@@ -11,6 +11,11 @@ export const workflowRoles = [
 export const reasoningSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export const permissionSchema = z.enum(["read-only", "workspace-write"]);
 
+export const commandSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+});
+
 export const profileSchema = z.object({
   adapter: z.string().min(1),
   executable: z.string().min(1).optional(),
@@ -41,7 +46,7 @@ export const configSchema = z
     profiles: z.record(z.string().min(1), profileSchema),
     roles: z.record(z.string().min(1), roleSchema),
     quality: z.object({
-      commands: z.array(z.string().min(1)),
+      commands: z.array(commandSchema),
       maxReworkAttempts: z.number().int().min(0).max(10),
       commandTimeoutSeconds: z.number().int().positive(),
     }),
@@ -113,3 +118,4 @@ export type AgentProfile = z.infer<typeof profileSchema>;
 export type RolePolicy = z.infer<typeof roleSchema>;
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export type Permission = z.infer<typeof permissionSchema>;
+export type CommandSpec = z.infer<typeof commandSchema>;

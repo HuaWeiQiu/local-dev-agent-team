@@ -35,7 +35,7 @@
       "properties": {
         "commands": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 }
+          "items": { "$ref": "#/$defs/command" }
         },
         "maxReworkAttempts": { "type": "integer", "minimum": 0, "maximum": 10 },
         "commandTimeoutSeconds": { "type": "integer", "minimum": 1 }
@@ -54,6 +54,18 @@
     }
   },
   "$defs": {
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "args"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
     "profile": {
       "type": "object",
       "additionalProperties": false,

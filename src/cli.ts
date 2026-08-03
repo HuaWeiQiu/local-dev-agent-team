@@ -9,6 +9,8 @@ import { resolveProfile } from "./profiles/resolve.js";
 import { AdapterRegistry } from "./adapters/registry.js";
 import { invokeAgent } from "./adapters/invoke.js";
 import { runDoctor } from "./doctor.js";
+import { LocalWorkflowRunner } from "./workflow/runner.js";
+import { RunStateStore } from "./state/store.js";
 
 const program = new Command();
 program
@@ -148,8 +150,87 @@ program
     },
   );
 
+program
+  .command("run")
+  .description("Run the local multi-agent development workflow")
+  .requiredOption("--goal <text>", "software-development goal")
+  .option("--profile <role=profile...>", "override a role profile", [])
+  .option("-c, --config <path>", "configuration path")
+  .action(
+    async (options: { goal: string; profile: string[]; config?: string }) => {
+      const loaded = await loadConfig(process.cwd(), options.config);
+      const profileOverrides = parseProfileAssignments(options.profile);
+      const state = await new LocalWorkflowRunner(loaded).run({
+        goal: options.goal,
+        profileOverrides,
+      });
+      process.stdout.write(
+        `${state.id}\t${state.status}\t${state.integrationBranch}\n`,
+      );
+      if (state.error) {
+        process.stderr.write(`${state.error}\n`);
+      }
+      if (state.status === "blocked") {
+        process.exitCode = 1;
+      }
+    },
+  );
+
+program
+  .command("status")
+  .description("Show one run or list recent runs")
+  .argument("[run-id]", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .option("--json", "emit JSON", false)
+  .action(async (runId: string | undefined, options: { config?: string; json: boolean }) => {
+    const loaded = await loadConfig(process.cwd(), options.config);
+    const runsDirectory = path.resolve(
+      loaded.root,
+      loaded.config.project.stateDirectory,
+      "runs",
+    );
+    const store = new RunStateStore(runsDirectory);
+    if (runId) {
+      const state = await store.load(runId);
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`${state.id} ${state.status}\n`);
+      for (const task of state.tasks) {
+        process.stdout.write(
+          `  ${task.task.id.padEnd(12)} ${task.status.padEnd(10)} attempts=${task.attempts}\n`,
+        );
+      }
+      if (state.error) {
+        process.stdout.write(`  error: ${state.error}\n`);
+      }
+      return;
+    }
+    const states = await store.list();
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(states, null, 2)}\n`);
+      return;
+    }
+    for (const state of states) {
+      process.stdout.write(`${state.id}\t${state.status}\t${state.updatedAt}\n`);
+    }
+  });
+
 program.parseAsync().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`Error: ${message}\n`);
   process.exitCode = 1;
 });
+
+function parseProfileAssignments(assignments: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const assignment of assignments) {
+    const separator = assignment.indexOf("=");
+    if (separator <= 0 || separator === assignment.length - 1) {
+      throw new Error(`Invalid profile assignment '${assignment}'; expected role=profile`);
+    }
+    result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
+  }
+  return result;
+}
