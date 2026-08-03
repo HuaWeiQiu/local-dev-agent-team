@@ -66,3 +66,8 @@ github:
   remote: origin
   draftPullRequest: true
   autoMerge: false
+  checkTimeoutSeconds: 1800
+  maxRepairAttempts: 1
+  repairForbiddenPaths:
+    - .github/workflows/**
+    - agent-team.yaml

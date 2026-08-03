@@ -11,6 +11,9 @@ import { invokeAgent } from "./adapters/invoke.js";
 import { runDoctor } from "./doctor.js";
 import { LocalWorkflowRunner } from "./workflow/runner.js";
 import { RunStateStore } from "./state/store.js";
+import { GithubPublisher } from "./github/publish.js";
+import { GithubRepairRunner } from "./github/repair.js";
+import type { LoadedConfig } from "./config/load.js";
 
 const program = new Command();
 program
@@ -217,6 +220,76 @@ program
     }
   });
 
+program
+  .command("publish")
+  .description("Push a passing integration branch and create a draft pull request")
+  .argument("<run-id>", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .option("--wait", "wait for GitHub checks", false)
+  .action(async (runId: string, options: { config?: string; wait: boolean }) => {
+    const { loaded, store } = await loadRunContext(options.config);
+    const state = await store.load(runId);
+    const publisher = new GithubPublisher(loaded, store);
+    await publisher.publish(state);
+    process.stdout.write(`${state.pullRequestUrl}\n`);
+    if (options.wait) {
+      const checks = await publisher.refreshChecks(state, true);
+      printChecks(checks);
+      if (state.status === "ci-failed") {
+        process.exitCode = 1;
+      }
+    }
+  });
+
+program
+  .command("checks")
+  .description("Refresh GitHub Actions status for a published run")
+  .argument("<run-id>", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .option("--watch", "wait until checks complete", false)
+  .action(async (runId: string, options: { config?: string; watch: boolean }) => {
+    const { loaded, store } = await loadRunContext(options.config);
+    const state = await store.load(runId);
+    const checks = await new GithubPublisher(loaded, store).refreshChecks(
+      state,
+      options.watch,
+    );
+    printChecks(checks);
+    if (state.status === "ci-failed") {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("repair")
+  .description("Run one bounded local repair for failed GitHub checks")
+  .argument("<run-id>", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .action(async (runId: string, options: { config?: string }) => {
+    const { loaded, store } = await loadRunContext(options.config);
+    const state = await store.load(runId);
+    await new GithubRepairRunner(loaded, store).repair(state);
+    process.stdout.write(`${state.id}\t${state.status}\n`);
+    if (state.status === "ci-failed") {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("complete")
+  .description("Mark a run complete after its pull request is merged")
+  .argument("<run-id>", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .action(async (runId: string, options: { config?: string }) => {
+    const { loaded, store } = await loadRunContext(options.config);
+    const state = await store.load(runId);
+    const merged = await new GithubPublisher(loaded, store).markCompletedIfMerged(state);
+    if (!merged) {
+      throw new Error(`Pull request for run '${runId}' has not been merged`);
+    }
+    process.stdout.write(`${state.id}\tcompleted\n`);
+  });
+
 program.parseAsync().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`Error: ${message}\n`);
@@ -233,4 +306,27 @@ function parseProfileAssignments(assignments: string[]): Record<string, string> 
     result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
   }
   return result;
+}
+
+async function loadRunContext(configPath?: string): Promise<{
+  loaded: LoadedConfig;
+  store: RunStateStore;
+}> {
+  const loaded = await loadConfig(process.cwd(), configPath);
+  const runsDirectory = path.resolve(
+    loaded.root,
+    loaded.config.project.stateDirectory,
+    "runs",
+  );
+  return { loaded, store: new RunStateStore(runsDirectory) };
+}
+
+function printChecks(checks: Array<{ bucket: string; name: string; state: string }>): void {
+  if (checks.length === 0) {
+    process.stdout.write("No GitHub checks reported.\n");
+    return;
+  }
+  for (const check of checks) {
+    process.stdout.write(`${check.bucket.toUpperCase().padEnd(8)} ${check.name}: ${check.state}\n`);
+  }
 }

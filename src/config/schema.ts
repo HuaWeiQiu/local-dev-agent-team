@@ -55,6 +55,9 @@ export const configSchema = z
       remote: z.string().min(1),
       draftPullRequest: z.boolean(),
       autoMerge: z.literal(false),
+      checkTimeoutSeconds: z.number().int().positive(),
+      maxRepairAttempts: z.number().int().min(0).max(5),
+      repairForbiddenPaths: z.array(z.string().min(1)),
     }),
   })
   .superRefine((config, context) => {

@@ -19,6 +19,11 @@ export type RunStatus =
   | "integrating"
   | "final-checks"
   | "awaiting-human"
+  | "publishing"
+  | "waiting-ci"
+  | "ci-failed"
+  | "repairing"
+  | "ready-to-merge"
   | "completed"
   | "blocked";
 
@@ -69,6 +74,9 @@ export interface RunState {
   finalQuality?: QualityReport;
   finalDecision?: FinalDecision;
   pullRequestUrl?: string;
+  pullRequestNumber?: number;
+  repository?: string;
+  githubRepairAttempts?: number;
   history: StateEvent[];
   error?: string;
 }

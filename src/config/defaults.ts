@@ -64,6 +64,9 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
       remote: "origin",
       draftPullRequest: true,
       autoMerge: false,
+      checkTimeoutSeconds: 1_800,
+      maxRepairAttempts: 1,
+      repairForbiddenPaths: [".github/workflows/**", "agent-team.yaml"],
     },
   };
 }

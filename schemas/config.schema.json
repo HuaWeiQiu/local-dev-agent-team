@@ -44,12 +44,26 @@
     "github": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "remote", "draftPullRequest", "autoMerge"],
+      "required": [
+        "enabled",
+        "remote",
+        "draftPullRequest",
+        "autoMerge",
+        "checkTimeoutSeconds",
+        "maxRepairAttempts",
+        "repairForbiddenPaths"
+      ],
       "properties": {
         "enabled": { "type": "boolean" },
         "remote": { "type": "string", "minLength": 1 },
         "draftPullRequest": { "type": "boolean" },
-        "autoMerge": { "const": false }
+        "autoMerge": { "const": false },
+        "checkTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "maxRepairAttempts": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "repairForbiddenPaths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     }
   },
