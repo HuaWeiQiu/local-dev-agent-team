@@ -2,6 +2,21 @@
   "name": "local-dev-agent-team",
   "version": "0.1.0",
   "description": "Local-first orchestration for profile-driven software development agents.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HuaWeiQiu/local-dev-agent-team.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HuaWeiQiu/local-dev-agent-team/issues"
+  },
+  "homepage": "https://github.com/HuaWeiQiu/local-dev-agent-team#readme",
+  "keywords": [
+    "agents",
+    "codex",
+    "claude-code",
+    "multi-agent",
+    "developer-tools"
+  ],
   "type": "module",
   "bin": {
     "agent-team": "dist/cli.js"
@@ -16,7 +31,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "prepack": "pnpm check && pnpm test && pnpm build"
   },
   "engines": {
     "node": ">=20"

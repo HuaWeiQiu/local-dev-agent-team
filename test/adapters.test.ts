@@ -51,6 +51,9 @@ describe("Claude adapter", () => {
     expect(invocation.command).toBe("claude");
     expect(invocation.args).toContain("plan");
     expect(invocation.args).toContain("max");
-    expect(invocation.args.at(-1)).toBe("Review");
+    expect(invocation.args).toContain("Read,Glob,Grep");
+    expect(invocation.args).toContain("Edit,Write,NotebookEdit,Bash");
+    expect(invocation.args).not.toContain("Review");
+    expect(invocation.stdin).toBe("Review");
   });
 });

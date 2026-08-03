@@ -62,8 +62,8 @@ created
 ```
 
 Any state can transition to `blocked` on a non-recoverable infrastructure or
-policy failure. State is persisted after every transition so an interrupted run
-can resume without asking agents to reconstruct history.
+policy failure. State is persisted after every transition for audit and
+diagnosis. Version 0.1 does not automatically resume an interrupted run.
 
 ## Git Isolation
 

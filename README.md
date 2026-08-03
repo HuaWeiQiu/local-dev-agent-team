@@ -1,54 +1,109 @@
 # Local Dev Agent Team
 
-Local Dev Agent Team is a local-first orchestrator for software-development
-agents. It reuses installed agent CLIs, isolates implementation work in Git
-worktrees, and uses GitHub pull requests and checks as an optional audit and
-quality layer.
-
-The project is built around one rule:
+Local-first orchestration for a software-development agent team. It reuses the
+agent CLIs already authenticated on your machine and gives each role an
+independent CLI, model, reasoning level, and permission profile.
 
 ```text
-role != agent CLI != model
+goal -> controller -> architect -> worker DAG
+     -> deterministic checks + reviewer + tester
+     -> bounded rework -> integration branch -> draft PR -> human merge
 ```
 
-An architect can run through Codex today and Claude Code tomorrow. A worker can
-use a different model for one task without changing its role contract. Models
-remain owned by the selected CLI; this project passes through configured model
-names and verifies that the CLI can launch them.
+The core rule is `role != agent CLI != model`. A reviewer can use Claude Code,
+a worker can use Codex, and either role can switch models without changing the
+workflow. `model: inherit` uses that CLI's configured default; any other value
+is passed to the selected CLI as an explicit model selector.
 
-## Target Workflow
+## What It Provides
 
-```text
-goal
-  -> orchestrator
-  -> architect
-  -> task DAG
-  -> isolated workers
-  -> deterministic checks + tester + reviewer
-  -> rework or integration
-  -> GitHub pull request
-  -> human merge
+- One supervising orchestrator, one architect, one reviewer, one tester, and
+  one or more dependency-aware workers.
+- Codex CLI and Claude Code adapters with a stable extension boundary for more
+  CLIs.
+- Isolated Git branches and worktrees for every worker task.
+- Structured contracts for plans, reviews, test verdicts, and final decisions.
+- Real project commands as hard gates; an agent cannot declare a failed test
+  successful.
+- Bounded rework and explicit escalation instead of unbounded agent loops.
+- Optional draft pull request publication, GitHub Actions monitoring, and one
+  bounded CI-repair attempt. Automatic merge is intentionally unsupported.
+
+## Requirements
+
+- Node.js 20 or newer, pnpm, and Git.
+- At least one supported agent CLI installed and authenticated:
+  [Codex CLI](https://developers.openai.com/codex/cli) or Claude Code.
+- GitHub CLI authenticated with repository access when using `publish`,
+  `checks`, `repair`, or `complete`.
+
+No API keys are copied into this project. Child processes reuse each CLI's own
+authentication and configuration.
+
+## Install
+
+```bash
+git clone https://github.com/HuaWeiQiu/local-dev-agent-team.git
+cd local-dev-agent-team
+pnpm install
+pnpm build
+pnpm link --global
 ```
 
-The first release targets Codex CLI and Claude Code. The adapter boundary is
-open so other non-interactive coding CLIs can be added without changing role or
-workflow code.
+You can skip the global link and run `pnpm dev -- <command>` from this checkout.
 
-## Status
+## Quick Start
 
-Active implementation. See [Architecture](docs/architecture.md) and
-[ADR-0001](docs/adr/0001-profile-driven-runtime.md) for the frozen design
-contract.
+From the Git repository you want the team to modify:
 
-## Safety Defaults
+```bash
+agent-team init
+# Edit agent-team.yaml: profiles, role policy, and real project checks.
+agent-team validate
+agent-team profiles
+agent-team doctor
+agent-team doctor --profile codex-worker --probe-models
+agent-team run --goal "Add cursor pagination to the users API"
+agent-team status
+```
 
-- Orchestrator, architect, and reviewer profiles are read-only by default.
-- Workers receive write access only to their isolated worktree.
-- Tests are executed as real processes; agents do not self-report success.
-- Automatic merge is disabled.
-- Secrets are inherited from the installed CLI and are never copied into this
-  repository.
+Override a role for one run without editing the configuration:
 
-## License
+```bash
+agent-team run \
+  --goal "Add cursor pagination to the users API" \
+  --profile architect=claude-architect \
+  --profile worker=codex-worker
+```
 
-MIT
+After a local run reaches `awaiting-human`, publication remains explicit:
+
+```bash
+agent-team publish <run-id> --wait
+agent-team checks <run-id> --watch
+agent-team repair <run-id>       # only after a failed GitHub check
+agent-team complete <run-id>     # only after a human merged the PR
+```
+
+See [configuration](docs/configuration.md), [workflow](docs/workflow.md),
+[security](docs/security.md), and [architecture](docs/architecture.md) for the
+full operating contract. Start from [agent-team.example.yaml](agent-team.example.yaml).
+
+## Current Scope
+
+Version 0.1 is deliberately narrow: local software-development repositories,
+Codex CLI and Claude Code, Git worktree isolation, and GitHub PR quality gates.
+Run state is durable and inspectable, but interrupted runs are not automatically
+resumed yet. Other agent CLIs can be added through the adapter interface.
+
+## Development
+
+```bash
+pnpm install
+pnpm check
+pnpm test
+pnpm build
+```
+
+Contributions are described in [CONTRIBUTING.md](CONTRIBUTING.md). Licensed
+under the MIT License.

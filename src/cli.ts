@@ -157,7 +157,12 @@ program
   .command("run")
   .description("Run the local multi-agent development workflow")
   .requiredOption("--goal <text>", "software-development goal")
-  .option("--profile <role=profile...>", "override a role profile", [])
+  .option(
+    "--profile <role=profile>",
+    "override a role profile; repeat for multiple roles",
+    collectOption,
+    [],
+  )
   .option("-c, --config <path>", "configuration path")
   .action(
     async (options: { goal: string; profile: string[]; config?: string }) => {
@@ -306,6 +311,10 @@ function parseProfileAssignments(assignments: string[]): Record<string, string> 
     result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
   }
   return result;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 async function loadRunContext(configPath?: string): Promise<{

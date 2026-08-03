@@ -5,6 +5,5 @@ coverage/
 .env
 .env.*
 !.env.example
-.agent-team/runs/
-.agent-team/worktrees/
+.agent-team/
 *.log

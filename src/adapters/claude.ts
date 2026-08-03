@@ -30,8 +30,8 @@ export class ClaudeAdapter implements AgentAdapter {
       profile.reasoning,
     ];
     if (profile.permission === "read-only") {
-      args.push("--tools", "Read,Glob,Grep,Bash");
-      args.push("--disallowed-tools", "Edit,Write,NotebookEdit");
+      args.push("--tools", "Read,Glob,Grep");
+      args.push("--disallowed-tools", "Edit,Write,NotebookEdit,Bash");
     }
     if (profile.model !== "inherit") {
       args.push("--model", profile.model);
@@ -39,12 +39,13 @@ export class ClaudeAdapter implements AgentAdapter {
     if (request.outputSchema) {
       args.push("--json-schema", JSON.stringify(request.outputSchema));
     }
-    args.push(...profile.args, request.prompt);
+    args.push(...profile.args);
 
     return {
       command: profile.executable ?? "claude",
       args,
       cwd: request.cwd,
+      stdin: request.prompt,
       timeoutMs: profile.timeoutSeconds * 1_000,
     };
   }
