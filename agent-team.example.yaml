@@ -1,0 +1,65 @@
+version: 1
+
+project:
+  name: example-project
+  defaultBranch: main
+  stateDirectory: .agent-team
+  maxParallel: 2
+
+profiles:
+  codex-planner:
+    adapter: codex
+    model: inherit
+    reasoning: high
+    permission: read-only
+    timeoutSeconds: 900
+
+  codex-worker:
+    adapter: codex
+    model: inherit
+    reasoning: medium
+    permission: workspace-write
+    timeoutSeconds: 1800
+
+  claude-reviewer:
+    adapter: claude
+    model: inherit
+    reasoning: high
+    permission: read-only
+    timeoutSeconds: 900
+
+roles:
+  orchestrator:
+    defaultProfile: codex-planner
+    allowedProfiles: [codex-planner]
+
+  architect:
+    defaultProfile: codex-planner
+    allowedProfiles: [codex-planner, claude-reviewer]
+
+  worker:
+    defaultProfile: codex-worker
+    allowedProfiles: [codex-worker]
+
+  reviewer:
+    defaultProfile: claude-reviewer
+    allowedProfiles: [claude-reviewer, codex-planner]
+    fallbackProfiles: [codex-planner]
+
+  tester:
+    defaultProfile: codex-planner
+    allowedProfiles: [codex-planner]
+
+quality:
+  commands:
+    - pnpm check
+    - pnpm test
+    - pnpm build
+  maxReworkAttempts: 2
+  commandTimeoutSeconds: 900
+
+github:
+  enabled: true
+  remote: origin
+  draftPullRequest: true
+  autoMerge: false
