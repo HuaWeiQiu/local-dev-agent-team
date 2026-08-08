@@ -17,12 +17,15 @@ import {
   GitPullRequest,
   LockKeyhole,
   Network,
+  PanelLeftOpen,
   Play,
   RotateCcw,
   Save,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   Users,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -83,6 +86,8 @@ export function StrategyComposer({
   const [feedback, setFeedback] = useState<ComposerFeedback>();
   const [submitting, setSubmitting] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => isCompactLayout());
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(() => !isCompactLayout());
 
   useEffect(() => {
     if (!config.strategies.definitions[selectedName]) {
@@ -107,7 +112,13 @@ export function StrategyComposer({
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 800px)");
-    const updateLayout = () => setCompactLayout(mediaQuery.matches);
+    const updateLayout = () => {
+      setCompactLayout(mediaQuery.matches);
+      if (mediaQuery.matches) {
+        setLibraryOpen(false);
+        setInspectorOpen(false);
+      }
+    };
     updateLayout();
     mediaQuery.addEventListener("change", updateLayout);
     return () => mediaQuery.removeEventListener("change", updateLayout);
@@ -173,65 +184,58 @@ export function StrategyComposer({
   };
 
   return (
-    <section className="strategy-composer" aria-label="策略编排器" aria-busy={submitting}>
-      <aside className="composer-library">
-        <header>
-          <span className="section-kicker">STRATEGIES</span>
-          <h2>策略模板</h2>
-        </header>
-        <div className="composer-strategy-list">
-          {strategyNames.map((name) => {
-            const item = config.strategies.definitions[name]!;
-            return (
-              <button
-                key={name}
-                className={name === selectedName ? "is-selected" : ""}
-                onClick={() => selectStrategy(name)}
+    <section
+      className={`strategy-composer ${libraryOpen ? "library-open" : ""} ${inspectorOpen ? "inspector-open" : ""}`}
+      aria-label="策略编排器"
+      aria-busy={submitting}
+    >
+      <main className="composer-canvas">
+        <header className="composer-toolbar">
+          <div className="composer-toolbar-group">
+            <button
+              className={`button secondary toolbar-toggle ${libraryOpen ? "is-active" : ""}`}
+              onClick={() => setLibraryOpen((open) => !open)}
+              aria-pressed={libraryOpen}
+              title="打开策略库"
+            >
+              <PanelLeftOpen size={16} /><span>策略库</span>
+            </button>
+            <div className="composer-title">
+              <span className="section-kicker">STRATEGY GRAPH</span>
+              <select
+                className="composer-strategy-select"
+                aria-label="策略模板"
+                value={selectedName}
+                onChange={(event) => selectStrategy(event.target.value)}
                 disabled={submitting}
               >
-                <span><Network size={15} /><strong>{name}</strong></span>
-                <small>{topologyModeLabel(item.topology?.mode ?? item.compiledTopology.mode)} · {item.source === "custom" ? "自定义" : "配置"}</small>
-              </button>
-            );
-          })}
-        </div>
-        <div className="composer-palette">
-          <span className="section-kicker">STAGES</span>
-          <h3>阶段组件</h3>
-          <PaletteItem icon={<Bot size={15} />} label="Agent 阶段" locked />
-          <PaletteItem icon={<Users size={15} />} label="Worker Pool" locked />
-          <PaletteItem icon={<ShieldCheck size={15} />} label="质量门禁" locked />
-          <button
-            className={`palette-item ${draft.planApproval ? "is-active" : ""}`}
-            onClick={() => updateDraft((current) => ({ ...current, planApproval: !current.planApproval }))}
-            aria-pressed={draft.planApproval}
-            disabled={submitting}
-          >
-            <span><Check size={15} />计划审批</span>
-            <small>{draft.planApproval ? "已启用" : "可选"}</small>
-          </button>
-          <PaletteItem icon={<GitPullRequest size={15} />} label="发布边界" locked />
-        </div>
-      </aside>
-
-      <main className="composer-canvas">
-        <header className="composer-canvas-header">
-          <div>
-            <span className="section-kicker">STRATEGY GRAPH</span>
-            <h2>{selectedName}</h2>
+                {strategyNames.map((name) => <option key={name}>{name}</option>)}
+              </select>
+            </div>
           </div>
-          <select
-            className="composer-mobile-strategy"
-            aria-label="策略模板"
-            value={selectedName}
-            onChange={(event) => selectStrategy(event.target.value)}
-            disabled={submitting}
-          >
-            {strategyNames.map((name) => <option key={name}>{name}</option>)}
-          </select>
-          <div className={`composer-validation ${feedback?.kind === "error" ? "is-error" : ""}`}>
-            {feedback?.kind === "error" ? <CircleAlert size={14} /> : <Check size={14} />}
-            <span>{feedback?.message ?? (dirty ? "草稿待预检" : "已加载策略")}</span>
+          <div className="composer-toolbar-actions">
+            <div className={`composer-validation ${feedback?.kind === "error" ? "is-error" : ""}`}>
+              {feedback?.kind === "error" ? <CircleAlert size={14} /> : <Check size={14} />}
+              <span>{feedback?.message ?? (dirty ? "草稿待预检" : "已加载策略")}</span>
+            </div>
+            <button
+              className={`button secondary toolbar-toggle ${inspectorOpen ? "is-active" : ""}`}
+              onClick={() => setInspectorOpen((open) => !open)}
+              aria-pressed={inspectorOpen}
+              title="策略设置"
+            >
+              <SlidersHorizontal size={16} /><span>策略设置</span>
+            </button>
+            <span className="toolbar-divider" />
+            <button className="button secondary" onClick={() => void runAction("preflight")} disabled={submitting || !blueprintName.trim()} title="预检策略" aria-label="预检">
+              <ShieldCheck size={15} /><span>预检</span>
+            </button>
+            <button className="button secondary" onClick={() => void runAction("save")} disabled={submitting || !blueprintName.trim()} title="保存策略" aria-label="保存">
+              <Save size={15} /><span>保存</span>
+            </button>
+            <button className="button primary" onClick={() => onLaunch(selectedName)} disabled={submitting || dirty} title={dirty ? "请先保存当前草稿" : "使用已保存策略启动运行"} aria-label="运行">
+              <Play size={15} fill="currentColor" /><span>运行</span>
+            </button>
           </div>
         </header>
         <div className="composer-flow" aria-label="策略阶段图">
@@ -244,16 +248,52 @@ export function StrategyComposer({
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable
+            onNodeClick={() => setInspectorOpen(true)}
             minZoom={0.45}
             maxZoom={1.4}
           >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#d2d3cb" />
+            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#cbd5d1" />
             <Controls showInteractive={false} />
           </ReactFlow>
+          <div className="composer-canvas-summary">
+            <span><strong>{topology.stages.length}</strong> 阶段</span>
+            <span><strong>{topologyModeLabel(draft.mode)}</strong> 拓扑</span>
+            <span><strong>{draft.mode === "sequential" ? 1 : draft.maxParallel}</strong> 并行上限</span>
+            <span className={draft.planApproval ? "is-enabled" : ""}><strong>{draft.planApproval ? "已启用" : "未启用"}</strong> 计划审批</span>
+          </div>
         </div>
       </main>
 
-      <aside className="composer-inspector">
+      <aside className="composer-library" aria-hidden={!libraryOpen} inert={!libraryOpen}>
+        <header className="drawer-header">
+          <div><span className="section-kicker">LIBRARY</span><h2>策略与阶段</h2></div>
+          <button className="icon-button" onClick={() => setLibraryOpen(false)} title="关闭策略库" aria-label="关闭策略库"><X size={17} /></button>
+        </header>
+        <div className="composer-strategy-list">
+          {strategyNames.map((name) => {
+            const item = config.strategies.definitions[name]!;
+            return (
+              <button key={name} className={name === selectedName ? "is-selected" : ""} onClick={() => selectStrategy(name)} disabled={submitting}>
+                <span><Network size={16} /><strong>{name}</strong></span>
+                <small>{topologyModeLabel(item.topology?.mode ?? item.compiledTopology.mode)} · {item.source === "custom" ? "自定义蓝图" : "项目配置"}</small>
+              </button>
+            );
+          })}
+        </div>
+        <div className="composer-palette">
+          <span className="section-kicker">STAGES</span>
+          <h3>执行阶段</h3>
+          <PaletteItem icon={<Bot size={16} />} label="Agent 阶段" locked />
+          <PaletteItem icon={<Users size={16} />} label="Worker Pool" locked />
+          <PaletteItem icon={<ShieldCheck size={16} />} label="质量门禁" locked />
+          <button className={`palette-item ${draft.planApproval ? "is-active" : ""}`} onClick={() => updateDraft((current) => ({ ...current, planApproval: !current.planApproval }))} aria-pressed={draft.planApproval} disabled={submitting}>
+            <span><Check size={16} />计划审批</span><small>{draft.planApproval ? "已启用" : "可添加"}</small>
+          </button>
+          <PaletteItem icon={<GitPullRequest size={16} />} label="发布边界" locked />
+        </div>
+      </aside>
+
+      <aside className="composer-inspector" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
         <header className="section-heading composer-inspector-header">
           <div>
             <span className="section-kicker">POLICY</span>
@@ -285,6 +325,7 @@ export function StrategyComposer({
                 <Trash2 size={16} />
               </button>
             )}
+            <button className="icon-button" onClick={() => setInspectorOpen(false)} title="关闭策略设置" aria-label="关闭策略设置"><X size={17} /></button>
           </div>
         </header>
         <div className="composer-inspector-scroll">
@@ -384,30 +425,6 @@ export function StrategyComposer({
             })}
           </section>
         </div>
-        <footer className="composer-actions">
-          <button
-            className="button secondary"
-            onClick={() => void runAction("preflight")}
-            disabled={submitting || !blueprintName.trim()}
-          >
-            <ShieldCheck size={15} />预检
-          </button>
-          <button
-            className="button secondary"
-            onClick={() => void runAction("save")}
-            disabled={submitting || !blueprintName.trim()}
-          >
-            <Save size={15} />保存
-          </button>
-          <button
-            className="button primary"
-            onClick={() => onLaunch(selectedName)}
-            disabled={submitting || dirty}
-            title={dirty ? "请先保存当前草稿" : "使用已保存策略启动运行"}
-          >
-            <Play size={15} fill="currentColor" />运行
-          </button>
-        </footer>
       </aside>
     </section>
   );

@@ -96,14 +96,17 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   });
   await launcher.getByRole("button", { name: "关闭" }).click();
 
-  await page.getByRole("button", { name: "编排", exact: true }).click();
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "编排", exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: "策略编排", exact: true }).click();
+  }
   const composer = page.getByRole("region", { name: "策略编排器" });
   await expect(composer).toBeVisible();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(7);
+  await composer.getByLabel("策略模板").selectOption("strict");
   if (testInfo.project.name === "mobile") {
-    await composer.getByLabel("策略模板").selectOption("strict");
-  } else {
-    await composer.locator(".composer-strategy-list button").filter({ hasText: "strict" }).click();
+    await composer.getByRole("button", { name: "策略设置", exact: true }).click();
   }
   await expect(composer.getByRole("button", { name: "串行", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(composer.locator(".strategy-stage-node").filter({ hasText: "串行执行" })).toBeVisible();
@@ -112,12 +115,12 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await composer.locator(".policy-toggle input").check();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(8);
   await expect(composer.locator(".strategy-stage-node").filter({ hasText: "计划审批" })).toBeVisible();
+  if (testInfo.project.name === "mobile") {
+    await composer.getByRole("button", { name: "关闭策略设置" }).click();
+  }
   await expect(composer.getByText("草稿待预检", { exact: true })).toBeVisible();
   await composer.getByRole("button", { name: "预检", exact: true }).click();
   await expect(composer.getByText("服务端预检通过", { exact: true })).toBeVisible();
-  if (testInfo.project.name === "mobile") {
-    await composer.evaluate((element) => element.scrollTo({ top: 0 }));
-  }
   await page.screenshot({
     path: testInfo.outputPath(`${testInfo.project.name}-strategy-composer.png`),
     fullPage: false,
@@ -137,17 +140,15 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
       return approvalBox!.y - architectureBox!.y;
     }).toBeGreaterThan(100);
     await page.setViewportSize({ width: 1440, height: 960 });
+    await composer.getByRole("button", { name: "策略设置", exact: true }).click();
   }
   await composer.getByRole("button", { name: "保存", exact: true }).click();
   await expect(composer.getByText("已保存并编译", { exact: true })).toBeVisible();
-  if (testInfo.project.name === "mobile") {
-    await expect(composer.getByLabel("策略模板")).toHaveValue(blueprintName);
-  } else {
-    await expect(
-      composer.locator(".composer-strategy-list button.is-selected").filter({ hasText: blueprintName }),
-    ).toBeVisible();
-  }
+  await expect(composer.getByLabel("策略模板")).toHaveValue(blueprintName);
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(8);
+  if (testInfo.project.name === "mobile") {
+    await composer.getByRole("button", { name: "策略设置", exact: true }).click();
+  }
   const architectProfile = composer.locator(".role-policy-list label")
     .filter({ hasText: "architect" })
     .locator("select");
@@ -166,10 +167,11 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   if (testInfo.project.name === "mobile") {
     await page.getByRole("button", { name: "任务图" }).click();
   } else {
-    await page.getByRole("group", { name: "工作台模式" }).getByRole("button", { name: "运行" }).click();
+    await page.getByRole("button", { name: "运行监控", exact: true }).click();
   }
 
   if (testInfo.project.name === "desktop") {
+    await page.getByRole("tab", { name: "活动日志" }).click();
     await page.getByRole("tab", { name: /输出/ }).click();
     await expect(page.locator(".output-log")).toContainText("implemented refund idempotency ledger");
   }

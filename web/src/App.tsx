@@ -1,4 +1,4 @@
-import { Ban, CircleDot, History, Network, Plus, RotateCcw, Rows3, ScrollText, ShieldCheck, Workflow } from "lucide-react";
+import { Activity, Ban, Bot, CircleDot, GitBranch, History, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -60,6 +60,7 @@ export default function App() {
   }>();
   const [error, setError] = useState<string>();
   const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design">("monitor");
+  const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity">("graph");
   const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs">("flow");
   const refreshTimer = useRef<number | undefined>(undefined);
   const scope = useMemo<ProjectScope | undefined>(
@@ -315,61 +316,80 @@ export default function App() {
   }
 
   const selectedProject = workspace.projects.find((project) => project.id === selectedProjectId);
+  const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
 
   return (
-    <div className="app-shell" data-mobile-view={mobileView}>
+    <div className={`app-shell mode-${workspaceMode}`} data-mobile-view={mobileView}>
+      <aside className="app-navigation" aria-label="主导航">
+        <div className="product-symbol" title="Agent Team"><Bot size={23} /></div>
+        <nav>
+          <button
+            className={workspaceMode === "monitor" ? "is-active" : ""}
+            onClick={() => setWorkspaceMode("monitor")}
+            aria-label="运行监控"
+            title="运行监控"
+          >
+            <Activity size={20} /><span>运行</span>
+          </button>
+          <button
+            className={workspaceMode === "design" ? "is-active" : ""}
+            onClick={() => setWorkspaceMode("design")}
+            aria-label="策略编排"
+            title="策略编排"
+            disabled={!config}
+          >
+            <Workflow size={20} /><span>编排</span>
+          </button>
+        </nav>
+        <span className={`navigation-stream ${connected ? "is-connected" : ""}`} title={connected ? "事件流已连接" : "事件流未连接"}>
+          <Radio size={18} />
+        </span>
+      </aside>
+
       <header className="topbar">
-        <div className="brand-block">
-          <span className="brand-mark"><CircleDot size={20} /></span>
-          <div className="brand-copy">
-            <strong>Agent Team</strong>
-            <div className="project-context">
-              {workspace.projects.length > 1 ? (
-                <select
-                  aria-label="当前项目"
-                  value={selectedProjectId}
-                  disabled={busy}
-                  onChange={(event) => {
-                    setLauncherOpen(false);
-                    setLauncherStrategy(undefined);
-                    setRunAction(undefined);
-                    setConfig(undefined);
-                    setRuns([]);
-                    setSelectedRunId(undefined);
-                    setRun(undefined);
-                    setSelectedTaskId(undefined);
-                    setEvents([]);
-                    setSelectedProjectId(event.target.value);
-                    setWorkspaceMode("monitor");
-                    setMobileView("flow");
-                  }}
-                >
-                  {workspace.projects.map((project) => (
-                    <option key={project.id} value={project.id}>{project.name}</option>
-                  ))}
-                </select>
-              ) : (
-                <span className="project-name">{selectedProject?.name}</span>
-              )}
-              <span className="project-branch">{selectedProject?.defaultBranch}</span>
-            </div>
-          </div>
+        <div className="project-context">
+          <span className="topbar-product">Agent Team</span>
+          <span className="context-divider" />
+          {workspace.projects.length > 1 ? (
+            <select
+              aria-label="当前项目"
+              value={selectedProjectId}
+              disabled={busy}
+              onChange={(event) => {
+                setLauncherOpen(false);
+                setLauncherStrategy(undefined);
+                setRunAction(undefined);
+                setConfig(undefined);
+                setRuns([]);
+                setSelectedRunId(undefined);
+                setRun(undefined);
+                setSelectedTaskId(undefined);
+                setEvents([]);
+                setSelectedProjectId(event.target.value);
+                setWorkspaceMode("monitor");
+                setMonitorPanel("graph");
+                setMobileView("flow");
+              }}
+            >
+              {workspace.projects.map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="project-name">{selectedProject?.name}</span>
+          )}
+          <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
         </div>
         <div className="topbar-run">
-          <div className="workspace-mode-switch" role="group" aria-label="工作台模式">
-            <button className={workspaceMode === "monitor" ? "is-selected" : ""} onClick={() => setWorkspaceMode("monitor")}><Rows3 size={14} />运行</button>
-            <button className={workspaceMode === "design" ? "is-selected" : ""} disabled={!config} onClick={() => setWorkspaceMode("design")}><Network size={14} />编排</button>
-          </div>
-          {workspaceMode === "design" ? <strong>策略拓扑与执行政策</strong> : run ? (
+          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : run ? (
             <>
-              <span className="topbar-context-label">当前运行</span>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
             </>
           ) : <span>本地 Agent 控制台</span>}
         </div>
         <div className="topbar-actions">
-          {pendingApproval && (
+          {workspaceMode === "monitor" && pendingApproval && (
             <button
               className="button secondary"
               onClick={() => setRunAction({ mode: "approval", approval: pendingApproval })}
@@ -379,7 +399,7 @@ export default function App() {
               <ShieldCheck size={16} /><span>处理审批</span>
             </button>
           )}
-          {run?.status === "interrupted" && run.checkpoints?.length ? (
+          {workspaceMode === "monitor" && run?.status === "interrupted" && run.checkpoints?.length ? (
             <button
               className="button secondary"
               onClick={() => setRunAction({ mode: "resume" })}
@@ -389,10 +409,10 @@ export default function App() {
               <History size={16} /><span>恢复</span>
             </button>
           ) : null}
-          {run && activeStatuses.has(run.status) && (
+          {workspaceMode === "monitor" && run && activeStatuses.has(run.status) && (
             <button className="button danger-quiet" onClick={() => void cancel()} disabled={busy} title="取消运行"><Ban size={16} /><span>取消</span></button>
           )}
-          {run && retryableStatuses.has(run.status) && (
+          {workspaceMode === "monitor" && run && retryableStatuses.has(run.status) && (
             <button className="button secondary" onClick={() => void retry()} disabled={busy} title="重试为新运行"><RotateCcw size={16} /><span>重试</span></button>
           )}
           <button className="button primary" aria-label="新建运行" title="新建运行" disabled={!config} onClick={() => openLauncher()}><Plus size={16} /><span>新建运行</span></button>
@@ -407,22 +427,47 @@ export default function App() {
         <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
       </nav>
 
-      {workspaceMode === "design" && config ? (
-        <StrategyComposer
-          config={config}
-          onPreflight={preflightBlueprint}
-          onSave={saveBlueprint}
-          onDelete={deleteBlueprint}
-          onLaunch={(strategy) => openLauncher(strategy)}
-        />
-      ) : (
-        <>
-          <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={(runId) => { setSelectedRunId(runId); setMobileView("flow"); }} onCreate={() => openLauncher()} />
-          <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task: TaskRunState) => { setSelectedTaskId(task.task.id); if (window.innerWidth <= 800) setMobileView("details"); }} />
-          <TaskInspector run={run} task={selectedTask} />
-          <EventConsole run={run} events={events} connected={connected} />
-        </>
-      )}
+      <div className="workspace-shell">
+        {workspaceMode === "design" && config ? (
+          <StrategyComposer
+            config={config}
+            onPreflight={preflightBlueprint}
+            onSave={saveBlueprint}
+            onDelete={deleteBlueprint}
+            onLaunch={(strategy) => openLauncher(strategy)}
+          />
+        ) : (
+          <section className="monitor-workbench" aria-label="运行工作台">
+            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={(runId) => { setSelectedRunId(runId); setMonitorPanel("graph"); setMobileView("flow"); }} onCreate={() => openLauncher()} />
+            <section className="run-workspace">
+              <header className="run-workspace-header">
+                <div className="run-workspace-title">
+                  <span className="section-kicker">EXECUTION</span>
+                  <div>
+                    <h1>{run?.goal ?? "选择一个运行"}</h1>
+                    {run && <span>{run.strategy.name} · {completedTasks}/{run.tasks.length} 任务完成</span>}
+                  </div>
+                </div>
+                <div className="run-view-tabs" role="tablist" aria-label="运行视图">
+                  <button role="tab" aria-selected={monitorPanel === "graph"} className={monitorPanel === "graph" ? "is-active" : ""} onClick={() => setMonitorPanel("graph")}>
+                    <Workflow size={16} />任务图
+                  </button>
+                  <button role="tab" aria-selected={monitorPanel === "activity"} className={monitorPanel === "activity" ? "is-active" : ""} onClick={() => setMonitorPanel("activity")}>
+                    <ScrollText size={16} />活动日志
+                  </button>
+                </div>
+              </header>
+              <div className={`run-panel run-panel-graph ${monitorPanel === "graph" ? "is-active" : ""}`}>
+                <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task: TaskRunState) => { setSelectedTaskId(task.task.id); if (window.innerWidth <= 800) setMobileView("details"); }} />
+              </div>
+              <div className={`run-panel run-panel-activity ${monitorPanel === "activity" ? "is-active" : ""}`}>
+                <EventConsole run={run} events={events} connected={connected} />
+              </div>
+            </section>
+            <TaskInspector run={run} task={selectedTask} />
+          </section>
+        )}
+      </div>
       {error && !launcherOpen && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="关闭错误">×</button></div>}
       {config && <RunLauncher open={launcherOpen} config={config} {...(launcherStrategy ? { initialStrategy: launcherStrategy } : {})} busy={busy} error={error} onClose={() => { setLauncherOpen(false); setLauncherStrategy(undefined); }} onSubmit={create} />}
       <RunActionDialog

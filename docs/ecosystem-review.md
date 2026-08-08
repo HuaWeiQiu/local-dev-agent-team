@@ -3,7 +3,7 @@
 This review records the design ideas compared while adding the local control
 service and React workbench. It is a boundary document, not a plan to replace
 the repository's TypeScript workflow with another framework. Sources were
-reviewed on 2026-08-08.
+reviewed on 2026-08-09.
 
 ## Relevant Projects
 
@@ -14,6 +14,10 @@ reviewed on 2026-08-08.
 | [AutoGen / AutoGen Studio](https://github.com/microsoft/autogen) | Layered runtime, event-driven agents, visual composition and debugging | Adopt the control-plane/UI separation. Do not embed its Python runtime: Studio is positioned as a prototyping UI and AutoGen is now maintenance-oriented. |
 | [CrewAI](https://github.com/crewAIInc/crewAI) | Distinction between autonomous crews and deterministic flows, role configuration, observability | Named strategies configure bounded autonomy while the TypeScript workflow retains deterministic gates. Avoid a second orchestration runtime. |
 | [OpenHands / Agent Canvas](https://github.com/OpenHands/OpenHands) | Local control center for parallel coding agents, persistent run navigation, execution inspection, explicit user controls | Use Agent Canvas as the workbench's visual reference while keeping stdout/stderr and state events as first-class projections and the supervisor as the only process owner. |
+| [Langflow](https://github.com/langflow-ai/langflow) | Canvas-first composition, collapsible component library, contextual inspector, trace views | Adopt its full-canvas information hierarchy and dismissible tools without importing its application runtime or copying components. |
+| [Flowise](https://github.com/FlowiseAI/Flowise) | Agent-flow nodes, execution detail views, state-aware canvas rendering | Adopt the separation between execution evidence and editing controls. Keep our compiled topology and TypeScript supervisor as the source of truth. |
+| [XYFlow](https://github.com/xyflow/xyflow) | Maintained React graph rendering, node toolbars, controls, minimap, responsive examples | Continue using `@xyflow/react`; use supported primitives and responsive node layouts instead of a custom renderer. |
+| [n8n](https://github.com/n8n-io/n8n) | Mature workflow-editor interaction conventions | Interaction reference only. Do not copy source or CSS because its Sustainable Use License is not an open-source reuse basis for this project. |
 | [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) | Official MCP 2026-07-28 client/server implementation, capability negotiation, conformance tooling | Do not reimplement the wire protocol. Keep MCP provider-managed and profile-gated until the control plane has an explicit consent UI and tool authorization model. |
 | [A2A JavaScript SDK](https://github.com/a2aproject/a2a-js) | Official A2A 1.0 Agent Card, task lifecycle, streaming, cancellation, and authenticated transport bindings | Reuse the official SDK when remote delegation is authorized. Do not advertise an Agent Card from the current unauthenticated loopback service. |
 
@@ -39,8 +43,9 @@ reviewed on 2026-08-08.
   machine-readable interoperability manifest.
 - MCP denied by default with explicit provider-managed opt-in; A2A remote ingress
   remains disabled behind a documented authentication boundary.
-- Agent Canvas-inspired visual hierarchy: persistent dark run navigation, quiet
-  task workspace, strong primary command, and dense inspection/log surfaces.
+- Source-reviewed workbench hierarchy: narrow primary navigation, searchable
+  run context, graph/log workspace views, evidence inspector, full-canvas
+  strategy composition, and dismissible library/policy tools.
 
 ## Gaps Worth Closing
 

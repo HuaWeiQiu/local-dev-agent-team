@@ -1,4 +1,5 @@
-import { Plus, Workflow } from "lucide-react";
+import { Plus, Search, Workflow } from "lucide-react";
+import { useMemo, useState } from "react";
 import { formatTimestamp, shortRunId } from "../presentation";
 import type { RunSummary } from "../types";
 import { RunStatusBadge } from "./StatusBadge";
@@ -11,6 +12,13 @@ interface RunRailProps {
 }
 
 export function RunRail({ runs, selectedRunId, onSelect, onCreate }: RunRailProps) {
+  const [query, setQuery] = useState("");
+  const visibleRuns = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return runs;
+    return runs.filter((run) => [run.goal, run.strategy, run.id].some((value) => value.toLocaleLowerCase().includes(normalized)));
+  }, [query, runs]);
+
   return (
     <aside className="run-rail" aria-label="运行列表">
       <div className="section-heading rail-heading">
@@ -22,8 +30,12 @@ export function RunRail({ runs, selectedRunId, onSelect, onCreate }: RunRailProp
           <Plus size={18} />
         </button>
       </div>
+      <label className="run-search">
+        <Search size={15} />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索目标、策略或 ID" aria-label="搜索运行" />
+      </label>
       <div className="run-list">
-        {runs.map((run) => {
+        {visibleRuns.map((run) => {
           const completed = run.taskCounts.merged + run.taskCounts.passed;
           const total = Object.values(run.taskCounts).reduce((sum, count) => sum + count, 0);
           return (
@@ -58,10 +70,10 @@ export function RunRail({ runs, selectedRunId, onSelect, onCreate }: RunRailProp
             </button>
           );
         })}
-        {runs.length === 0 && (
+        {visibleRuns.length === 0 && (
           <div className="empty-rail">
             <Workflow size={22} />
-            <span>暂无运行</span>
+            <span>{runs.length === 0 ? "暂无运行" : "没有匹配的运行"}</span>
           </div>
         )}
       </div>

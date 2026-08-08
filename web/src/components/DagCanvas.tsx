@@ -9,7 +9,7 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { Network } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { buildTaskGraph, type TaskNodeData } from "../graph";
 import { statusTone } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
@@ -24,8 +24,23 @@ interface DagCanvasProps {
 }
 
 export function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps) {
+  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia("(max-width: 800px)").matches);
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 800px)");
+    const updateLayout = () => setCompactLayout(mediaQuery.matches);
+    updateLayout();
+    mediaQuery.addEventListener("change", updateLayout);
+    return () => mediaQuery.removeEventListener("change", updateLayout);
+  }, []);
   const graph = useMemo(() => buildTaskGraph(run?.tasks ?? []), [run?.tasks]);
-  const nodes = graph.nodes.map((node) => ({ ...node, selected: node.id === selectedTaskId }));
+  const nodes = graph.nodes.map((node) => ({
+    ...node,
+    position: compactLayout
+      ? { x: (node.position.y / 138) * 280, y: (node.position.x / 290) * 170 }
+      : node.position,
+    data: { ...node.data, compactLayout },
+    selected: node.id === selectedTaskId,
+  }));
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
 
   return (
@@ -83,7 +98,7 @@ function TaskNode({ data, selected }: NodeProps) {
   const { task } = nodeData;
   return (
     <div className={`task-node tone-border-${statusTone(task.status)} ${selected ? "is-selected" : ""}`}>
-      <Handle type="target" position={Position.Left} />
+      <Handle type="target" position={nodeData.compactLayout ? Position.Top : Position.Left} />
       <div className="task-node-topline">
         <code>{task.task.id}</code>
         <TaskStatusBadge status={task.status} />
@@ -93,7 +108,7 @@ function TaskNode({ data, selected }: NodeProps) {
         <span>{task.profile ?? task.task.profile ?? "策略分配"}</span>
         <span>尝试 {task.attempts}</span>
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="source" position={nodeData.compactLayout ? Position.Bottom : Position.Right} />
     </div>
   );
 }

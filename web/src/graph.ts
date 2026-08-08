@@ -3,6 +3,7 @@ import type { TaskRunState } from "./types";
 
 export interface TaskNodeData extends Record<string, unknown> {
   task: TaskRunState;
+  compactLayout?: boolean;
 }
 
 export function buildTaskGraph(tasks: TaskRunState[]): {
