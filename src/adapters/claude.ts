@@ -1,6 +1,7 @@
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
 import { parseClaudeJson, validateProfileArguments } from "./shared.js";
+import { assertAdapterProfile } from "./conformance.js";
 import type {
   AdapterDoctorOptions,
   AgentAdapter,
@@ -14,10 +15,19 @@ const reasoning: readonly Reasoning[] = ["low", "medium", "high", "xhigh", "max"
 
 export class ClaudeAdapter implements AgentAdapter {
   readonly name = "claude";
+  readonly contract = {
+    version: 1,
+    transport: "local-process",
+    permissions: ["read-only", "workspace-write"],
+    externalTools: ["deny", "inherit"],
+    structuredOutput: true,
+    usage: ["inputTokens", "cachedInputTokens", "outputTokens", "reportedCostUsd"],
+  } as const;
   readonly supportedReasoning = reasoning;
 
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation {
-    validateProfileArguments(profile);
+    assertAdapterProfile(this, profile, request.outputSchema !== undefined);
+    validateProfileArguments(profile, "claude");
     const permissionMode = profile.permission === "read-only" ? "plan" : "acceptEdits";
     const args = [
       "--print",
@@ -35,6 +45,9 @@ export class ClaudeAdapter implements AgentAdapter {
     }
     if (profile.model !== "inherit") {
       args.push("--model", profile.model);
+    }
+    if (profile.externalTools === "deny") {
+      args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
     }
     if (request.outputSchema) {
       args.push("--json-schema", JSON.stringify(request.outputSchema));
@@ -92,7 +105,7 @@ export class ClaudeAdapter implements AgentAdapter {
       adapter: this.name,
       check: "capability",
       status: "pass",
-      detail: `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}`,
+      detail: `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}, externalTools=${options.profile.externalTools}`,
     });
     checks.push(
       options.probeModel
@@ -112,6 +125,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const profile: AgentProfile = {
       ...options.profile,
       permission: "read-only",
+      externalTools: "deny",
       timeoutSeconds: Math.min(options.profile.timeoutSeconds, 120),
       args: [],
     };

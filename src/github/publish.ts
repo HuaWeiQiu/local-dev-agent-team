@@ -17,7 +17,13 @@ export class GithubPublisher {
     if (!this.loaded.config.github.enabled) {
       throw new Error("GitHub integration is disabled in agent-team.yaml");
     }
-    if (!['awaiting-human', 'waiting-ci', 'ci-failed', 'ready-to-merge'].includes(state.status)) {
+    const finalApproval = state.approvals
+      ?.filter((approval) => approval.gate === "final")
+      .at(-1);
+    if (finalApproval?.status !== "approved") {
+      throw new Error(`Run '${state.id}' requires final human approval before publication`);
+    }
+    if (!["waiting-ci", "ci-failed", "ready-to-merge"].includes(state.status)) {
       throw new Error(`Run '${state.id}' cannot be published from status '${state.status}'`);
     }
     await this.store.transition(state, "publishing", "Publishing integration branch to GitHub");

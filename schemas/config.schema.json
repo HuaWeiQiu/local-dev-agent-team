@@ -28,6 +28,30 @@
       "minProperties": 1,
       "additionalProperties": { "$ref": "#/$defs/role" }
     },
+    "strategies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "definitions"],
+      "properties": {
+        "default": { "type": "string", "minLength": 1 },
+        "definitions": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/strategy" }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxEventsPerRun": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 50000
+        }
+      }
+    },
     "quality": {
       "type": "object",
       "additionalProperties": false,
@@ -78,7 +102,28 @@
           "type": "array",
           "items": { "type": "string" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["permission"],
+            "properties": { "permission": { "const": "read-only" } }
+          },
+          "then": {
+            "properties": { "externalTools": { "const": "deny" } }
+          }
+        },
+        {
+          "if": { "required": ["nativeProfile"] },
+          "then": {
+            "required": ["externalTools"],
+            "properties": {
+              "adapter": { "const": "codex" },
+              "externalTools": { "const": "inherit" }
+            }
+          }
+        }
+      ]
     },
     "profile": {
       "type": "object",
@@ -93,6 +138,10 @@
         },
         "permission": {
           "enum": ["read-only", "workspace-write"]
+        },
+        "externalTools": {
+          "enum": ["deny", "inherit"],
+          "default": "deny"
         },
         "nativeProfile": { "type": "string", "minLength": 1 },
         "timeoutSeconds": { "type": "integer", "minimum": 1 },
@@ -121,6 +170,77 @@
         },
         "promptFile": { "type": "string", "minLength": 1 }
       }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topology": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": ["parallel-dag", "sequential"],
+              "default": "parallel-dag"
+            }
+          }
+        },
+        "maxParallel": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "maxReworkAttempts": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "executionTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800
+        },
+        "maxAgentInvocations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxProcessOutputBytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "maximum": 16777216
+        },
+        "maxArtifactBytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 10737418240
+        },
+        "approvalGates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "contains": { "const": "final" },
+          "items": { "enum": ["plan", "final"] }
+        },
+        "approvalTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800
+        },
+        "roleProfiles": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["topology"],
+            "properties": {
+              "topology": {
+                "required": ["mode"],
+                "properties": { "mode": { "const": "sequential" } }
+              }
+            }
+          },
+          "then": {
+            "properties": { "maxParallel": { "const": 1 } }
+          }
+        }
+      ]
     }
   }
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import type { CommandSpec } from "../config/schema.js";
@@ -28,19 +29,48 @@ import {
   type QualityReport,
 } from "../quality/run.js";
 import { RunStateStore } from "../state/store.js";
-import type { RunState, TaskRunState } from "../state/types.js";
+import type {
+  ApprovalRequest,
+  CheckpointStage,
+  RecoveryRecord,
+  RunCheckpoint,
+  RunState,
+  TaskRunState,
+} from "../state/types.js";
 import { branchSegment, createRunId } from "./id.js";
+import { resolveStrategy } from "../strategies/resolve.js";
+import type { RunEventSink } from "../events/types.js";
+import { traceIdForRun } from "../events/store.js";
+import {
+  createExecutionDeadline,
+  RunBudgetTracker,
+} from "../observability/budget.js";
 
 export interface WorkflowRunOptions {
   goal: string;
   profileOverrides?: Record<string, string>;
+  strategyName?: string;
+  runId?: string;
+  signal?: AbortSignal;
+  supervisorId?: string;
+  parentRunId?: string;
 }
 
 export interface WorkflowDependencies {
   createAgentService?: (
     store: RunStateStore,
     profileOverrides: Record<string, string>,
+    signal?: AbortSignal,
   ) => RoleAgentService;
+  eventSink?: RunEventSink;
+}
+
+export interface WorkflowResumeOptions {
+  mode: "approval" | "recovery";
+  actor: string;
+  reason: string;
+  signal?: AbortSignal;
+  supervisorId?: string;
 }
 
 export class LocalWorkflowRunner {
@@ -58,17 +88,14 @@ export class LocalWorkflowRunner {
 
   async run(options: WorkflowRunOptions): Promise<RunState> {
     const profileOverrides = options.profileOverrides ?? {};
-    const runId = createRunId(options.goal);
-    const store = new RunStateStore(this.runsDirectory);
+    const strategy = resolveStrategy(this.loaded.config, options.strategyName);
+    const effectiveProfileOverrides = {
+      ...strategy.roleProfiles,
+      ...profileOverrides,
+    };
+    const runId = options.runId ?? createRunId(options.goal);
+    const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
     const git = new GitManager(this.loaded.root, this.worktreesDirectory);
-    const agent = this.dependencies.createAgentService
-      ? this.dependencies.createAgentService(store, profileOverrides)
-      : new ProfiledAgentService(
-          this.loaded.config,
-          this.loaded.root,
-          store,
-          profileOverrides,
-        );
 
     await git.assertReady();
     const baseCommit = await git.resolveCommit(this.loaded.config.project.defaultBranch);
@@ -77,6 +104,7 @@ export class LocalWorkflowRunner {
     const now = new Date().toISOString();
     const state: RunState = {
       id: runId,
+      traceId: traceIdForRun(runId),
       goal: options.goal,
       root: this.loaded.root,
       configPath: this.loaded.path,
@@ -88,12 +116,29 @@ export class LocalWorkflowRunner {
       createdAt: now,
       updatedAt: now,
       profileOverrides,
+      strategy,
+      ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
+      ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       tasks: [],
       history: [{ at: now, status: "created", message: "Run created" }],
     };
     await store.save(state);
+    const deadline = createExecutionDeadline(strategy.executionTimeoutSeconds, options.signal);
+    const workflowSignal = deadline.signal;
+    const budget = new RunBudgetTracker(state, store);
+    const agent = this.dependencies.createAgentService
+      ? this.dependencies.createAgentService(store, effectiveProfileOverrides, workflowSignal)
+      : new ProfiledAgentService(
+          this.loaded.config,
+          this.loaded.root,
+          store,
+          effectiveProfileOverrides,
+          workflowSignal,
+          budget,
+        );
 
     try {
+      workflowSignal.throwIfAborted();
       await git.createWorktree(integrationBranch, baseCommit, integrationWorktree);
       await store.transition(state, "orchestrating", "Supervising agent is analyzing the goal");
       const intake = await agent.runStructured({
@@ -138,59 +183,326 @@ export class LocalWorkflowRunner {
         attempts: 0,
       }));
       await store.transition(state, "planned", `Architect produced ${state.tasks.length} task(s)`);
-
-      await this.executeTasks(state, store, git, agent);
-
-      await store.transition(state, "final-checks", "Running integration quality commands");
-      state.finalQuality = await runQualityCommands(
-        state.integrationWorktree,
-        this.loaded.config.quality.commands,
-        this.loaded.config.quality.commandTimeoutSeconds,
-        store.artifactDirectory(runId, "final-quality"),
-      );
-      await store.save(state);
-
-      const finalDecision = await agent.runStructured({
-        role: "orchestrator",
-        promptKey: "orchestrator-final",
-        cwd: state.integrationWorktree,
-        runId,
-        artifactKey: "final-decision",
-        context: {
-          goal: state.goal,
-          planSummary: state.plan.summary,
-          tasks: state.tasks.map((task) => ({
-            id: task.task.id,
-            status: task.status,
-            qualityPassed: task.quality?.passed,
-            review: task.review,
-            test: task.test,
-          })),
-          finalQuality: compactQuality(state.finalQuality),
-        },
-        schema: finalDecisionSchema,
-        jsonSchema: finalDecisionJsonSchema,
-      });
-      state.finalDecision = finalDecision.value;
-
-      if (!state.finalQuality.passed || finalDecision.value.decision !== "ready") {
-        throw new Error(
-          !state.finalQuality.passed
-            ? "Integration quality commands failed"
-            : `Supervising agent escalated: ${finalDecision.value.reason}`,
+      const checkpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
+      if (state.strategy.approvalGates.includes("plan")) {
+        await this.requestApproval(
+          state,
+          store,
+          checkpoint,
+          "plan",
+          `Approve ${state.tasks.length} planned task(s) before worker execution`,
         );
+        return state;
       }
-      await store.transition(
+      return await this.continueFromCheckpoint(
         state,
-        "awaiting-human",
-        "All local gates passed; awaiting optional publication and human merge",
+        checkpoint,
+        store,
+        git,
+        agent,
+        budget,
+        workflowSignal,
       );
-      return state;
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
-      await store.transition(state, "blocked", state.error);
+      await store.transition(
+        state,
+        options.signal?.aborted ? "cancelled" : "blocked",
+        state.error,
+      );
+      return state;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  async resume(state: RunState, options: WorkflowResumeOptions): Promise<RunState> {
+    const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
+    const git = new GitManager(this.loaded.root, this.worktreesDirectory);
+    const deadline = createExecutionDeadline(
+      state.strategy.executionTimeoutSeconds ?? 14_400,
+      options.signal,
+    );
+    const workflowSignal = deadline.signal;
+    const effectiveProfileOverrides = {
+      ...state.strategy.roleProfiles,
+      ...state.profileOverrides,
+    };
+    const budget = new RunBudgetTracker(state, store);
+    const agent = this.dependencies.createAgentService
+      ? this.dependencies.createAgentService(store, effectiveProfileOverrides, workflowSignal)
+      : new ProfiledAgentService(
+          this.loaded.config,
+          this.loaded.root,
+          store,
+          effectiveProfileOverrides,
+          workflowSignal,
+          budget,
+        );
+    try {
+      workflowSignal.throwIfAborted();
+      await git.assertReady();
+      if (state.root !== this.loaded.root || state.configPath !== this.loaded.path) {
+        throw new Error("Run checkpoint belongs to a different project configuration");
+      }
+      const checkpoint = latestCheckpoint(state);
+      await this.assertCheckpointMatches(state, checkpoint, git);
+      if (options.mode === "approval") {
+        const approval = latestApproval(state, "plan");
+        if (approval?.status !== "approved" || approval.checkpointId !== checkpoint.id) {
+          throw new Error("Plan approval does not match the latest checkpoint");
+        }
+        delete state.error;
+        if (options.supervisorId) state.supervisorId = options.supervisorId;
+        await store.save(state);
+        store.emit(state.id, "run.continuation-started", {
+          mode: options.mode,
+          actor: options.actor,
+          checkpointId: checkpoint.id,
+        });
+      } else {
+        await this.prepareRecovery(state, checkpoint, store, options);
+      }
+      return await this.continueFromCheckpoint(
+        state,
+        checkpoint,
+        store,
+        git,
+        agent,
+        budget,
+        workflowSignal,
+      );
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
+      await store.transition(
+        state,
+        options.signal?.aborted ? "cancelled" : "blocked",
+        state.error,
+      );
+      return state;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private async continueFromCheckpoint(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    store: RunStateStore,
+    git: GitManager,
+    agent: RoleAgentService,
+    budget: RunBudgetTracker,
+    signal?: AbortSignal,
+  ): Promise<RunState> {
+    if (checkpoint.stage === "local-gates-passed") {
+      const finalApproval = latestApproval(state, "final");
+      if (!finalApproval || finalApproval.checkpointId !== checkpoint.id) {
+        await this.requestApproval(
+          state,
+          store,
+          checkpoint,
+          "final",
+          "All local gates passed; approve the integration result before publication",
+        );
+      }
       return state;
     }
+    if (checkpoint.stage !== "tasks-complete") {
+      await this.executeTasks(state, store, git, agent, budget, signal);
+      await this.recordCheckpoint(state, store, git, "tasks-complete");
+    }
+
+    await store.transition(state, "final-checks", "Running integration quality commands");
+    state.finalQuality = await runQualityCommands(
+      state.integrationWorktree,
+      this.loaded.config.quality.commands,
+      this.loaded.config.quality.commandTimeoutSeconds,
+      store.artifactDirectory(state.id, recoveryArtifactKey(state, "final-quality")),
+      signal,
+      { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+    );
+    await budget.recordQuality(state.finalQuality);
+    await store.save(state);
+
+    const finalDecision = await agent.runStructured({
+      role: "orchestrator",
+      promptKey: "orchestrator-final",
+      cwd: state.integrationWorktree,
+      runId: state.id,
+      artifactKey: recoveryArtifactKey(state, "final-decision"),
+      context: {
+        goal: state.goal,
+        planSummary: state.plan?.summary,
+        tasks: state.tasks.map((task) => ({
+          id: task.task.id,
+          status: task.status,
+          qualityPassed: task.quality?.passed,
+          review: task.review,
+          test: task.test,
+        })),
+        finalQuality: compactQuality(state.finalQuality),
+      },
+      schema: finalDecisionSchema,
+      jsonSchema: finalDecisionJsonSchema,
+    });
+    state.finalDecision = finalDecision.value;
+
+    if (!state.finalQuality.passed || finalDecision.value.decision !== "ready") {
+      throw new Error(
+        !state.finalQuality.passed
+          ? "Integration quality commands failed"
+          : `Supervising agent escalated: ${finalDecision.value.reason}`,
+      );
+    }
+    const finalCheckpoint = await this.recordCheckpoint(
+      state,
+      store,
+      git,
+      "local-gates-passed",
+    );
+    await this.requestApproval(
+      state,
+      store,
+      finalCheckpoint,
+      "final",
+      "All local gates passed; approve the integration result before publication",
+    );
+    return state;
+  }
+
+  private async recordCheckpoint(
+    state: RunState,
+    store: RunStateStore,
+    git: GitManager,
+    stage: CheckpointStage,
+  ): Promise<RunCheckpoint> {
+    const checkpoint: RunCheckpoint = {
+      id: randomUUID(),
+      version: 1,
+      stage,
+      integrationCommit: await git.currentCommit(state.integrationWorktree),
+      completedTaskIds: state.tasks
+        .filter((task) => task.status === "merged")
+        .map((task) => task.task.id)
+        .sort(),
+      createdAt: new Date().toISOString(),
+    };
+    state.checkpoints = [...(state.checkpoints ?? []), checkpoint];
+    await store.save(state);
+    store.emit(state.id, "workflow.checkpoint", checkpoint);
+    return checkpoint;
+  }
+
+  private async requestApproval(
+    state: RunState,
+    store: RunStateStore,
+    checkpoint: RunCheckpoint,
+    gate: ApprovalRequest["gate"],
+    summary: string,
+  ): Promise<ApprovalRequest> {
+    const requestedAt = new Date();
+    const approval: ApprovalRequest = {
+      id: randomUUID(),
+      gate,
+      status: "pending",
+      summary,
+      checkpointId: checkpoint.id,
+      requestedAt: requestedAt.toISOString(),
+      expiresAt: new Date(
+        requestedAt.getTime() + state.strategy.approvalTimeoutSeconds * 1_000,
+      ).toISOString(),
+    };
+    state.approvals = [...(state.approvals ?? []), approval];
+    await store.transition(state, "awaiting-human", summary);
+    store.emit(state.id, "approval.requested", approval);
+    return approval;
+  }
+
+  private async assertCheckpointMatches(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    git: GitManager,
+  ): Promise<void> {
+    const integrationCommit = await git.currentCommit(state.integrationWorktree);
+    if (integrationCommit !== checkpoint.integrationCommit) {
+      throw new Error(
+        `Integration worktree HEAD '${integrationCommit}' does not match checkpoint '${checkpoint.integrationCommit}'`,
+      );
+    }
+    if (!(await git.isClean(state.integrationWorktree))) {
+      throw new Error("Integration worktree has uncommitted changes outside the checkpoint");
+    }
+    const knownTasks = new Set(state.tasks.map((task) => task.task.id));
+    for (const taskId of checkpoint.completedTaskIds) {
+      if (!knownTasks.has(taskId)) {
+        throw new Error(`Checkpoint references unknown task '${taskId}'`);
+      }
+    }
+  }
+
+  private async prepareRecovery(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    store: RunStateStore,
+    options: WorkflowResumeOptions,
+  ): Promise<void> {
+    if (state.status !== "interrupted") {
+      throw new Error(`Run '${state.id}' cannot recover from status '${state.status}'`);
+    }
+    if (
+      checkpoint.stage === "plan-ready" &&
+      state.strategy.approvalGates.includes("plan")
+    ) {
+      const planApproval = latestApproval(state, "plan");
+      if (
+        planApproval?.status !== "approved" ||
+        planApproval.checkpointId !== checkpoint.id
+      ) {
+        throw new Error("Plan checkpoint requires approval before worker recovery");
+      }
+    }
+    const completed = new Set(checkpoint.completedTaskIds);
+    const abandonedTasks: RecoveryRecord["abandonedTasks"] = [];
+    for (const task of state.tasks) {
+      if (completed.has(task.task.id)) {
+        if (task.status !== "merged") {
+          throw new Error(`Checkpointed task '${task.task.id}' is not marked merged`);
+        }
+        continue;
+      }
+      if (task.status !== "pending") {
+        abandonedTasks.push({
+          taskId: task.task.id,
+          status: task.status,
+          attempts: task.attempts,
+          ...(task.branch ? { branch: task.branch } : {}),
+          ...(task.worktree ? { worktree: task.worktree } : {}),
+          ...(task.commit ? { commit: task.commit } : {}),
+        });
+      }
+      resetIncompleteTask(task);
+    }
+    state.resumeCount = (state.resumeCount ?? 0) + 1;
+    state.recoveries = [
+      ...(state.recoveries ?? []),
+      {
+        at: new Date().toISOString(),
+        actor: options.actor,
+        reason: options.reason,
+        checkpointId: checkpoint.id,
+        abandonedTasks,
+      },
+    ];
+    delete state.error;
+    if (options.supervisorId) state.supervisorId = options.supervisorId;
+    await store.transition(
+      state,
+      checkpoint.stage === "local-gates-passed" || checkpoint.stage === "tasks-complete"
+        ? "final-checks"
+        : "planned",
+      `Recovered checkpoint ${checkpoint.id} by ${options.actor}`,
+    );
+    store.emit(state.id, "run.recovered", state.recoveries.at(-1));
   }
 
   private async executeTasks(
@@ -198,19 +510,23 @@ export class LocalWorkflowRunner {
     store: RunStateStore,
     git: GitManager,
     agent: RoleAgentService,
+    budget: RunBudgetTracker,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!state.plan) {
       throw new Error("Cannot execute tasks without a plan");
     }
-    const completed = new Set<string>();
-    const started = new Set<string>();
+    const checkpoint = latestCheckpoint(state);
+    const completed = new Set(checkpoint.completedTaskIds);
+    const started = new Set(checkpoint.completedTaskIds);
 
     while (completed.size < state.plan.tasks.length) {
+      signal?.throwIfAborted();
       const wave = selectTaskWave(
         state.plan,
         completed,
         started,
-        this.loaded.config.project.maxParallel,
+        state.strategy.maxParallel,
       );
       if (wave.length === 0) {
         throw new Error("No dependency-ready tasks remain");
@@ -228,14 +544,16 @@ export class LocalWorkflowRunner {
       const taskStates = await Promise.all(
         wave.map(async (task) => {
           const taskState = findTaskState(state, task.id);
-          const branch = `agent-team/${branchSegment(state.id)}/${branchSegment(task.id)}`;
-          const worktree = path.join(this.worktreesDirectory, state.id, branchSegment(task.id));
+          const recoverySuffix = state.resumeCount ? `-resume-${state.resumeCount}` : "";
+          const taskSegment = `${branchSegment(task.id)}${recoverySuffix}`;
+          const branch = `agent-team/${branchSegment(state.id)}/${taskSegment}`;
+          const worktree = path.join(this.worktreesDirectory, state.id, taskSegment);
           taskState.branch = branch;
           taskState.worktree = worktree;
           taskState.status = "working";
           await git.createWorktree(branch, integrationCommit, worktree);
           await store.save(state);
-          await this.executeOneTask(state, taskState, store, git, agent);
+          await this.executeOneTask(state, taskState, store, git, agent, budget, signal);
           return taskState;
         }),
       );
@@ -260,6 +578,7 @@ export class LocalWorkflowRunner {
         await git.removeWorktree(taskState.worktree);
         await store.save(state);
       }
+      await this.recordCheckpoint(state, store, git, "task-wave-integrated");
     }
   }
 
@@ -269,14 +588,17 @@ export class LocalWorkflowRunner {
     store: RunStateStore,
     git: GitManager,
     agent: RoleAgentService,
+    budget: RunBudgetTracker,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!taskState.worktree || !state.plan) {
       throw new Error(`Task '${taskState.task.id}' worktree is not initialized`);
     }
-    const maxAttempts = this.loaded.config.quality.maxReworkAttempts + 1;
+    const maxAttempts = state.strategy.maxReworkAttempts + 1;
     let feedback = "";
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      signal?.throwIfAborted();
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
       await store.save(state);
@@ -285,7 +607,7 @@ export class LocalWorkflowRunner {
           role: "worker",
           cwd: taskState.worktree,
           runId: state.id,
-          artifactKey: `tasks/${taskState.task.id}/attempt-${attempt}/worker`,
+          artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "worker"),
           ...(taskState.task.profile ? { profileName: taskState.task.profile } : {}),
           context: {
             goal: state.goal,
@@ -307,9 +629,12 @@ export class LocalWorkflowRunner {
           this.loaded.config.quality.commandTimeoutSeconds,
           store.artifactDirectory(
             state.id,
-            `tasks/${taskState.task.id}/attempt-${attempt}/quality`,
+            taskArtifactKey(state, taskState.task.id, attempt, "quality"),
           ),
+          signal,
+          { maxOutputBytes: state.strategy.maxProcessOutputBytes },
         );
+        await budget.recordQuality(quality);
         taskState.quality = quality;
 
         await git.stage(taskState.worktree);
@@ -335,7 +660,7 @@ export class LocalWorkflowRunner {
             role: "reviewer",
             cwd: taskState.worktree,
             runId: state.id,
-            artifactKey: `tasks/${taskState.task.id}/attempt-${attempt}/review`,
+            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "review"),
             context: {
               goal: state.goal,
               planSummary: state.plan.summary,
@@ -350,7 +675,7 @@ export class LocalWorkflowRunner {
             role: "tester",
             cwd: taskState.worktree,
             runId: state.id,
-            artifactKey: `tasks/${taskState.task.id}/attempt-${attempt}/test`,
+            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "test"),
             context: {
               goal: state.goal,
               task: taskState.task,
@@ -404,6 +729,51 @@ export class LocalWorkflowRunner {
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
     await store.save(state);
   }
+}
+
+function latestCheckpoint(state: RunState): RunCheckpoint {
+  const checkpoint = state.checkpoints?.at(-1);
+  if (!checkpoint) {
+    throw new Error(`Run '${state.id}' has no durable checkpoint`);
+  }
+  return checkpoint;
+}
+
+function latestApproval(
+  state: RunState,
+  gate: ApprovalRequest["gate"],
+): ApprovalRequest | undefined {
+  for (let index = (state.approvals?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const approval = state.approvals?.[index];
+    if (approval?.gate === gate) return approval;
+  }
+  return undefined;
+}
+
+function resetIncompleteTask(task: TaskRunState): void {
+  task.status = "pending";
+  task.attempts = 0;
+  delete task.branch;
+  delete task.worktree;
+  delete task.commit;
+  delete task.profile;
+  delete task.quality;
+  delete task.review;
+  delete task.test;
+  delete task.error;
+}
+
+function recoveryArtifactKey(state: RunState, key: string): string {
+  return state.resumeCount ? `recoveries/${state.resumeCount}/${key}` : key;
+}
+
+function taskArtifactKey(
+  state: RunState,
+  taskId: string,
+  attempt: number,
+  artifact: string,
+): string {
+  return recoveryArtifactKey(state, `tasks/${taskId}/attempt-${attempt}/${artifact}`);
 }
 
 function findTaskState(state: RunState, taskId: string): TaskRunState {

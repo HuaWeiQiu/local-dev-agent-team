@@ -10,10 +10,17 @@ import { AdapterRegistry } from "./adapters/registry.js";
 import { invokeAgent } from "./adapters/invoke.js";
 import { runDoctor } from "./doctor.js";
 import { LocalWorkflowRunner } from "./workflow/runner.js";
+import { StrategyBlueprintCatalog } from "./strategies/catalog.js";
 import { RunStateStore } from "./state/store.js";
 import { GithubPublisher } from "./github/publish.js";
 import { GithubRepairRunner } from "./github/repair.js";
 import type { LoadedConfig } from "./config/load.js";
+import { startControlService } from "./server/start.js";
+import { startProjectRuntime } from "./server/project-runtime.js";
+import { loadWorkspace } from "./workspace/load.js";
+import { startWorkspaceControlService } from "./workspace/service.js";
+import { assertDiagnosticProfilePermission } from "./security/permissions.js";
+import { buildInteropManifest } from "./interop/manifest.js";
 
 const program = new Command();
 program
@@ -46,9 +53,16 @@ program
 
 program
   .command("validate")
-  .description("Validate project configuration")
+  .description("Validate project or workspace configuration")
   .option("-c, --config <path>", "configuration path")
-  .action(async (options: { config?: string }) => {
+  .option("-w, --workspace <path>", "workspace manifest path")
+  .action(async (options: { config?: string; workspace?: string }) => {
+    assertExclusiveConfigOptions(options);
+    if (options.workspace) {
+      const workspace = await loadWorkspace(process.cwd(), options.workspace);
+      process.stdout.write(`Valid: ${workspace.path} (${workspace.projects.length} projects)\n`);
+      return;
+    }
     const loaded = await loadConfig(process.cwd(), options.config);
     process.stdout.write(`Valid: ${loaded.path}\n`);
   });
@@ -75,6 +89,31 @@ program
         `${item.role.padEnd(14)} ${item.defaultProfile} [${item.allowedProfiles.join(", ")}]\n`,
       );
     }
+  });
+
+program
+  .command("interop")
+  .description("Show adapter contracts and external protocol boundaries")
+  .option("-c, --config <path>", "configuration path")
+  .option("--json", "emit JSON", false)
+  .action(async (options: { config?: string; json: boolean }) => {
+    const loaded = await loadConfig(process.cwd(), options.config);
+    const manifest = buildInteropManifest(loaded.config);
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+      return;
+    }
+    for (const adapter of manifest.adapters) {
+      process.stdout.write(
+        `${adapter.name}\tcontract=v${adapter.contractVersion}\t${adapter.transport}\tstructured=${String(adapter.structuredOutput)}\n`,
+      );
+    }
+    process.stdout.write(
+      `mcp\t${manifest.protocols.mcp.specification}\t${manifest.protocols.mcp.mode}\tdefault=${manifest.protocols.mcp.defaultPolicy}\n`,
+    );
+    process.stdout.write(
+      `a2a\t${manifest.protocols.a2a.specification}\t${manifest.protocols.a2a.mode}\n`,
+    );
   });
 
 program
@@ -129,6 +168,11 @@ program
     }) => {
       const loaded = await loadConfig(process.cwd(), options.config);
       const resolved = resolveProfile(loaded.config, options.role, options.profile);
+      assertDiagnosticProfilePermission(
+        options.role,
+        resolved.name,
+        resolved.profile.permission,
+      );
       const outputSchema = options.schema
         ? (JSON.parse(await readFile(path.resolve(options.schema), "utf8")) as Record<string, unknown>)
         : undefined;
@@ -163,14 +207,23 @@ program
     collectOption,
     [],
   )
+  .option("--strategy <name>", "named execution strategy")
   .option("-c, --config <path>", "configuration path")
   .action(
-    async (options: { goal: string; profile: string[]; config?: string }) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+    async (options: {
+      goal: string;
+      profile: string[];
+      strategy?: string;
+      config?: string;
+    }) => {
+      const catalog = await StrategyBlueprintCatalog.open(
+        await loadConfig(process.cwd(), options.config),
+      );
       const profileOverrides = parseProfileAssignments(options.profile);
-      const state = await new LocalWorkflowRunner(loaded).run({
+      const state = await new LocalWorkflowRunner(catalog.loaded).run({
         goal: options.goal,
         profileOverrides,
+        ...(options.strategy ? { strategyName: options.strategy } : {}),
       });
       process.stdout.write(
         `${state.id}\t${state.status}\t${state.integrationBranch}\n`,
@@ -180,6 +233,101 @@ program
       }
       if (state.status === "blocked") {
         process.exitCode = 1;
+      }
+    },
+  );
+
+program
+  .command("serve")
+  .description("Start the local REST and SSE control service for a project or workspace")
+  .option("--host <host>", "loopback host", "127.0.0.1")
+  .option("--port <port>", "listen port", "4317")
+  .option("-c, --config <path>", "configuration path")
+  .option("-w, --workspace <path>", "workspace manifest path")
+  .action(async (options: { host: string; port: string; config?: string; workspace?: string }) => {
+    assertExclusiveConfigOptions(options);
+    const port = parsePort(options.port);
+    const service = options.workspace
+      ? await startWorkspaceControlService(
+          await loadWorkspace(process.cwd(), options.workspace),
+          { host: options.host, port },
+        )
+      : await startControlService(await loadConfig(process.cwd(), options.config), {
+          host: options.host,
+          port,
+        });
+    process.stdout.write(
+      `Agent Team ${options.workspace ? "workspace " : ""}control service: ${service.url}\n`,
+    );
+    await waitForShutdownSignal();
+    await service.close();
+  });
+
+program
+  .command("approval")
+  .description("Approve or reject a pending durable approval request")
+  .argument("<run-id>", "run identifier")
+  .requiredOption("--request <id>", "approval request identifier")
+  .requiredOption("--decision <decision>", "approved or rejected")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "approval or rejection reason")
+  .option("-c, --config <path>", "configuration path")
+  .action(
+    async (
+      runId: string,
+      options: {
+        request: string;
+        decision: string;
+        actor: string;
+        reason: string;
+        config?: string;
+      },
+    ) => {
+      if (options.decision !== "approved" && options.decision !== "rejected") {
+        throw new Error("--decision must be 'approved' or 'rejected'");
+      }
+      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      try {
+        const result = await runtime.supervisor.respondApproval(runId, {
+          requestId: options.request,
+          decision: options.decision,
+          actor: options.actor,
+          reason: options.reason,
+        });
+        if (result.status === "resuming") {
+          await runtime.supervisor.wait(runId);
+        }
+        const state = await runtime.supervisor.get(runId);
+        process.stdout.write(`${runId}\t${state?.status ?? result.status}\n`);
+      } finally {
+        await runtime.close();
+      }
+    },
+  );
+
+program
+  .command("resume")
+  .description("Resume an interrupted run from its latest verified checkpoint")
+  .argument("<run-id>", "run identifier")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "recovery reason")
+  .option("-c, --config <path>", "configuration path")
+  .action(
+    async (
+      runId: string,
+      options: { actor: string; reason: string; config?: string },
+    ) => {
+      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      try {
+        await runtime.supervisor.resume(runId, {
+          actor: options.actor,
+          reason: options.reason,
+        });
+        await runtime.supervisor.wait(runId);
+        const state = await runtime.supervisor.get(runId);
+        process.stdout.write(`${runId}\t${state?.status ?? "unknown"}\n`);
+      } finally {
+        await runtime.close();
       }
     },
   );
@@ -208,6 +356,17 @@ program
       for (const task of state.tasks) {
         process.stdout.write(
           `  ${task.task.id.padEnd(12)} ${task.status.padEnd(10)} attempts=${task.attempts}\n`,
+        );
+      }
+      const checkpoint = state.checkpoints?.at(-1);
+      if (checkpoint) {
+        process.stdout.write(
+          `  checkpoint: ${checkpoint.id} ${checkpoint.stage} ${checkpoint.integrationCommit.slice(0, 10)}\n`,
+        );
+      }
+      for (const approval of state.approvals?.filter((item) => item.status === "pending") ?? []) {
+        process.stdout.write(
+          `  approval: ${approval.id} gate=${approval.gate} expires=${approval.expiresAt}\n`,
         );
       }
       if (state.error) {
@@ -338,4 +497,25 @@ function printChecks(checks: Array<{ bucket: string; name: string; state: string
   for (const check of checks) {
     process.stdout.write(`${check.bucket.toUpperCase().padEnd(8)} ${check.name}: ${check.state}\n`);
   }
+}
+
+function parsePort(value: string): number {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error(`Invalid port '${value}'`);
+  }
+  return port;
+}
+
+function assertExclusiveConfigOptions(options: { config?: string; workspace?: string }): void {
+  if (options.config && options.workspace) {
+    throw new Error("Use either --config or --workspace, not both");
+  }
+}
+
+async function waitForShutdownSignal(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
 }

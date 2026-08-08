@@ -13,6 +13,10 @@ import {
 } from "../domain/json-schemas.js";
 import { GitManager } from "../git/manager.js";
 import { runQualityCommands } from "../quality/run.js";
+import {
+  createExecutionDeadline,
+  RunBudgetTracker,
+} from "../observability/budget.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { GithubClient } from "./client.js";
@@ -57,6 +61,8 @@ export class GithubRepairRunner {
       state.repository,
       checks,
     );
+    const budget = new RunBudgetTracker(state, this.store);
+    const deadline = createExecutionDeadline(state.strategy.executionTimeoutSeconds);
     const agent =
       this.agent ??
       new ProfiledAgentService(
@@ -64,6 +70,8 @@ export class GithubRepairRunner {
         this.loaded.root,
         this.store,
         state.profileOverrides,
+        deadline.signal,
+        budget,
       );
 
     try {
@@ -91,7 +99,10 @@ export class GithubRepairRunner {
         this.loaded.config.quality.commands,
         this.loaded.config.quality.commandTimeoutSeconds,
         this.store.artifactDirectory(state.id, `github-repair/attempt-${attempt}/quality`),
+        deadline.signal,
+        { maxOutputBytes: state.strategy.maxProcessOutputBytes },
       );
+      await budget.recordQuality(quality);
       await git.stage(state.integrationWorktree);
       const changedFiles = await git.changedFiles(state.integrationWorktree);
       if (changedFiles.length === 0) {
@@ -153,6 +164,8 @@ export class GithubRepairRunner {
       state.error = error instanceof Error ? error.message : String(error);
       await this.store.transition(state, "ci-failed", state.error);
       return state;
+    } finally {
+      deadline.dispose();
     }
   }
 }

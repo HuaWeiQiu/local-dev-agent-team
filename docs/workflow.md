@@ -15,8 +15,9 @@
    exhausted retry budget blocks the run.
 7. Passing task commits merge into the integration branch in stable task-ID
    order. Final project checks and the supervising controller run once more.
-8. A passing run stops at `awaiting-human`. Publication, CI observation,
-   repair, and completion are separate explicit commands.
+8. A passing run creates a durable final approval request and stops at
+   `awaiting-human`. Approval moves it to `ready-to-merge`; publication, CI
+   observation, repair, and completion remain separate explicit commands.
 
 ## Git Layout
 
@@ -45,10 +46,30 @@ Run state and artifacts live under `.agent-team/` and are ignored by Git:
 .agent-team/runs/<run-id>/.../stderr.log
 ```
 
-State is written after transitions and attempts. `agent-team status [run-id]`
-provides inspection after interruption. Version 0.1 retains branches,
-worktrees, logs, and state for diagnosis but does not yet offer automatic
-resume; begin a new run after resolving the cause.
+State is written after transitions and attempts. The workflow also records the
+integration commit and completed task IDs after planning, each fully integrated
+worker wave, all tasks, and final local gates. `agent-team status [run-id]`
+shows the latest checkpoint and pending approval IDs.
+
+Runs started through `agent-team serve` also append ordered events to
+`.agent-team/control.sqlite`. SSE clients reconnect with the last observed
+sequence. Agent stdout and stderr remain available as artifact logs; event
+chunks provide live progress without making the browser the process owner.
+Captured process output and cumulative artifacts are bounded by the selected
+strategy. The run snapshot records invocation counts, durations, output bytes,
+truncation, artifact bytes, and any provider-reported token or USD usage.
+
+Every retained event includes trace and span IDs. The run telemetry endpoint
+projects those rows into OTLP/HTTP JSON `resourceSpans`; it does not send data
+outside the workstation.
+An interrupted run can resume only from a matching checkpoint. A partial wave
+is abandoned as evidence and its incomplete tasks restart on new branches.
+Cancelled or blocked runs can still be retried as new linked runs. Neither path
+claims that a killed CLI process continued in place.
+
+Approval requests and responses are persisted in the run snapshot and emitted
+to the ordered event ledger. A response records decision, actor, reason, and
+time. The actor is a local audit assertion, not authenticated identity.
 
 ## Publication Lifecycle
 

@@ -1,4 +1,9 @@
-import type { AgentProfile, Reasoning } from "../config/schema.js";
+import type {
+  AgentProfile,
+  ExternalToolsPolicy,
+  Permission,
+  Reasoning,
+} from "../config/schema.js";
 import type { ProcessResult } from "../process/run.js";
 
 export interface AgentInvocationRequest {
@@ -21,6 +26,14 @@ export interface AgentRunResult {
   text: string;
   structured?: unknown;
   process: ProcessResult;
+  usage?: AgentUsage;
+}
+
+export interface AgentUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reportedCostUsd?: number;
 }
 
 export interface DoctorCheck {
@@ -38,8 +51,18 @@ export interface AdapterDoctorOptions {
   probeModel: boolean;
 }
 
+export interface AgentAdapterContract {
+  version: 1;
+  transport: "local-process";
+  permissions: readonly Permission[];
+  externalTools: readonly ExternalToolsPolicy[];
+  structuredOutput: boolean;
+  usage: readonly (keyof AgentUsage)[];
+}
+
 export interface AgentAdapter {
   readonly name: string;
+  readonly contract: AgentAdapterContract;
   readonly supportedReasoning: readonly Reasoning[];
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation;
   parseResult(invocation: AgentInvocation, process: ProcessResult): Promise<AgentRunResult>;

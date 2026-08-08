@@ -2,6 +2,8 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { configSchema, type AgentTeamConfig } from "./schema.js";
+import { AdapterRegistry } from "../adapters/registry.js";
+import { assertAdapterProfile } from "../adapters/conformance.js";
 
 const configNames = ["agent-team.yaml", "agent-team.yml"];
 
@@ -40,6 +42,7 @@ export async function findConfig(startDirectory: string): Promise<string | undef
 export async function loadConfig(
   startDirectory = process.cwd(),
   explicitPath?: string,
+  registry = new AdapterRegistry(),
 ): Promise<LoadedConfig> {
   const configPath = explicitPath
     ? path.resolve(startDirectory, explicitPath)
@@ -57,6 +60,16 @@ export async function loadConfig(
       .map((issue) => `${issue.path.join(".") || "config"}: ${issue.message}`)
       .join("\n");
     throw new Error(`Invalid configuration at ${configPath}:\n${details}`);
+  }
+
+  for (const [profileName, profile] of Object.entries(result.data.profiles)) {
+    try {
+      assertAdapterProfile(registry.get(profile.adapter), profile, false);
+    } catch (error) {
+      throw new Error(
+        `Invalid configuration at ${configPath}:\nprofiles.${profileName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   return {

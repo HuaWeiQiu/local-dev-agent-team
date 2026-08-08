@@ -12,6 +12,7 @@ profiles:
     model: inherit
     reasoning: high
     permission: read-only
+    externalTools: deny
     timeoutSeconds: 900
 
   codex-worker:
@@ -19,6 +20,7 @@ profiles:
     model: inherit
     reasoning: medium
     permission: workspace-write
+    externalTools: deny
     timeoutSeconds: 1800
 
   claude-reviewer:
@@ -26,6 +28,7 @@ profiles:
     model: inherit
     reasoning: high
     permission: read-only
+    externalTools: deny
     timeoutSeconds: 900
 
 roles:
@@ -49,6 +52,40 @@ roles:
   tester:
     defaultProfile: codex-planner
     allowedProfiles: [codex-planner]
+
+strategies:
+  default: balanced
+  definitions:
+    balanced:
+      topology:
+        mode: parallel-dag
+      maxParallel: 2
+      maxReworkAttempts: 2
+      executionTimeoutSeconds: 14400
+      maxAgentInvocations: 64
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 1073741824
+      approvalGates: [final]
+      approvalTimeoutSeconds: 86400
+      roleProfiles: {}
+
+    strict:
+      topology:
+        mode: sequential
+      maxParallel: 1
+      maxReworkAttempts: 3
+      executionTimeoutSeconds: 21600
+      maxAgentInvocations: 96
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 2147483648
+      approvalGates: [plan, final]
+      approvalTimeoutSeconds: 172800
+      roleProfiles:
+        reviewer: claude-reviewer
+        tester: codex-planner
+
+observability:
+  maxEventsPerRun: 50000
 
 quality:
   commands:

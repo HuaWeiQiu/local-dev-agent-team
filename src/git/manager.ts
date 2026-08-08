@@ -23,8 +23,7 @@ export class GitManager {
     if (gitRoot !== configuredRoot) {
       throw new Error(`Configuration root '${this.root}' must be the Git repository root`);
     }
-    const status = await this.git(["status", "--porcelain"], this.root);
-    if (status.stdout.trim()) {
+    if (!(await this.isClean(this.root))) {
       throw new Error("The primary Git worktree must be clean before starting a run");
     }
   }
@@ -90,6 +89,11 @@ export class GitManager {
 
   async currentCommit(directory: string): Promise<string> {
     return (await this.git(["rev-parse", "HEAD"], directory)).stdout.trim();
+  }
+
+  async isClean(directory: string): Promise<boolean> {
+    const status = await this.git(["status", "--porcelain"], directory);
+    return status.stdout.trim().length === 0;
   }
 
   async push(directory: string, remote: string, branch: string): Promise<void> {
