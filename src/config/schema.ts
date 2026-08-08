@@ -10,6 +10,7 @@ export const workflowRoles = [
 
 export const reasoningSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export const permissionSchema = z.enum(["read-only", "workspace-write"]);
+export const externalToolsSchema = z.enum(["deny", "inherit"]);
 
 export const commandSchema = z.object({
   command: z.string().min(1),
@@ -22,6 +23,7 @@ export const profileSchema = z.object({
   model: z.string().min(1),
   reasoning: reasoningSchema,
   permission: permissionSchema,
+  externalTools: externalToolsSchema.default("deny"),
   nativeProfile: z.string().min(1).optional(),
   timeoutSeconds: z.number().int().positive(),
   args: z.array(z.string()).default([]),
@@ -32,6 +34,65 @@ export const roleSchema = z.object({
   allowedProfiles: z.array(z.string().min(1)).min(1),
   fallbackProfiles: z.array(z.string().min(1)).default([]),
   promptFile: z.string().min(1).optional(),
+});
+
+export const approvalGateSchema = z.enum(["plan", "final"]);
+export const strategyTopologyModeSchema = z.enum(["parallel-dag", "sequential"]);
+export const strategyTopologySchema = z.object({
+  mode: strategyTopologyModeSchema.default("parallel-dag"),
+});
+
+export const namedStrategySchema = z
+  .object({
+    topology: strategyTopologySchema.default({ mode: "parallel-dag" }),
+    maxParallel: z.number().int().min(1).max(32).optional(),
+    maxReworkAttempts: z.number().int().min(0).max(10).optional(),
+    executionTimeoutSeconds: z.number().int().min(60).max(604_800).optional(),
+    maxAgentInvocations: z.number().int().min(1).max(1_000).optional(),
+    maxProcessOutputBytes: z.number().int().min(4_096).max(16_777_216).optional(),
+    maxArtifactBytes: z.number().int().min(1_048_576).max(10_737_418_240).optional(),
+    roleProfiles: z.record(z.string().min(1), z.string().min(1)).default({}),
+    approvalGates: z.array(approvalGateSchema).min(1).max(2).optional(),
+    approvalTimeoutSeconds: z.number().int().min(60).max(604_800).optional(),
+  })
+  .superRefine((strategy, context) => {
+    if (strategy.approvalGates && !strategy.approvalGates.includes("final")) {
+      context.addIssue({
+        code: "custom",
+        path: ["approvalGates"],
+        message: "Every strategy must include the final approval gate",
+      });
+    }
+    if (
+      strategy.approvalGates &&
+      new Set(strategy.approvalGates).size !== strategy.approvalGates.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["approvalGates"],
+        message: "Approval gates must be unique",
+      });
+    }
+    if (
+      strategy.topology.mode === "sequential" &&
+      strategy.maxParallel !== undefined &&
+      strategy.maxParallel !== 1
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["maxParallel"],
+        message: "Sequential strategies require maxParallel to be 1",
+      });
+    }
+  });
+
+export const strategiesSchema = z.object({
+  default: z.string().min(1),
+  definitions: z.record(z.string().min(1), namedStrategySchema),
+});
+
+export const observabilitySchema = z.object({
+  maxEventsPerRun: z.number().int().min(100).max(1_000_000).default(50_000),
 });
 
 export const configSchema = z
@@ -45,6 +106,8 @@ export const configSchema = z
     }),
     profiles: z.record(z.string().min(1), profileSchema),
     roles: z.record(z.string().min(1), roleSchema),
+    strategies: strategiesSchema.optional(),
+    observability: observabilitySchema.default({ maxEventsPerRun: 50_000 }),
     quality: z.object({
       commands: z.array(commandSchema),
       maxReworkAttempts: z.number().int().min(0).max(10),
@@ -103,22 +166,92 @@ export const configSchema = z
       }
     }
 
-    for (const roleName of ["orchestrator", "architect", "reviewer"] as const) {
-      const role = config.roles[roleName];
-      const profile = role ? config.profiles[role.defaultProfile] : undefined;
-      if (profile?.permission === "workspace-write") {
+    if (config.strategies) {
+      if (!config.strategies.definitions[config.strategies.default]) {
         context.addIssue({
           code: "custom",
-          path: ["roles", roleName, "defaultProfile"],
-          message: `${roleName} must use a read-only default profile`,
+          path: ["strategies", "default"],
+          message: `Default strategy '${config.strategies.default}' is not defined`,
+        });
+      }
+      for (const [strategyName, strategy] of Object.entries(
+        config.strategies.definitions,
+      )) {
+        for (const [roleName, profileName] of Object.entries(strategy.roleProfiles)) {
+          const role = config.roles[roleName];
+          if (!role) {
+            context.addIssue({
+              code: "custom",
+              path: ["strategies", "definitions", strategyName, "roleProfiles", roleName],
+              message: `Strategy references unknown role '${roleName}'`,
+            });
+          } else if (!role.allowedProfiles.includes(profileName)) {
+            context.addIssue({
+              code: "custom",
+              path: ["strategies", "definitions", strategyName, "roleProfiles", roleName],
+              message: `Profile '${profileName}' is not allowed for role '${roleName}'`,
+            });
+          }
+        }
+      }
+    }
+
+    for (const [roleName, role] of Object.entries(config.roles)) {
+      if (roleName === "worker") continue;
+      for (const profileName of new Set([
+        role.defaultProfile,
+        ...role.allowedProfiles,
+        ...role.fallbackProfiles,
+      ])) {
+        if (config.profiles[profileName]?.permission === "workspace-write") {
+          context.addIssue({
+            code: "custom",
+            path: ["roles", roleName, "allowedProfiles"],
+            message: `${roleName} cannot allow workspace-write profile '${profileName}'`,
+          });
+        }
+      }
+    }
+
+    for (const [profileName, profile] of Object.entries(config.profiles)) {
+      if (profile.nativeProfile && profile.adapter !== "codex") {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", profileName, "nativeProfile"],
+          message: "nativeProfile is supported only by the Codex adapter",
+        });
+      }
+      if (profile.permission === "read-only" && profile.externalTools === "inherit") {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", profileName, "externalTools"],
+          message: "Read-only profiles cannot inherit external MCP tools",
+        });
+      }
+      if (
+        profile.adapter === "codex" &&
+        profile.externalTools === "deny" &&
+        profile.nativeProfile
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", profileName, "nativeProfile"],
+          message: "Codex nativeProfile requires externalTools: inherit",
         });
       }
     }
   });
 
 export type AgentTeamConfig = z.infer<typeof configSchema>;
+export type WorkflowRole = (typeof workflowRoles)[number];
 export type AgentProfile = z.infer<typeof profileSchema>;
 export type RolePolicy = z.infer<typeof roleSchema>;
+export type NamedStrategy = z.infer<typeof namedStrategySchema>;
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export type Permission = z.infer<typeof permissionSchema>;
+export type ExternalToolsPolicy = z.infer<typeof externalToolsSchema>;
 export type CommandSpec = z.infer<typeof commandSchema>;
+export type ApprovalGate = z.infer<typeof approvalGateSchema>;
+export type StrategyTopologyMode = z.infer<typeof strategyTopologyModeSchema>;
+export type StrategyTopology = z.infer<typeof strategyTopologySchema>;
+export type ObservabilityConfig = z.infer<typeof observabilitySchema>;

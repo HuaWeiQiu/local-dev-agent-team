@@ -48,7 +48,7 @@
 
 ## 运行条件
 
-- Node.js 20 或更高版本。
+- Node.js 24 或更高版本。
 - pnpm 和 Git。
 - 至少安装并登录一个受支持的 Agent CLI。
 - 使用 GitHub 发布功能时，需要安装并登录 GitHub CLI `gh`。
@@ -75,7 +75,7 @@ agent-team --version
 如果不希望创建全局命令，也可以在本仓库中使用：
 
 ```bash
-pnpm dev -- <命令>
+pnpm dev <命令>
 ```
 
 ## 快速开始
@@ -93,6 +93,7 @@ agent-team init
 ```bash
 agent-team validate
 agent-team profiles
+agent-team interop
 agent-team doctor
 ```
 
@@ -118,6 +119,45 @@ agent-team status
 agent-team status <run-id>
 ```
 
+启动本地控制服务：
+
+```bash
+agent-team serve
+```
+
+服务默认只监听 `http://127.0.0.1:4317`。在浏览器打开这个地址即可使用 React
+工作台：可视化预检和保存执行策略、选择角色 profile、启动或取消运行、查看任务
+DAG、审查结果、质量命令和实时 Agent 输出；阻塞、取消或中断的运行可以作为新的
+关联运行重试。界面保存的策略位于项目状态目录，不会改写 `agent-team.yaml`，并且
+可以通过工作台或 `agent-team run --strategy <name>` 执行。
+
+同一个服务还提供 REST 命令和带游标的 SSE 事件流。运行元数据和幂等命令保存在
+`.agent-team/control.sqlite`，大型日志、上下文、diff 和测试制品继续保存在
+`.agent-team/runs/`。同一项目同时只允许一个控制服务持有运行租约，浏览器不会
+直接创建本地进程或修改运行状态。
+
+一个工作台也可以安全管理多个项目。创建 `agent-team.workspace.yaml`：
+
+```yaml
+version: 1
+projects:
+  - id: frontend
+    config: ./frontend/agent-team.yaml
+  - id: backend
+    config: ./backend/agent-team.yaml
+```
+
+路径相对工作区清单解析。验证并启动：
+
+```bash
+agent-team validate --workspace ./agent-team.workspace.yaml
+agent-team serve --workspace ./agent-team.workspace.yaml
+```
+
+页面顶部可以切换项目。每个项目仍拥有独立的 supervisor、进程租约、SQLite
+事件账本、运行目录、worktree 和制品；所有命令与 SSE 都带项目作用域，不会把
+一个仓库的运行发送到另一个仓库。工作区是声明式配置，修改项目列表后需要重启服务。
+
 ## 分别选择 CLI 和模型
 
 `agent-team.yaml` 中的 profile 决定使用哪个 CLI 和模型：
@@ -129,6 +169,7 @@ profiles:
     model: inherit
     reasoning: high
     permission: read-only
+    externalTools: deny
     timeoutSeconds: 900
 
   codex-worker:
@@ -136,6 +177,7 @@ profiles:
     model: your-codex-model
     reasoning: medium
     permission: workspace-write
+    externalTools: deny
     timeoutSeconds: 1800
 
   claude-reviewer:
@@ -143,6 +185,7 @@ profiles:
     model: your-claude-model
     reasoning: high
     permission: read-only
+    externalTools: deny
     timeoutSeconds: 900
 ```
 
@@ -153,6 +196,16 @@ profiles:
 
 模型必须已经能在对应 CLI 中使用。本项目不会绕过 CLI 自己的账号、权限和
 模型可用性限制。
+
+`externalTools` 默认是 `deny`：Codex 忽略用户配置并将本次运行的项目配置标记为
+不受信任（登录状态仍保留），
+Claude Code 使用严格空 MCP 配置。只有显式设置为 `inherit` 时，Agent 才会继承
+对应 CLI 自己的 MCP 配置。凭据、server 生命周期和工具授权仍由 CLI 管理，本项目
+不保存 MCP 凭据，也不把 MCP 工具变成控制面命令。由于外部工具不保证服从 CLI
+的文件沙箱，只有 `workspace-write` Worker profile 可以设置 `inherit`；只读
+profile 必须保持 `deny`。Codex 的 deny 模式也不读取用户模型/provider 配置，
+`model: inherit` 会使用 CLI 内置默认值；需要固定模型时请显式填写 `model`。
+`nativeProfile` 依赖用户配置，因此只能和 `externalTools: inherit` 一起使用。
 
 角色再引用允许使用的 profile：
 
@@ -198,6 +251,83 @@ agent-team run \
 ```
 
 所有覆盖都必须符合该角色的 `allowedProfiles`，不会静默使用未授权的 profile。
+只有 `worker` 角色可以允许 `workspace-write` profile；总控、架构、审查、测试和
+自定义非 Worker 角色都必须只允许只读 profile。用于适配器诊断的 `agent-team
+invoke` 也始终拒绝写权限 profile，避免直接修改主工作树。
+
+查看可机器校验的适配器和协议边界：
+
+```bash
+agent-team interop --json
+curl http://127.0.0.1:4317/api/interop
+```
+
+工作区模式使用 `/api/projects/<project-id>/interop`。MCP `2026-07-28` 当前是
+profile 控制、CLI 执行；A2A `1.0` 在具备 HTTPS、认证和授权网关前明确禁用。
+
+## 命名执行策略
+
+策略把一组 Agent 路由和运行限制保存为可复用配置：
+
+```yaml
+strategies:
+  default: balanced
+  definitions:
+    balanced:
+      maxParallel: 2
+      maxReworkAttempts: 2
+      executionTimeoutSeconds: 14400
+      maxAgentInvocations: 64
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 1073741824
+      approvalGates: [final]
+      approvalTimeoutSeconds: 86400
+      roleProfiles: {}
+
+    strict:
+      maxParallel: 1
+      maxReworkAttempts: 3
+      executionTimeoutSeconds: 21600
+      maxAgentInvocations: 96
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 2147483648
+      approvalGates: [plan, final]
+      approvalTimeoutSeconds: 172800
+      roleProfiles:
+        reviewer: claude-reviewer
+        tester: codex-planner
+```
+
+为单次运行选择策略：
+
+```bash
+agent-team run --goal "重构支付回调" --strategy strict
+```
+
+解析优先级是本次运行的 `--profile` 覆盖、策略中的 `roleProfiles`、角色默认
+profile。策略不能选择角色 `allowedProfiles` 之外的 profile。未配置策略的旧
+项目仍然使用 `project.maxParallel` 和 `quality.maxReworkAttempts`。`final` 审批
+门不可移除；`plan` 审批门可让工作 Agent 在人工确认任务拆分后才开始执行。
+
+`executionTimeoutSeconds` 限制一次活动执行段，等待人工审批不计时；恢复后重新开始
+执行段，但 `maxAgentInvocations` 调用总数和 `maxArtifactBytes` 制品用量继续累计。
+`maxProcessOutputBytes` 分别限制每个子进程的 stdout、stderr 捕获量，超出部分会被
+截断但子进程仍会被完整排空。执行时限、调用次数或制品超限会阻断运行；界面会
+显示调用数、耗时、输出、制品和截断次数。
+
+只有 Agent CLI 明确返回时才记录 token 和美元成本，不按模型名称推算价格。跨
+供应商的硬成本边界使用调用次数，而不是可能失真的估算金额。
+
+事件保留量是项目级配置：
+
+```yaml
+observability:
+  maxEventsPerRun: 50000
+```
+
+每个事件都带稳定 trace/span ID；`GET /api/runs/<run-id>/telemetry`（工作区模式
+使用对应的项目作用域路径）可导出 OTLP/HTTP JSON。导出只读且不会主动发送到
+外部服务。
 
 ## 项目测试门禁
 
@@ -224,7 +354,32 @@ quality:
 
 ## GitHub 工作流
 
-本地运行通过后，状态会停在 `awaiting-human`，不会自动发布或合并。
+本地运行通过后，状态会停在 `awaiting-human`，不会自动发布或合并。React 工作台
+可以直接处理审批；CLI 可先查看请求 ID，再提交带操作者和理由的决定：
+
+```bash
+agent-team status <run-id>
+agent-team approval <run-id> \
+  --request <approval-id> \
+  --decision approved \
+  --actor "release-owner" \
+  --reason "已核对集成 diff 和本地门禁"
+```
+
+拒绝时使用 `--decision rejected`，运行会进入 `blocked`。批准计划审批后，同一个
+run 会从计划检查点继续；批准最终审批后状态变为 `ready-to-merge`，才允许发布。
+
+控制服务意外中断时，只能从已验证的任务边界恢复：
+
+```bash
+agent-team resume <run-id> \
+  --actor "operator" \
+  --reason "主机重启，恢复最近已合并波次"
+```
+
+恢复前会核对 integration worktree 的 Git HEAD。未完成波次的旧分支和 worktree
+会保留为审计证据，任务改用新的 `resume-N` 分支重跑；不会伪装成续接已终止的
+Agent CLI 进程。
 
 创建草稿 PR 并等待 GitHub Actions：
 
@@ -282,6 +437,8 @@ agent-team complete <run-id>
 - [工作流说明](docs/workflow.md)
 - [安全模型](docs/security.md)
 - [系统架构](docs/architecture.md)
+- [开源多 Agent 框架对照与补缺](docs/ecosystem-review.md)
+- [可视化策略蓝图](docs/strategy-blueprints.md)
 - [完整示例配置](agent-team.example.yaml)
 
 ## 开发与测试
@@ -291,6 +448,7 @@ pnpm install
 pnpm check
 pnpm test
 pnpm build
+pnpm test:e2e
 ```
 
 贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。本项目使用 MIT License。

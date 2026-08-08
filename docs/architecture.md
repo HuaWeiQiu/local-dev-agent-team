@@ -8,6 +8,37 @@ state, Git isolation, quality gates, retry limits, and GitHub publication. Agent
 CLIs own model access, authentication, tool execution, and model-specific
 configuration.
 
+The optional local control service is a long-running owner around this core:
+
+```text
+browser or CLI
+  -> loopback REST commands
+  -> run supervisor
+  -> workflow core
+  -> agent CLI processes
+
+workflow and process events
+  -> SQLite event ledger
+  -> cursor-based SSE
+  -> browser projections
+  -> OTLP JSON trace export
+```
+
+Only the control service starts and cancels managed runs. A browser never
+spawns an agent process or edits run snapshots directly.
+
+The React workbench is built as static assets and served by the same loopback
+HTTP service. It renders run snapshots as a task DAG and uses the event ledger
+only for live projections. Desktop and mobile layouts share the same REST/SSE
+contract; the UI has no adapter-specific process control.
+
+A workspace service can place several project runtimes behind the same HTTP/UI
+process. Discovery is shared, but execution is not: every project owns a
+separate supervisor, process lease, SQLite event ledger, state directory,
+worktrees, and artifacts. Commands and SSE use `/api/projects/:projectId`; the
+single-project `/api` routes remain compatible. A workspace never starts in a
+partially available state.
+
 ## Control And Execution Planes
 
 The deterministic control plane:
@@ -32,6 +63,26 @@ The agent execution plane:
 
 Deterministic policy always wins over agent recommendations.
 
+## Budgets And Telemetry
+
+Named strategies bound every active execution segment, cumulative agent
+invocations, captured output per stream, and total run artifacts. Budget usage
+is stored in the run snapshot and rendered by the workbench. Approval waits do
+not consume execution timeout, while continuation and recovery retain the
+run-wide invocation and artifact counters.
+
+Each strategy also compiles a declared topology into an immutable stage graph.
+The first supported modes are dependency-aware `parallel-dag` and `sequential`;
+both retain mandatory deterministic gates and final human approval. The same
+compiled graph is projected to the workbench and stored with the run so UI
+layout cannot redefine backend execution semantics.
+
+Every event has a stable run trace ID and an event span ID. The REST control
+plane can project retained events into OTLP/HTTP JSON without sending data to a
+remote collector. The SQLite ledger remains authoritative for retained events;
+the run snapshot remains authoritative for current budgets, approvals, and
+checkpoints.
+
 ## Configuration Layers
 
 ```text
@@ -42,8 +93,25 @@ project defaults
 ```
 
 The resolved profile contains an adapter name, optional model, reasoning level,
-permission mode, optional native CLI profile, timeout, and safe argument list.
-The scheduler may select only profiles listed by the role policy.
+permission mode, external-tool policy, optional native CLI profile, timeout,
+and safe argument list. The scheduler may select only profiles listed by the
+role policy. Only the worker role can receive workspace-write permission.
+
+Every adapter publishes a versioned local-process contract covering supported
+reasoning levels, permissions, external-tool policies, structured output, and
+reported usage fields.
+Before spawn, the control plane verifies adapter/profile ownership, working
+directory, stdin prompt delivery, output path, and timeout. `agent-team interop`
+and `GET /api/interop` expose the same machine-readable contract.
+
+MCP and A2A have separate ownership boundaries. MCP `2026-07-28` integration is
+profile-controlled and provider-managed: `deny` is the default, while `inherit`
+lets the selected Agent CLI use its own MCP configuration. The control plane is
+not an MCP Host and stores no MCP credentials. Because MCP tools can execute
+outside the CLI filesystem sandbox, only workspace-write worker profiles may
+select `inherit`. A2A `1.0` remote task ingress is disabled because the loopback
+service has no remote identity or authorization layer; it must sit behind a
+separately authenticated HTTPS gateway before that boundary can change.
 
 ## Workflow State
 
@@ -58,12 +126,21 @@ created
   -> integrating
   -> final-checks
   -> awaiting-human
+  -> ready-to-merge
   -> completed
 ```
 
 Any state can transition to `blocked` on a non-recoverable infrastructure or
 policy failure. State is persisted after every transition for audit and
-diagnosis. Version 0.1 does not automatically resume an interrupted run.
+diagnosis.
+
+Control-service cancellation transitions a run to `cancelled`. When a new
+service instance finds a non-terminal run owned by a previous service instance,
+it records `interrupted` while preserving worktrees, branches, and artifacts.
+Recovery is allowed only when the integration HEAD matches the latest durable
+task-boundary checkpoint. Work from a partial wave is retained as abandoned
+evidence and rerun on new branches; an interrupted agent process is never
+continued in place.
 
 ## Git Isolation
 
@@ -76,6 +153,8 @@ deterministic order. The primary working tree is never used for agent edits.
 
 - Agent text is untrusted data.
 - Profile arguments are passed to child processes without a shell.
+- Adapter-managed directory, permission, MCP, model, and output arguments cannot
+  be overridden by profile extras.
 - Model names are opaque strings, not executable fragments.
 - Reviewer and tester sessions cannot approve their own implementation.
 - The worker cannot convert a failed command into a passing result.

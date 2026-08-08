@@ -15,6 +15,7 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
         model: "inherit",
         reasoning: "high",
         permission: "read-only",
+        externalTools: "deny",
         timeoutSeconds: 900,
         args: [],
       },
@@ -23,6 +24,7 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
         model: "inherit",
         reasoning: "medium",
         permission: "workspace-write",
+        externalTools: "deny",
         timeoutSeconds: 1800,
         args: [],
       },
@@ -53,6 +55,26 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
         allowedProfiles: ["codex-planner"],
         fallbackProfiles: [],
       },
+    },
+    strategies: {
+      default: "balanced",
+      definitions: {
+        balanced: {
+          topology: { mode: "parallel-dag" },
+          maxParallel: 2,
+          maxReworkAttempts: 2,
+          executionTimeoutSeconds: 14_400,
+          maxAgentInvocations: 64,
+          maxProcessOutputBytes: 1_048_576,
+          maxArtifactBytes: 1_073_741_824,
+          roleProfiles: {},
+          approvalGates: ["final"],
+          approvalTimeoutSeconds: 86_400,
+        },
+      },
+    },
+    observability: {
+      maxEventsPerRun: 50_000,
     },
     quality: {
       commands: [],

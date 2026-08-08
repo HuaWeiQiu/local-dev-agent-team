@@ -1,6 +1,7 @@
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
 import { parseOutputFileResult, validateProfileArguments } from "./shared.js";
+import { assertAdapterProfile } from "./conformance.js";
 import type {
   AdapterDoctorOptions,
   AgentAdapter,
@@ -14,10 +15,22 @@ const reasoning: readonly Reasoning[] = ["low", "medium", "high", "xhigh"];
 
 export class CodexAdapter implements AgentAdapter {
   readonly name = "codex";
+  readonly contract = {
+    version: 1,
+    transport: "local-process",
+    permissions: ["read-only", "workspace-write"],
+    externalTools: ["deny", "inherit"],
+    structuredOutput: true,
+    usage: ["inputTokens", "cachedInputTokens", "outputTokens"],
+  } as const;
   readonly supportedReasoning = reasoning;
 
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation {
-    validateProfileArguments(profile);
+    assertAdapterProfile(this, profile, request.outputSchema !== undefined);
+    validateProfileArguments(profile, "codex");
+    if (profile.externalTools === "deny" && profile.nativeProfile) {
+      throw new Error("Codex nativeProfile requires externalTools: inherit");
+    }
     if (!this.supportedReasoning.includes(profile.reasoning)) {
       throw new Error(`Codex adapter does not support reasoning '${profile.reasoning}'`);
     }
@@ -35,6 +48,16 @@ export class CodexAdapter implements AgentAdapter {
       "-c",
       `model_reasoning_effort="${profile.reasoning}"`,
     ];
+
+    if (profile.externalTools === "deny") {
+      args.push(
+        "--ignore-user-config",
+        "-c",
+        "project_root_markers=[]",
+        "-c",
+        `projects.${JSON.stringify(request.cwd)}.trust_level="untrusted"`,
+      );
+    }
 
     if (profile.nativeProfile) {
       args.push("--profile", profile.nativeProfile);
@@ -108,7 +131,7 @@ export class CodexAdapter implements AgentAdapter {
       check: "capability",
       status: capabilityOk ? "pass" : "fail",
       detail: capabilityOk
-        ? `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}`
+        ? `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}, externalTools=${options.profile.externalTools}`
         : `Unsupported reasoning '${options.profile.reasoning}'`,
     });
 
@@ -127,9 +150,11 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   private async probeModel(options: AdapterDoctorOptions): Promise<DoctorCheck> {
+    const { nativeProfile: _nativeProfile, ...probeProfile } = options.profile;
     const profile: AgentProfile = {
-      ...options.profile,
+      ...probeProfile,
       permission: "read-only",
+      externalTools: "deny",
       timeoutSeconds: Math.min(options.profile.timeoutSeconds, 120),
       args: [],
     };

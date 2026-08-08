@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -13,6 +13,7 @@ import type {
 import { createDefaultConfig } from "../src/config/defaults.js";
 import { loadConfig } from "../src/config/load.js";
 import { runProcess } from "../src/process/run.js";
+import { RunStateStore } from "../src/state/store.js";
 import { LocalWorkflowRunner } from "../src/workflow/runner.js";
 
 class FakeAgentService implements RoleAgentService {
@@ -72,13 +73,19 @@ class FakeAgentService implements RoleAgentService {
 }
 
 describe("local workflow", () => {
-  it("runs parallel workers through review, tests, and integration", async () => {
+  it("runs a sequential topology through review, tests, and integration", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-workflow-"));
     await git(root, ["init", "-b", "main"]);
     await git(root, ["config", "user.name", "Agent Team Test"]);
     await git(root, ["config", "user.email", "agent-team@example.com"]);
     const config = createDefaultConfig("fixture");
     config.project.maxParallel = 2;
+    config.strategies!.definitions.strict = {
+      topology: { mode: "sequential" },
+      maxParallel: 1,
+      maxReworkAttempts: 3,
+      roleProfiles: { reviewer: "codex-planner" },
+    };
     config.quality.commands = [
       { command: process.execPath, args: ["-e", "process.exit(0)"] },
     ];
@@ -89,17 +96,137 @@ describe("local workflow", () => {
     await git(root, ["commit", "-m", "initial"]);
 
     const loaded = await loadConfig(root);
+    let resolvedProfileOverrides: Record<string, string> | undefined;
     const state = await new LocalWorkflowRunner(loaded, {
-      createAgentService: () => new FakeAgentService(),
-    }).run({ goal: "Create alpha and beta files" });
+      createAgentService: (_store, overrides) => {
+        resolvedProfileOverrides = overrides;
+        return new FakeAgentService();
+      },
+    }).run({
+      goal: "Create alpha and beta files",
+      strategyName: "strict",
+      profileOverrides: { reviewer: "codex-planner" },
+    });
 
     expect(state.status).toBe("awaiting-human");
+    expect(state.strategy).toMatchObject({
+      name: "strict",
+      maxParallel: 1,
+      maxReworkAttempts: 3,
+      topology: { mode: "sequential" },
+    });
+    expect(resolvedProfileOverrides).toEqual({ reviewer: "codex-planner" });
     expect(state.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    expect(state.checkpoints?.map((checkpoint) => checkpoint.stage)).toEqual([
+      "plan-ready",
+      "task-wave-integrated",
+      "task-wave-integrated",
+      "tasks-complete",
+      "local-gates-passed",
+    ]);
+    expect(state.approvals).toMatchObject([{ gate: "final", status: "pending" }]);
     expect(await readFile(path.join(state.integrationWorktree, "alpha.txt"), "utf8")).toBe(
       "alpha\n",
     );
     expect(await readFile(path.join(state.integrationWorktree, "beta.txt"), "utf8")).toBe(
       "beta\n",
+    );
+  }, 30_000);
+
+  it("recovers only from a verified boundary and preserves abandoned task evidence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-recovery-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Agent Team Test"]);
+    await git(root, ["config", "user.email", "agent-team@example.com"]);
+    const config = createDefaultConfig("fixture");
+    config.strategies!.definitions.guarded = {
+      maxParallel: 2,
+      maxReworkAttempts: 2,
+      roleProfiles: {},
+      approvalGates: ["plan", "final"],
+      approvalTimeoutSeconds: 86_400,
+    };
+    config.quality.commands = [
+      { command: process.execPath, args: ["-e", "process.exit(0)"] },
+    ];
+    await writeFile(path.join(root, ".gitignore"), ".agent-team/\n");
+    await writeFile(path.join(root, "README.md"), "# Fixture\n");
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial"]);
+
+    const loaded = await loadConfig(root);
+    const dependencies = {
+      createAgentService: () => new FakeAgentService(),
+    };
+    const runner = new LocalWorkflowRunner(loaded, dependencies);
+    const state = await runner.run({
+      goal: "Recover alpha and beta files",
+      strategyName: "guarded",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.every((task) => task.status === "pending")).toBe(true);
+    expect(state.approvals).toMatchObject([{ gate: "plan", status: "pending" }]);
+
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+    state.status = "interrupted";
+    state.tasks[0]!.status = "working";
+    state.tasks[0]!.attempts = 1;
+    state.tasks[0]!.branch = `agent-team/${state.id}/alpha`;
+    state.tasks[0]!.worktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const checkpoint = state.checkpoints!.at(-1)!;
+    const integrationCommit = checkpoint.integrationCommit;
+    checkpoint.integrationCommit = "does-not-match-integration-head";
+    const refused = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Attempt recovery with stale evidence",
+    });
+    expect(refused.status).toBe("blocked");
+    expect(refused.error).toContain("does not match checkpoint");
+
+    checkpoint.integrationCommit = integrationCommit;
+    state.status = "interrupted";
+    delete state.error;
+    const uncheckpointedFile = path.join(state.integrationWorktree, "uncheckpointed.txt");
+    await writeFile(uncheckpointedFile, "must not enter recovery\n");
+    const dirtyRefused = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Attempt recovery with a dirty integration worktree",
+    });
+    expect(dirtyRefused.status).toBe("blocked");
+    expect(dirtyRefused.error).toContain("uncommitted changes outside the checkpoint");
+
+    await unlink(uncheckpointedFile);
+    state.status = "interrupted";
+    delete state.error;
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Host restarted during the first worker wave",
+    });
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.resumeCount).toBe(1);
+    expect(recovered.recoveries).toMatchObject([
+      {
+        actor: "operator",
+        abandonedTasks: [{ taskId: "alpha", status: "working", attempts: 1 }],
+      },
+    ]);
+    expect(recovered.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    expect(recovered.tasks.every((task) => task.branch?.endsWith("-resume-1"))).toBe(true);
+    expect(recovered.approvals?.at(-1)).toMatchObject({ gate: "final", status: "pending" });
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
     );
   }, 30_000);
 });

@@ -10,6 +10,10 @@ export interface CommandResult {
   stderr: string;
   durationMs: number;
   timedOut: boolean;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
 }
 
 export interface QualityReport {
@@ -22,28 +26,41 @@ export async function runQualityCommands(
   commands: CommandSpec[],
   timeoutSeconds: number,
   artifactDirectory?: string,
+  signal?: AbortSignal,
+  options: { maxOutputBytes?: number } = {},
 ): Promise<QualityReport> {
   if (artifactDirectory) {
     await mkdir(artifactDirectory, { recursive: true });
   }
   const results: CommandResult[] = [];
   for (const [index, spec] of commands.entries()) {
-    const process = await runProcess({
-      command: spec.command,
-      args: spec.args,
-      cwd,
-      timeoutMs: timeoutSeconds * 1_000,
-      env: { ...processEnv(), CI: "true" },
-    }).catch((error: unknown) => ({
-      command: spec.command,
-      args: spec.args,
-      exitCode: null,
-      stdout: "",
-      stderr: error instanceof Error ? error.message : String(error),
-      durationMs: 0,
-      timedOut: false,
-      signal: null,
-    }));
+    let process;
+    try {
+      process = await runProcess({
+        command: spec.command,
+        args: spec.args,
+        cwd,
+        timeoutMs: timeoutSeconds * 1_000,
+        env: { ...processEnv(), CI: "true" },
+        ...(signal ? { signal } : {}),
+        ...(options.maxOutputBytes ? { maxOutputBytes: options.maxOutputBytes } : {}),
+      });
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      process = {
+        command: spec.command,
+        args: spec.args,
+        exitCode: null,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        durationMs: 0,
+        timedOut: false,
+        signal: null,
+      };
+    }
     const result: CommandResult = {
       spec,
       exitCode: process.exitCode,
@@ -51,6 +68,10 @@ export async function runQualityCommands(
       stderr: process.stderr,
       durationMs: process.durationMs,
       timedOut: process.timedOut,
+      ...(process.stdoutBytes !== undefined ? { stdoutBytes: process.stdoutBytes } : {}),
+      ...(process.stderrBytes !== undefined ? { stderrBytes: process.stderrBytes } : {}),
+      ...(process.stdoutTruncated ? { stdoutTruncated: true } : {}),
+      ...(process.stderrTruncated ? { stderrTruncated: true } : {}),
     };
     results.push(result);
     if (artifactDirectory) {
@@ -58,6 +79,8 @@ export async function runQualityCommands(
         `$ ${[spec.command, ...spec.args].join(" ")}`,
         `exit: ${String(result.exitCode)}`,
         `duration_ms: ${result.durationMs}`,
+        `stdout_truncated: ${String(result.stdoutTruncated ?? false)}`,
+        `stderr_truncated: ${String(result.stderrTruncated ?? false)}`,
         "",
         "--- stdout ---",
         result.stdout,

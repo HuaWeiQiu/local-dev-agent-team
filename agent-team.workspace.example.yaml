@@ -1,0 +1,6 @@
+version: 1
+projects:
+  - id: agent-team
+    config: ./agent-team.yaml
+  - id: another-project
+    config: ../another-project/agent-team.yaml

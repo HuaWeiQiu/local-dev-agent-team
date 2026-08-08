@@ -4,9 +4,11 @@ import path from "node:path";
 import type { z } from "zod";
 import type { AgentTeamConfig } from "../config/schema.js";
 import { fallbackProfiles, resolveProfile } from "../profiles/resolve.js";
-import { invokeAgent } from "../adapters/invoke.js";
+import { AgentInvocationError, invokeAgent } from "../adapters/invoke.js";
 import { AdapterRegistry } from "../adapters/registry.js";
+import type { AgentRunResult } from "../adapters/types.js";
 import type { RunStateStore } from "../state/store.js";
+import { assertRoleProfilePermission } from "../security/permissions.js";
 
 export interface RoleInvocationOptions<T> {
   role: string;
@@ -48,12 +50,37 @@ export interface RoleAgentService {
   runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse>;
 }
 
+export interface AgentInvocationObservation {
+  invocationId: string;
+  runId: string;
+  role: string;
+  profile: string;
+  adapter: string;
+  model: string;
+  permission: string;
+  externalTools: string;
+  artifactKey: string;
+  durationMs: number;
+  result?: AgentRunResult;
+  error?: unknown;
+}
+
+export interface AgentInvocationObserver {
+  readonly maxProcessOutputBytes?: number;
+  beforeInvocation(
+    observation: Omit<AgentInvocationObservation, "invocationId" | "durationMs" | "result" | "error">,
+  ): Promise<string>;
+  afterInvocation(observation: AgentInvocationObservation): Promise<void>;
+}
+
 export class ProfiledAgentService implements RoleAgentService {
   constructor(
     private readonly config: AgentTeamConfig,
     private readonly root: string,
     private readonly store: RunStateStore,
     private readonly profileOverrides: Record<string, string>,
+    private readonly signal?: AbortSignal,
+    private readonly observer?: AgentInvocationObserver,
     private readonly registry = new AdapterRegistry(),
   ) {}
 
@@ -89,7 +116,11 @@ export class ProfiledAgentService implements RoleAgentService {
     profileName: string;
     usedFallback: boolean;
   }> {
-    const requested = options.profileName ?? this.profileOverrides[options.role];
+    const requested = requestedProfileForRole(
+      options.role,
+      this.profileOverrides,
+      options.profileName,
+    );
     const primary = resolveProfile(this.config, options.role, requested);
     const candidates = [primary, ...fallbackProfiles(this.config, options.role)].filter(
       (candidate, index, all) =>
@@ -103,6 +134,11 @@ export class ProfiledAgentService implements RoleAgentService {
     const errors: string[] = [];
 
     for (const candidate of candidates) {
+      assertRoleProfilePermission(
+        options.role,
+        candidate.name,
+        candidate.profile.permission,
+      );
       const artifactDirectory = this.store.artifactDirectory(
         options.runId,
         options.artifactKey,
@@ -114,7 +150,26 @@ export class ProfiledAgentService implements RoleAgentService {
         `${JSON.stringify(options.context, null, 2)}\n`,
         "utf8",
       );
+      let invocationId: string | undefined;
+      let observed = false;
+      let observationFailed = false;
+      const startedAt = Date.now();
       try {
+        try {
+          invocationId = await this.observer?.beforeInvocation({
+            runId: options.runId,
+            role: options.role,
+            profile: candidate.name,
+            adapter: candidate.profile.adapter,
+            model: candidate.profile.model,
+            permission: candidate.profile.permission,
+            externalTools: candidate.profile.externalTools,
+            artifactKey: options.artifactKey,
+          });
+        } catch (error) {
+          observationFailed = true;
+          throw error;
+        }
         const result = await invokeAgent(
           {
             adapterName: candidate.profile.adapter,
@@ -123,9 +178,50 @@ export class ProfiledAgentService implements RoleAgentService {
             prompt,
             artifactDirectory,
             ...(outputSchema ? { outputSchema } : {}),
+            ...(this.signal ? { signal: this.signal } : {}),
+            ...(this.observer?.maxProcessOutputBytes
+              ? { maxOutputBytes: this.observer.maxProcessOutputBytes }
+              : {}),
+            onStdout: (chunk) => {
+              this.store.emit(options.runId, "agent.stdout", {
+                role: options.role,
+                profile: candidate.name,
+                artifactKey: options.artifactKey,
+                chunk: boundedOutputChunk(chunk),
+              });
+            },
+            onStderr: (chunk) => {
+              this.store.emit(options.runId, "agent.stderr", {
+                role: options.role,
+                profile: candidate.name,
+                artifactKey: options.artifactKey,
+                chunk: boundedOutputChunk(chunk),
+              });
+            },
           },
           this.registry,
         );
+        if (invocationId) {
+          observed = true;
+          try {
+            await this.observer?.afterInvocation({
+              invocationId,
+              runId: options.runId,
+              role: options.role,
+              profile: candidate.name,
+              adapter: candidate.profile.adapter,
+              model: candidate.profile.model,
+              permission: candidate.profile.permission,
+              externalTools: candidate.profile.externalTools,
+              artifactKey: options.artifactKey,
+              durationMs: Date.now() - startedAt,
+              result,
+            });
+          } catch (error) {
+            observationFailed = true;
+            throw error;
+          }
+        }
         return {
           text: result.text,
           ...(result.structured !== undefined ? { structured: result.structured } : {}),
@@ -133,8 +229,33 @@ export class ProfiledAgentService implements RoleAgentService {
           usedFallback: candidate.usedFallback,
         };
       } catch (error) {
+        let failure = error;
+        if (invocationId && !observed) {
+          observed = true;
+          try {
+            await this.observer?.afterInvocation({
+              invocationId,
+              runId: options.runId,
+              role: options.role,
+              profile: candidate.name,
+              adapter: candidate.profile.adapter,
+              model: candidate.profile.model,
+              permission: candidate.profile.permission,
+              externalTools: candidate.profile.externalTools,
+              artifactKey: options.artifactKey,
+              durationMs: Date.now() - startedAt,
+              ...(error instanceof AgentInvocationError ? { result: error.result } : {}),
+              error,
+            });
+          } catch (observerError) {
+            observationFailed = true;
+            failure = observerError;
+          }
+        }
+        this.signal?.throwIfAborted();
+        if (observationFailed || isBudgetExceeded(failure)) throw failure;
         errors.push(
-          `${candidate.name}: ${error instanceof Error ? error.message : String(error)}`,
+          `${candidate.name}: ${failure instanceof Error ? failure.message : String(failure)}`,
         );
       }
     }
@@ -162,6 +283,25 @@ export class ProfiledAgentService implements RoleAgentService {
     const instructions = await readFile(promptPath, "utf8");
     return `${instructions.trim()}\n\n## Run Context\n\n${JSON.stringify(context, null, 2)}\n`;
   }
+}
+
+function isBudgetExceeded(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "RUN_BUDGET_EXCEEDED";
+}
+
+export function requestedProfileForRole(
+  role: string,
+  profileOverrides: Record<string, string>,
+  taskProfile?: string,
+): string | undefined {
+  return profileOverrides[role] ?? taskProfile;
+}
+
+function boundedOutputChunk(chunk: string): string {
+  const maxCharacters = 64 * 1024;
+  return chunk.length <= maxCharacters
+    ? chunk
+    : `${chunk.slice(0, maxCharacters)}\n[chunk truncated]`;
 }
 
 function parseJsonText(text: string): unknown {
