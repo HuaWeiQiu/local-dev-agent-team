@@ -9,9 +9,16 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { Network } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { buildTaskGraph, type TaskNodeData } from "../graph";
+import { memo, useMemo } from "react";
+import { useFlowPalette } from "../flow-theme";
+import {
+  buildTaskGraph,
+  TASK_NODE_GRID,
+  TASK_NODE_GRID_COMPACT,
+  type TaskNodeData,
+} from "../graph";
 import { statusTone } from "../presentation";
+import { useMediaQuery } from "../useMediaQuery";
 import type { RunState, TaskRunState } from "../types";
 import { TaskStatusBadge } from "./StatusBadge";
 
@@ -23,24 +30,28 @@ interface DagCanvasProps {
   onSelectTask(task: TaskRunState): void;
 }
 
-export function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps) {
-  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia("(max-width: 800px)").matches);
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 800px)");
-    const updateLayout = () => setCompactLayout(mediaQuery.matches);
-    updateLayout();
-    mediaQuery.addEventListener("change", updateLayout);
-    return () => mediaQuery.removeEventListener("change", updateLayout);
-  }, []);
-  const graph = useMemo(() => buildTaskGraph(run?.tasks ?? []), [run?.tasks]);
-  const nodes = graph.nodes.map((node) => ({
-    ...node,
-    position: compactLayout
-      ? { x: (node.position.y / 138) * 280, y: (node.position.x / 290) * 170 }
-      : node.position,
-    data: { ...node.data, compactLayout },
-    selected: node.id === selectedTaskId,
-  }));
+export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps) {
+  const compactLayout = useMediaQuery("(max-width: 800px)");
+  const palette = useFlowPalette();
+  const graph = useMemo(
+    () => buildTaskGraph(run?.tasks ?? []),
+    [palette.edge, run?.tasks],
+  );
+  const nodes = useMemo(
+    () =>
+      graph.nodes.map((node) => ({
+        ...node,
+        position: compactLayout
+          ? {
+              x: (node.position.y / TASK_NODE_GRID.rowHeight) * TASK_NODE_GRID_COMPACT.columnWidth,
+              y: (node.position.x / TASK_NODE_GRID.columnWidth) * TASK_NODE_GRID_COMPACT.rowHeight,
+            }
+          : node.position,
+        data: { ...node.data, compactLayout },
+        selected: node.id === selectedTaskId,
+      })),
+    [compactLayout, graph, selectedTaskId],
+  );
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
 
   return (
@@ -72,13 +83,13 @@ export function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps)
             minZoom={0.35}
             maxZoom={1.5}
           >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#d2d3cb" />
+            <Background variant={BackgroundVariant.Dots} gap={20} size={1} color={palette.dot} />
             <Controls showInteractive={false} />
             <MiniMap
               pannable
               zoomable
-              nodeColor={(node) => toneColor(statusTone((node.data as TaskNodeData).task.status))}
-              maskColor="rgba(244, 246, 245, 0.72)"
+              nodeColor={(node) => palette.tones[statusTone((node.data as TaskNodeData).task.status) as keyof typeof palette.tones] ?? palette.tones.neutral}
+              maskColor={palette.minimapMask}
             />
           </ReactFlow>
         </div>
@@ -91,7 +102,7 @@ export function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps)
       )}
     </main>
   );
-}
+});
 
 function TaskNode({ data, selected }: NodeProps) {
   const nodeData = data as TaskNodeData;
@@ -111,8 +122,4 @@ function TaskNode({ data, selected }: NodeProps) {
       <Handle type="source" position={nodeData.compactLayout ? Position.Bottom : Position.Right} />
     </div>
   );
-}
-
-function toneColor(tone: string): string {
-  return { success: "#26855f", danger: "#c24b4b", warning: "#c1812d", active: "#3574a6" }[tone] ?? "#78827e";
 }

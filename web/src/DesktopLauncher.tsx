@@ -13,6 +13,8 @@ import {
   Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { errorMessage } from "./presentation";
+import { applyTheme, getInitialTheme } from "./theme";
 
 type DesktopState = "needsProject" | "needsSetup" | "starting" | "ready" | "error";
 
@@ -37,6 +39,10 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
     previewState ? previewStatus(previewState) : initialStatus,
   );
   const [busy, setBusy] = useState(!previewState);
+
+  useEffect(() => {
+    applyTheme(getInitialTheme());
+  }, []);
 
   useEffect(() => {
     if (previewState) return;
@@ -263,8 +269,4 @@ function previewStatus(state: DesktopState): DesktopStatus {
     return { state, message: "正在检查项目", projectName: "example-project" };
   }
   return { state, message: "选择后会自动检查并打开工作台" };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

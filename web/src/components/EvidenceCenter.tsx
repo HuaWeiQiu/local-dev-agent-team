@@ -7,7 +7,8 @@ import {
   GitCompareArrows,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
+import { formatBytes } from "../presentation";
 import type { EvidenceFilePreview, RunEvidence, RunState } from "../types";
 
 interface EvidenceCenterProps {
@@ -17,7 +18,7 @@ interface EvidenceCenterProps {
   onReadArtifact(path: string): Promise<EvidenceFilePreview>;
 }
 
-export function EvidenceCenter({ run, evidence, loading, onReadArtifact }: EvidenceCenterProps) {
+export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, loading, onReadArtifact }: EvidenceCenterProps) {
   const [file, setFile] = useState<EvidenceFilePreview>();
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string>();
@@ -122,7 +123,7 @@ export function EvidenceCenter({ run, evidence, loading, onReadArtifact }: Evide
       </section>
     </div>
   );
-}
+});
 
 function EvidenceValue({ value, passing }: { value: string; passing: boolean | undefined }) {
   return <span className={passing === true ? "value-pass" : passing === false ? "value-fail" : "value-pending"}>{value}</span>;
@@ -134,10 +135,4 @@ function readinessLabel(readiness: RunEvidence["readiness"]): string {
 
 function artifactLabel(kind: RunEvidence["artifacts"][number]["kind"]): string {
   return { context: "上下文", "agent-output": "Agent 输出", quality: "质量命令", review: "代码审查", test: "测试审查", other: "其他" }[kind];
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
-  return `${(bytes / 1_048_576).toFixed(1)} MB`;
 }

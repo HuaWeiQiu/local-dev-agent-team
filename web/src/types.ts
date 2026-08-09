@@ -374,3 +374,33 @@ export interface StartRunInput {
   strategy?: string;
   profileOverrides: Record<string, string>;
 }
+
+export interface UsageDetail {
+  agentInvocations: number;
+  agentDurationMs: number;
+  processOutputBytes: number;
+  truncatedStreams: number;
+  artifactBytes: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reportedCostUsd: number;
+  costReported: boolean;
+}
+
+export interface RunUsageEntry {
+  runId: string;
+  goal: string;
+  status: RunStatus;
+  strategy: string;
+  createdAt: string;
+  updatedAt: string;
+  usage: UsageDetail;
+}
+
+export interface UsageReport {
+  generatedAt: string;
+  runCount: number;
+  totals: UsageDetail;
+  runs: RunUsageEntry[];
+}

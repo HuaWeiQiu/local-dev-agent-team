@@ -1,6 +1,6 @@
 import { Filter, Plus, Search, Trash2, Workflow } from "lucide-react";
-import { useMemo, useState } from "react";
-import { formatTimestamp, shortRunId } from "../presentation";
+import { memo, useMemo, useState } from "react";
+import { activeRunStatuses, formatTimestamp, shortRunId } from "../presentation";
 import type { RunSummary } from "../types";
 import { RunStatusBadge } from "./StatusBadge";
 
@@ -14,14 +14,14 @@ interface RunRailProps {
 
 type RunFilter = "all" | "active" | "attention" | "finished";
 
-export function RunRail({ runs, selectedRunId, onSelect, onCreate, onCleanup }: RunRailProps) {
+export const RunRail = memo(function RunRail({ runs, selectedRunId, onSelect, onCreate, onCleanup }: RunRailProps) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<RunFilter>("all");
   const visibleRuns = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return runs.filter((run) => {
       const matchesQuery = !normalized || [run.goal, run.strategy, run.id].some((value) => value.toLocaleLowerCase().includes(normalized));
-      const matchesFilter = filter === "all" || (filter === "active" && activeStatuses.has(run.status)) || (filter === "attention" && attentionStatuses.has(run.status)) || (filter === "finished" && finishedStatuses.has(run.status));
+      const matchesFilter = filter === "all" || (filter === "active" && activeRunStatuses.has(run.status)) || (filter === "attention" && attentionStatuses.has(run.status)) || (filter === "finished" && finishedStatuses.has(run.status));
       return matchesQuery && matchesFilter;
     });
   }, [filter, query, runs]);
@@ -85,8 +85,7 @@ export function RunRail({ runs, selectedRunId, onSelect, onCreate, onCleanup }: 
       </div>
     </aside>
   );
-}
+});
 
-const activeStatuses = new Set(["created", "orchestrating", "architecting", "planned", "implementing", "reviewing-testing", "reworking", "integrating", "final-checks", "publishing", "waiting-ci", "repairing"]);
 const attentionStatuses = new Set(["awaiting-human", "ci-failed", "ready-to-merge", "cancelled", "interrupted", "blocked"]);
 const finishedStatuses = new Set(["completed"]);

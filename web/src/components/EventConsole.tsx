@@ -1,5 +1,5 @@
-import { Activity, Radio, TerminalSquare } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Activity, Download, Radio, TerminalSquare } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { formatTimestamp } from "../presentation";
 import type { RunEvent, RunState } from "../types";
 
@@ -7,12 +7,18 @@ interface EventConsoleProps {
   run: RunState | undefined;
   events: RunEvent[];
   connected: boolean;
+  exporting?: boolean;
+  onExport(): void;
 }
 
-export function EventConsole({ run, events, connected }: EventConsoleProps) {
+export const EventConsole = memo(function EventConsole({ run, events, connected, exporting, onExport }: EventConsoleProps) {
   const [tab, setTab] = useState<"activity" | "output">("activity");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const outputEvents = events.filter((event) => event.type === "agent.stdout" || event.type === "agent.stderr");
+  const outputEvents = useMemo(
+    () => events.filter((event) => event.type === "agent.stdout" || event.type === "agent.stderr"),
+    [events],
+  );
+  const outputText = useMemo(() => outputEvents.map(formatOutput).join(""), [outputEvents]);
 
   useEffect(() => {
     if (tab === "output") {
@@ -32,9 +38,20 @@ export function EventConsole({ run, events, connected }: EventConsoleProps) {
             {outputEvents.length > 0 && <span>{outputEvents.length}</span>}
           </button>
         </div>
-        <span className={`stream-state ${connected ? "is-connected" : ""}`}>
-          <Radio size={13} />{connected ? "实时" : "离线"}
-        </span>
+        <div className="console-actions">
+          <button
+            className="icon-button compact"
+            onClick={onExport}
+            disabled={!run || exporting}
+            aria-label="导出日志"
+            title="导出当前运行的事件日志（NDJSON）"
+          >
+            <Download size={15} />
+          </button>
+          <span className={`stream-state ${connected ? "is-connected" : ""}`}>
+            <Radio size={13} />{connected ? "实时" : "离线"}
+          </span>
+        </div>
       </header>
       <div className="console-body" ref={scrollRef}>
         {tab === "activity" ? (
@@ -50,12 +67,12 @@ export function EventConsole({ run, events, connected }: EventConsoleProps) {
             {!run && <span className="console-empty">选择运行后显示活动</span>}
           </div>
         ) : (
-          <pre className="output-log">{outputEvents.length > 0 ? outputEvents.map(formatOutput).join("") : "等待 Agent 输出…"}</pre>
+          <pre className="output-log">{outputEvents.length > 0 ? outputText : "等待 Agent 输出…"}</pre>
         )}
       </div>
     </section>
   );
-}
+});
 
 function formatOutput(event: RunEvent): string {
   const payload = event.payload as { role?: unknown; profile?: unknown; chunk?: unknown };

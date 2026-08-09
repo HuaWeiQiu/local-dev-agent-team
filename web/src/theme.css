@@ -1,0 +1,237 @@
+/* ==========================================================================
+   Agent Team 设计令牌 — 颜色 / 层级 / 阴影 / 圆角 / 间距 / 字阶的唯一来源。
+   由 styles.css、desktop-launcher.css 消费；flow-theme.ts 通过
+   getComputedStyle 读取，供 xyflow 画布（SVG 属性不能用 var()）使用。
+
+   主题机制：
+   - :root                      浅色（默认）
+   - :root[data-theme="dark"]   用户显式选择深色
+   - prefers-color-scheme: dark 且未设置 data-theme 时跟随系统
+   两个深色块的取值必须保持一致。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* 中性色：冷灰，微蓝 */
+  --bg: oklch(0.955 0.006 235);
+  --surface-1: oklch(0.995 0.002 235);
+  --surface-2: oklch(0.972 0.004 235);
+  --surface-3: oklch(0.932 0.007 235);
+  --surface-glass: oklch(0.995 0.002 235 / 0.78);
+  --line: oklch(0.89 0.008 235);
+  --line-strong: oklch(0.79 0.013 235);
+  --ink: oklch(0.28 0.016 240);
+  --ink-2: oklch(0.42 0.016 240);
+  --muted: oklch(0.495 0.016 240);
+  --scrim: oklch(0.26 0.02 240 / 0.45);
+  --edge-highlight: inset 0 1px 0 oklch(1 0 0 / 0.55);
+
+  /* 品牌 teal（产品图标基因） */
+  --accent: oklch(0.52 0.085 183);
+  --accent-strong: oklch(0.45 0.08 185);
+  --accent-soft: oklch(0.935 0.025 185);
+  --accent-ink: oklch(0.42 0.075 185);
+  --accent-line: oklch(0.72 0.055 185);
+  --on-accent: oklch(0.99 0.005 185);
+  --focus-ring: 0 0 0 3px oklch(0.60 0.09 185 / 0.32);
+
+  /* 状态色：正文色 + soft 底 + soft 底上的文字色 */
+  --success: oklch(0.52 0.1 160);
+  --success-soft: oklch(0.94 0.03 160);
+  --success-ink: oklch(0.4 0.09 160);
+  --info: oklch(0.52 0.09 250);
+  --info-soft: oklch(0.94 0.025 250);
+  --info-ink: oklch(0.4 0.08 250);
+  --warning: oklch(0.55 0.1 80);
+  --warning-soft: oklch(0.95 0.035 90);
+  --warning-ink: oklch(0.44 0.09 75);
+  --danger: oklch(0.52 0.13 27);
+  --danger-soft: oklch(0.945 0.025 27);
+  --danger-ink: oklch(0.43 0.11 27);
+  --violet: oklch(0.52 0.1 300);
+
+  /* 深色终端面板（输出日志 / 证据预览，两个主题下都保持深色） */
+  --terminal-bg: oklch(0.25 0.02 220);
+  --terminal-raised: oklch(0.29 0.02 220);
+  --terminal-line: oklch(0.37 0.02 220);
+  --terminal-ink: oklch(0.88 0.025 195);
+  --terminal-muted: oklch(0.68 0.025 210);
+
+  /* 导航 rail 在两个主题下都保持深色（品牌基座） */
+  --nav: oklch(0.255 0.02 240);
+  --nav-raised: oklch(0.32 0.025 240);
+  --nav-active: oklch(0.34 0.045 210);
+  --nav-line: oklch(0.37 0.02 240);
+  --nav-ink: oklch(0.93 0.01 220);
+  --nav-muted: oklch(0.66 0.02 230);
+  --nav-accent: oklch(0.78 0.09 185);
+  --nav-accent-ink: oklch(0.92 0.05 185);
+  --nav-success: oklch(0.75 0.12 160);
+
+  /* 阴影 */
+  --shadow-1:
+    0 1px 2px oklch(0.3 0.02 240 / 0.06),
+    0 2px 8px oklch(0.3 0.02 240 / 0.05);
+  --shadow-2:
+    0 6px 20px oklch(0.3 0.02 240 / 0.09),
+    0 2px 6px oklch(0.3 0.02 240 / 0.06);
+  --shadow-3:
+    0 20px 56px oklch(0.3 0.02 240 / 0.16),
+    0 4px 12px oklch(0.3 0.02 240 / 0.08);
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* 间距（4 基数刻度） */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* 字阶 / 字重（450 正文、550 中等、650 强调、750 重标） */
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-16: 16px;
+  --text-20: 20px;
+  --weight-regular: 450;
+  --weight-medium: 550;
+  --weight-semibold: 650;
+  --weight-bold: 750;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+/* 深色：近黑蓝灰底 + 分层提亮表面；阴影换细边框高光 + 淡环境影。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: oklch(0.175 0.012 245);
+  --surface-1: oklch(0.215 0.014 245);
+  --surface-2: oklch(0.25 0.016 245);
+  --surface-3: oklch(0.295 0.018 245);
+  --surface-glass: oklch(0.215 0.014 245 / 0.76);
+  --line: oklch(0.315 0.015 245);
+  --line-strong: oklch(0.395 0.018 245);
+  --ink: oklch(0.92 0.008 240);
+  --ink-2: oklch(0.8 0.012 242);
+  --muted: oklch(0.69 0.015 242);
+  --scrim: oklch(0 0 0 / 0.6);
+  --edge-highlight: inset 0 1px 0 oklch(1 0 0 / 0.06);
+
+  --accent: oklch(0.74 0.1 185);
+  --accent-strong: oklch(0.8 0.1 185);
+  --accent-soft: oklch(0.33 0.04 190);
+  --accent-ink: oklch(0.86 0.07 185);
+  --accent-line: oklch(0.45 0.06 185);
+  --on-accent: oklch(0.17 0.02 220);
+  --focus-ring: 0 0 0 3px oklch(0.74 0.1 185 / 0.38);
+
+  --success: oklch(0.74 0.12 160);
+  --success-soft: oklch(0.32 0.045 160);
+  --success-ink: oklch(0.82 0.1 160);
+  --info: oklch(0.74 0.1 250);
+  --info-soft: oklch(0.32 0.04 250);
+  --info-ink: oklch(0.82 0.08 250);
+  --warning: oklch(0.78 0.11 85);
+  --warning-soft: oklch(0.34 0.05 85);
+  --warning-ink: oklch(0.85 0.09 85);
+  --danger: oklch(0.7 0.14 27);
+  --danger-soft: oklch(0.33 0.05 27);
+  --danger-ink: oklch(0.82 0.1 27);
+  --violet: oklch(0.72 0.1 300);
+
+  --terminal-bg: oklch(0.19 0.014 235);
+  --terminal-raised: oklch(0.23 0.016 235);
+  --terminal-line: oklch(0.31 0.018 235);
+  --terminal-ink: oklch(0.87 0.025 195);
+  --terminal-muted: oklch(0.65 0.02 220);
+
+  --nav: oklch(0.15 0.012 245);
+  --nav-raised: oklch(0.24 0.016 245);
+  --nav-active: oklch(0.3 0.05 210);
+  --nav-line: oklch(0.3 0.015 245);
+  --nav-ink: oklch(0.93 0.01 220);
+  --nav-muted: oklch(0.64 0.015 235);
+  --nav-accent: oklch(0.78 0.09 185);
+  --nav-accent-ink: oklch(0.92 0.05 185);
+  --nav-success: oklch(0.75 0.12 160);
+
+  --shadow-1: 0 1px 2px oklch(0 0 0 / 0.5);
+  --shadow-2: 0 6px 20px oklch(0 0 0 / 0.45);
+  --shadow-3: 0 24px 64px oklch(0 0 0 / 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --bg: oklch(0.175 0.012 245);
+    --surface-1: oklch(0.215 0.014 245);
+    --surface-2: oklch(0.25 0.016 245);
+    --surface-3: oklch(0.295 0.018 245);
+    --surface-glass: oklch(0.215 0.014 245 / 0.76);
+    --line: oklch(0.315 0.015 245);
+    --line-strong: oklch(0.395 0.018 245);
+    --ink: oklch(0.92 0.008 240);
+    --ink-2: oklch(0.8 0.012 242);
+    --muted: oklch(0.69 0.015 242);
+    --scrim: oklch(0 0 0 / 0.6);
+    --edge-highlight: inset 0 1px 0 oklch(1 0 0 / 0.06);
+
+    --accent: oklch(0.74 0.1 185);
+    --accent-strong: oklch(0.8 0.1 185);
+    --accent-soft: oklch(0.33 0.04 190);
+    --accent-ink: oklch(0.86 0.07 185);
+    --accent-line: oklch(0.45 0.06 185);
+    --on-accent: oklch(0.17 0.02 220);
+    --focus-ring: 0 0 0 3px oklch(0.74 0.1 185 / 0.38);
+
+    --success: oklch(0.74 0.12 160);
+    --success-soft: oklch(0.32 0.045 160);
+    --success-ink: oklch(0.82 0.1 160);
+    --info: oklch(0.74 0.1 250);
+    --info-soft: oklch(0.32 0.04 250);
+    --info-ink: oklch(0.82 0.08 250);
+    --warning: oklch(0.78 0.11 85);
+    --warning-soft: oklch(0.34 0.05 85);
+    --warning-ink: oklch(0.85 0.09 85);
+    --danger: oklch(0.7 0.14 27);
+    --danger-soft: oklch(0.33 0.05 27);
+    --danger-ink: oklch(0.82 0.1 27);
+    --violet: oklch(0.72 0.1 300);
+
+    --terminal-bg: oklch(0.19 0.014 235);
+    --terminal-raised: oklch(0.23 0.016 235);
+    --terminal-line: oklch(0.31 0.018 235);
+    --terminal-ink: oklch(0.87 0.025 195);
+    --terminal-muted: oklch(0.65 0.02 220);
+
+    --nav: oklch(0.15 0.012 245);
+    --nav-raised: oklch(0.24 0.016 245);
+    --nav-active: oklch(0.3 0.05 210);
+    --nav-line: oklch(0.3 0.015 245);
+    --nav-ink: oklch(0.93 0.01 220);
+    --nav-muted: oklch(0.64 0.015 235);
+    --nav-accent: oklch(0.78 0.09 185);
+    --nav-accent-ink: oklch(0.92 0.05 185);
+    --nav-success: oklch(0.75 0.12 160);
+
+    --shadow-1: 0 1px 2px oklch(0 0 0 / 0.5);
+    --shadow-2: 0 6px 20px oklch(0 0 0 / 0.45);
+    --shadow-3: 0 24px 64px oklch(0 0 0 / 0.6);
+  }
+}

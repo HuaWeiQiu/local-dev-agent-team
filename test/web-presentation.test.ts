@@ -3,6 +3,13 @@ import { buildTaskGraph } from "../web/src/graph.js";
 import { runStatusLabel, statusTone } from "../web/src/presentation.js";
 import type { TaskRunState } from "../web/src/types.js";
 
+// buildTaskGraph reads flow palette colors from page CSS tokens; vitest runs in a
+// node environment without a DOM, so stub just enough for flowPalette() to fall
+// back to its default colors.
+const globals = globalThis as { document?: unknown; getComputedStyle?: unknown };
+globals.document ??= { documentElement: {} };
+globals.getComputedStyle ??= () => ({ getPropertyValue: () => "" });
+
 describe("web workbench projections", () => {
   it("lays a task DAG into dependency ranks", () => {
     const tasks = [fixtureTask("api", []), fixtureTask("ui", ["api"]), fixtureTask("docs", ["api"])];

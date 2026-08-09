@@ -67,3 +67,29 @@ export function formatTimestamp(value: string): string {
 export function shortRunId(runId: string): string {
   return runId.length > 20 ? `${runId.slice(0, 12)}…${runId.slice(-5)}` : runId;
 }
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
+  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export const activeRunStatuses: ReadonlySet<string> = new Set([
+  "created",
+  "orchestrating",
+  "architecting",
+  "planned",
+  "implementing",
+  "reviewing-testing",
+  "reworking",
+  "integrating",
+  "final-checks",
+  "publishing",
+  "waiting-ci",
+  "repairing",
+]);
