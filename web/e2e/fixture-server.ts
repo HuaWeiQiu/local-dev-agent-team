@@ -52,6 +52,35 @@ const state = fixtureState(visualRoot);
 const runDirectory = path.join(visualRoot, ".agent-team", "runs", state.id);
 await mkdir(runDirectory, { recursive: true });
 await writeFile(path.join(runDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+const qualityArtifacts = path.join(
+  runDirectory,
+  "artifacts",
+  "tasks",
+  "refund-api",
+  "attempt-2",
+  "quality",
+);
+await mkdir(qualityArtifacts, { recursive: true });
+await writeFile(
+  path.join(qualityArtifacts, "1.log"),
+  "$ pnpm test\nexit: 0\n\nrefund idempotency regression passed\n",
+  "utf8",
+);
+const reviewArtifacts = path.join(
+  runDirectory,
+  "artifacts",
+  "tasks",
+  "refund-api",
+  "attempt-2",
+  "review",
+  "claude-reviewer",
+);
+await mkdir(reviewArtifacts, { recursive: true });
+await writeFile(
+  path.join(reviewArtifacts, "last-message.json"),
+  `${JSON.stringify({ verdict: "approve", summary: "Idempotency boundary is explicit" }, null, 2)}\n`,
+  "utf8",
+);
 
 const serviceState = fixtureState(serviceRoot);
 serviceState.id = "run-service-20260808";

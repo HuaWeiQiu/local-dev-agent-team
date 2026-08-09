@@ -301,6 +301,74 @@ export interface RunEvent {
   spanId: string;
 }
 
+export type EvidenceCheckStatus = "pass" | "fail" | "pending";
+
+export interface RunEvidence {
+  runId: string;
+  status: RunStatus;
+  readiness: "ready" | "attention" | "in-progress";
+  checks: Array<{
+    id: "tasks" | "quality" | "decision" | "approval";
+    label: string;
+    status: EvidenceCheckStatus;
+    detail: string;
+  }>;
+  tasks: Array<{
+    id: string;
+    title: string;
+    status: TaskStatus;
+    attempts: number;
+    commit?: string;
+    qualityPassed?: boolean;
+    reviewVerdict?: string;
+    testVerdict?: string;
+    findingCount: number;
+  }>;
+  artifacts: Array<{
+    path: string;
+    size: number;
+    kind: "context" | "agent-output" | "quality" | "review" | "test" | "other";
+    previewable: boolean;
+  }>;
+  artifactBytes: number;
+  diff: {
+    available: boolean;
+    baseCommit: string;
+    targetCommit?: string;
+    changedFiles: string[];
+    content?: string;
+    truncated: boolean;
+    detail?: string;
+  };
+}
+
+export interface EvidenceFilePreview {
+  path: string;
+  size: number;
+  content: string;
+  truncated: boolean;
+}
+
+export interface RunCleanupPreview {
+  token: string;
+  expiresAt: string;
+  olderThanDays: number;
+  cutoff: string;
+  candidates: Array<{
+    id: string;
+    goal: string;
+    status: "completed" | "cancelled" | "blocked";
+    updatedAt: string;
+    bytes: number;
+  }>;
+  totalBytes: number;
+}
+
+export interface RunCleanupResult {
+  deletedRunIds: string[];
+  reclaimedBytes: number;
+}
+
 export interface StartRunInput {
   goal: string;
   strategy?: string;

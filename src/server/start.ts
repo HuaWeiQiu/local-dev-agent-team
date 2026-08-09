@@ -9,7 +9,7 @@ export interface RunningControlService extends ListeningControlServer {
 
 export async function startControlService(
   loaded: LoadedConfig,
-  options: { host?: string; port?: number } = {},
+  options: { host?: string; port?: number; sessionToken?: string } = {},
 ): Promise<RunningControlService> {
   const runtime = await startProjectRuntime(loaded);
   let listening: ListeningControlServer | undefined;
@@ -18,6 +18,7 @@ export async function startControlService(
       host: options.host ?? "127.0.0.1",
       port: options.port ?? 4317,
       strategyCatalog: runtime.strategies,
+      ...(options.sessionToken ? { sessionToken: options.sessionToken } : {}),
     });
   } catch (error) {
     const cleanupErrors: unknown[] = [];

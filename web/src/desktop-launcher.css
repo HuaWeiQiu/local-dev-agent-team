@@ -1,0 +1,321 @@
+.desktop-launcher {
+  display: grid;
+  width: 100%;
+  height: 100dvh;
+  min-height: 560px;
+  grid-template-rows: 64px minmax(0, 1fr) 52px;
+  color: #1d2527;
+  background: #f4f6f5;
+}
+
+.launcher-header,
+.launcher-footer {
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+  border-color: #dde4e2;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.launcher-header {
+  justify-content: space-between;
+  border-bottom: 1px solid #dde4e2;
+}
+
+.launcher-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+}
+
+.launcher-brand-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #ffffff;
+  border-radius: 7px;
+  background: #0f766e;
+}
+
+.launcher-edition {
+  padding: 4px 7px;
+  color: #66736f;
+  border: 1px solid #d5dedb;
+  border-radius: 5px;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.launcher-main {
+  display: grid;
+  min-height: 0;
+  overflow: auto;
+  place-items: center;
+  padding: 42px 24px 34px;
+}
+
+.launcher-content {
+  width: min(100%, 520px);
+  text-align: center;
+}
+
+.launcher-hero-icon {
+  display: grid;
+  width: 62px;
+  height: 62px;
+  margin: 0 auto 20px;
+  place-items: center;
+  color: #0f766e;
+  border: 1px solid #b9d7d2;
+  border-radius: 8px;
+  background: #e8f4f2;
+}
+
+.launcher-hero-icon.is-error {
+  color: #a63f3f;
+  border-color: #ebcaca;
+  background: #fceeee;
+}
+
+.launcher-kicker {
+  min-height: 18px;
+  margin: 0 0 7px;
+  color: #74817d;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.launcher-content h1 {
+  margin: 0;
+  color: #20292a;
+  font-size: 30px;
+  font-weight: 720;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.launcher-message {
+  min-height: 24px;
+  margin: 12px auto 24px;
+  color: #65726f;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.launcher-actions {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.launcher-primary,
+.launcher-secondary {
+  display: inline-flex;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.launcher-primary {
+  min-width: 210px;
+  color: #ffffff;
+  border: 1px solid #0f766e;
+  background: #0f766e;
+  box-shadow: 0 1px 2px rgba(15, 72, 66, 0.18);
+}
+
+.launcher-primary svg:last-child {
+  margin-left: 4px;
+}
+
+.launcher-primary:hover {
+  border-color: #0b625c;
+  background: #0b625c;
+}
+
+.launcher-secondary {
+  color: #41504c;
+  border: 1px solid #c8d3d0;
+  background: #ffffff;
+}
+
+.launcher-secondary:hover {
+  border-color: #a7b7b2;
+  background: #f8faf9;
+}
+
+.launcher-primary:disabled,
+.launcher-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.launcher-busy {
+  display: inline-flex;
+  height: 44px;
+  align-items: center;
+  gap: 9px;
+  color: #4f5d59;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.launcher-spinner {
+  animation: launcher-spin 800ms linear infinite;
+}
+
+.launcher-checks {
+  margin-top: 38px;
+  border-top: 1px solid #dce4e1;
+  border-bottom: 1px solid #dce4e1;
+}
+
+.launcher-check {
+  display: grid;
+  min-height: 46px;
+  grid-template-columns: 22px 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: #8a9692;
+  text-align: left;
+  border-bottom: 1px solid #e5eae8;
+  font-size: 12px;
+}
+
+.launcher-check:last-child {
+  border-bottom: 0;
+}
+
+.launcher-check > span:nth-child(2) {
+  font-weight: 750;
+}
+
+.launcher-check small {
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-check-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+}
+
+.launcher-check.is-done {
+  color: #3c4d49;
+}
+
+.launcher-check.is-done .launcher-check-icon {
+  color: #ffffff;
+  background: #24815e;
+}
+
+.launcher-check.is-active {
+  color: #226a64;
+}
+
+.launcher-details {
+  margin-top: 16px;
+  color: #6c7975;
+  text-align: left;
+  font-size: 11px;
+}
+
+.launcher-details summary {
+  width: max-content;
+  margin: 0 auto;
+  padding: 5px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.launcher-details pre {
+  max-height: 124px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 12px;
+  color: #45524f;
+  border: 1px solid #d9e1de;
+  border-radius: 6px;
+  background: #ffffff;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.launcher-footer {
+  justify-content: center;
+  gap: 7px;
+  color: #74817d;
+  border-top: 1px solid #dde4e2;
+  font-size: 11px;
+}
+
+@keyframes launcher-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 600px) {
+  .desktop-launcher {
+    min-height: 520px;
+    grid-template-rows: 58px minmax(0, 1fr) 46px;
+  }
+
+  .launcher-header,
+  .launcher-footer {
+    padding: 0 18px;
+  }
+
+  .launcher-main {
+    align-items: start;
+    padding: 42px 20px 28px;
+  }
+
+  .launcher-content h1 {
+    font-size: 26px;
+  }
+
+  .launcher-actions {
+    min-height: 98px;
+    flex-direction: column;
+  }
+
+  .launcher-primary,
+  .launcher-secondary {
+    width: 100%;
+  }
+
+  .launcher-checks {
+    margin-top: 28px;
+  }
+
+  .launcher-check {
+    grid-template-columns: 22px 72px minmax(0, 1fr);
+    padding: 0 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launcher-spinner {
+    animation-duration: 1600ms;
+  }
+}

@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
+import { buildRunEvidence, LocalEvidenceStore } from "../evidence/local.js";
+import type {
+  EvidenceFilePreview,
+  IntegrationDiffEvidence,
+  RunCleanupCandidate,
+  RunCleanupPreview,
+  RunCleanupResult,
+  RunEvidence,
+} from "../evidence/types.js";
 import { SqliteEventStore } from "../events/store.js";
 import { GitManager } from "../git/manager.js";
 import { resolveProfile } from "../profiles/resolve.js";
@@ -39,6 +48,7 @@ export interface SupervisorDependencies {
 interface ActiveRun {
   controller: AbortController;
   promise: Promise<RunState>;
+  parentRunId?: string;
 }
 
 const activeStatuses = new Set([
@@ -61,6 +71,8 @@ export class RunSupervisor {
   private readonly active = new Map<string, ActiveRun>();
   private readonly actionQueues = new Map<string, Promise<void>>();
   private readonly stateStore: RunStateStore;
+  private readonly evidenceStore: LocalEvidenceStore;
+  private readonly cleanupPreviews = new Map<string, CleanupPreviewSnapshot>();
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -71,6 +83,7 @@ export class RunSupervisor {
       path.resolve(loaded.root, loaded.config.project.stateDirectory, "runs"),
       events,
     );
+    this.evidenceStore = new LocalEvidenceStore(this.stateStore);
   }
 
   start(request: StartRunRequest, idempotencyKey?: string): StartRunResult {
@@ -125,7 +138,7 @@ export class RunSupervisor {
       }
       throw error;
     }
-    this.track(runId, controller, workflow);
+    this.track(runId, controller, workflow, request.parentRunId);
     return { runId, deduplicated: false };
   }
 
@@ -140,22 +153,24 @@ export class RunSupervisor {
   }
 
   async retry(runId: string, idempotencyKey?: string): Promise<StartRunResult> {
-    const source = await this.get(runId);
-    if (!source) {
-      throw new Error(`Run '${runId}' was not found`);
-    }
-    if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
-      throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
-    }
-    return this.start(
-      {
-        goal: source.goal,
-        profileOverrides: source.profileOverrides,
-        ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
-        parentRunId: source.id,
-      },
-      idempotencyKey,
-    );
+    return await this.serializeAction(runId, async () => {
+      const source = await this.get(runId);
+      if (!source) {
+        throw new Error(`Run '${runId}' was not found`);
+      }
+      if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
+        throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
+      }
+      return this.start(
+        {
+          goal: source.goal,
+          profileOverrides: source.profileOverrides,
+          ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
+          parentRunId: source.id,
+        },
+        idempotencyKey,
+      );
+    });
   }
 
   async respondApproval(
@@ -294,6 +309,97 @@ export class RunSupervisor {
     return (await this.stateStore.list()).map(summarizeRun);
   }
 
+  async evidence(runId: string): Promise<RunEvidence | undefined> {
+    const state = await this.get(runId);
+    if (!state) return undefined;
+    const [artifacts, diff] = await Promise.all([
+      this.evidenceStore.listArtifacts(runId),
+      this.integrationDiff(state),
+    ]);
+    return buildRunEvidence(state, artifacts, diff);
+  }
+
+  async evidenceFile(runId: string, relativePath: string): Promise<EvidenceFilePreview> {
+    await this.requireRun(runId);
+    return await this.evidenceStore.readArtifact(runId, relativePath);
+  }
+
+  async previewCleanup(olderThanDays: number): Promise<RunCleanupPreview> {
+    if (!Number.isInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3_650) {
+      throw new Error("Cleanup age must be an integer from 1 to 3650 days");
+    }
+    this.expireCleanupPreviews();
+    const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+    const allStates = await this.stateStore.list();
+    const protectedParents = new Set(allStates.map((state) => state.parentRunId).filter((id): id is string => Boolean(id)));
+    const states = allStates.filter(
+      (state) => cleanupStatuses.has(state.status) && state.updatedAt < cutoff && !protectedParents.has(state.id) && !this.hasActiveChild(state.id),
+    );
+    const candidates = await Promise.all(states.map(async (state): Promise<RunCleanupCandidate> => ({
+      id: state.id,
+      goal: state.goal,
+      status: state.status as RunCleanupCandidate["status"],
+      updatedAt: state.updatedAt,
+      bytes: await this.evidenceStore.runBytes(state.id),
+    })));
+    const token = randomUUID();
+    const expiresAt = new Date(Date.now() + cleanupPreviewTtlMs).toISOString();
+    this.cleanupPreviews.set(token, { expiresAt, candidates });
+    return {
+      token,
+      expiresAt,
+      olderThanDays,
+      cutoff,
+      candidates,
+      totalBytes: candidates.reduce((total, candidate) => total + candidate.bytes, 0),
+    };
+  }
+
+  async cleanup(token: string): Promise<RunCleanupResult> {
+    this.expireCleanupPreviews();
+    const preview = this.cleanupPreviews.get(token);
+    if (!preview) {
+      throw new Error("Cleanup preview is missing or expired; create a new preview");
+    }
+    this.cleanupPreviews.delete(token);
+
+    return await this.serializeActions(preview.candidates.map((candidate) => candidate.id), async () => {
+      const currentStates = await this.stateStore.list();
+      const currentById = new Map(currentStates.map((state) => [state.id, state]));
+      const protectedParents = new Set(currentStates.map((state) => state.parentRunId).filter((id): id is string => Boolean(id)));
+      for (const candidate of preview.candidates) {
+        const current = currentById.get(candidate.id);
+        if (
+          !current ||
+          current.status !== candidate.status ||
+          current.updatedAt !== candidate.updatedAt ||
+          !cleanupStatuses.has(current.status) ||
+          this.active.has(candidate.id) ||
+          this.hasActiveChild(candidate.id) ||
+          protectedParents.has(candidate.id)
+        ) {
+          throw new Error(`Run '${candidate.id}' changed after preview; create a new preview`);
+        }
+      }
+
+      const deletedRunIds: string[] = [];
+      let reclaimedBytes = 0;
+      for (const candidate of preview.candidates) {
+        const quarantined = await this.stateStore.quarantine(candidate.id);
+        try {
+          this.events.deleteRun(candidate.id);
+        } catch (error) {
+          await this.stateStore.restoreQuarantined(quarantined);
+          throw error;
+        }
+        await this.stateStore.removeQuarantined(quarantined);
+        deletedRunIds.push(candidate.id);
+        reclaimedBytes += candidate.bytes;
+      }
+      return { deletedRunIds, reclaimedBytes };
+    });
+  }
+
   async reconcileInterruptedRuns(): Promise<number> {
     const states = await this.stateStore.list();
     let count = 0;
@@ -315,6 +421,7 @@ export class RunSupervisor {
   }
 
   async close(): Promise<void> {
+    this.cleanupPreviews.clear();
     for (const [runId, active] of this.active) {
       this.events.emit(runId, "run.cancel-requested", {
         reason: "control-service-shutdown",
@@ -328,6 +435,7 @@ export class RunSupervisor {
     runId: string,
     controller: AbortController,
     workflow: Promise<RunState>,
+    parentRunId?: string,
   ): Promise<RunState> {
     const promise = workflow
       .catch((error: unknown) => {
@@ -339,7 +447,7 @@ export class RunSupervisor {
       .finally(() => {
         this.active.delete(runId);
       });
-    this.active.set(runId, { controller, promise });
+    this.active.set(runId, { controller, promise, ...(parentRunId ? { parentRunId } : {}) });
     void promise.catch(() => undefined);
     return promise;
   }
@@ -385,6 +493,54 @@ export class RunSupervisor {
     const state = await this.get(runId);
     if (!state) throw new Error(`Run '${runId}' was not found`);
     return state;
+  }
+
+  private async integrationDiff(state: RunState): Promise<IntegrationDiffEvidence> {
+    const targetCommit = state.checkpoints?.at(-1)?.integrationCommit;
+    if (!targetCommit) {
+      return {
+        available: false,
+        baseCommit: state.baseCommit,
+        changedFiles: [],
+        truncated: false,
+        detail: "尚未生成持久化集成检查点",
+      };
+    }
+    const git = new GitManager(
+      this.loaded.root,
+      path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
+    );
+    try {
+      const diff = await git.diffBetween(state.baseCommit, targetCommit);
+      return {
+        available: true,
+        baseCommit: state.baseCommit,
+        targetCommit,
+        changedFiles: diff.changedFiles,
+        content: diff.content,
+        truncated: diff.truncated,
+      };
+    } catch {
+      return {
+        available: false,
+        baseCommit: state.baseCommit,
+        targetCommit,
+        changedFiles: [],
+        truncated: false,
+        detail: "记录的 Git 检查点当前不可读取",
+      };
+    }
+  }
+
+  private expireCleanupPreviews(): void {
+    const now = Date.now();
+    for (const [token, preview] of this.cleanupPreviews) {
+      if (Date.parse(preview.expiresAt) <= now) this.cleanupPreviews.delete(token);
+    }
+  }
+
+  private hasActiveChild(runId: string): boolean {
+    return [...this.active.values()].some((active) => active.parentRunId === runId);
   }
 
   private async reconcileApprovalBoundary(state: RunState): Promise<boolean> {
@@ -509,22 +665,36 @@ export class RunSupervisor {
   }
 
   private async serializeAction<T>(runId: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.actionQueues.get(runId) ?? Promise.resolve();
-    const result = previous.catch(() => undefined).then(action);
+    return await this.serializeActions([runId], action);
+  }
+
+  private async serializeActions<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
+    const ids = [...new Set(runIds)].sort();
+    const previous = ids.map((runId) => this.actionQueues.get(runId) ?? Promise.resolve());
+    const result = Promise.all(previous.map(async (queued) => await queued.catch(() => undefined)))
+      .then(action);
     const queued = result.then(
       () => undefined,
       () => undefined,
     );
-    this.actionQueues.set(runId, queued);
+    for (const runId of ids) this.actionQueues.set(runId, queued);
     try {
       return await result;
     } finally {
-      if (this.actionQueues.get(runId) === queued) {
-        this.actionQueues.delete(runId);
+      for (const runId of ids) {
+        if (this.actionQueues.get(runId) === queued) this.actionQueues.delete(runId);
       }
     }
   }
 }
+
+interface CleanupPreviewSnapshot {
+  expiresAt: string;
+  candidates: RunCleanupCandidate[];
+}
+
+const cleanupPreviewTtlMs = 5 * 60_000;
+const cleanupStatuses = new Set<RunState["status"]>(["completed", "cancelled", "blocked"]);
 
 function requiredApprovalGate(
   state: RunState,

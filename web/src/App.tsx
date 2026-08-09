@@ -1,15 +1,19 @@
-import { Activity, Ban, Bot, CircleDot, GitBranch, History, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Workflow } from "lucide-react";
+import { Activity, Ban, Bot, CircleDot, FileCheck2, GitBranch, History, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   cancelRun,
+  cleanupRuns,
   deleteStrategyBlueprint,
   eventStreamUrl,
+  getEvidenceFile,
   getConfig,
   getRun,
+  getRunEvidence,
   getRuns,
   getWorkspace,
   preflightStrategyBlueprint,
+  previewRunCleanup,
   respondApproval,
   resumeRun,
   retryRun,
@@ -18,6 +22,8 @@ import {
 } from "./api";
 import { DagCanvas } from "./components/DagCanvas";
 import { EventConsole } from "./components/EventConsole";
+import { EvidenceCenter } from "./components/EvidenceCenter";
+import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunActionDialog } from "./components/RunActionDialog";
 import { RunRail } from "./components/RunRail";
@@ -27,8 +33,11 @@ import { TaskInspector } from "./components/TaskInspector";
 import type {
   ProjectScope,
   ApprovalRequest,
+  EvidenceFilePreview,
   PublicConfig,
   RunEvent,
+  RunCleanupPreview,
+  RunEvidence,
   RunState,
   RunSummary,
   StartRunInput,
@@ -50,6 +59,8 @@ export default function App() {
   const [run, setRun] = useState<RunState>();
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [evidence, setEvidence] = useState<RunEvidence>();
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [connected, setConnected] = useState(false);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [launcherStrategy, setLauncherStrategy] = useState<string>();
@@ -58,10 +69,13 @@ export default function App() {
     mode: "approval" | "resume";
     approval?: ApprovalRequest;
   }>();
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<RunCleanupPreview>();
+  const [cleanupError, setCleanupError] = useState<string>();
   const [error, setError] = useState<string>();
   const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design">("monitor");
-  const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity">("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs">("flow");
+  const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence">("graph");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs" | "evidence">("flow");
   const refreshTimer = useRef<number | undefined>(undefined);
   const scope = useMemo<ProjectScope | undefined>(
     () => workspace && selectedProjectId
@@ -80,7 +94,7 @@ export default function App() {
       const nextRuns = await getRuns(scope);
       if (currentScopeKey.current !== requestedScope) return;
       setRuns(nextRuns);
-      setSelectedRunId((current) => current ?? nextRuns[0]?.id);
+      setSelectedRunId((current) => current && nextRuns.some((item) => item.id === current) ? current : nextRuns[0]?.id);
     } catch (requestError) {
       if (currentScopeKey.current === requestedScope) throw requestError;
     }
@@ -113,6 +127,18 @@ export default function App() {
     }
   }, [scope]);
 
+  const refreshEvidence = useCallback(async (runId: string) => {
+    if (!scope) return;
+    const requestedScope = `${scope.mode}:${scope.projectId}`;
+    setEvidenceLoading(true);
+    try {
+      const nextEvidence = await getRunEvidence(scope, runId);
+      if (currentScopeKey.current === requestedScope) setEvidence(nextEvidence);
+    } finally {
+      if (currentScopeKey.current === requestedScope) setEvidenceLoading(false);
+    }
+  }, [scope]);
+
   const scheduleRefresh = useCallback((runId: string) => {
     window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
@@ -142,8 +168,12 @@ export default function App() {
     setRun(undefined);
     setSelectedTaskId(undefined);
     setEvents([]);
+    setEvidence(undefined);
     setConnected(false);
     setError(undefined);
+    setCleanupOpen(false);
+    setCleanupPreview(undefined);
+    setCleanupError(undefined);
     void Promise.all([getConfig(scope), getRuns(scope)])
       .then(([nextConfig, nextRuns]) => {
         if (!active) return;
@@ -163,11 +193,13 @@ export default function App() {
     if (!scope || !selectedRunId) {
       setRun(undefined);
       setEvents([]);
+      setEvidence(undefined);
       return;
     }
     setRun(undefined);
     setSelectedTaskId(undefined);
     setEvents([]);
+    setEvidence(undefined);
     void refreshRun(selectedRunId).catch((requestError: unknown) => setError(errorMessage(requestError)));
 
     const source = new EventSource(eventStreamUrl(scope, selectedRunId));
@@ -196,6 +228,12 @@ export default function App() {
       setConnected(false);
     };
   }, [refreshRun, scheduleRefresh, scope, selectedRunId]);
+
+  useEffect(() => {
+    const evidenceVisible = monitorPanel === "evidence" || mobileView === "evidence";
+    if (!selectedRunId || !scope || !evidenceVisible) return;
+    void refreshEvidence(selectedRunId).catch((requestError: unknown) => setError(errorMessage(requestError)));
+  }, [mobileView, monitorPanel, refreshEvidence, run?.updatedAt, scope, selectedRunId]);
 
   const selectedTask = useMemo(
     () => run?.tasks.find((task) => task.task.id === selectedTaskId),
@@ -311,6 +349,48 @@ export default function App() {
     }
   };
 
+  const openCleanup = () => {
+    setCleanupPreview(undefined);
+    setCleanupError(undefined);
+    setCleanupOpen(true);
+  };
+
+  const previewCleanup = async (days: number) => {
+    if (!scope) return;
+    setBusy(true);
+    setCleanupError(undefined);
+    try {
+      setCleanupPreview(await previewRunCleanup(scope, days));
+    } catch (requestError) {
+      setCleanupError(errorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmCleanup = async () => {
+    if (!scope || !cleanupPreview) return;
+    setBusy(true);
+    setCleanupError(undefined);
+    try {
+      await cleanupRuns(scope, cleanupPreview.token);
+      setCleanupOpen(false);
+      setCleanupPreview(undefined);
+      setRun(undefined);
+      setEvidence(undefined);
+      await refreshRuns();
+    } catch (requestError) {
+      setCleanupError(errorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const readEvidenceArtifact = async (artifactPath: string): Promise<EvidenceFilePreview> => {
+    if (!scope || !selectedRunId) throw new Error("当前运行尚未加载");
+    return await getEvidenceFile(scope, selectedRunId, artifactPath);
+  };
+
   if (!workspace || !selectedProjectId) {
     return <div className="boot-screen"><CircleDot className="boot-mark" size={28} /><strong>Agent Team</strong><span>{error ?? "连接控制服务"}</span></div>;
   }
@@ -422,9 +502,10 @@ export default function App() {
       <nav className="mobile-nav" aria-label="移动端视图">
         <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
         <MobileTab active={workspaceMode === "design"} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "flow"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("flow"); }} icon={<Workflow size={16} />} label="任务图" />
+        <MobileTab active={workspaceMode === "monitor" && mobileView === "flow"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Workflow size={16} />} label="任务图" />
         <MobileTab active={workspaceMode === "monitor" && mobileView === "details"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("details"); }} icon={<CircleDot size={16} />} label="详情" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
+        <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
+        <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
       </nav>
 
       <div className="workspace-shell">
@@ -438,7 +519,7 @@ export default function App() {
           />
         ) : (
           <section className="monitor-workbench" aria-label="运行工作台">
-            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={(runId) => { setSelectedRunId(runId); setMonitorPanel("graph"); setMobileView("flow"); }} onCreate={() => openLauncher()} />
+            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={(runId) => { setSelectedRunId(runId); setMonitorPanel("graph"); setMobileView("flow"); }} onCreate={() => openLauncher()} onCleanup={openCleanup} />
             <section className="run-workspace">
               <header className="run-workspace-header">
                 <div className="run-workspace-title">
@@ -455,6 +536,9 @@ export default function App() {
                   <button role="tab" aria-selected={monitorPanel === "activity"} className={monitorPanel === "activity" ? "is-active" : ""} onClick={() => setMonitorPanel("activity")}>
                     <ScrollText size={16} />活动日志
                   </button>
+                  <button role="tab" aria-selected={monitorPanel === "evidence"} className={monitorPanel === "evidence" ? "is-active" : ""} onClick={() => setMonitorPanel("evidence")}>
+                    <FileCheck2 size={16} />交付证据
+                  </button>
                 </div>
               </header>
               <div className={`run-panel run-panel-graph ${monitorPanel === "graph" ? "is-active" : ""}`}>
@@ -462,6 +546,9 @@ export default function App() {
               </div>
               <div className={`run-panel run-panel-activity ${monitorPanel === "activity" ? "is-active" : ""}`}>
                 <EventConsole run={run} events={events} connected={connected} />
+              </div>
+              <div className={`run-panel run-panel-evidence ${monitorPanel === "evidence" ? "is-active" : ""}`}>
+                <EvidenceCenter run={run} evidence={evidence} loading={evidenceLoading} onReadArtifact={readEvidenceArtifact} />
               </div>
             </section>
             <TaskInspector run={run} task={selectedTask} />
@@ -477,6 +564,16 @@ export default function App() {
         {...(error ? { error } : {})}
         onClose={() => setRunAction(undefined)}
         onSubmit={submitRunAction}
+      />
+      <RunCleanupDialog
+        open={cleanupOpen}
+        preview={cleanupPreview}
+        busy={busy}
+        error={cleanupError}
+        onPreview={previewCleanup}
+        onConfirm={confirmCleanup}
+        onResetPreview={() => { setCleanupPreview(undefined); setCleanupError(undefined); }}
+        onClose={() => { setCleanupOpen(false); setCleanupPreview(undefined); setCleanupError(undefined); }}
       />
     </div>
   );

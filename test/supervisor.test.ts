@@ -231,6 +231,70 @@ describe("run supervisor", () => {
     await supervisor.close();
     events.close();
   });
+
+  it("previews and removes only old terminal runs with a one-time token", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const completed = fakeState("old-completed", "Old completed run", "completed");
+    const interrupted = fakeState("old-interrupted", "Recoverable run", "interrupted");
+    const retryParent = fakeState("old-retry-parent", "Retried blocked run", "blocked");
+    const retryChild = fakeState("recent-retry-child", "Retried blocked run", "completed");
+    retryChild.parentRunId = retryParent.id;
+    const oldTimestamp = new Date(Date.now() - 60 * 86_400_000).toISOString();
+    await Promise.all([
+      states.save(completed),
+      states.save(interrupted),
+      states.save(retryParent),
+      states.save(retryChild),
+    ]);
+    completed.updatedAt = oldTimestamp;
+    interrupted.updatedAt = oldTimestamp;
+    retryParent.updatedAt = oldTimestamp;
+    await Promise.all([
+      writeFile(path.join(states.runDirectory(completed.id), "state.json"), `${JSON.stringify(completed)}\n`),
+      writeFile(path.join(states.runDirectory(interrupted.id), "state.json"), `${JSON.stringify(interrupted)}\n`),
+      writeFile(path.join(states.runDirectory(retryParent.id), "state.json"), `${JSON.stringify(retryParent)}\n`),
+    ]);
+    events.emit(completed.id, "run.fixture", { retained: false });
+    events.emit(interrupted.id, "run.fixture", { retained: true });
+    const supervisor = new RunSupervisor(loaded, events);
+
+    const preview = await supervisor.previewCleanup(30);
+    expect(preview.candidates).toEqual([
+      expect.objectContaining({ id: completed.id, status: "completed" }),
+    ]);
+    await expect(supervisor.cleanup(preview.token)).resolves.toEqual({
+      deletedRunIds: [completed.id],
+      reclaimedBytes: expect.any(Number),
+    });
+    await expect(supervisor.get(completed.id)).resolves.toBeUndefined();
+    await expect(supervisor.get(interrupted.id)).resolves.toMatchObject({ status: "interrupted" });
+    await expect(supervisor.get(retryParent.id)).resolves.toMatchObject({ status: "blocked" });
+    expect(events.listAfter(0, completed.id)).toEqual([]);
+    expect(events.listAfter(0, interrupted.id)).toHaveLength(2);
+    await expect(supervisor.cleanup(preview.token)).rejects.toThrow("missing or expired");
+
+    const stale = fakeState("stale-preview", "Changed after preview", "cancelled");
+    await states.save(stale);
+    stale.updatedAt = oldTimestamp;
+    await writeFile(
+      path.join(states.runDirectory(stale.id), "state.json"),
+      `${JSON.stringify(stale)}\n`,
+    );
+    const stalePreview = await supervisor.previewCleanup(30);
+    const changed = await states.load(stale.id);
+    changed.error = "Operator added a note";
+    await states.save(changed);
+    await expect(supervisor.cleanup(stalePreview.token)).rejects.toThrow("changed after preview");
+    await expect(supervisor.get(stale.id)).resolves.toMatchObject({
+      status: "cancelled",
+      error: "Operator added a note",
+    });
+
+    await supervisor.close();
+    events.close();
+  });
 });
 
 async function fixtureConfig() {

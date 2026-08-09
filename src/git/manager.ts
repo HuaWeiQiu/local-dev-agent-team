@@ -8,6 +8,12 @@ export interface WorktreeInfo {
   branch: string;
 }
 
+export interface GitDiffEvidence {
+  content: string;
+  changedFiles: string[];
+  truncated: boolean;
+}
+
 export class GitManager {
   constructor(
     readonly root: string,
@@ -87,6 +93,28 @@ export class GitManager {
     return (await this.git(["diff", "--stat", `${baseRef}...HEAD`], directory)).stdout.trim();
   }
 
+  async diffBetween(
+    baseCommit: string,
+    targetCommit: string,
+    maxCharacters = 300_000,
+  ): Promise<GitDiffEvidence> {
+    assertGitObjectId(baseCommit);
+    assertGitObjectId(targetCommit);
+    const range = `${baseCommit}...${targetCommit}`;
+    const [diff, files] = await Promise.all([
+      this.git(["diff", "--no-ext-diff", "--unified=30", range], this.root),
+      this.git(["diff", "--name-only", "--diff-filter=ACDMRTUXB", range], this.root),
+    ]);
+    const truncated = diff.stdout.length > maxCharacters;
+    return {
+      content: truncated
+        ? `${diff.stdout.slice(0, maxCharacters)}\n\n[diff truncated at ${maxCharacters} characters]`
+        : diff.stdout,
+      changedFiles: files.stdout.split("\n").map((file) => file.trim()).filter(Boolean),
+      truncated,
+    };
+  }
+
   async currentCommit(directory: string): Promise<string> {
     return (await this.git(["rev-parse", "HEAD"], directory)).stdout.trim();
   }
@@ -118,5 +146,11 @@ export class GitManager {
       throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`);
     }
     return result;
+  }
+}
+
+function assertGitObjectId(value: string): void {
+  if (!/^[0-9a-f]{7,64}$/i.test(value)) {
+    throw new Error(`Invalid Git object ID '${value}'`);
   }
 }

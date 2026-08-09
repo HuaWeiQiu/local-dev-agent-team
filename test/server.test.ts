@@ -152,6 +152,9 @@ describe("control HTTP server", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }];
     await states.save(state);
+    const reviewArtifacts = states.artifactDirectory(state.id, "tasks", "contract", "attempt-1", "review");
+    await mkdir(reviewArtifacts, { recursive: true });
+    await writeFile(path.join(reviewArtifacts, "last-message.json"), "{\"verdict\":\"approve\"}\n");
     const supervisor = new RunSupervisor(loaded, events);
     const staticDirectory = path.join(root, "web");
     await mkdir(staticDirectory, { recursive: true });
@@ -188,6 +191,39 @@ describe("control HTTP server", () => {
         }),
       ]) }] }],
     });
+    const evidence = await fetch(`${listening.url}/api/runs/${state.id}/evidence`);
+    expect(evidence.status).toBe(200);
+    await expect(evidence.json()).resolves.toMatchObject({
+      evidence: {
+        runId: state.id,
+        artifacts: [expect.objectContaining({
+          path: "tasks/contract/attempt-1/review/last-message.json",
+          kind: "review",
+        })],
+      },
+    });
+    const artifact = await fetch(
+      `${listening.url}/api/runs/${state.id}/evidence/file?path=${encodeURIComponent("tasks/contract/attempt-1/review/last-message.json")}`,
+    );
+    await expect(artifact.json()).resolves.toMatchObject({
+      file: { content: "{\"verdict\":\"approve\"}\n", truncated: false },
+    });
+    expect((await fetch(
+      `${listening.url}/api/runs/${encodeURIComponent(`../${state.id}`)}/evidence`,
+    )).status).toBe(404);
+    const cleanupPreview = await fetch(`${listening.url}/api/runs/cleanup/preview`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ olderThanDays: 30 }),
+    });
+    const cleanup = await cleanupPreview.json() as { token: string; candidates: unknown[] };
+    expect(cleanup.candidates).toEqual([]);
+    const cleanupResult = await fetch(`${listening.url}/api/runs/cleanup`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: cleanup.token }),
+    });
+    await expect(cleanupResult.json()).resolves.toEqual({ deletedRunIds: [], reclaimedBytes: 0 });
 
     await listening.close();
     await supervisor.close();

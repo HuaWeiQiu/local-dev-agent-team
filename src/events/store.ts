@@ -169,6 +169,25 @@ export class SqliteEventStore implements RunEventSink {
       .run(key, requestHash);
   }
 
+  deleteRun(runId: string): { events: number; commands: number } {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const events = Number(
+        this.database.prepare("DELETE FROM run_events WHERE run_id = ?").run(runId).changes,
+      );
+      const commands = Number(
+        this.database
+          .prepare("DELETE FROM command_idempotency WHERE response_json = ?")
+          .run(JSON.stringify({ runId })).changes,
+      );
+      this.database.exec("COMMIT");
+      return { events, commands };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   close(): void {
     this.listeners.clear();
     this.database.close();

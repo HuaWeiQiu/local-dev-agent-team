@@ -38,6 +38,10 @@
     "check:web": "tsc -p web/tsconfig.json --noEmit",
     "test": "vitest run",
     "test:e2e": "pnpm build && playwright test --config web/playwright.config.ts",
+    "desktop:prepare": "pnpm build && node scripts/prepare-desktop-runtime.mjs",
+    "desktop:dev": "pnpm desktop:prepare && tauri dev --no-watch",
+    "desktop:build": "tauri build",
+    "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "dev": "tsx src/cli.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "prepack": "pnpm check && pnpm test && pnpm build"
@@ -47,6 +51,8 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "@xyflow/react": "^12.11.2",
     "commander": "^14.0.0",
     "lucide-react": "^1.30.0",
@@ -58,6 +64,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
