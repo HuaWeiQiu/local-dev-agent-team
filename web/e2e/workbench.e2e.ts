@@ -22,10 +22,23 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
       page.locator(".run-rail").getByText("校验跨服务接口契约与发布边界", { exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("progressbar", { name: "任务进度" }).first()).toHaveAttribute("aria-valuetext", "1/1 个任务");
-    await page.getByRole("button", { name: "任务图" }).click();
   } else {
     await expect(page.getByText("校验跨服务接口契约与发布边界", { exact: true }).first()).toBeVisible();
     await expect(page.getByRole("progressbar", { name: "任务进度" }).first()).toHaveAttribute("aria-valuetext", "1/1 个任务");
+  }
+  const runRail = page.locator(".run-rail");
+  await runRail.getByLabel("运行状态筛选").selectOption("attention");
+  await expect(runRail.getByText("校验跨服务接口契约与发布边界", { exact: true })).toBeVisible();
+  await runRail.getByLabel("运行状态筛选").selectOption("all");
+  await runRail.getByRole("button", { name: "清理历史" }).click();
+  const cleanupDialog = page.getByRole("dialog");
+  await expect(cleanupDialog.getByRole("heading", { name: "清理本地运行历史" })).toBeVisible();
+  await cleanupDialog.getByRole("button", { name: "生成预览" }).click();
+  await expect(cleanupDialog.getByText("这个保留范围内没有可清理运行")).toBeVisible();
+  await expect(cleanupDialog.getByRole("button", { name: "确认删除 0 个运行" })).toBeDisabled();
+  await cleanupDialog.getByRole("button", { name: "关闭" }).click();
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "任务图" }).click();
   }
   await page.getByRole("button", { name: "处理审批" }).click();
   const approvalDialog = page.getByRole("dialog");
@@ -60,7 +73,24 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     fullPage: false,
   });
   if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "证据", exact: true }).click();
+  } else {
+    await page.getByRole("tab", { name: "交付证据" }).click();
+  }
+  const evidenceCenter = page.getByLabel("交付证据中心");
+  await expect(evidenceCenter).toBeVisible();
+  await expect(evidenceCenter.getByText("需要处理", { exact: true })).toBeVisible();
+  await expect(evidenceCenter.getByRole("table", { name: "任务交付矩阵" })).toBeVisible();
+  await evidenceCenter.locator(".artifact-list button").filter({ hasText: "1.log" }).click();
+  await expect(evidenceCenter.locator(".evidence-code")).toContainText("refund idempotency regression passed");
+  await page.screenshot({
+    path: testInfo.outputPath(`${testInfo.project.name}-evidence.png`),
+    fullPage: false,
+  });
+  if (testInfo.project.name === "mobile") {
     await page.getByRole("button", { name: "任务图" }).click();
+  } else {
+    await page.getByRole("tab", { name: "任务图" }).click();
   }
 
   const ledgerNode = page.locator(".react-flow__node").filter({ hasText: "幂等账本" });

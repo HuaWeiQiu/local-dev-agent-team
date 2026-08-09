@@ -32,5 +32,15 @@ export const resumeRunRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2_000),
 });
 
+export const cleanupPreviewRequestSchema = z.object({
+  olderThanDays: z.number().int().min(1).max(3_650),
+});
+
+export const cleanupRunRequestSchema = z.object({
+  token: z.string().uuid(),
+});
+
 export type ApprovalResponseRequest = z.infer<typeof approvalResponseRequestSchema>;
 export type ResumeRunRequest = z.infer<typeof resumeRunRequestSchema>;
+export type CleanupPreviewRequest = z.infer<typeof cleanupPreviewRequestSchema>;
+export type CleanupRunRequest = z.infer<typeof cleanupRunRequestSchema>;

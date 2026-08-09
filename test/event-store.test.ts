@@ -43,6 +43,27 @@ describe("SQLite event store", () => {
     store.close();
   });
 
+  it("deletes a run event ledger and its idempotent command references together", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    const store = new SqliteEventStore(path.join(root, "events.sqlite"));
+    store.emit("run-clean", "run.updated", {});
+    store.emit("run-keep", "run.updated", {});
+    store.claimCommand("start-clean", "hash-a", { runId: "run-clean" });
+    store.claimCommand("start-keep", "hash-b", { runId: "run-keep" });
+
+    expect(store.deleteRun("run-clean")).toEqual({ events: 1, commands: 1 });
+    expect(store.listAfter(0, "run-clean")).toEqual([]);
+    expect(store.listAfter(0, "run-keep")).toHaveLength(1);
+    expect(store.claimCommand("start-clean", "new-hash", { runId: "replacement" })).toMatchObject({
+      claimed: true,
+    });
+    expect(store.claimCommand("start-keep", "hash-b", { runId: "other" })).toMatchObject({
+      claimed: false,
+      response: { runId: "run-keep" },
+    });
+    store.close();
+  });
+
   it("rejects non-JSON event payloads", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
     const store = new SqliteEventStore(path.join(root, "events.sqlite"));

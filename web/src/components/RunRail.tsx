@@ -1,4 +1,4 @@
-import { Plus, Search, Workflow } from "lucide-react";
+import { Filter, Plus, Search, Trash2, Workflow } from "lucide-react";
 import { useMemo, useState } from "react";
 import { formatTimestamp, shortRunId } from "../presentation";
 import type { RunSummary } from "../types";
@@ -9,31 +9,37 @@ interface RunRailProps {
   selectedRunId: string | undefined;
   onSelect(runId: string): void;
   onCreate(): void;
+  onCleanup(): void;
 }
 
-export function RunRail({ runs, selectedRunId, onSelect, onCreate }: RunRailProps) {
+type RunFilter = "all" | "active" | "attention" | "finished";
+
+export function RunRail({ runs, selectedRunId, onSelect, onCreate, onCleanup }: RunRailProps) {
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<RunFilter>("all");
   const visibleRuns = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    if (!normalized) return runs;
-    return runs.filter((run) => [run.goal, run.strategy, run.id].some((value) => value.toLocaleLowerCase().includes(normalized)));
-  }, [query, runs]);
+    return runs.filter((run) => {
+      const matchesQuery = !normalized || [run.goal, run.strategy, run.id].some((value) => value.toLocaleLowerCase().includes(normalized));
+      const matchesFilter = filter === "all" || (filter === "active" && activeStatuses.has(run.status)) || (filter === "attention" && attentionStatuses.has(run.status)) || (filter === "finished" && finishedStatuses.has(run.status));
+      return matchesQuery && matchesFilter;
+    });
+  }, [filter, query, runs]);
 
   return (
     <aside className="run-rail" aria-label="运行列表">
       <div className="section-heading rail-heading">
         <div className="rail-title">
           <span className="section-kicker">RUNS</span>
-          <div><h2>运行记录</h2><span className="rail-count">{runs.length}</span></div>
+          <div><h2>运行记录</h2><span className="rail-count">{visibleRuns.length === runs.length ? runs.length : `${visibleRuns.length}/${runs.length}`}</span></div>
         </div>
-        <button className="icon-button primary-icon" onClick={onCreate} title="新建运行" aria-label="新建运行">
-          <Plus size={18} />
-        </button>
+        <div className="rail-actions"><button className="icon-button" onClick={onCleanup} title="清理历史" aria-label="清理历史"><Trash2 size={16} /></button><button className="icon-button primary-icon" onClick={onCreate} title="新建运行" aria-label="新建运行"><Plus size={18} /></button></div>
       </div>
       <label className="run-search">
         <Search size={15} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索目标、策略或 ID" aria-label="搜索运行" />
       </label>
+      <label className="run-filter"><Filter size={14} /><select value={filter} onChange={(event) => setFilter(event.target.value as RunFilter)} aria-label="运行状态筛选"><option value="all">全部状态</option><option value="active">执行中</option><option value="attention">需要处理</option><option value="finished">已完成</option></select></label>
       <div className="run-list">
         {visibleRuns.map((run) => {
           const completed = run.taskCounts.merged + run.taskCounts.passed;
@@ -80,3 +86,7 @@ export function RunRail({ runs, selectedRunId, onSelect, onCreate }: RunRailProp
     </aside>
   );
 }
+
+const activeStatuses = new Set(["created", "orchestrating", "architecting", "planned", "implementing", "reviewing-testing", "reworking", "integrating", "final-checks", "publishing", "waiting-ci", "repairing"]);
+const attentionStatuses = new Set(["awaiting-human", "ci-failed", "ready-to-merge", "cancelled", "interrupted", "blocked"]);
+const finishedStatuses = new Set(["completed"]);

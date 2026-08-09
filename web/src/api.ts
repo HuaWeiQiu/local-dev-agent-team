@@ -1,6 +1,10 @@
 import type {
   ProjectScope,
   PublicConfig,
+  EvidenceFilePreview,
+  RunCleanupPreview,
+  RunCleanupResult,
+  RunEvidence,
   RunState,
   RunSummary,
   StartRunInput,
@@ -36,6 +40,46 @@ export async function getRun(scope: ProjectScope, runId: string): Promise<RunSta
       `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}`,
     )
   ).run;
+}
+
+export async function getRunEvidence(scope: ProjectScope, runId: string): Promise<RunEvidence> {
+  return (
+    await request<{ evidence: RunEvidence }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/evidence`,
+    )
+  ).evidence;
+}
+
+export async function getEvidenceFile(
+  scope: ProjectScope,
+  runId: string,
+  artifactPath: string,
+): Promise<EvidenceFilePreview> {
+  return (
+    await request<{ file: EvidenceFilePreview }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/evidence/file?path=${encodeURIComponent(artifactPath)}`,
+    )
+  ).file;
+}
+
+export async function previewRunCleanup(
+  scope: ProjectScope,
+  olderThanDays: number,
+): Promise<RunCleanupPreview> {
+  return await request<RunCleanupPreview>(`${apiRoot(scope)}/runs/cleanup/preview`, {
+    method: "POST",
+    body: JSON.stringify({ olderThanDays }),
+  });
+}
+
+export async function cleanupRuns(
+  scope: ProjectScope,
+  token: string,
+): Promise<RunCleanupResult> {
+  return await request<RunCleanupResult>(`${apiRoot(scope)}/runs/cleanup`, {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 }
 
 export async function startRun(scope: ProjectScope, input: StartRunInput): Promise<string> {

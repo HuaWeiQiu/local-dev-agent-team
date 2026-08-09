@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RunState, RunStatus } from "./types.js";
 import type { PendingRunEvent, RunEventSink } from "../events/types.js";
@@ -14,11 +14,17 @@ export class RunStateStore {
   ) {}
 
   runDirectory(runId: string): string {
+    assertRunId(runId);
     return path.join(this.runsDirectory, runId);
   }
 
   artifactDirectory(runId: string, ...parts: string[]): string {
-    return path.join(this.runDirectory(runId), "artifacts", ...parts);
+    const root = path.resolve(this.runDirectory(runId), "artifacts");
+    const target = path.resolve(root, ...parts);
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
+      throw new Error(`Artifact path must stay inside run '${runId}'`);
+    }
+    return target;
   }
 
   async save(state: RunState): Promise<void> {
@@ -80,6 +86,37 @@ export class RunStateStore {
     return states
       .filter((state): state is RunState => state !== undefined)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async quarantine(runId: string): Promise<{ original: string; quarantined: string }> {
+    await this.saveQueue;
+    const original = this.runDirectory(runId);
+    const quarantined = path.join(
+      this.runsDirectory,
+      `.deleting-${runId}-${randomUUID()}`,
+    );
+    await rename(original, quarantined);
+    return { original, quarantined };
+  }
+
+  async restoreQuarantined(paths: { original: string; quarantined: string }): Promise<void> {
+    await rename(paths.quarantined, paths.original);
+  }
+
+  async removeQuarantined(paths: { quarantined: string }): Promise<void> {
+    await rm(paths.quarantined, { recursive: true, force: true });
+  }
+}
+
+export function assertRunId(runId: string): void {
+  if (
+    runId.length === 0 ||
+    runId.length > 200 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId) ||
+    runId === "." ||
+    runId === ".."
+  ) {
+    throw new Error(`Invalid run ID '${runId}'`);
   }
 }
 
