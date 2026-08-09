@@ -316,6 +316,90 @@ describe("control HTTP server", () => {
     await supervisor.close();
     events.close();
   });
+
+  it("exports run events as NDJSON and aggregates usage across runs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("usage-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeState("export-run", "Export run events");
+    state.usage = {
+      agentInvocations: 3,
+      agentDurationMs: 5_000,
+      processOutputBytes: 100,
+      truncatedStreams: 0,
+      artifactBytes: 200,
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 5,
+      reportedCostUsd: 0.125,
+    };
+    await states.save(state);
+    events.emit("export-run", "agent.stdout", { role: "worker", chunk: "exported line\n" });
+    await states.save(fakeState("bare-run", "No telemetry"));
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    const exportResponse = await fetch(`${listening.url}/api/runs/export-run/export`);
+    expect(exportResponse.status).toBe(200);
+    expect(exportResponse.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(exportResponse.headers.get("content-disposition")).toBe(
+      'attachment; filename="export-run.ndjson"',
+    );
+    const exported = await exportResponse.text();
+    const lines = exported.trim().split("\n");
+    expect(lines.length).toBeGreaterThanOrEqual(2);
+    for (const line of lines) {
+      expect(JSON.parse(line) as { runId: string }).toMatchObject({ runId: "export-run" });
+    }
+    expect(exported).toContain("agent.stdout");
+    expect(exported).toContain("exported line");
+
+    expect((await fetch(`${listening.url}/api/runs/missing-run/export`)).status).toBe(404);
+
+    const usage = await fetch(`${listening.url}/api/usage`);
+    expect(usage.status).toBe(200);
+    const report = (await usage.json()) as {
+      runCount: number;
+      totals: Record<string, unknown>;
+      runs: Array<{ runId: string; usage: Record<string, unknown> }>;
+    };
+    expect(report.runCount).toBe(2);
+    expect(report.totals).toMatchObject({
+      agentInvocations: 3,
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 5,
+      reportedCostUsd: 0.125,
+      costReported: true,
+    });
+    const byId = new Map(report.runs.map((entry) => [entry.runId, entry.usage]));
+    expect(byId.get("export-run")).toMatchObject({
+      agentInvocations: 3,
+      reportedCostUsd: 0.125,
+      costReported: true,
+    });
+    expect(byId.get("bare-run")).toMatchObject({
+      agentInvocations: 0,
+      reportedCostUsd: 0,
+      costReported: false,
+    });
+
+    await listening.close();
+    await supervisor.close();
+    events.close();
+  });
 });
 
 async function readUntil(

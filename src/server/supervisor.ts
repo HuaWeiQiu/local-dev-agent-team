@@ -14,7 +14,14 @@ import { SqliteEventStore } from "../events/store.js";
 import { GitManager } from "../git/manager.js";
 import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
-import type { ApprovalRequest, RunState, RunSummary } from "../state/types.js";
+import type {
+  ApprovalRequest,
+  RunCheckpoint,
+  RunState,
+  RunSummary,
+  RunUsage,
+} from "../state/types.js";
+import { legacyApprovalTimeoutSeconds } from "../strategies/defaults.js";
 import { resolveStrategy } from "../strategies/resolve.js";
 import { createRunId } from "../workflow/id.js";
 import { LocalWorkflowRunner, type WorkflowResumeOptions } from "../workflow/runner.js";
@@ -32,6 +39,36 @@ export interface StartRunResult {
 export interface RunActionResult {
   runId: string;
   status: "resuming" | "ready-to-merge" | "blocked" | "unchanged";
+}
+
+export interface RunUsageDetail {
+  agentInvocations: number;
+  agentDurationMs: number;
+  processOutputBytes: number;
+  truncatedStreams: number;
+  artifactBytes: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reportedCostUsd: number;
+  costReported: boolean;
+}
+
+export interface RunUsageEntry {
+  runId: string;
+  goal: string;
+  status: RunState["status"];
+  strategy: string;
+  createdAt: string;
+  updatedAt: string;
+  usage: RunUsageDetail;
+}
+
+export interface UsageReport {
+  generatedAt: string;
+  runCount: number;
+  totals: RunUsageDetail;
+  runs: RunUsageEntry[];
 }
 
 export interface SupervisorDependencies {
@@ -309,6 +346,56 @@ export class RunSupervisor {
     return (await this.stateStore.list()).map(summarizeRun);
   }
 
+  async usageReport(): Promise<UsageReport> {
+    const states = await this.stateStore.list();
+    const runs: RunUsageEntry[] = states
+      .map((state) => ({
+        runId: state.id,
+        goal: state.goal,
+        status: state.status,
+        strategy: state.strategy.name,
+        createdAt: state.createdAt,
+        updatedAt: state.updatedAt,
+        usage: usageDetail(state.usage),
+      }))
+      .sort(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) || left.runId.localeCompare(right.runId),
+      );
+    const totals = runs.reduce(
+      (acc, entry) => ({
+        agentInvocations: acc.agentInvocations + entry.usage.agentInvocations,
+        agentDurationMs: acc.agentDurationMs + entry.usage.agentDurationMs,
+        processOutputBytes: acc.processOutputBytes + entry.usage.processOutputBytes,
+        truncatedStreams: acc.truncatedStreams + entry.usage.truncatedStreams,
+        artifactBytes: acc.artifactBytes + entry.usage.artifactBytes,
+        inputTokens: acc.inputTokens + entry.usage.inputTokens,
+        cachedInputTokens: acc.cachedInputTokens + entry.usage.cachedInputTokens,
+        outputTokens: acc.outputTokens + entry.usage.outputTokens,
+        reportedCostUsd: acc.reportedCostUsd + entry.usage.reportedCostUsd,
+        costReported: acc.costReported || entry.usage.costReported,
+      }),
+      {
+        agentInvocations: 0,
+        agentDurationMs: 0,
+        processOutputBytes: 0,
+        truncatedStreams: 0,
+        artifactBytes: 0,
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reportedCostUsd: 0,
+        costReported: false,
+      },
+    );
+    return {
+      generatedAt: new Date().toISOString(),
+      runCount: runs.length,
+      totals,
+      runs,
+    };
+  }
+
   async evidence(runId: string): Promise<RunEvidence | undefined> {
     const state = await this.get(runId);
     if (!state) return undefined;
@@ -409,6 +496,7 @@ export class RunSupervisor {
         continue;
       }
       if (
+        state.supervisorId !== undefined &&
         state.supervisorId !== this.id &&
         activeStatuses.has(state.status)
       ) {
@@ -544,119 +632,143 @@ export class RunSupervisor {
   }
 
   private async reconcileApprovalBoundary(state: RunState): Promise<boolean> {
-    let checkpoint = state.checkpoints?.at(-1);
-    if (
-      !checkpoint &&
-      state.status === "awaiting-human" &&
-      state.finalQuality?.passed &&
-      state.finalDecision?.decision === "ready"
-    ) {
-      const worktreesRoot = path.resolve(
-        this.loaded.root,
-        this.loaded.config.project.stateDirectory,
-        "worktrees",
-      );
-      const git = new GitManager(
-        this.loaded.root,
-        worktreesRoot,
-      );
-      const [integrationCommit, clean] = await Promise.all([
-        git.currentCommit(state.integrationWorktree).catch(() => undefined),
-        git.isClean(state.integrationWorktree).catch(() => false),
-      ]);
-      if (integrationCommit && clean) {
-        checkpoint = {
-          id: randomUUID(),
-          version: 1,
-          stage: "local-gates-passed",
-          integrationCommit,
-          completedTaskIds: state.tasks
-            .filter((task) => task.status === "merged")
-            .map((task) => task.task.id)
-            .sort(),
-          createdAt: new Date().toISOString(),
-        };
-        state.checkpoints = [checkpoint];
-        this.events.emit(state.id, "workflow.checkpoint-migrated", checkpoint);
-      }
-    }
-
+    const checkpoint = await this.rebuildMissingCheckpoint(state);
     const requiredGate = checkpoint ? requiredApprovalGate(state, checkpoint.stage) : undefined;
-    let approval = requiredGate
+    const approval = requiredGate
       ? state.approvals?.find(
           (item) => item.gate === requiredGate && item.checkpointId === checkpoint?.id,
         )
       : state.approvals?.at(-1);
     if (checkpoint && requiredGate && !approval) {
-      const git = new GitManager(
-        this.loaded.root,
-        path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
-      );
-      const [currentCommit, clean] = await Promise.all([
-        git.currentCommit(state.integrationWorktree).catch(() => undefined),
-        git.isClean(state.integrationWorktree).catch(() => false),
-      ]);
-      if (currentCommit !== checkpoint.integrationCommit || !clean) {
-        return false;
-      }
-      const requestedAt = new Date();
-      approval = {
-        id: randomUUID(),
-        gate: requiredGate,
-        status: "pending",
-        summary: requiredGate === "plan"
-          ? `Approve ${state.tasks.length} planned task(s) before worker execution`
-          : "All local gates passed; approve the integration result before publication",
-        checkpointId: checkpoint.id,
-        requestedAt: requestedAt.toISOString(),
-        expiresAt: new Date(
-          requestedAt.getTime() + (state.strategy.approvalTimeoutSeconds ?? 86_400) * 1_000,
-        ).toISOString(),
-      };
-      state.approvals = [...(state.approvals ?? []), approval];
-      await this.stateStore.transition(state, "awaiting-human", approval.summary);
-      this.events.emit(state.id, "approval.requested", approval);
-      return true;
+      return await this.restoreMissingApprovalRequest(state, checkpoint, requiredGate);
     }
     if (!approval) return false;
-
     if (approval.status === "pending") {
-      if (Date.now() > Date.parse(approval.expiresAt)) {
-        await this.recordApprovalResponse(state, approval, {
-          decision: "rejected",
-          actor: "system:approval-expiry",
-          reason: `Approval request expired at ${approval.expiresAt}`,
-        });
-        state.error = approval.response!.reason;
-        await this.stateStore.transition(state, "blocked", state.error);
-        return true;
-      }
-      if (state.status !== "awaiting-human") {
-        await this.stateStore.transition(state, "awaiting-human", approval.summary);
-        return true;
-      }
+      return await this.reconcilePendingApproval(state, approval);
+    }
+    if (approval.status === "rejected") {
+      return await this.reconcileRejectedApproval(state, approval);
+    }
+    if (approval.status === "approved") {
+      return await this.reconcileApprovedApproval(state, approval);
+    }
+    return false;
+  }
+
+  /** Rebuilds the final-gate checkpoint for runs persisted before checkpoints existed. */
+  private async rebuildMissingCheckpoint(state: RunState): Promise<RunCheckpoint | undefined> {
+    const existing = state.checkpoints?.at(-1);
+    if (existing) return existing;
+    if (
+      state.status !== "awaiting-human" ||
+      !state.finalQuality?.passed ||
+      state.finalDecision?.decision !== "ready"
+    ) {
+      return undefined;
+    }
+    const git = this.integrationGitManager();
+    const [integrationCommit, clean] = await Promise.all([
+      git.currentCommit(state.integrationWorktree).catch(() => undefined),
+      git.isClean(state.integrationWorktree).catch(() => false),
+    ]);
+    if (!integrationCommit || !clean) return undefined;
+    const checkpoint: RunCheckpoint = {
+      id: randomUUID(),
+      version: 1,
+      stage: "local-gates-passed",
+      integrationCommit,
+      completedTaskIds: state.tasks
+        .filter((task) => task.status === "merged")
+        .map((task) => task.task.id)
+        .sort(),
+      createdAt: new Date().toISOString(),
+    };
+    state.checkpoints = [checkpoint];
+    this.events.emit(state.id, "workflow.checkpoint-migrated", checkpoint);
+    return checkpoint;
+  }
+
+  private async restoreMissingApprovalRequest(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    requiredGate: ApprovalRequest["gate"],
+  ): Promise<boolean> {
+    const git = this.integrationGitManager();
+    const [currentCommit, clean] = await Promise.all([
+      git.currentCommit(state.integrationWorktree).catch(() => undefined),
+      git.isClean(state.integrationWorktree).catch(() => false),
+    ]);
+    if (currentCommit !== checkpoint.integrationCommit || !clean) {
       return false;
     }
+    const requestedAt = new Date();
+    const approval: ApprovalRequest = {
+      id: randomUUID(),
+      gate: requiredGate,
+      status: "pending",
+      summary: requiredGate === "plan"
+        ? `Approve ${state.tasks.length} planned task(s) before worker execution`
+        : "All local gates passed; approve the integration result before publication",
+      checkpointId: checkpoint.id,
+      requestedAt: requestedAt.toISOString(),
+      expiresAt: new Date(
+        requestedAt.getTime() + (state.strategy.approvalTimeoutSeconds ?? legacyApprovalTimeoutSeconds) * 1_000,
+      ).toISOString(),
+    };
+    state.approvals = [...(state.approvals ?? []), approval];
+    await this.stateStore.transition(state, "awaiting-human", approval.summary);
+    this.events.emit(state.id, "approval.requested", approval);
+    return true;
+  }
 
-    if (approval.status === "rejected" && state.status !== "blocked") {
-      state.error = `Approval rejected by ${approval.response?.actor ?? "unknown"}: ${approval.response?.reason ?? "no reason"}`;
+  private integrationGitManager(): GitManager {
+    return new GitManager(
+      this.loaded.root,
+      path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
+    );
+  }
+
+  private async reconcilePendingApproval(
+    state: RunState,
+    approval: ApprovalRequest,
+  ): Promise<boolean> {
+    if (Date.now() > Date.parse(approval.expiresAt)) {
+      await this.recordApprovalResponse(state, approval, {
+        decision: "rejected",
+        actor: "system:approval-expiry",
+        reason: `Approval request expired at ${approval.expiresAt}`,
+      });
+      state.error = approval.response!.reason;
       await this.stateStore.transition(state, "blocked", state.error);
       return true;
     }
-    if (
-      approval.status === "approved" &&
-      approval.gate === "final" &&
-      state.status !== "ready-to-merge"
-    ) {
+    if (state.status !== "awaiting-human") {
+      await this.stateStore.transition(state, "awaiting-human", approval.summary);
+      return true;
+    }
+    return false;
+  }
+
+  private async reconcileRejectedApproval(
+    state: RunState,
+    approval: ApprovalRequest,
+  ): Promise<boolean> {
+    if (state.status === "blocked") return false;
+    state.error = `Approval rejected by ${approval.response?.actor ?? "unknown"}: ${approval.response?.reason ?? "no reason"}`;
+    await this.stateStore.transition(state, "blocked", state.error);
+    return true;
+  }
+
+  private async reconcileApprovedApproval(
+    state: RunState,
+    approval: ApprovalRequest,
+  ): Promise<boolean> {
+    if (approval.gate === "final" && state.status !== "ready-to-merge") {
       delete state.error;
       await this.stateStore.transition(state, "ready-to-merge", "Recovered final approval response");
       return true;
     }
-    if (
-      approval.status === "approved" &&
-      approval.gate === "plan" &&
-      state.status === "awaiting-human"
-    ) {
+    if (approval.gate === "plan" && state.status === "awaiting-human") {
       state.error = "Plan approval was recorded before its continuation started";
       await this.stateStore.transition(state, "interrupted", state.error);
       return true;
@@ -707,6 +819,21 @@ function requiredApprovalGate(
     return "plan";
   }
   return stage === "local-gates-passed" ? "final" : undefined;
+}
+
+function usageDetail(usage: RunUsage | undefined): RunUsageDetail {
+  return {
+    agentInvocations: usage?.agentInvocations ?? 0,
+    agentDurationMs: usage?.agentDurationMs ?? 0,
+    processOutputBytes: usage?.processOutputBytes ?? 0,
+    truncatedStreams: usage?.truncatedStreams ?? 0,
+    artifactBytes: usage?.artifactBytes ?? 0,
+    inputTokens: usage?.inputTokens ?? 0,
+    cachedInputTokens: usage?.cachedInputTokens ?? 0,
+    outputTokens: usage?.outputTokens ?? 0,
+    reportedCostUsd: usage?.reportedCostUsd ?? 0,
+    costReported: usage?.reportedCostUsd !== undefined,
+  };
 }
 
 function requestHash(request: StartRunRequest): string {
