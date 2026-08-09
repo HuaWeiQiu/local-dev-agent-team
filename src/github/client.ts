@@ -43,7 +43,7 @@ export class GithubClient {
       ["repo", "view", "--json", "nameWithOwner,url,defaultBranchRef"],
       cwd,
     );
-    const value = JSON.parse(result.stdout) as {
+    const value = parseGhJson(result.stdout, "gh repo view --json nameWithOwner,url,defaultBranchRef") as {
       nameWithOwner: string;
       url: string;
       defaultBranchRef: { name: string };
@@ -76,7 +76,10 @@ export class GithubClient {
     if (result.exitCode !== 0 || !result.stdout.trim()) {
       return undefined;
     }
-    return JSON.parse(result.stdout) as PullRequestInfo;
+    return parseGhJson(
+      result.stdout,
+      `gh pr view ${branch} --json number,url,state,mergedAt`,
+    ) as PullRequestInfo;
   }
 
   async createPullRequest(options: {
@@ -126,7 +129,10 @@ export class GithubClient {
       ],
       cwd,
     );
-    return JSON.parse(result.stdout) as PullRequestInfo;
+    return parseGhJson(
+      result.stdout,
+      `gh pr view ${target} --json number,url,state,mergedAt`,
+    ) as PullRequestInfo;
   }
 
   async checks(cwd: string, repository: string, target: string): Promise<GithubCheck[]> {
@@ -146,7 +152,7 @@ export class GithubClient {
     if (!result.stdout.trim()) {
       return [];
     }
-    return JSON.parse(result.stdout) as GithubCheck[];
+    return parseGhJson(result.stdout, `gh pr checks ${target} --json ...`) as GithubCheck[];
   }
 
   async failedLogs(cwd: string, repository: string, checks: GithubCheck[]): Promise<string> {
@@ -204,6 +210,18 @@ export class GithubClient {
       throw new Error(`gh ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`);
     }
     return result;
+  }
+}
+
+export function parseGhJson(raw: string, context: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const excerpt = raw.length <= 200 ? raw : `${raw.slice(0, 200)}…`;
+    throw new Error(
+      `${context} returned invalid JSON: ${excerpt.trim() || "(empty output)"}`,
+      { cause: error },
+    );
   }
 }
 

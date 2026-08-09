@@ -9,6 +9,13 @@ import {
   type AgentTeamConfig,
   type NamedStrategy,
 } from "../config/schema.js";
+import {
+  legacyApprovalTimeoutSeconds,
+  legacyExecutionTimeoutSeconds,
+  legacyMaxAgentInvocations,
+  legacyMaxArtifactBytes,
+  legacyMaxProcessOutputBytes,
+} from "./defaults.js";
 import { resolveStrategy, type ResolvedStrategy } from "./resolve.js";
 
 export const strategyBlueprintNameSchema = z
@@ -229,13 +236,13 @@ function legacyStrategies(config: AgentTeamConfig): NonNullable<AgentTeamConfig[
         topology: { mode: "parallel-dag" },
         maxParallel: config.project.maxParallel,
         maxReworkAttempts: config.quality.maxReworkAttempts,
-        executionTimeoutSeconds: 14_400,
-        maxAgentInvocations: 64,
-        maxProcessOutputBytes: 1_048_576,
-        maxArtifactBytes: 1_073_741_824,
+        executionTimeoutSeconds: legacyExecutionTimeoutSeconds,
+        maxAgentInvocations: legacyMaxAgentInvocations,
+        maxProcessOutputBytes: legacyMaxProcessOutputBytes,
+        maxArtifactBytes: legacyMaxArtifactBytes,
         roleProfiles: {},
         approvalGates: ["final"],
-        approvalTimeoutSeconds: 86_400,
+        approvalTimeoutSeconds: legacyApprovalTimeoutSeconds,
       },
     },
   };

@@ -32,6 +32,8 @@ export async function runQualityCommands(
   if (artifactDirectory) {
     await mkdir(artifactDirectory, { recursive: true });
   }
+  // The loop below shadows `process` with a ProcessResult, so capture env first.
+  const qualityEnv = { ...process.env, CI: "true" };
   const results: CommandResult[] = [];
   for (const [index, spec] of commands.entries()) {
     let process;
@@ -41,7 +43,7 @@ export async function runQualityCommands(
         args: spec.args,
         cwd,
         timeoutMs: timeoutSeconds * 1_000,
-        env: { ...processEnv(), CI: "true" },
+        env: qualityEnv,
         ...(signal ? { signal } : {}),
         ...(options.maxOutputBytes ? { maxOutputBytes: options.maxOutputBytes } : {}),
       });
@@ -94,10 +96,6 @@ export async function runQualityCommands(
     }
   }
   return { passed: results.length === commands.length && results.every((item) => item.exitCode === 0), commands: results };
-}
-
-function processEnv(): NodeJS.ProcessEnv {
-  return process.env;
 }
 
 export function deduplicateCommands(commands: CommandSpec[]): CommandSpec[] {
