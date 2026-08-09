@@ -4,8 +4,14 @@ import { isTauri } from "@tauri-apps/api/core";
 import "@xyflow/react/dist/style.css";
 import App from "./App";
 import DesktopLauncher from "./DesktopLauncher";
+import { applyTheme, getInitialTheme } from "./theme";
+import "./theme.css";
 import "./styles.css";
 import "./desktop-launcher.css";
+
+// 首帧渲染前应用主题（服务端 CSP 禁止内联脚本，只能在这里尽早执行）；
+// "system" 不写 data-theme，交给 CSS 媒体查询跟随系统。
+applyTheme(getInitialTheme());
 
 const previewState = import.meta.env.DEV
   ? desktopPreviewState(new URLSearchParams(window.location.search).get("desktop-preview"))

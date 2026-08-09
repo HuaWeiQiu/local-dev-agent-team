@@ -1,4 +1,6 @@
 import { CheckCircle2, Clock3, FileCode2, Gauge, GitBranch, History, ShieldAlert, TerminalSquare, UserRound } from "lucide-react";
+import { memo } from "react";
+import { formatBytes } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
 
@@ -7,7 +9,7 @@ interface TaskInspectorProps {
   task: TaskRunState | undefined;
 }
 
-export function TaskInspector({ run, task }: TaskInspectorProps) {
+export const TaskInspector = memo(function TaskInspector({ run, task }: TaskInspectorProps) {
   return (
     <aside className="task-inspector" aria-label="任务详情">
       <div className="section-heading inspector-heading">
@@ -20,7 +22,7 @@ export function TaskInspector({ run, task }: TaskInspectorProps) {
       {task ? <TaskDetail task={task} /> : run ? <RunDetail run={run} /> : <div className="inspector-empty">未选择运行</div>}
     </aside>
   );
-}
+});
 
 function TaskDetail({ task }: { task: TaskRunState }) {
   return (
@@ -173,13 +175,6 @@ function RunDetail({ run }: { run: RunState }) {
       {run.error && <p className="inline-error">{run.error}</p>}
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
-  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`;
-  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
 }
 
 function formatDuration(milliseconds: number): string {

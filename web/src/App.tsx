@@ -1,16 +1,18 @@
-import { Activity, Ban, Bot, CircleDot, FileCheck2, GitBranch, History, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Workflow } from "lucide-react";
+import { Activity, Ban, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   cancelRun,
   cleanupRuns,
   deleteStrategyBlueprint,
+  downloadRunEvents,
   eventStreamUrl,
   getEvidenceFile,
   getConfig,
   getRun,
   getRunEvidence,
   getRuns,
+  getUsage,
   getWorkspace,
   preflightStrategyBlueprint,
   previewRunCleanup,
@@ -30,6 +32,9 @@ import { RunRail } from "./components/RunRail";
 import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { TaskInspector } from "./components/TaskInspector";
+import { UsagePanel } from "./components/UsagePanel";
+import { activeRunStatuses, errorMessage } from "./presentation";
+import { applyTheme, getInitialTheme, nextThemeMode, themeModeLabel, type ThemeMode } from "./theme";
 import type {
   ProjectScope,
   ApprovalRequest,
@@ -44,10 +49,10 @@ import type {
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
   TaskRunState,
+  UsageReport,
   WorkspaceInfo,
 } from "./types";
 
-const activeStatuses = new Set(["created", "orchestrating", "architecting", "planned", "implementing", "reviewing-testing", "reworking", "integrating", "final-checks", "publishing", "waiting-ci", "repairing"]);
 const retryableStatuses = new Set(["blocked", "cancelled", "interrupted"]);
 
 export default function App() {
@@ -74,9 +79,14 @@ export default function App() {
   const [cleanupError, setCleanupError] = useState<string>();
   const [error, setError] = useState<string>();
   const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design">("monitor");
-  const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence">("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs" | "evidence">("flow");
+  const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence" | "usage">("graph");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
+  const [usageReport, setUsageReport] = useState<UsageReport>();
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
   const refreshTimer = useRef<number | undefined>(undefined);
+  const eventBuffer = useRef<RunEvent[]>([]);
+  const eventFlushTimer = useRef<number | undefined>(undefined);
   const scope = useMemo<ProjectScope | undefined>(
     () => workspace && selectedProjectId
       ? { mode: workspace.mode, projectId: selectedProjectId }
@@ -139,6 +149,18 @@ export default function App() {
     }
   }, [scope]);
 
+  const refreshUsage = useCallback(async () => {
+    if (!scope) return;
+    const requestedScope = `${scope.mode}:${scope.projectId}`;
+    setUsageLoading(true);
+    try {
+      const nextUsage = await getUsage(scope);
+      if (currentScopeKey.current === requestedScope) setUsageReport(nextUsage);
+    } finally {
+      if (currentScopeKey.current === requestedScope) setUsageLoading(false);
+    }
+  }, [scope]);
+
   const scheduleRefresh = useCallback((runId: string) => {
     window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
@@ -147,6 +169,33 @@ export default function App() {
       });
     }, 80);
   }, [refreshRun, refreshRuns]);
+
+  const cycleTheme = useCallback(() => {
+    const next = nextThemeMode(themeMode);
+    applyTheme(next);
+    setThemeMode(next);
+  }, [themeMode]);
+
+  const resetRunScope = useCallback(() => {
+    window.clearTimeout(refreshTimer.current);
+    eventBuffer.current = [];
+    window.clearTimeout(eventFlushTimer.current);
+    eventFlushTimer.current = undefined;
+    setConfig(undefined);
+    setRuns([]);
+    setSelectedRunId(undefined);
+    setRun(undefined);
+    setSelectedTaskId(undefined);
+    setEvents([]);
+    setEvidence(undefined);
+    setUsageReport(undefined);
+    setUsageLoading(false);
+    setConnected(false);
+    setError(undefined);
+    setCleanupOpen(false);
+    setCleanupPreview(undefined);
+    setCleanupError(undefined);
+  }, []);
 
   useEffect(() => {
     void getWorkspace()
@@ -161,19 +210,7 @@ export default function App() {
   useEffect(() => {
     if (!scope) return;
     let active = true;
-    window.clearTimeout(refreshTimer.current);
-    setConfig(undefined);
-    setRuns([]);
-    setSelectedRunId(undefined);
-    setRun(undefined);
-    setSelectedTaskId(undefined);
-    setEvents([]);
-    setEvidence(undefined);
-    setConnected(false);
-    setError(undefined);
-    setCleanupOpen(false);
-    setCleanupPreview(undefined);
-    setCleanupError(undefined);
+    resetRunScope();
     void Promise.all([getConfig(scope), getRuns(scope)])
       .then(([nextConfig, nextRuns]) => {
         if (!active) return;
@@ -187,7 +224,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [scope]);
+  }, [resetRunScope, scope]);
 
   useEffect(() => {
     if (!scope || !selectedRunId) {
@@ -210,11 +247,20 @@ export default function App() {
     source.onerror = () => {
       if (active) setConnected(false);
     };
+    // SSE 事件先进 ref 缓冲，~120ms 定时 flush，避免每条事件都触发全树重渲染
+    const flushEvents = () => {
+      eventFlushTimer.current = undefined;
+      if (!active || eventBuffer.current.length === 0) return;
+      const pending = eventBuffer.current;
+      eventBuffer.current = [];
+      setEvents((current) => [...current, ...pending].slice(-500));
+    };
     source.onmessage = (message) => {
       if (!active) return;
       try {
         const event = JSON.parse(message.data) as RunEvent;
-        setEvents((current) => [...current, event].slice(-500));
+        eventBuffer.current.push(event);
+        eventFlushTimer.current ??= window.setTimeout(flushEvents, 120);
         if (event.type === "run.updated" || event.type === "run.crashed") {
           scheduleRefresh(selectedRunId);
         }
@@ -226,6 +272,9 @@ export default function App() {
       active = false;
       source.close();
       setConnected(false);
+      window.clearTimeout(eventFlushTimer.current);
+      eventFlushTimer.current = undefined;
+      eventBuffer.current = [];
     };
   }, [refreshRun, scheduleRefresh, scope, selectedRunId]);
 
@@ -234,6 +283,12 @@ export default function App() {
     if (!selectedRunId || !scope || !evidenceVisible) return;
     void refreshEvidence(selectedRunId).catch((requestError: unknown) => setError(errorMessage(requestError)));
   }, [mobileView, monitorPanel, refreshEvidence, run?.updatedAt, scope, selectedRunId]);
+
+  useEffect(() => {
+    const usageVisible = monitorPanel === "usage" || mobileView === "usage";
+    if (!scope || !usageVisible) return;
+    void refreshUsage().catch((requestError: unknown) => setError(errorMessage(requestError)));
+  }, [mobileView, monitorPanel, refreshUsage, scope]);
 
   const selectedTask = useMemo(
     () => run?.tasks.find((task) => task.task.id === selectedTaskId),
@@ -283,11 +338,28 @@ export default function App() {
     await refreshConfig();
   };
 
-  const openLauncher = (strategy?: string) => {
+  const openLauncher = useCallback((strategy?: string) => {
     setError(undefined);
     setLauncherStrategy(strategy);
     setLauncherOpen(true);
-  };
+  }, []);
+
+  const openCleanup = useCallback(() => {
+    setCleanupPreview(undefined);
+    setCleanupError(undefined);
+    setCleanupOpen(true);
+  }, []);
+
+  const handleSelectRun = useCallback((runId: string) => {
+    setSelectedRunId(runId);
+    setMonitorPanel("graph");
+    setMobileView("flow");
+  }, []);
+
+  const handleSelectTask = useCallback((task: TaskRunState) => {
+    setSelectedTaskId(task.task.id);
+    if (window.innerWidth <= 800) setMobileView("details");
+  }, []);
 
   const cancel = async () => {
     if (!scope || !selectedRunId) return;
@@ -349,12 +421,6 @@ export default function App() {
     }
   };
 
-  const openCleanup = () => {
-    setCleanupPreview(undefined);
-    setCleanupError(undefined);
-    setCleanupOpen(true);
-  };
-
   const previewCleanup = async (days: number) => {
     if (!scope) return;
     setBusy(true);
@@ -386,10 +452,23 @@ export default function App() {
     }
   };
 
-  const readEvidenceArtifact = async (artifactPath: string): Promise<EvidenceFilePreview> => {
+  const readEvidenceArtifact = useCallback(async (artifactPath: string): Promise<EvidenceFilePreview> => {
     if (!scope || !selectedRunId) throw new Error("当前运行尚未加载");
     return await getEvidenceFile(scope, selectedRunId, artifactPath);
-  };
+  }, [scope, selectedRunId]);
+
+  const exportRunEvents = useCallback(async () => {
+    if (!scope || !selectedRunId) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await downloadRunEvents(scope, selectedRunId);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }, [scope, selectedRunId]);
 
   if (!workspace || !selectedProjectId) {
     return <div className="boot-screen"><CircleDot className="boot-mark" size={28} /><strong>Agent Team</strong><span>{error ?? "连接控制服务"}</span></div>;
@@ -439,12 +518,7 @@ export default function App() {
                 setLauncherOpen(false);
                 setLauncherStrategy(undefined);
                 setRunAction(undefined);
-                setConfig(undefined);
-                setRuns([]);
-                setSelectedRunId(undefined);
-                setRun(undefined);
-                setSelectedTaskId(undefined);
-                setEvents([]);
+                resetRunScope();
                 setSelectedProjectId(event.target.value);
                 setWorkspaceMode("monitor");
                 setMonitorPanel("graph");
@@ -489,12 +563,20 @@ export default function App() {
               <History size={16} /><span>恢复</span>
             </button>
           ) : null}
-          {workspaceMode === "monitor" && run && activeStatuses.has(run.status) && (
+          {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
             <button className="button danger-quiet" onClick={() => void cancel()} disabled={busy} title="取消运行"><Ban size={16} /><span>取消</span></button>
           )}
           {workspaceMode === "monitor" && run && retryableStatuses.has(run.status) && (
             <button className="button secondary" onClick={() => void retry()} disabled={busy} title="重试为新运行"><RotateCcw size={16} /><span>重试</span></button>
           )}
+          <button
+            className="icon-button"
+            onClick={cycleTheme}
+            aria-label="切换主题"
+            title={`切换主题（当前：${themeModeLabel(themeMode)}）`}
+          >
+            {themeMode === "light" ? <Sun size={17} /> : themeMode === "dark" ? <Moon size={17} /> : <Monitor size={17} />}
+          </button>
           <button className="button primary" aria-label="新建运行" title="新建运行" disabled={!config} onClick={() => openLauncher()}><Plus size={16} /><span>新建运行</span></button>
         </div>
       </header>
@@ -506,6 +588,7 @@ export default function App() {
         <MobileTab active={workspaceMode === "monitor" && mobileView === "details"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("details"); }} icon={<CircleDot size={16} />} label="详情" />
         <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
         <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
+        <MobileTab active={workspaceMode === "monitor" && mobileView === "usage"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("usage"); setMobileView("usage"); }} icon={<Gauge size={16} />} label="用量" />
       </nav>
 
       <div className="workspace-shell">
@@ -519,7 +602,7 @@ export default function App() {
           />
         ) : (
           <section className="monitor-workbench" aria-label="运行工作台">
-            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={(runId) => { setSelectedRunId(runId); setMonitorPanel("graph"); setMobileView("flow"); }} onCreate={() => openLauncher()} onCleanup={openCleanup} />
+            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={handleSelectRun} onCreate={openLauncher} onCleanup={openCleanup} />
             <section className="run-workspace">
               <header className="run-workspace-header">
                 <div className="run-workspace-title">
@@ -539,16 +622,22 @@ export default function App() {
                   <button role="tab" aria-selected={monitorPanel === "evidence"} className={monitorPanel === "evidence" ? "is-active" : ""} onClick={() => setMonitorPanel("evidence")}>
                     <FileCheck2 size={16} />交付证据
                   </button>
+                  <button role="tab" aria-selected={monitorPanel === "usage"} className={monitorPanel === "usage" ? "is-active" : ""} onClick={() => setMonitorPanel("usage")}>
+                    <Gauge size={16} />用量
+                  </button>
                 </div>
               </header>
               <div className={`run-panel run-panel-graph ${monitorPanel === "graph" ? "is-active" : ""}`}>
-                <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task: TaskRunState) => { setSelectedTaskId(task.task.id); if (window.innerWidth <= 800) setMobileView("details"); }} />
+                <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={handleSelectTask} />
               </div>
               <div className={`run-panel run-panel-activity ${monitorPanel === "activity" ? "is-active" : ""}`}>
-                <EventConsole run={run} events={events} connected={connected} />
+                <EventConsole run={run} events={events} connected={connected} exporting={busy} onExport={() => void exportRunEvents()} />
               </div>
               <div className={`run-panel run-panel-evidence ${monitorPanel === "evidence" ? "is-active" : ""}`}>
                 <EvidenceCenter run={run} evidence={evidence} loading={evidenceLoading} onReadArtifact={readEvidenceArtifact} />
+              </div>
+              <div className={`run-panel run-panel-usage ${monitorPanel === "usage" ? "is-active" : ""}`}>
+                <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={() => void refreshUsage().catch((requestError: unknown) => setError(errorMessage(requestError)))} />
               </div>
             </section>
             <TaskInspector run={run} task={selectedTask} />
@@ -581,10 +670,6 @@ export default function App() {
 
 function MobileTab({ active, onClick, icon, label }: { active: boolean; onClick(): void; icon: React.ReactNode; label: string }) {
   return <button className={active ? "is-active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function latestPendingApproval(run: RunState | undefined): ApprovalRequest | undefined {

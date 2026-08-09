@@ -1,11 +1,16 @@
+/* ==========================================================================
+   Tauri 桌面壳启动页样式 — 调色板全部消费 theme.css 令牌（亮/暗双主题）。
+   启动卡片：分层表面 + 细边框高光（--edge-highlight），暗色下同样成立。
+   ========================================================================== */
+
 .desktop-launcher {
   display: grid;
   width: 100%;
   height: 100dvh;
   min-height: 560px;
   grid-template-rows: 64px minmax(0, 1fr) 52px;
-  color: #1d2527;
-  background: #f4f6f5;
+  color: var(--ink);
+  background: var(--bg);
 }
 
 .launcher-header,
@@ -13,20 +18,22 @@
   display: flex;
   align-items: center;
   padding: 0 28px;
-  border-color: #dde4e2;
-  background: rgba(255, 255, 255, 0.92);
+  border-color: var(--line);
+  background: var(--surface-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .launcher-header {
   justify-content: space-between;
-  border-bottom: 1px solid #dde4e2;
+  border-bottom: 1px solid var(--line);
 }
 
 .launcher-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 15px;
+  font-size: var(--text-16);
 }
 
 .launcher-brand-icon {
@@ -34,19 +41,19 @@
   width: 34px;
   height: 34px;
   place-items: center;
-  color: #ffffff;
-  border-radius: 7px;
-  background: #0f766e;
+  color: var(--on-accent);
+  border-radius: var(--radius-md);
+  background: var(--accent);
 }
 
 .launcher-edition {
   padding: 4px 7px;
-  color: #66736f;
-  border: 1px solid #d5dedb;
-  border-radius: 5px;
-  background: #ffffff;
-  font-size: 11px;
-  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: var(--text-11);
+  font-weight: var(--weight-semibold);
 }
 
 .launcher-main {
@@ -59,7 +66,12 @@
 
 .launcher-content {
   width: min(100%, 520px);
+  padding: 34px 30px 26px;
   text-align: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-2), var(--edge-highlight);
 }
 
 .launcher-hero-icon {
@@ -68,31 +80,31 @@
   height: 62px;
   margin: 0 auto 20px;
   place-items: center;
-  color: #0f766e;
-  border: 1px solid #b9d7d2;
-  border-radius: 8px;
-  background: #e8f4f2;
+  color: var(--accent-ink);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
 }
 
 .launcher-hero-icon.is-error {
-  color: #a63f3f;
-  border-color: #ebcaca;
-  background: #fceeee;
+  color: var(--danger-ink);
+  border-color: color-mix(in oklab, var(--danger) 30%, transparent);
+  background: var(--danger-soft);
 }
 
 .launcher-kicker {
   min-height: 18px;
   margin: 0 0 7px;
-  color: #74817d;
-  font-size: 12px;
-  font-weight: 750;
+  color: var(--muted);
+  font-size: var(--text-12);
+  font-weight: var(--weight-bold);
 }
 
 .launcher-content h1 {
   margin: 0;
-  color: #20292a;
-  font-size: 30px;
-  font-weight: 720;
+  color: var(--ink);
+  font-size: 28px;
+  font-weight: var(--weight-bold);
   line-height: 1.25;
   letter-spacing: 0;
 }
@@ -100,8 +112,8 @@
 .launcher-message {
   min-height: 24px;
   margin: 12px auto 24px;
-  color: #65726f;
-  font-size: 14px;
+  color: var(--muted);
+  font-size: var(--text-14);
   line-height: 1.65;
 }
 
@@ -121,19 +133,23 @@
   justify-content: center;
   gap: 8px;
   padding: 0 16px;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 750;
+  border-radius: var(--radius-md);
+  font-size: var(--text-13);
+  font-weight: var(--weight-bold);
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
 }
 
 .launcher-primary {
   min-width: 210px;
-  color: #ffffff;
-  border: 1px solid #0f766e;
-  background: #0f766e;
-  box-shadow: 0 1px 2px rgba(15, 72, 66, 0.18);
+  color: var(--on-accent);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  box-shadow: var(--shadow-1);
 }
 
 .launcher-primary svg:last-child {
@@ -141,19 +157,20 @@
 }
 
 .launcher-primary:hover {
-  border-color: #0b625c;
-  background: #0b625c;
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
 }
 
 .launcher-secondary {
-  color: #41504c;
-  border: 1px solid #c8d3d0;
-  background: #ffffff;
+  color: var(--ink-2);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-1);
 }
 
 .launcher-secondary:hover {
-  border-color: #a7b7b2;
-  background: #f8faf9;
+  color: var(--ink);
+  border-color: var(--muted);
+  background: var(--surface-2);
 }
 
 .launcher-primary:disabled,
@@ -167,9 +184,9 @@
   height: 44px;
   align-items: center;
   gap: 9px;
-  color: #4f5d59;
-  font-size: 13px;
-  font-weight: 700;
+  color: var(--ink-2);
+  font-size: var(--text-13);
+  font-weight: var(--weight-semibold);
 }
 
 .launcher-spinner {
@@ -177,9 +194,11 @@
 }
 
 .launcher-checks {
-  margin-top: 38px;
-  border-top: 1px solid #dce4e1;
-  border-bottom: 1px solid #dce4e1;
+  margin-top: 30px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
 }
 
 .launcher-check {
@@ -188,11 +207,11 @@
   grid-template-columns: 22px 90px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
-  color: #8a9692;
+  padding: 0 12px;
+  color: var(--muted);
   text-align: left;
-  border-bottom: 1px solid #e5eae8;
-  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-12);
 }
 
 .launcher-check:last-child {
@@ -200,7 +219,7 @@
 }
 
 .launcher-check > span:nth-child(2) {
-  font-weight: 750;
+  font-weight: var(--weight-bold);
 }
 
 .launcher-check small {
@@ -216,27 +235,27 @@
   width: 20px;
   height: 20px;
   place-items: center;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 
 .launcher-check.is-done {
-  color: #3c4d49;
+  color: var(--ink-2);
 }
 
 .launcher-check.is-done .launcher-check-icon {
-  color: #ffffff;
-  background: #24815e;
+  color: var(--on-accent);
+  background: var(--success);
 }
 
 .launcher-check.is-active {
-  color: #226a64;
+  color: var(--accent-ink);
 }
 
 .launcher-details {
   margin-top: 16px;
-  color: #6c7975;
+  color: var(--muted);
   text-align: left;
-  font-size: 11px;
+  font-size: var(--text-11);
 }
 
 .launcher-details summary {
@@ -244,7 +263,7 @@
   margin: 0 auto;
   padding: 5px;
   cursor: pointer;
-  font-weight: 700;
+  font-weight: var(--weight-semibold);
 }
 
 .launcher-details pre {
@@ -252,11 +271,11 @@
   overflow: auto;
   margin: 8px 0 0;
   padding: 12px;
-  color: #45524f;
-  border: 1px solid #d9e1de;
-  border-radius: 6px;
-  background: #ffffff;
-  font-size: 11px;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: var(--text-11);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -265,13 +284,15 @@
 .launcher-footer {
   justify-content: center;
   gap: 7px;
-  color: #74817d;
-  border-top: 1px solid #dde4e2;
-  font-size: 11px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-11);
 }
 
 @keyframes launcher-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 600px) {
@@ -290,8 +311,12 @@
     padding: 42px 20px 28px;
   }
 
+  .launcher-content {
+    padding: 26px 18px 20px;
+  }
+
   .launcher-content h1 {
-    font-size: 26px;
+    font-size: 24px;
   }
 
   .launcher-actions {
@@ -305,12 +330,12 @@
   }
 
   .launcher-checks {
-    margin-top: 28px;
+    margin-top: 24px;
   }
 
   .launcher-check {
     grid-template-columns: 22px 72px minmax(0, 1fr);
-    padding: 0 4px;
+    padding: 0 8px;
   }
 }
 

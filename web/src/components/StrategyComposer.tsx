@@ -28,6 +28,9 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useFlowPalette } from "../flow-theme";
+import { STRATEGY_STAGE_GRID } from "../graph";
+import { useMediaQuery } from "../useMediaQuery";
 import type {
   CompiledStrategyStage,
   CompiledStrategyTopology,
@@ -85,9 +88,9 @@ export function StrategyComposer({
   const [pendingSelection, setPendingSelection] = useState<string>();
   const [feedback, setFeedback] = useState<ComposerFeedback>();
   const [submitting, setSubmitting] = useState(false);
-  const [compactLayout, setCompactLayout] = useState(() => isCompactLayout());
+  const compactLayout = useMediaQuery("(max-width: 800px)");
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(() => !isCompactLayout());
+  const [inspectorOpen, setInspectorOpen] = useState(() => !compactLayout);
 
   useEffect(() => {
     if (!config.strategies.definitions[selectedName]) {
@@ -111,26 +114,20 @@ export function StrategyComposer({
   }, [config.strategies.definitions, pendingSelection]);
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 800px)");
-    const updateLayout = () => {
-      setCompactLayout(mediaQuery.matches);
-      if (mediaQuery.matches) {
-        setLibraryOpen(false);
-        setInspectorOpen(false);
-      }
-    };
-    updateLayout();
-    mediaQuery.addEventListener("change", updateLayout);
-    return () => mediaQuery.removeEventListener("change", updateLayout);
-  }, []);
+    if (compactLayout) {
+      setLibraryOpen(false);
+      setInspectorOpen(false);
+    }
+  }, [compactLayout]);
 
+  const palette = useFlowPalette();
   const topology = useMemo(
     () => buildPreviewTopology(definition.compiledTopology, draft),
     [definition.compiledTopology, draft],
   );
   const graph = useMemo(
-    () => buildStrategyGraph(topology, compactLayout),
-    [compactLayout, topology],
+    () => buildStrategyGraph(topology, compactLayout, palette.edge),
+    [compactLayout, palette.edge, topology],
   );
   const persistedDraft = useMemo(() => createDraft(definition, config), [config, definition]);
   const dirty = !sameDraft(draft, persistedDraft);
@@ -252,7 +249,7 @@ export function StrategyComposer({
             minZoom={0.45}
             maxZoom={1.4}
           >
-            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#cbd5d1" />
+            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color={palette.dot} />
             <Controls showInteractive={false} />
           </ReactFlow>
           <div className="composer-canvas-summary">
@@ -570,6 +567,7 @@ function buildPreviewTopology(
 function buildStrategyGraph(
   topology: CompiledStrategyTopology,
   compact: boolean,
+  edgeColor: string,
 ): { nodes: Array<Node<StrategyNodeData>>; edges: Edge[] } {
   const columns = compact ? 2 : 3;
   const nodes = topology.stages.map((stage, index) => {
@@ -583,7 +581,10 @@ function buildStrategyGraph(
     return {
       id: stage.id,
       type: "strategyStage",
-      position: { x: column * 270, y: row * 160 },
+      position: {
+        x: column * STRATEGY_STAGE_GRID.columnWidth,
+        y: row * STRATEGY_STAGE_GRID.rowHeight,
+      },
       data: {
         stage,
         sourcePosition: endsRow ? Position.Bottom : horizontalSource,
@@ -597,17 +598,13 @@ function buildStrategyGraph(
     target: edge.target,
     type: "smoothstep",
     markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-    style: { stroke: "#81877d", strokeWidth: 1.5 },
+    style: { stroke: edgeColor, strokeWidth: 1.5 },
   }));
   return { nodes, edges };
 }
 
 function topologyModeLabel(mode: StrategyTopologyMode): string {
   return mode === "sequential" ? "串行" : "并行 DAG";
-}
-
-function isCompactLayout(): boolean {
-  return typeof window !== "undefined" && window.matchMedia("(max-width: 800px)").matches;
 }
 
 function stageKindLabel(kind: CompiledStrategyStage["kind"]): string {

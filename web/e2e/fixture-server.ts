@@ -49,6 +49,9 @@ await writeFile(
 );
 
 const state = fixtureState(visualRoot);
+// 标记为其他控制服务持有的活跃运行：服务启动时的崩溃恢复会把它转为
+// interrupted（可重试、证据就绪度需要处理），与既有 e2e 断言保持一致。
+state.supervisorId = "fixture-stale-supervisor";
 const runDirectory = path.join(visualRoot, ".agent-team", "runs", state.id);
 await mkdir(runDirectory, { recursive: true });
 await writeFile(path.join(runDirectory, "state.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");

@@ -10,6 +10,7 @@ import type {
   StartRunInput,
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
+  UsageReport,
   WorkspaceInfo,
 } from "./types";
 
@@ -165,6 +166,35 @@ export async function resumeRun(
 
 export function eventStreamUrl(scope: ProjectScope, runId: string): string {
   return `${apiRoot(scope)}/events?runId=${encodeURIComponent(runId)}&after=0`;
+}
+
+export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
+  return await request<UsageReport>(`${apiRoot(scope)}/usage`);
+}
+
+export function runExportUrl(scope: ProjectScope, runId: string): string {
+  return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/export`;
+}
+
+/** 拉取某运行的 NDJSON 事件导出并触发浏览器下载（同源 fetch + blob，兼容 CSP）。 */
+export async function downloadRunEvents(scope: ProjectScope, runId: string): Promise<void> {
+  const response = await fetch(runExportUrl(scope, runId));
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    throw new ApiError(
+      response.status,
+      typeof body.error === "string" ? body.error : `请求失败 (${response.status})`,
+    );
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${runId}.ndjson`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 async function request<T = unknown>(url: string, init?: RequestInit): Promise<T> {

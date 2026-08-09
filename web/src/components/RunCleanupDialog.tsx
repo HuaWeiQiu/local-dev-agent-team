@@ -1,5 +1,6 @@
 import { AlertTriangle, ArchiveX, Clock3, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { formatBytes } from "../presentation";
 import type { RunCleanupPreview } from "../types";
 import { RunStatusBadge } from "./StatusBadge";
 
@@ -54,11 +55,4 @@ export function RunCleanupDialog({ open, preview, busy, error, onPreview, onConf
       </section>
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
-  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MB`;
-  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
 }
