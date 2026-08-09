@@ -170,37 +170,42 @@ export class ProfiledAgentService implements RoleAgentService {
           observationFailed = true;
           throw error;
         }
-        const result = await invokeAgent(
-          {
-            adapterName: candidate.profile.adapter,
-            profile: candidate.profile,
-            cwd: options.cwd ?? this.root,
-            prompt,
-            artifactDirectory,
-            ...(outputSchema ? { outputSchema } : {}),
-            ...(this.signal ? { signal: this.signal } : {}),
-            ...(this.observer?.maxProcessOutputBytes
-              ? { maxOutputBytes: this.observer.maxProcessOutputBytes }
-              : {}),
-            onStdout: (chunk) => {
-              this.store.emit(options.runId, "agent.stdout", {
-                role: options.role,
-                profile: candidate.name,
-                artifactKey: options.artifactKey,
-                chunk: boundedOutputChunk(chunk),
-              });
-            },
-            onStderr: (chunk) => {
-              this.store.emit(options.runId, "agent.stderr", {
-                role: options.role,
-                profile: candidate.name,
-                artifactKey: options.artifactKey,
-                chunk: boundedOutputChunk(chunk),
-              });
-            },
+        const batcher = new StreamEventBatcher({
+          emit: (stream, chunk) => {
+            this.store.emit(options.runId, `agent.${stream}`, {
+              role: options.role,
+              profile: candidate.name,
+              artifactKey: options.artifactKey,
+              chunk,
+            });
           },
-          this.registry,
-        );
+        });
+        let result;
+        try {
+          result = await invokeAgent(
+            {
+              adapterName: candidate.profile.adapter,
+              profile: candidate.profile,
+              cwd: options.cwd ?? this.root,
+              prompt,
+              artifactDirectory,
+              ...(outputSchema ? { outputSchema } : {}),
+              ...(this.signal ? { signal: this.signal } : {}),
+              ...(this.observer?.maxProcessOutputBytes
+                ? { maxOutputBytes: this.observer.maxProcessOutputBytes }
+                : {}),
+              onStdout: (chunk) => {
+                batcher.push("stdout", boundedOutputChunk(chunk));
+              },
+              onStderr: (chunk) => {
+                batcher.push("stderr", boundedOutputChunk(chunk));
+              },
+            },
+            this.registry,
+          );
+        } finally {
+          batcher.flushAll();
+        }
         if (invocationId) {
           observed = true;
           try {
@@ -280,7 +285,7 @@ export class ProfiledAgentService implements RoleAgentService {
       : fileURLToPath(
           new URL(`../../prompts/${defaultNames[promptKey] ?? `${promptKey}.md`}`, import.meta.url),
         );
-    const instructions = await readFile(promptPath, "utf8");
+    const instructions = await loadPromptTemplate(promptPath);
     return `${instructions.trim()}\n\n## Run Context\n\n${JSON.stringify(context, null, 2)}\n`;
   }
 }
@@ -302,6 +307,82 @@ function boundedOutputChunk(chunk: string): string {
   return chunk.length <= maxCharacters
     ? chunk
     : `${chunk.slice(0, maxCharacters)}\n[chunk truncated]`;
+}
+
+export type StreamKind = "stdout" | "stderr";
+
+export interface StreamEventBatcherOptions {
+  emit: (stream: StreamKind, chunk: string) => void;
+  flushIntervalMs?: number;
+  maxBufferedCharacters?: number;
+  now?: () => number;
+}
+
+const defaultFlushIntervalMs = 200;
+const defaultMaxBufferedCharacters = 64 * 1024;
+
+export class StreamEventBatcher {
+  private readonly buffers: Record<StreamKind, string[]> = { stdout: [], stderr: [] };
+  private readonly bufferedCharacters: Record<StreamKind, number> = { stdout: 0, stderr: 0 };
+  private readonly bufferStartedAt: Record<StreamKind, number> = { stdout: 0, stderr: 0 };
+  private readonly flushIntervalMs: number;
+  private readonly maxBufferedCharacters: number;
+  private readonly now: () => number;
+
+  constructor(private readonly options: StreamEventBatcherOptions) {
+    this.flushIntervalMs = options.flushIntervalMs ?? defaultFlushIntervalMs;
+    this.maxBufferedCharacters = options.maxBufferedCharacters ?? defaultMaxBufferedCharacters;
+    this.now = options.now ?? Date.now;
+  }
+
+  push(stream: StreamKind, chunk: string): void {
+    if (!chunk) return;
+    const now = this.now();
+    if (
+      this.bufferedCharacters[stream] > 0 &&
+      now - this.bufferStartedAt[stream] >= this.flushIntervalMs
+    ) {
+      this.flush(stream);
+    }
+    if (this.bufferedCharacters[stream] === 0) {
+      this.bufferStartedAt[stream] = now;
+    }
+    this.buffers[stream].push(chunk);
+    this.bufferedCharacters[stream] += chunk.length;
+    if (this.bufferedCharacters[stream] >= this.maxBufferedCharacters) {
+      this.flush(stream);
+    }
+  }
+
+  flushAll(): void {
+    this.flush("stdout");
+    this.flush("stderr");
+  }
+
+  private flush(stream: StreamKind): void {
+    if (this.bufferedCharacters[stream] === 0) return;
+    const chunk = this.buffers[stream].join("");
+    this.buffers[stream] = [];
+    this.bufferedCharacters[stream] = 0;
+    this.options.emit(stream, chunk);
+  }
+}
+
+const promptTemplateCache = new Map<string, Promise<string>>();
+
+export async function loadPromptTemplate(promptPath: string): Promise<string> {
+  const cached = promptTemplateCache.get(promptPath);
+  if (cached) return await cached;
+  const pending = readFile(promptPath, "utf8").catch((error: unknown) => {
+    promptTemplateCache.delete(promptPath);
+    throw error;
+  });
+  promptTemplateCache.set(promptPath, pending);
+  return await pending;
+}
+
+export function clearPromptTemplateCache(): void {
+  promptTemplateCache.clear();
 }
 
 function parseJsonText(text: string): unknown {

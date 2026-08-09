@@ -39,6 +39,7 @@ import type {
 } from "../state/types.js";
 import { branchSegment, createRunId } from "./id.js";
 import { resolveStrategy } from "../strategies/resolve.js";
+import { legacyExecutionTimeoutSeconds } from "../strategies/defaults.js";
 import type { RunEventSink } from "../events/types.js";
 import { traceIdForRun } from "../events/store.js";
 import {
@@ -220,7 +221,7 @@ export class LocalWorkflowRunner {
     const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
     const git = new GitManager(this.loaded.root, this.worktreesDirectory);
     const deadline = createExecutionDeadline(
-      state.strategy.executionTimeoutSeconds ?? 14_400,
+      state.strategy.executionTimeoutSeconds ?? legacyExecutionTimeoutSeconds,
       options.signal,
     );
     const workflowSignal = deadline.signal;
@@ -619,23 +620,15 @@ export class LocalWorkflowRunner {
         });
         taskState.profile = worker.profileName;
 
-        const commands = deduplicateCommands([
-          ...this.loaded.config.quality.commands,
-          ...taskState.task.acceptanceCommands,
-        ]);
-        const quality = await runQualityCommands(
+        const quality = await this.runTaskQualityGates(
+          state,
+          taskState,
           taskState.worktree,
-          commands,
-          this.loaded.config.quality.commandTimeoutSeconds,
-          store.artifactDirectory(
-            state.id,
-            taskArtifactKey(state, taskState.task.id, attempt, "quality"),
-          ),
+          store,
+          budget,
+          attempt,
           signal,
-          { maxOutputBytes: state.strategy.maxProcessOutputBytes },
         );
-        await budget.recordQuality(quality);
-        taskState.quality = quality;
 
         await git.stage(taskState.worktree);
         const files = await git.changedFiles(taskState.worktree);
@@ -650,65 +643,28 @@ export class LocalWorkflowRunner {
           continue;
         }
         const diff = await git.stagedDiff(taskState.worktree);
-        await store.transition(
+        const { review, test } = await this.reviewTaskAttempt(
           state,
-          "reviewing-testing",
-          `Reviewing and testing task ${taskState.task.id}, attempt ${attempt}`,
+          taskState,
+          taskState.worktree,
+          store,
+          agent,
+          quality,
+          files,
+          diff,
+          attempt,
         );
-        const [review, test] = await Promise.all([
-          agent.runStructured({
-            role: "reviewer",
-            cwd: taskState.worktree,
-            runId: state.id,
-            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "review"),
-            context: {
-              goal: state.goal,
-              planSummary: state.plan.summary,
-              task: taskState.task,
-              changedFiles: files,
-              diff,
-            },
-            schema: reviewVerdictSchema,
-            jsonSchema: reviewVerdictJsonSchema,
-          }),
-          agent.runStructured({
-            role: "tester",
-            cwd: taskState.worktree,
-            runId: state.id,
-            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "test"),
-            context: {
-              goal: state.goal,
-              task: taskState.task,
-              changedFiles: files,
-              diff,
-              quality: compactQuality(quality),
-            },
-            schema: testVerdictSchema,
-            jsonSchema: testVerdictJsonSchema,
-          }),
-        ]);
-        taskState.review = review.value;
-        taskState.test = test.value;
-        await store.save(state);
 
-        if (review.value.verdict === "escalate" || test.value.verdict === "escalate") {
+        if (review.verdict === "escalate" || test.verdict === "escalate") {
           throw new Error(
-            `Specialist escalated task: ${review.value.summary}; ${test.value.summary}`,
+            `Specialist escalated task: ${review.summary}; ${test.summary}`,
           );
         }
-        if (passesTaskGates(quality, review.value, test.value)) {
-          await git.stage(taskState.worktree);
-          const finalFiles = await git.changedFiles(taskState.worktree);
-          git.assertOwnedPaths(finalFiles, taskState.task.ownedPaths);
-          taskState.commit = await git.commit(
-            taskState.worktree,
-            `agent: ${taskState.task.id} ${taskState.task.title}`,
-          );
-          taskState.status = "passed";
-          await store.save(state);
+        if (passesTaskGates(quality, review, test)) {
+          await this.commitPassedTask(state, taskState, taskState.worktree, store, git);
           return;
         }
-        feedback = buildReworkFeedback(quality, review.value, test.value);
+        feedback = buildReworkFeedback(quality, review, test);
         await store.transition(
           state,
           "reworking",
@@ -727,6 +683,107 @@ export class LocalWorkflowRunner {
 
     taskState.status = "blocked";
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
+    await store.save(state);
+  }
+
+  private async runTaskQualityGates(
+    state: RunState,
+    taskState: TaskRunState,
+    worktree: string,
+    store: RunStateStore,
+    budget: RunBudgetTracker,
+    attempt: number,
+    signal?: AbortSignal,
+  ): Promise<QualityReport> {
+    const commands = deduplicateCommands([
+      ...this.loaded.config.quality.commands,
+      ...taskState.task.acceptanceCommands,
+    ]);
+    const quality = await runQualityCommands(
+      worktree,
+      commands,
+      this.loaded.config.quality.commandTimeoutSeconds,
+      store.artifactDirectory(
+        state.id,
+        taskArtifactKey(state, taskState.task.id, attempt, "quality"),
+      ),
+      signal,
+      { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+    );
+    await budget.recordQuality(quality);
+    taskState.quality = quality;
+    return quality;
+  }
+
+  private async reviewTaskAttempt(
+    state: RunState,
+    taskState: TaskRunState,
+    worktree: string,
+    store: RunStateStore,
+    agent: RoleAgentService,
+    quality: QualityReport,
+    changedFiles: string[],
+    diff: string,
+    attempt: number,
+  ): Promise<{ review: ReviewVerdict; test: TestVerdict }> {
+    await store.transition(
+      state,
+      "reviewing-testing",
+      `Reviewing and testing task ${taskState.task.id}, attempt ${attempt}`,
+    );
+    const [review, test] = await Promise.all([
+      agent.runStructured({
+        role: "reviewer",
+        cwd: worktree,
+        runId: state.id,
+        artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "review"),
+        context: {
+          goal: state.goal,
+          planSummary: state.plan!.summary,
+          task: taskState.task,
+          changedFiles,
+          diff,
+        },
+        schema: reviewVerdictSchema,
+        jsonSchema: reviewVerdictJsonSchema,
+      }),
+      agent.runStructured({
+        role: "tester",
+        cwd: worktree,
+        runId: state.id,
+        artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "test"),
+        context: {
+          goal: state.goal,
+          task: taskState.task,
+          changedFiles,
+          diff,
+          quality: compactQuality(quality),
+        },
+        schema: testVerdictSchema,
+        jsonSchema: testVerdictJsonSchema,
+      }),
+    ]);
+    taskState.review = review.value;
+    taskState.test = test.value;
+    await store.save(state);
+    return { review: review.value, test: test.value };
+  }
+
+  private async commitPassedTask(
+    state: RunState,
+    taskState: TaskRunState,
+    worktree: string,
+    store: RunStateStore,
+    git: GitManager,
+  ): Promise<void> {
+    await git.stage(worktree);
+    const finalFiles = await git.changedFiles(worktree);
+    git.assertOwnedPaths(finalFiles, taskState.task.ownedPaths);
+    taskState.commit = await git.commit(
+      worktree,
+      `agent: ${taskState.task.id} ${taskState.task.title}`,
+    );
+    taskState.status = "passed";
     await store.save(state);
   }
 }

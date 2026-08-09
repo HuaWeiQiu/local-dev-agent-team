@@ -1,6 +1,11 @@
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
-import { parseOutputFileResult, validateProfileArguments } from "./shared.js";
+import {
+  parseOutputFileResult,
+  runAdapterDoctor,
+  validateProfileArguments,
+  type AdapterDoctorSpec,
+} from "./shared.js";
 import { assertAdapterProfile } from "./conformance.js";
 import type {
   AdapterDoctorOptions,
@@ -91,87 +96,18 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async doctor(options: AdapterDoctorOptions): Promise<DoctorCheck[]> {
-    const executable = options.profile.executable ?? "codex";
-    const checks: DoctorCheck[] = [];
-    const version = await runProcess({
-      command: executable,
-      args: ["--version"],
-      cwd: options.cwd,
-      timeoutMs: 10_000,
-    }).catch(() => undefined);
-    checks.push({
-      profile: options.profileName,
-      adapter: this.name,
-      check: "executable",
-      status: version?.exitCode === 0 ? "pass" : "fail",
-      detail: version?.stdout.trim() || version?.stderr.trim() || `${executable} not found`,
-    });
-    if (version?.exitCode !== 0) {
-      return checks;
-    }
-
-    const auth = await runProcess({
-      command: executable,
-      args: ["login", "status"],
-      cwd: options.cwd,
-      timeoutMs: 10_000,
-    });
-    checks.push({
-      profile: options.profileName,
-      adapter: this.name,
-      check: "authentication",
-      status: auth.exitCode === 0 ? "pass" : "fail",
-      detail: auth.exitCode === 0 ? "Codex authentication is available" : auth.stderr.trim(),
-    });
-
-    const capabilityOk = this.supportedReasoning.includes(options.profile.reasoning);
-    checks.push({
-      profile: options.profileName,
-      adapter: this.name,
-      check: "capability",
-      status: capabilityOk ? "pass" : "fail",
-      detail: capabilityOk
-        ? `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}, externalTools=${options.profile.externalTools}`
-        : `Unsupported reasoning '${options.profile.reasoning}'`,
-    });
-
-    checks.push(
-      options.probeModel
-        ? await this.probeModel(options)
-        : {
-            profile: options.profileName,
-            adapter: this.name,
-            check: "model",
-            status: "skip",
-            detail: "Active model probe not requested",
-          },
-    );
-    return checks;
-  }
-
-  private async probeModel(options: AdapterDoctorOptions): Promise<DoctorCheck> {
-    const { nativeProfile: _nativeProfile, ...probeProfile } = options.profile;
-    const profile: AgentProfile = {
-      ...probeProfile,
-      permission: "read-only",
-      externalTools: "deny",
-      timeoutSeconds: Math.min(options.profile.timeoutSeconds, 120),
-      args: [],
-    };
-    const invocation = this.buildInvocation(profile, {
-      cwd: options.cwd,
-      prompt: "Reply with exactly OK. Do not call tools.",
-    });
-    const result = await runProcess(invocation);
-    return {
-      profile: options.profileName,
-      adapter: this.name,
-      check: "model",
-      status: result.exitCode === 0 ? "pass" : "fail",
-      detail:
-        result.exitCode === 0
-          ? `Model '${options.profile.model}' accepted by Codex`
-          : result.stderr.trim() || "Codex model probe failed",
-    };
+    return await runAdapterDoctor(this, options, doctorSpec);
   }
 }
+
+const doctorSpec: AdapterDoctorSpec = {
+  displayName: "Codex",
+  executableFallback: "codex",
+  authArgs: ["login", "status"],
+  authPassDetail: "Codex authentication is available",
+  prepareProbeProfile: (profile) => {
+    // Native profiles pull in user-level configuration the probe must not use.
+    const { nativeProfile: _nativeProfile, ...probeProfile } = profile;
+    return probeProfile;
+  },
+};
