@@ -10,6 +10,13 @@ import { buildOtlpTraceExport } from "../observability/otlp.js";
 import { buildInteropManifest } from "../interop/manifest.js";
 import { resolveStrategy } from "../strategies/resolve.js";
 import {
+  legacyApprovalTimeoutSeconds,
+  legacyExecutionTimeoutSeconds,
+  legacyMaxAgentInvocations,
+  legacyMaxArtifactBytes,
+  legacyMaxProcessOutputBytes,
+} from "../strategies/defaults.js";
+import {
   StrategyBlueprintCatalog,
   StrategyBlueprintConflictError,
   StrategyBlueprintNotFoundError,
@@ -272,6 +279,297 @@ async function handleWorkspaceRequest(
   throw new HttpError(404, "Route not found");
 }
 
+type ProjectApiHandler = (
+  context: ProjectHttpContext,
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  params: Record<string, string>,
+) => Promise<void> | void;
+
+interface ProjectApiRoute {
+  method: "GET" | "POST" | "PUT" | "DELETE";
+  pattern: string;
+  handler: ProjectApiHandler;
+}
+
+const projectApiRoutes: ProjectApiRoute[] = [
+  {
+    method: "GET",
+    pattern: "/health",
+    handler: (context, _request, response) => {
+      sendJson(response, 200, {
+        status: "ok",
+        project: context.loaded.config.project.name,
+        projectId: context.id,
+        supervisorId: context.supervisor.id,
+      });
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/config",
+    handler: (context, _request, response) => {
+      sendJson(response, 200, buildPublicConfig(context.loaded, context.strategies));
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/strategies/preflight",
+    handler: async (context, request, response) => {
+      const parsed = strategyBlueprintPreflightRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        const checked = requireStrategyCatalog(context).preflight(
+          parsed.data.name,
+          parsed.data.definition,
+        );
+        sendJson(response, 200, blueprintProjection(checked, "custom"));
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw strategyHttpError(error);
+      }
+    },
+  },
+  {
+    method: "PUT",
+    pattern: "/strategies/:name",
+    handler: async (context, request, response, _url, params) => {
+      const name = decodePathSegment(params.name!);
+      const catalog = requireStrategyCatalog(context);
+      try {
+        const parsed = strategyBlueprintRequestSchema.safeParse(await readJson(request));
+        if (!parsed.success) {
+          throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+        }
+        const checked = await catalog.save(name, parsed.data.definition);
+        sendJson(response, 200, blueprintProjection(checked, "custom"));
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw strategyHttpError(error);
+      }
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: "/strategies/:name",
+    handler: async (context, _request, response, _url, params) => {
+      const name = decodePathSegment(params.name!);
+      const catalog = requireStrategyCatalog(context);
+      try {
+        await catalog.delete(name);
+        sendJson(response, 200, { name, deleted: true });
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw strategyHttpError(error);
+      }
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/interop",
+    handler: (context, _request, response) => {
+      sendJson(response, 200, buildInteropManifest(context.loaded.config));
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs",
+    handler: async (context, _request, response) => {
+      sendJson(response, 200, { runs: await context.supervisor.list() });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs",
+    handler: async (context, request, response) => {
+      const parsed = startRunRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const idempotency = singleHeader(request.headers["idempotency-key"]);
+      const result = context.supervisor.start(parsed.data, idempotency);
+      sendJson(response, result.deduplicated ? 200 : 202, result);
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/cleanup/preview",
+    handler: async (context, request, response) => {
+      const parsed = cleanupPreviewRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      sendJson(response, 200, await context.supervisor.previewCleanup(parsed.data.olderThanDays));
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/cleanup",
+    handler: async (context, request, response) => {
+      const parsed = cleanupRunRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        sendJson(response, 200, await context.supervisor.cleanup(parsed.data.token));
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/events",
+    handler: (context, request, response, url) => {
+      streamEvents(request, response, context.supervisor, url.searchParams.get("runId") ?? undefined);
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/usage",
+    handler: async (context, _request, response) => {
+      sendJson(response, 200, await context.supervisor.usageReport());
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId/export",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      if (!(await context.supervisor.get(runId))) {
+        throw new HttpError(404, "Run not found");
+      }
+      const lines = listRunEvents(context.supervisor, runId).map((event) => JSON.stringify(event));
+      const body = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+      response.writeHead(200, {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${runId}.ndjson"`,
+        "Content-Length": Buffer.byteLength(body),
+        "Cache-Control": "no-store",
+      });
+      response.end(body);
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId/telemetry",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      if (!(await context.supervisor.get(runId))) {
+        throw new HttpError(404, "Run not found");
+      }
+      sendJson(
+        response,
+        200,
+        buildOtlpTraceExport(
+          listRunEvents(context.supervisor, runId),
+          context.loaded.config.project.name,
+        ),
+      );
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId/evidence/file",
+    handler: async (context, _request, response, url, params) => {
+      const relativePath = url.searchParams.get("path");
+      if (!relativePath) throw new HttpError(400, "Artifact path is required");
+      const runId = decodePathSegment(params.runId!);
+      try {
+        sendJson(response, 200, {
+          file: await context.supervisor.evidenceFile(runId, relativePath),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new HttpError(message.includes("was not found") ? 404 : 400, message);
+      }
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId/evidence",
+    handler: async (context, _request, response, _url, params) => {
+      const evidence = await context.supervisor.evidence(decodePathSegment(params.runId!));
+      if (!evidence) throw new HttpError(404, "Run not found");
+      sendJson(response, 200, { evidence });
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId",
+    handler: async (context, _request, response, _url, params) => {
+      const run = await context.supervisor.get(decodePathSegment(params.runId!));
+      if (!run) {
+        throw new HttpError(404, "Run not found");
+      }
+      sendJson(response, 200, { run });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/cancel",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      if (!context.supervisor.cancel(runId)) {
+        throw new HttpError(409, "Run is not active in this control service");
+      }
+      sendJson(response, 202, { runId, status: "cancel-requested" });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/retry",
+    handler: async (context, request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      const idempotency = singleHeader(request.headers["idempotency-key"]);
+      try {
+        const result = await context.supervisor.retry(runId, idempotency);
+        sendJson(response, result.deduplicated ? 200 : 202, result);
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/respond-approval",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = approvalResponseRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        const result = await context.supervisor.respondApproval(
+          decodePathSegment(params.runId!),
+          parsed.data,
+        );
+        sendJson(response, result.status === "resuming" ? 202 : 200, result);
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/resume",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = resumeRunRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        const result = await context.supervisor.resume(decodePathSegment(params.runId!), parsed.data);
+        sendJson(response, 202, result);
+      } catch (error) {
+        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+];
+
 async function dispatchProjectApi(
   context: ProjectHttpContext,
   request: IncomingMessage,
@@ -284,200 +582,37 @@ async function dispatchProjectApi(
   }
   const localPath = url.pathname.slice(apiRoot.length) || "/";
   const method = request.method ?? "GET";
-  const { loaded, supervisor } = context;
-
-  if (method === "GET" && localPath === "/health") {
-    sendJson(response, 200, {
-      status: "ok",
-      project: loaded.config.project.name,
-      projectId: context.id,
-      supervisorId: supervisor.id,
-    });
-    return true;
-  }
-  if (method === "GET" && localPath === "/config") {
-    sendJson(response, 200, buildPublicConfig(loaded, context.strategies));
-    return true;
-  }
-  if (method === "POST" && localPath === "/strategies/preflight") {
-    const parsed = strategyBlueprintPreflightRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    try {
-      const checked = requireStrategyCatalog(context).preflight(
-        parsed.data.name,
-        parsed.data.definition,
-      );
-      sendJson(response, 200, blueprintProjection(checked, "custom"));
-    } catch (error) {
-      throw strategyHttpError(error);
-    }
-    return true;
-  }
-  const strategyMatch = localPath.match(/^\/strategies\/([^/]+)$/);
-  if ((method === "PUT" || method === "DELETE") && strategyMatch?.[1]) {
-    const name = decodePathSegment(strategyMatch[1]);
-    const catalog = requireStrategyCatalog(context);
-    try {
-      if (method === "DELETE") {
-        await catalog.delete(name);
-        sendJson(response, 200, { name, deleted: true });
-      } else {
-        const parsed = strategyBlueprintRequestSchema.safeParse(await readJson(request));
-        if (!parsed.success) {
-          throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-        }
-        const checked = await catalog.save(name, parsed.data.definition);
-        sendJson(response, 200, blueprintProjection(checked, "custom"));
-      }
-    } catch (error) {
-      if (error instanceof HttpError) throw error;
-      throw strategyHttpError(error);
-    }
-    return true;
-  }
-  if (method === "GET" && localPath === "/interop") {
-    sendJson(response, 200, buildInteropManifest(loaded.config));
-    return true;
-  }
-  if (method === "GET" && localPath === "/runs") {
-    sendJson(response, 200, { runs: await supervisor.list() });
-    return true;
-  }
-  if (method === "POST" && localPath === "/runs") {
-    const parsed = startRunRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    const idempotency = singleHeader(request.headers["idempotency-key"]);
-    const result = supervisor.start(parsed.data, idempotency);
-    sendJson(response, result.deduplicated ? 200 : 202, result);
-    return true;
-  }
-  if (method === "POST" && localPath === "/runs/cleanup/preview") {
-    const parsed = cleanupPreviewRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    sendJson(response, 200, await supervisor.previewCleanup(parsed.data.olderThanDays));
-    return true;
-  }
-  if (method === "POST" && localPath === "/runs/cleanup") {
-    const parsed = cleanupRunRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    try {
-      sendJson(response, 200, await supervisor.cleanup(parsed.data.token));
-    } catch (error) {
-      throw new HttpError(409, error instanceof Error ? error.message : String(error));
-    }
-    return true;
-  }
-  if (method === "GET" && localPath === "/events") {
-    streamEvents(request, response, supervisor, url.searchParams.get("runId") ?? undefined);
-    return true;
-  }
-
-  const telemetryMatch = localPath.match(/^\/runs\/([^/]+)\/telemetry$/);
-  if (method === "GET" && telemetryMatch?.[1]) {
-    const runId = decodePathSegment(telemetryMatch[1]);
-    if (!(await supervisor.get(runId))) {
-      throw new HttpError(404, "Run not found");
-    }
-    sendJson(
-      response,
-      200,
-      buildOtlpTraceExport(listRunEvents(supervisor, runId), loaded.config.project.name),
-    );
-    return true;
-  }
-  const evidenceFileMatch = localPath.match(/^\/runs\/([^/]+)\/evidence\/file$/);
-  if (method === "GET" && evidenceFileMatch?.[1]) {
-    const relativePath = url.searchParams.get("path");
-    if (!relativePath) throw new HttpError(400, "Artifact path is required");
-    const runId = decodePathSegment(evidenceFileMatch[1]);
-    try {
-      sendJson(response, 200, {
-        file: await supervisor.evidenceFile(runId, relativePath),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new HttpError(message.includes("was not found") ? 404 : 400, message);
-    }
-    return true;
-  }
-  const evidenceMatch = localPath.match(/^\/runs\/([^/]+)\/evidence$/);
-  if (method === "GET" && evidenceMatch?.[1]) {
-    const evidence = await supervisor.evidence(decodePathSegment(evidenceMatch[1]));
-    if (!evidence) throw new HttpError(404, "Run not found");
-    sendJson(response, 200, { evidence });
-    return true;
-  }
-
-  const runMatch = localPath.match(/^\/runs\/([^/]+)$/);
-  if (method === "GET" && runMatch?.[1]) {
-    const run = await supervisor.get(decodePathSegment(runMatch[1]));
-    if (!run) {
-      throw new HttpError(404, "Run not found");
-    }
-    sendJson(response, 200, { run });
-    return true;
-  }
-  const actionMatch = localPath.match(/^\/runs\/([^/]+)\/actions\/cancel$/);
-  if (method === "POST" && actionMatch?.[1]) {
-    const runId = decodePathSegment(actionMatch[1]);
-    if (!supervisor.cancel(runId)) {
-      throw new HttpError(409, "Run is not active in this control service");
-    }
-    sendJson(response, 202, { runId, status: "cancel-requested" });
-    return true;
-  }
-  const retryMatch = localPath.match(/^\/runs\/([^/]+)\/actions\/retry$/);
-  if (method === "POST" && retryMatch?.[1]) {
-    const runId = decodePathSegment(retryMatch[1]);
-    const idempotency = singleHeader(request.headers["idempotency-key"]);
-    try {
-      const result = await supervisor.retry(runId, idempotency);
-      sendJson(response, result.deduplicated ? 200 : 202, result);
-    } catch (error) {
-      throw new HttpError(409, error instanceof Error ? error.message : String(error));
-    }
-    return true;
-  }
-  const approvalMatch = localPath.match(/^\/runs\/([^/]+)\/actions\/respond-approval$/);
-  if (method === "POST" && approvalMatch?.[1]) {
-    const parsed = approvalResponseRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    try {
-      const result = await supervisor.respondApproval(
-        decodePathSegment(approvalMatch[1]),
-        parsed.data,
-      );
-      sendJson(response, result.status === "resuming" ? 202 : 200, result);
-    } catch (error) {
-      throw new HttpError(409, error instanceof Error ? error.message : String(error));
-    }
-    return true;
-  }
-  const resumeMatch = localPath.match(/^\/runs\/([^/]+)\/actions\/resume$/);
-  if (method === "POST" && resumeMatch?.[1]) {
-    const parsed = resumeRunRequestSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
-    }
-    try {
-      const result = await supervisor.resume(decodePathSegment(resumeMatch[1]), parsed.data);
-      sendJson(response, 202, result);
-    } catch (error) {
-      throw new HttpError(409, error instanceof Error ? error.message : String(error));
-    }
+  for (const route of projectApiRoutes) {
+    if (route.method !== method) continue;
+    const params = matchRoutePattern(route.pattern, localPath);
+    if (!params) continue;
+    await route.handler(context, request, response, url, params);
     return true;
   }
   return false;
+}
+
+function matchRoutePattern(
+  pattern: string,
+  localPath: string,
+): Record<string, string> | undefined {
+  const patternSegments = pattern.split("/");
+  const pathSegments = localPath.split("/");
+  if (patternSegments.length !== pathSegments.length) {
+    return undefined;
+  }
+  const params: Record<string, string> = {};
+  for (let index = 0; index < patternSegments.length; index += 1) {
+    const expected = patternSegments[index]!;
+    const actual = pathSegments[index]!;
+    if (expected.startsWith(":")) {
+      if (!actual) return undefined;
+      params[expected.slice(1)] = actual;
+    } else if (expected !== actual) {
+      return undefined;
+    }
+  }
+  return params;
 }
 
 function listRunEvents(supervisor: RunSupervisor, runId: string): RunEvent[] {
@@ -583,13 +718,13 @@ export function buildPublicConfig(
           legacy: {
             maxParallel: loaded.config.project.maxParallel,
             maxReworkAttempts: loaded.config.quality.maxReworkAttempts,
-            executionTimeoutSeconds: 14_400,
-            maxAgentInvocations: 64,
-            maxProcessOutputBytes: 1_048_576,
-            maxArtifactBytes: 1_073_741_824,
+            executionTimeoutSeconds: legacyExecutionTimeoutSeconds,
+            maxAgentInvocations: legacyMaxAgentInvocations,
+            maxProcessOutputBytes: legacyMaxProcessOutputBytes,
+            maxArtifactBytes: legacyMaxArtifactBytes,
             roleProfiles: {},
             approvalGates: ["final"],
-            approvalTimeoutSeconds: 86_400,
+            approvalTimeoutSeconds: legacyApprovalTimeoutSeconds,
             compiledTopology: resolveStrategy(loaded.config).topology,
             source: "config",
           },

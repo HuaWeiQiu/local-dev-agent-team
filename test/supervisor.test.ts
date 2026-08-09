@@ -208,12 +208,13 @@ describe("run supervisor", () => {
     };
     const expired = fakeApprovalState("expired-request", "final");
     expired.approvals![0]!.expiresAt = new Date(Date.now() - 1_000).toISOString();
-    const unmanaged = fakeState("legacy-active", "Recover legacy run", "implementing");
+    const foreign = fakeState("foreign-active", "Run owned by a stopped service", "implementing");
+    foreign.supervisorId = randomUUID();
     await Promise.all([
       states.save(plan),
       states.save(final),
       states.save(expired),
-      states.save(unmanaged),
+      states.save(foreign),
     ]);
     const supervisor = new RunSupervisor(loaded, events);
 
@@ -224,7 +225,29 @@ describe("run supervisor", () => {
       status: "blocked",
       approvals: [{ status: "rejected", response: { actor: "system:approval-expiry" } }],
     });
-    await expect(supervisor.get(unmanaged.id)).resolves.toMatchObject({
+    await expect(supervisor.get(foreign.id)).resolves.toMatchObject({
+      status: "interrupted",
+      error: "The owning control service stopped before the run completed",
+    });
+    await supervisor.close();
+    events.close();
+  });
+
+  it("leaves active runs without a supervisorId untouched during reconciliation", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const cliRun = fakeState("cli-run", "Started by agent-team run", "implementing");
+    const foreignRun = fakeState("foreign-run", "Started by another service", "implementing");
+    foreignRun.supervisorId = randomUUID();
+    await Promise.all([states.save(cliRun), states.save(foreignRun)]);
+    const supervisor = new RunSupervisor(loaded, events);
+
+    expect(await supervisor.reconcileInterruptedRuns()).toBe(1);
+    await expect(supervisor.get(cliRun.id)).resolves.toMatchObject({
+      status: "implementing",
+    });
+    await expect(supervisor.get(foreignRun.id)).resolves.toMatchObject({
       status: "interrupted",
       error: "The owning control service stopped before the run completed",
     });
