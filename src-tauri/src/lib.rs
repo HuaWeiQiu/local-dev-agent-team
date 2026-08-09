@@ -3,14 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROCESS_DETAIL: usize = 16 * 1024;
 
 #[derive(Clone, Default)]
@@ -218,27 +219,23 @@ fn initialize_project_sync(app: &AppHandle, runtime: &DesktopRuntime) -> Desktop
                 return error_status("桌面运行环境尚未准备好", Some(project_name(&root)), detail)
             }
         };
-        let output = match Command::new(&paths.node)
+        let mut command = Command::new(&paths.node);
+        command
             .arg(&paths.cli)
             .arg("init")
             .arg(&root)
-            .current_dir(&root)
-            .output()
-        {
+            .current_dir(&root);
+        let output = match run_command_with_timeout(&mut command, INITIALIZE_TIMEOUT) {
             Ok(output) => output,
-            Err(error) => {
-                return error_status(
-                    "无法初始化这个项目",
-                    Some(project_name(&root)),
-                    error.to_string(),
-                )
+            Err(detail) => {
+                return error_status("无法初始化这个项目", Some(project_name(&root)), detail)
             }
         };
         if !output.status.success() {
             return error_status(
                 "无法初始化这个项目",
                 Some(project_name(&root)),
-                process_output_detail(&output.stdout, &output.stderr),
+                process_output_detail(output.stdout.as_bytes(), output.stderr.as_bytes()),
             );
         }
     }
@@ -269,6 +266,12 @@ fn start_service(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 让控制服务独占一个进程组，terminate_child 才能按组整棵清理。
+        command.process_group(0);
+    }
 
     let mut child = command.spawn().map_err(|error| {
         format!(
@@ -370,6 +373,86 @@ fn process_output_detail(stdout: &[u8], stderr: &[u8]) -> String {
     String::from_utf8_lossy(detail).trim().to_string()
 }
 
+struct CommandOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+/// 运行一个短生命周期命令，stdout/stderr 限量收集，超过 timeout 后按整棵进程树终止。
+fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<CommandOutput, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 与 start_service 一致：独立进程组，超时时 terminate_child 才能整组清理。
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout_detail = Arc::new(Mutex::new(String::new()));
+    let stderr_detail = Arc::new(Mutex::new(String::new()));
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let target = Arc::clone(&stdout_detail);
+        readers.push(thread::spawn(move || {
+            collect_process_detail(stdout, target)
+        }));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let target = Arc::clone(&stderr_detail);
+        readers.push(thread::spawn(move || {
+            collect_process_detail(stderr, target)
+        }));
+    }
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    terminate_child(&mut child);
+                    return Err(format!(
+                        "命令运行超过 {} 秒仍未完成，已终止{}",
+                        timeout.as_secs(),
+                        process_detail_suffix(&stderr_detail)
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                terminate_child(&mut child);
+                return Err(error.to_string());
+            }
+        }
+    };
+    let _ = child.wait();
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let stdout = stdout_detail
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .trim()
+        .to_string();
+    let stderr = stderr_detail
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .trim()
+        .to_string();
+    Ok(CommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn parse_service_url(line: &str) -> Option<String> {
     let url = line
         .split_whitespace()
@@ -416,6 +499,15 @@ fn resolve_runtime_paths(app: &AppHandle) -> Result<RuntimePaths, String> {
 
     let development_cli = Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist/cli.js");
     if development_cli.is_file() {
+        eprintln!(
+            "Agent Team desktop warning: 未找到随 App 安装的运行时（期望 {} 与 {}），回退到开发路径 {}",
+            resource_cli.to_string_lossy(),
+            sibling_node
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<无法定位 node 可执行文件>".into()),
+            development_cli.to_string_lossy()
+        );
         return Ok(RuntimePaths {
             node: PathBuf::from("node"),
             cli: development_cli,
@@ -565,22 +657,89 @@ fn terminate_child(child: &mut Child) {
         return;
     }
     #[cfg(unix)]
-    unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    {
+        let pid = child.id() as libc::pid_t;
+        // node 侧用 detached:true 派生的 agent/git 子进程自成进程组，killpg 打不到，
+        // 先保持 node 存活并按 PPID 清理后代，避免父进程退出后失去 detached 子进程。
+        for descendant in descendant_pids(pid) {
+            unsafe {
+                libc::kill(descendant, libc::SIGTERM);
+            }
+        }
+        let started = Instant::now();
+        while started.elapsed() < SHUTDOWN_TIMEOUT {
+            if descendant_pids(pid).is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        // 重新枚举后再强杀，避免对已经退出并被系统复用的旧 PID 发信号。
+        for descendant in descendant_pids(pid) {
+            unsafe {
+                libc::kill(descendant, libc::SIGKILL);
+            }
+        }
+
+        // 子进程由 process_group(0) 独立成组，负 PID 即整个进程组。
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        let started = Instant::now();
+        while started.elapsed() < SHUTDOWN_TIMEOUT {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        // 父进程仍存活时重新枚举是安全的；此时后代仍属于这棵进程树。
+        for descendant in descendant_pids(pid) {
+            unsafe {
+                libc::kill(descendant, libc::SIGKILL);
+            }
+        }
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
     #[cfg(windows)]
     {
         let _ = child.kill();
-    }
-    let started = Instant::now();
-    while started.elapsed() < SHUTDOWN_TIMEOUT {
-        if child.try_wait().ok().flatten().is_some() {
-            return;
+        let started = Instant::now();
+        while started.elapsed() < SHUTDOWN_TIMEOUT {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
         }
-        thread::sleep(Duration::from_millis(50));
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    let _ = child.kill();
-    let _ = child.wait();
+}
+
+/// 通过 pgrep -P 递归枚举某个进程的全部后代（无论它们是否 detached 换了进程组）。
+#[cfg(unix)]
+fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut descendants = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        let output = Command::new("pgrep")
+            .arg("-P")
+            .arg(parent.to_string())
+            .output();
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<libc::pid_t>() {
+                frontier.push(pid);
+                descendants.push(pid);
+            }
+        }
+    }
+    descendants
 }
 
 pub fn run() {
@@ -694,6 +853,104 @@ mod tests {
 
         terminate_child(&mut service.child);
         assert!(service.child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_kills_detached_descendants() {
+        let root = tempdir().unwrap();
+        // 模拟 node 侧 detached:true 派生 agent 子进程：孙进程自成进程组，
+        // 纯 killpg 打不到，terminate_child 必须连同它一起清掉。
+        let script = root.path().join("detached-parent.js");
+        fs::write(
+            &script,
+            r#"
+            const { spawn } = require("child_process");
+            const fs = require("fs");
+            const path = require("path");
+            const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+                detached: true,
+                stdio: "ignore",
+            });
+            fs.writeFileSync(path.join(__dirname, "grandchild.pid"), String(child.pid));
+            console.log("control service: http://127.0.0.1:4317");
+            setInterval(() => {}, 1000);
+            "#,
+        )
+        .unwrap();
+        let paths = RuntimePaths {
+            node: PathBuf::from("node"),
+            cli: script,
+        };
+        let config = SelectedConfig {
+            path: root.path().join("agent-team.yaml"),
+            kind: ConfigKind::Project,
+        };
+        let mut service = start_service(&paths, root.path(), &config).unwrap();
+
+        // start_service 用 process_group(0) 让服务独立成组。
+        let pid = service.child.id() as libc::pid_t;
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+
+        let grandchild_pid: libc::pid_t = {
+            let pid_path = root.path().join("grandchild.pid");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(contents) = fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = contents.trim().parse() {
+                        break pid;
+                    }
+                }
+                assert!(Instant::now() < deadline, "孙进程 pid 文件未出现");
+                thread::sleep(Duration::from_millis(50));
+            }
+        };
+        assert_eq!(unsafe { libc::kill(grandchild_pid, 0) }, 0, "孙进程应存活");
+        assert_ne!(
+            unsafe { libc::getpgid(grandchild_pid) },
+            pid,
+            "detached 孙进程不在服务的进程组里"
+        );
+
+        terminate_child(&mut service.child);
+        assert!(service.child.try_wait().unwrap().is_some());
+
+        let mut gone = false;
+        for _ in 0..40 {
+            if unsafe { libc::kill(grandchild_pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(gone, "detached 孙进程在 terminate 后仍存活");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_kills_overrunning_command() {
+        let mut command = Command::new("node");
+        command.arg("-e").arg("setInterval(() => {}, 1000)");
+        let started = Instant::now();
+        let error = run_command_with_timeout(&mut command, Duration::from_millis(500))
+            .err()
+            .expect("超时命令应报错");
+        assert!(error.contains("已终止"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "超时路径不应长时间阻塞"
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_captures_failure_output() {
+        let mut command = Command::new("node");
+        command
+            .arg("-e")
+            .arg("console.error('init failed here'); process.exit(3)");
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(30)).unwrap();
+        assert!(!output.status.success());
+        assert_eq!(output.stderr, "init failed here");
     }
 
     fn http_get(base_url: &str, path: &str, cookie: Option<&str>) -> String {
