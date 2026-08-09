@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -26,6 +27,15 @@ import {
 import type { RunSupervisor } from "./supervisor.js";
 
 const maxBodyBytes = 64 * 1024;
+const desktopSessionPath = "/__agent_team/session";
+const desktopSessionTokenPattern = /^[a-f0-9]{64}$/;
+
+interface HttpServerOptions {
+  host: string;
+  port: number;
+  staticDirectory?: string;
+  sessionToken?: string;
+}
 
 export interface ListeningControlServer {
   server: Server;
@@ -48,6 +58,7 @@ export async function listenControlServer(
     port: number;
     staticDirectory?: string;
     strategyCatalog?: StrategyBlueprintCatalog;
+    sessionToken?: string;
   },
 ): Promise<ListeningControlServer> {
   const context: ProjectHttpContext = {
@@ -65,7 +76,7 @@ export async function listenControlServer(
 
 export async function listenWorkspaceServer(
   projects: ProjectHttpContext[],
-  options: { host: string; port: number; staticDirectory?: string },
+  options: HttpServerOptions,
 ): Promise<ListeningControlServer> {
   if (projects.length === 0) {
     throw new Error("A workspace control server requires at least one project");
@@ -87,21 +98,30 @@ async function listenHttpServer(
     response: ServerResponse,
     staticDirectory: string,
   ) => Promise<void>,
-  options: { host: string; port: number; staticDirectory?: string },
+  options: HttpServerOptions,
 ): Promise<ListeningControlServer> {
   assertLoopbackHost(options.host);
+  if (options.sessionToken && !desktopSessionTokenPattern.test(options.sessionToken)) {
+    throw new Error("Desktop session token must contain 64 lowercase hexadecimal characters");
+  }
   const staticDirectory = options.staticDirectory ?? bundledWebDirectory;
   const server = createServer((request, response) => {
-    void handler(request, response, staticDirectory).catch((error: unknown) => {
-      if (response.headersSent) {
-        response.destroy(error instanceof Error ? error : undefined);
-        return;
-      }
-      const status = error instanceof HttpError ? error.status : 500;
-      sendJson(response, status, {
-        error: error instanceof Error ? error.message : String(error),
+    setSecurityHeaders(response);
+    void Promise.resolve()
+      .then(() => handleDesktopSession(request, response, options.sessionToken))
+      .then(async (handled) => {
+        if (!handled) await handler(request, response, staticDirectory);
+      })
+      .catch((error: unknown) => {
+        if (response.headersSent) {
+          response.destroy(error instanceof Error ? error : undefined);
+          return;
+        }
+        const status = error instanceof HttpError ? error.status : 500;
+        sendJson(response, status, {
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -124,6 +144,62 @@ async function listenHttpServer(
       return closePromise;
     },
   };
+}
+
+function handleDesktopSession(
+  request: IncomingMessage,
+  response: ServerResponse,
+  sessionToken: string | undefined,
+): boolean {
+  if (!sessionToken) return false;
+  const cookieName = desktopSessionCookieName(sessionToken);
+  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  if (url.pathname === desktopSessionPath) {
+    if (
+      request.method !== "GET" ||
+      !secureEqual(url.searchParams.get("token"), sessionToken)
+    ) {
+      throw new HttpError(401, "Desktop session could not be established");
+    }
+    response.writeHead(303, {
+      Location: "/?desktop-runtime=1",
+      "Set-Cookie": `${cookieName}=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`,
+      "Cache-Control": "no-store",
+    });
+    response.end();
+    return true;
+  }
+  if (isApiPath(url.pathname) && !hasDesktopSession(request, cookieName, sessionToken)) {
+    throw new HttpError(401, "Desktop session is required");
+  }
+  return false;
+}
+
+function hasDesktopSession(
+  request: IncomingMessage,
+  cookieName: string,
+  sessionToken: string,
+): boolean {
+  const cookieHeader = singleHeader(request.headers.cookie);
+  if (!cookieHeader) return false;
+  const value = cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${cookieName}=`))
+    ?.slice(cookieName.length + 1);
+  return secureEqual(value, sessionToken);
+}
+
+function desktopSessionCookieName(sessionToken: string): string {
+  const suffix = createHash("sha256").update(sessionToken).digest("hex").slice(0, 16);
+  return `agent_team_session_${suffix}`;
+}
+
+function secureEqual(candidate: string | null | undefined, expected: string): boolean {
+  if (!candidate) return false;
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 async function handleSingleProjectRequest(

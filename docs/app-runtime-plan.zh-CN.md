@@ -33,6 +33,11 @@ Agent Team 控制面
 4. App 退出时先阻止新运行，再按现有 supervisor 规则终止或标记中断，最后关闭 sidecar。
 5. Codex、Claude 等 CLI 初期仍作为独立工具安装和登录，后续再评估受许可约束的捆绑。
 
+客户侧的首次启动流程固定为：选择代码项目，App 自动识别配置并打开工作台。如果项目
+还没有 `agent-team.yaml`，页面只提供“初始化并打开”这一条主要修复动作。端口、Node、
+sidecar、配置路径和进程日志不进入正常操作流程，仅在“技术详情”中按需显示。成功打开过
+的项目会被记住，下次启动自动恢复。
+
 保留 HTTP/SSE 控制协议而不改成前端直调 Rust，是为了让桌面壳、浏览器和测试夹具共用
 同一契约。生产打包可用 loopback + 随机会话令牌，或由 Tauri 转发到私有 IPC。
 
@@ -63,4 +68,8 @@ Apache-2.0 或 MIT 例外，实际集成时必须按采用的具体文件逐项�
 3. 增加 `AndroidTermuxIntent`，在真实设备验证完整 Agent 工作流。
 4. 根据体积、稳定性和维护成本决定是否实现 `AndroidEmbeddedRuntime`。
 
-当前仓库处于第 1 阶段；后续阶段不能绕过现有权限、质量门禁、Git 检查点和证据契约。
+当前仓库已完成第 1 阶段和第 2 阶段的 macOS arm64 基线，包括安装包、sidecar
+生命周期、会话认证和实机启动验证；Apple Developer ID 签名与公证留在发布阶段完成。
+Windows/Linux 仍需在各自目标平台完成运行时准备、安装包与签名验证；后续阶段不能绕过
+现有权限、质量门禁、Git 检查点和证据契约。桌面壳的具体边界见
+[ADR 0011](adr/0011-desktop-shell-and-runtime-lifecycle.md)。

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agent Team",
+  "version": "0.1.0",
+  "identifier": "io.agentteam.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev:web",
+    "beforeBuildCommand": "pnpm desktop:prepare",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Agent Team",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/agent-team-node"
+    ],
+    "resources": {
+      "../dist/": "runtime/dist/",
+      "../web/dist/": "runtime/web/dist/",
+      "../prompts/": "runtime/prompts/",
+      "../schemas/": "runtime/schemas/",
+      "runtime/": "runtime/licenses/"
+    }
+  }
+}

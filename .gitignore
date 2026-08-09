@@ -1,6 +1,13 @@
 node_modules/
 dist/
 web/dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+src-tauri/runtime/*
+!src-tauri/runtime/.gitkeep
+.cache/desktop-runtime/
 coverage/
 .DS_Store
 .env

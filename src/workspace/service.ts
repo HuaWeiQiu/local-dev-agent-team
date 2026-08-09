@@ -12,7 +12,7 @@ export interface RunningWorkspaceService extends ListeningControlServer {
 
 export async function startWorkspaceControlService(
   workspace: LoadedWorkspace,
-  options: { host?: string; port?: number } = {},
+  options: { host?: string; port?: number; sessionToken?: string } = {},
 ): Promise<RunningWorkspaceService> {
   const runtimes: Array<{ id: string; runtime: ProjectRuntime }> = [];
   try {
@@ -35,6 +35,7 @@ export async function startWorkspaceControlService(
   const listening = await listenWorkspaceServer(contexts, {
     host: options.host ?? "127.0.0.1",
     port: options.port ?? 4317,
+    ...(options.sessionToken ? { sessionToken: options.sessionToken } : {}),
   }).catch(async (error: unknown) => await cleanupAfterFailure(error, runtimes));
 
   const projects = new Map(runtimes.map(({ id, runtime }) => [id, runtime]));

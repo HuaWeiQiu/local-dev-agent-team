@@ -585,12 +585,43 @@ Agent CLI 需要通过适配器接口接入。
 
 ## 开发与测试
 
+### 桌面 App
+
+桌面端使用 Tauri 2 包装现有 React 工作台，并自动管理本地控制服务。普通操作不需要
+手工启动 Node、填写端口或打开终端：首次启动选择代码项目；如果缺少配置，点击
+“初始化并打开”；之后会自动恢复上次成功打开的项目。
+
+本地开发：
+
+```bash
+pnpm install
+pnpm desktop:dev
+```
+
+生成当前平台安装包：
+
+```bash
+pnpm desktop:build
+```
+
+首次准备桌面端时会从 Node.js 官方发布站下载固定版本的 Node 24 运行时并校验
+SHA-256，安装包不依赖客户另行安装 Node。Codex、Claude Code 等 Agent CLI 仍需按
+项目配置安装并完成登录，App 会在后续环境检查中统一提示。
+
+当前已实机验证 macOS arm64。运行时准备脚本同时支持 macOS 和 Linux 的 arm64/x64；
+Windows 使用同一 Tauri/React/Rust 架构，目标运行时与签名打包会在对应平台阶段补齐。
+当前 macOS 本地安装包用于开发验证，尚未配置发行签名；公开分发前仍需配置 Apple
+Developer ID 签名和公证。
+
+### 全量检查
+
 ```bash
 pnpm install
 pnpm check
 pnpm test
 pnpm build
 pnpm test:e2e
+pnpm desktop:test
 ```
 
 贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。本项目使用 MIT License。

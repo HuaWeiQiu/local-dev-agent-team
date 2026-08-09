@@ -247,14 +247,16 @@ program
   .action(async (options: { host: string; port: string; config?: string; workspace?: string }) => {
     assertExclusiveConfigOptions(options);
     const port = parsePort(options.port);
+    const sessionToken = process.env.AGENT_TEAM_SESSION_TOKEN;
     const service = options.workspace
       ? await startWorkspaceControlService(
           await loadWorkspace(process.cwd(), options.workspace),
-          { host: options.host, port },
+          { host: options.host, port, ...(sessionToken ? { sessionToken } : {}) },
         )
       : await startControlService(await loadConfig(process.cwd(), options.config), {
           host: options.host,
           port,
+          ...(sessionToken ? { sessionToken } : {}),
         });
     process.stdout.write(
       `Agent Team ${options.workspace ? "workspace " : ""}control service: ${service.url}\n`,
