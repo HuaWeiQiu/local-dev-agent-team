@@ -9,22 +9,37 @@ import type { AgentUsage } from "../adapters/types.js";
 import type { QualityReport } from "../quality/run.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState, RunUsage } from "../state/types.js";
+import {
+  legacyExecutionTimeoutSeconds,
+  legacyMaxAgentInvocations,
+  legacyMaxArtifactBytes,
+  legacyMaxProcessOutputBytes,
+} from "../strategies/defaults.js";
 
 export class RunBudgetExceededError extends Error {
   readonly code = "RUN_BUDGET_EXCEEDED";
 }
 
+export interface RunBudgetTrackerOptions {
+  now?: () => number;
+  artifactBytesCacheTtlMs?: number;
+}
+
+const defaultArtifactBytesCacheTtlMs = 2_000;
+
 export class RunBudgetTracker implements AgentInvocationObserver {
   readonly maxProcessOutputBytes: number;
+  private artifactBytesCache?: { measuredAt: number; bytes: number };
 
   constructor(
     private readonly state: RunState,
     private readonly store: RunStateStore,
+    private readonly options: RunBudgetTrackerOptions = {},
   ) {
-    state.strategy.executionTimeoutSeconds ??= 14_400;
-    state.strategy.maxAgentInvocations ??= 64;
-    state.strategy.maxProcessOutputBytes ??= 1_048_576;
-    state.strategy.maxArtifactBytes ??= 1_073_741_824;
+    state.strategy.executionTimeoutSeconds ??= legacyExecutionTimeoutSeconds;
+    state.strategy.maxAgentInvocations ??= legacyMaxAgentInvocations;
+    state.strategy.maxProcessOutputBytes ??= legacyMaxProcessOutputBytes;
+    state.strategy.maxArtifactBytes ??= legacyMaxArtifactBytes;
     state.usage ??= emptyUsage();
     this.maxProcessOutputBytes = state.strategy.maxProcessOutputBytes;
   }
@@ -113,9 +128,16 @@ export class RunBudgetTracker implements AgentInvocationObserver {
   }
 
   private async refreshArtifactBytes(): Promise<void> {
-    this.state.usage!.artifactBytes = await directorySize(
-      this.store.artifactDirectory(this.state.id),
-    );
+    const now = this.options.now?.() ?? Date.now();
+    const ttlMs = this.options.artifactBytesCacheTtlMs ?? defaultArtifactBytesCacheTtlMs;
+    const cached = this.artifactBytesCache;
+    if (cached && now - cached.measuredAt < ttlMs) {
+      this.state.usage!.artifactBytes = cached.bytes;
+      return;
+    }
+    const bytes = await directorySize(this.store.artifactDirectory(this.state.id));
+    this.artifactBytesCache = { measuredAt: now, bytes };
+    this.state.usage!.artifactBytes = bytes;
   }
 
   private assertArtifactBudget(): void {

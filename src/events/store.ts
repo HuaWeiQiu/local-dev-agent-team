@@ -24,13 +24,22 @@ export interface CommandClaim {
   response: unknown;
 }
 
+export interface SqliteEventStoreOptions {
+  maxEventsPerRun?: number;
+  now?: () => number;
+}
+
+const pruneIntervalMs = 5_000;
+const prunePendingThreshold = 200;
+
 export class SqliteEventStore implements RunEventSink {
   private readonly database: DatabaseSync;
   private readonly listeners = new Set<(event: RunEvent) => void>();
+  private readonly pruneState = new Map<string, { lastPruneAt: number; pending: number }>();
 
   constructor(
     databasePath: string,
-    private readonly options: { maxEventsPerRun?: number } = {},
+    private readonly options: SqliteEventStoreOptions = {},
   ) {
     mkdirSync(path.dirname(databasePath), { recursive: true });
     this.database = new DatabaseSync(databasePath);
@@ -81,7 +90,7 @@ export class SqliteEventStore implements RunEventSink {
       spanId: spanIdForEvent(event.id),
       sequence: Number(result.lastInsertRowid),
     };
-    this.pruneRunEvents(event.runId);
+    this.maybePruneRunEvents(event.runId);
     for (const listener of this.listeners) {
       try {
         listener(stored);
@@ -124,6 +133,18 @@ export class SqliteEventStore implements RunEventSink {
             LIMIT ?
           `)
           .all(sequence, boundedLimit) as unknown as EventRow[]);
+    return rows.map(decodeEvent);
+  }
+
+  listRunEvents(runId: string): RunEvent[] {
+    const rows = this.database
+      .prepare(`
+        SELECT sequence, event_id, schema_version, run_id, type, occurred_at, payload_json
+        FROM run_events
+        WHERE run_id = ?
+        ORDER BY sequence ASC
+      `)
+      .all(runId) as unknown as EventRow[];
     return rows.map(decodeEvent);
   }
 
@@ -170,6 +191,7 @@ export class SqliteEventStore implements RunEventSink {
   }
 
   deleteRun(runId: string): { events: number; commands: number } {
+    this.pruneState.delete(runId);
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const events = Number(
@@ -189,8 +211,28 @@ export class SqliteEventStore implements RunEventSink {
   }
 
   close(): void {
+    for (const runId of this.pruneState.keys()) {
+      this.pruneRunEvents(runId);
+    }
+    this.pruneState.clear();
     this.listeners.clear();
     this.database.close();
+  }
+
+  private maybePruneRunEvents(runId: string): void {
+    if (!this.options.maxEventsPerRun) return;
+    const now = this.options.now?.() ?? Date.now();
+    const state = this.pruneState.get(runId) ?? { lastPruneAt: 0, pending: 0 };
+    state.pending += 1;
+    if (
+      now - state.lastPruneAt >= pruneIntervalMs ||
+      state.pending >= prunePendingThreshold
+    ) {
+      this.pruneRunEvents(runId);
+      state.lastPruneAt = now;
+      state.pending = 0;
+    }
+    this.pruneState.set(runId, state);
   }
 
   private pruneRunEvents(runId: string): void {

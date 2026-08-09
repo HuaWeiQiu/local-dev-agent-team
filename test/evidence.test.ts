@@ -19,6 +19,10 @@ describe("local run evidence", () => {
     const outside = path.join(root, "outside.log");
     await writeFile(outside, "private", "utf8");
     await symlink(outside, path.join(quality, "outside.log"));
+    const outsideDirectory = path.join(root, "outside");
+    await mkdir(outsideDirectory);
+    await writeFile(path.join(outsideDirectory, "secret.md"), "private", "utf8");
+    await symlink(outsideDirectory, path.join(quality, "outside-directory"));
 
     const evidence = new LocalEvidenceStore(states);
     const artifacts = await evidence.listArtifacts(state.id);
@@ -43,9 +47,57 @@ describe("local run evidence", () => {
     await expect(evidence.readArtifact(state.id, artifacts[1]!.path)).rejects.toThrow(
       "not a previewable text file",
     );
+    await expect(
+      evidence.readArtifact(state.id, "tasks/api/attempt-1/quality/outside.log"),
+    ).rejects.toThrow("not a regular file");
+    await expect(
+      evidence.readArtifact(
+        state.id,
+        "tasks/api/attempt-1/quality/outside-directory/secret.md",
+      ),
+    ).rejects.toThrow("not a regular file");
     expect(() => assertRunId("../other-run")).toThrow("Invalid run ID");
     expect(() => states.artifactDirectory(state.id, "..", "state.json")).toThrow(
       "must stay inside",
+    );
+  });
+
+  it("reads a nested artifact directly without walking the whole tree", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-evidence-"));
+    const states = new RunStateStore(path.join(root, "runs"));
+    const state = fakeState("deep-run");
+    await states.save(state);
+    const nested = states.artifactDirectory(state.id, "tasks", "api", "attempt-1", "review");
+    await mkdir(nested, { recursive: true });
+    await writeFile(path.join(nested, "notes.md"), "review notes\n", "utf8");
+    // Siblings that a full-tree walk would have to stat; a direct read ignores them.
+    const noisy = states.artifactDirectory(state.id, "tasks", "web", "attempt-1");
+    await mkdir(noisy, { recursive: true });
+    for (let index = 0; index < 50; index += 1) {
+      await writeFile(path.join(noisy, `${index}.log`), `noise ${index}\n`, "utf8");
+    }
+    await writeFile(path.join(noisy, "payload.bin"), Buffer.from([1, 2, 3]));
+
+    const evidence = new LocalEvidenceStore(states);
+    await expect(
+      evidence.readArtifact(state.id, "tasks/api/attempt-1/review/notes.md"),
+    ).resolves.toMatchObject({
+      path: "tasks/api/attempt-1/review/notes.md",
+      content: "review notes\n",
+      truncated: false,
+    });
+
+    await expect(
+      evidence.readArtifact(state.id, "tasks/api/attempt-1/review/missing.md"),
+    ).rejects.toThrow("was not found");
+    await expect(
+      evidence.readArtifact(state.id, "tasks/web/attempt-1/payload.bin"),
+    ).rejects.toThrow("not a previewable text file");
+    await expect(evidence.readArtifact(state.id, "..%2f..%2fstate.json")).rejects.toThrow(
+      "was not found",
+    );
+    await expect(evidence.readArtifact(state.id, "/etc/hostname")).rejects.toThrow(
+      "must be relative",
     );
   });
 

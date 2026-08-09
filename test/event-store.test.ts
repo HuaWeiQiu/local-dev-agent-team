@@ -92,16 +92,64 @@ describe("SQLite event store", () => {
 
   it("retains only the configured number of events per run", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    let now = 1_000_000;
     const store = new SqliteEventStore(path.join(root, "events.sqlite"), {
       maxEventsPerRun: 2,
+      now: () => now,
     });
     store.emit("run-a", "one", {});
     const second = store.emit("run-a", "two", {});
     const other = store.emit("run-b", "other", {});
+    now += 6_000;
     const third = store.emit("run-a", "three", {});
 
     expect(store.listAfter(0, "run-a")).toEqual([second, third]);
     expect(store.listAfter(0, "run-b")).toEqual([other]);
     store.close();
+  });
+
+  it("throttles pruning during rapid appends and prunes again on close", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    const databasePath = path.join(root, "events.sqlite");
+    let now = 1_000_000;
+    const store = new SqliteEventStore(databasePath, {
+      maxEventsPerRun: 10,
+      now: () => now,
+    });
+    for (let index = 0; index < 50; index += 1) {
+      store.emit("run-hot", "agent.stdout", { index });
+    }
+
+    // Within the throttle window only the first append prunes, so the
+    // high-frequency appends stay visible without paying a DELETE each time.
+    expect(store.listAfter(0, "run-hot")).toHaveLength(50);
+    store.close();
+
+    const reopened = new SqliteEventStore(databasePath, { maxEventsPerRun: 10 });
+    expect(reopened.listAfter(0, "run-hot")).toHaveLength(10);
+    reopened.close();
+  });
+
+  it("prunes once the unpruned backlog crosses the pending threshold", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    let now = 1_000_000;
+    const store = new SqliteEventStore(path.join(root, "events.sqlite"), {
+      maxEventsPerRun: 10,
+      now: () => now,
+    });
+    for (let index = 0; index < 250; index += 1) {
+      store.emit("run-bulk", "agent.stdout", { index });
+    }
+
+    const retained = store.listAfter(0, "run-bulk");
+    expect(retained.length).toBeLessThan(250);
+    expect(retained.at(-1)?.payload).toEqual({ index: 249 });
+    store.close();
+
+    const reopened = new SqliteEventStore(path.join(root, "events.sqlite"), {
+      maxEventsPerRun: 10,
+    });
+    expect(reopened.listAfter(0, "run-bulk")).toHaveLength(10);
+    reopened.close();
   });
 });

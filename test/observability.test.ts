@@ -15,7 +15,8 @@ describe("run observability", () => {
     const store = new RunStateStore(path.join(root, "runs"), events);
     const state = fakeState();
     state.strategy.maxAgentInvocations = 1;
-    const budget = new RunBudgetTracker(state, store);
+    let now = 1_000_000;
+    const budget = new RunBudgetTracker(state, store, { now: () => now });
     const observation = {
       runId: state.id,
       role: "worker",
@@ -71,9 +72,48 @@ describe("run observability", () => {
     const artifactDirectory = store.artifactDirectory(state.id);
     await mkdir(artifactDirectory, { recursive: true });
     await writeFile(path.join(artifactDirectory, "oversized.log"), "12345");
+    now += 3_000;
     await expect(budget.beforeInvocation(observation)).rejects.toThrow(
       "Artifact budget of 4 bytes exceeded",
     );
+    events.close();
+  });
+
+  it("reuses the artifact directory size within its cache TTL", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-budget-"));
+    const events = new SqliteEventStore(path.join(root, "events.sqlite"));
+    const store = new RunStateStore(path.join(root, "runs"), events);
+    const state = fakeState();
+    let now = 1_000_000;
+    const budget = new RunBudgetTracker(state, store, { now: () => now });
+    const artifactDirectory = store.artifactDirectory(state.id);
+    await mkdir(artifactDirectory, { recursive: true });
+    await writeFile(path.join(artifactDirectory, "a.log"), "1234");
+    const observation = {
+      runId: state.id,
+      role: "worker",
+      profile: "codex-worker",
+      adapter: "codex",
+      model: "inherit",
+      permission: "workspace-write",
+      externalTools: "deny",
+      artifactKey: "tasks/api/worker",
+    };
+
+    const invocationId = await budget.beforeInvocation(observation);
+    expect(state.usage!.artifactBytes).toBe(4);
+
+    // Growth inside the TTL window is not re-stat'ed on every accounting call.
+    await writeFile(path.join(artifactDirectory, "b.log"), "12345678");
+    await budget.afterInvocation({ ...observation, invocationId, durationMs: 5 });
+    expect(state.usage!.artifactBytes).toBe(4);
+    await budget.recordQuality({ passed: true, commands: [] });
+    expect(state.usage!.artifactBytes).toBe(4);
+
+    // Once the TTL expires the next accounting call measures again.
+    now += 3_000;
+    await budget.recordQuality({ passed: true, commands: [] });
+    expect(state.usage!.artifactBytes).toBe(12);
     events.close();
   });
 
