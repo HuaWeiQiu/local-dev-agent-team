@@ -5,6 +5,8 @@ import type { PendingRunEvent, RunEventSink } from "../events/types.js";
 import { randomUUID } from "node:crypto";
 import { traceIdForRun } from "../events/store.js";
 
+export const maxRunHistoryEntries = 500;
+
 export class RunStateStore {
   private saveQueue: Promise<void> = Promise.resolve();
 
@@ -30,6 +32,9 @@ export class RunStateStore {
   async save(state: RunState): Promise<void> {
     const directory = this.runDirectory(state.id);
     state.updatedAt = new Date().toISOString();
+    if (state.history.length > maxRunHistoryEntries) {
+      state.history = state.history.slice(-maxRunHistoryEntries);
+    }
     const target = path.join(directory, "state.json");
     const temporary = `${target}.tmp`;
     const serialized = `${JSON.stringify(state, null, 2)}\n`;

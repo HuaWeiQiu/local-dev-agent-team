@@ -38,15 +38,21 @@ export class LocalEvidenceStore {
 
   async readArtifact(runId: string, relativePath: string): Promise<EvidenceFilePreview> {
     const normalized = normalizeArtifactPath(relativePath);
-    const artifact = (await this.listArtifacts(runId)).find((item) => item.path === normalized);
-    if (!artifact) {
-      throw new Error(`Artifact '${normalized}' was not found`);
-    }
-    if (!artifact.previewable) {
+    if (!isPreviewableArtifact(normalized)) {
       throw new Error(`Artifact '${normalized}' is not a previewable text file`);
     }
-    const target = path.join(this.states.artifactDirectory(runId), ...normalized.split("/"));
-    const targetStats = await lstat(target);
+    const segments = normalized.split("/");
+    const root = this.states.artifactDirectory(runId);
+    const target = this.states.artifactDirectory(runId, ...segments);
+    let targetStats;
+    try {
+      targetStats = await validateArtifactPath(root, segments, normalized);
+    } catch (error) {
+      if (isMissing(error)) {
+        throw new Error(`Artifact '${normalized}' was not found`);
+      }
+      throw error;
+    }
     if (!targetStats.isFile() || targetStats.isSymbolicLink()) {
       throw new Error(`Artifact '${normalized}' is not a regular file`);
     }
@@ -54,7 +60,7 @@ export class LocalEvidenceStore {
     const truncated = contents.byteLength > maxPreviewBytes;
     return {
       path: normalized,
-      size: artifact.size,
+      size: targetStats.size,
       content: contents.subarray(0, maxPreviewBytes).toString("utf8"),
       truncated,
     };
@@ -165,7 +171,7 @@ async function walkArtifacts(
       path: relative,
       size: stats.size,
       kind: artifactKind(relative),
-      previewable: previewableExtensions.has(path.extname(entry.name).toLowerCase()),
+      previewable: isPreviewableArtifact(entry.name),
     });
   }
 }
@@ -195,6 +201,31 @@ function normalizeArtifactPath(relativePath: string): string {
     throw new Error("Artifact path contains an invalid segment");
   }
   return segments.join("/");
+}
+
+function isPreviewableArtifact(name: string): boolean {
+  return previewableExtensions.has(path.extname(name).toLowerCase());
+}
+
+async function validateArtifactPath(
+  root: string,
+  segments: string[],
+  relativePath: string,
+) {
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    const stats = await lstat(current);
+    const isLeaf = index === segments.length - 1;
+    if (
+      stats.isSymbolicLink() ||
+      (isLeaf ? !stats.isFile() : !stats.isDirectory())
+    ) {
+      throw new Error(`Artifact '${relativePath}' is not a regular file`);
+    }
+    if (isLeaf) return stats;
+  }
+  throw new Error(`Artifact '${relativePath}' was not found`);
 }
 
 function artifactKind(relativePath: string): EvidenceArtifact["kind"] {

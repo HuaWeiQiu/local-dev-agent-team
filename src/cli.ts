@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
@@ -12,6 +13,9 @@ import { runDoctor } from "./doctor.js";
 import { LocalWorkflowRunner } from "./workflow/runner.js";
 import { StrategyBlueprintCatalog } from "./strategies/catalog.js";
 import { RunStateStore } from "./state/store.js";
+import { SqliteEventStore } from "./events/store.js";
+import { filterRunEvents, renderLogLines } from "./logs/render.js";
+import type { RunLogFilter } from "./logs/render.js";
 import { GithubPublisher } from "./github/publish.js";
 import { GithubRepairRunner } from "./github/repair.js";
 import type { LoadedConfig } from "./config/load.js";
@@ -41,7 +45,7 @@ program
         await readFile(target, "utf8");
         throw new Error(`${target} already exists; use --force to replace it`);
       } catch (error) {
-        if (error instanceof Error && !error.message.includes("ENOENT")) {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
           throw error;
         }
       }
@@ -387,6 +391,57 @@ program
   });
 
 program
+  .command("logs")
+  .description("Print the recorded event stream of one run")
+  .argument("<run-id>", "run identifier")
+  .option("-c, --config <path>", "configuration path")
+  .option("--json", "emit raw event JSON lines", false)
+  .option("--role <name>", "only show events of one role")
+  .option("--type <prefix>", "only show event types starting with a prefix")
+  .option("--tail <n>", "only show the last n events")
+  .action(
+    async (
+      runId: string,
+      options: {
+        config?: string;
+        json: boolean;
+        role?: string;
+        type?: string;
+        tail?: string;
+      },
+    ) => {
+      const loaded = await loadConfig(process.cwd(), options.config);
+      const databasePath = path.join(
+        path.resolve(loaded.root, loaded.config.project.stateDirectory),
+        "control.sqlite",
+      );
+      if (!existsSync(databasePath)) {
+        throw new Error(`No event store found at ${databasePath}; no runs have been recorded`);
+      }
+      const filter: RunLogFilter = {
+        ...(options.role ? { role: options.role } : {}),
+        ...(options.type ? { typePrefix: options.type } : {}),
+        ...(options.tail !== undefined ? { tail: parseTail(options.tail) } : {}),
+      };
+      const store = new SqliteEventStore(databasePath);
+      try {
+        const events = filterRunEvents(store.listRunEvents(runId), filter);
+        if (options.json) {
+          for (const event of events) {
+            process.stdout.write(`${JSON.stringify(event)}\n`);
+          }
+          return;
+        }
+        for (const line of renderLogLines(events)) {
+          process.stdout.write(`${line}\n`);
+        }
+      } finally {
+        store.close();
+      }
+    },
+  );
+
+program
   .command("publish")
   .description("Push a passing integration branch and create a draft pull request")
   .argument("<run-id>", "run identifier")
@@ -499,6 +554,14 @@ function printChecks(checks: Array<{ bucket: string; name: string; state: string
   for (const check of checks) {
     process.stdout.write(`${check.bucket.toUpperCase().padEnd(8)} ${check.name}: ${check.state}\n`);
   }
+}
+
+function parseTail(value: string): number {
+  const tail = Number(value);
+  if (!Number.isInteger(tail) || tail < 0) {
+    throw new Error(`Invalid --tail value '${value}'; expected a non-negative integer`);
+  }
+  return tail;
 }
 
 function parsePort(value: string): number {
