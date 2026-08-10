@@ -1,10 +1,11 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { finished } from "node:stream/promises";
 import path from "node:path";
 import type { AgentProfile } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
-import type { AgentRunResult } from "./types.js";
+import type { AgentAdapter, AgentRunResult } from "./types.js";
 import { AdapterRegistry } from "./registry.js";
 import { assertAdapterProfile, assertInvocationContract } from "./conformance.js";
 
@@ -39,6 +40,28 @@ export async function invokeAgent(
 ): Promise<AgentRunResult> {
   const adapter = registry.get(options.adapterName);
   assertAdapterProfile(adapter, options.profile, options.outputSchema !== undefined);
+  const promptDirectory =
+    adapter.promptTransport === "file"
+      ? await mkdtemp(path.join(tmpdir(), "agent-team-prompt-"))
+      : undefined;
+  const promptFile = promptDirectory ? path.join(promptDirectory, "prompt.txt") : undefined;
+  try {
+    if (promptFile) {
+      await writeFile(promptFile, options.prompt, { encoding: "utf8", mode: 0o600 });
+    }
+    return await invokePreparedAgent(options, adapter, promptFile);
+  } finally {
+    if (promptDirectory) {
+      await rm(promptDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
+async function invokePreparedAgent(
+  options: InvokeOptions,
+  adapter: AgentAdapter,
+  promptFile?: string,
+): Promise<AgentRunResult> {
   let outputFile: string | undefined;
   if (options.artifactDirectory) {
     await mkdir(options.artifactDirectory, { recursive: true });
@@ -53,6 +76,7 @@ export async function invokeAgent(
   const request = {
     cwd: options.cwd,
     prompt: options.prompt,
+    ...(promptFile ? { promptFile } : {}),
     ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
     ...(outputFile ? { outputFile } : {}),
   };

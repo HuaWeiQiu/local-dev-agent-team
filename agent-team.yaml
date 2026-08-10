@@ -7,63 +7,110 @@ project:
   maxParallel: 2
 
 profiles:
-  codex-planner:
+  codex-orchestrator:
     adapter: codex
-    model: inherit
-    reasoning: high
+    model: gpt-5.6-sol
+    reasoning: max
     permission: read-only
-    timeoutSeconds: 900
-
-  codex-worker:
-    adapter: codex
-    model: inherit
-    reasoning: medium
-    permission: workspace-write
+    externalTools: deny
     timeoutSeconds: 1800
 
-  claude-reviewer:
-    adapter: claude
-    model: inherit
+  codex-architect:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    timeoutSeconds: 1800
+
+  grok-worker:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: workspace-write
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 3600
+
+  codex-reviewer:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    timeoutSeconds: 1800
+
+  codex-tester:
+    adapter: codex
+    model: gpt-5.6-sol
     reasoning: high
     permission: read-only
-    timeoutSeconds: 900
+    externalTools: deny
+    timeoutSeconds: 1200
 
 roles:
   orchestrator:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner]
+    defaultProfile: codex-orchestrator
+    allowedProfiles: [codex-orchestrator]
 
   architect:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner, claude-reviewer]
+    defaultProfile: codex-architect
+    allowedProfiles: [codex-architect]
 
   worker:
-    defaultProfile: codex-worker
-    allowedProfiles: [codex-worker]
+    defaultProfile: grok-worker
+    allowedProfiles: [grok-worker]
+    promptFile: prompts/grok-worker.md
 
   reviewer:
-    defaultProfile: claude-reviewer
-    allowedProfiles: [claude-reviewer, codex-planner]
-    fallbackProfiles: [codex-planner]
+    defaultProfile: codex-reviewer
+    allowedProfiles: [codex-reviewer]
 
   tester:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner]
+    defaultProfile: codex-tester
+    allowedProfiles: [codex-tester]
 
 strategies:
   default: balanced
   definitions:
     balanced:
+      topology:
+        mode: parallel-dag
       maxParallel: 2
-      maxReworkAttempts: 2
-      roleProfiles: {}
+      maxReworkAttempts: 1
+      executionTimeoutSeconds: 21600
+      maxAgentInvocations: 48
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 2147483648
+      approvalGates: [final]
+      approvalTimeoutSeconds: 172800
+      roleProfiles:
+        orchestrator: codex-orchestrator
+        architect: codex-architect
+        worker: grok-worker
+        reviewer: codex-reviewer
+        tester: codex-tester
 
     strict:
+      topology:
+        mode: sequential
       maxParallel: 1
-      maxReworkAttempts: 3
+      maxReworkAttempts: 2
+      executionTimeoutSeconds: 43200
+      maxAgentInvocations: 72
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 4294967296
+      approvalGates: [plan, final]
+      approvalTimeoutSeconds: 172800
       roleProfiles:
-        reviewer: claude-reviewer
-        tester: codex-planner
+        orchestrator: codex-orchestrator
+        architect: codex-architect
+        worker: grok-worker
+        reviewer: codex-reviewer
+        tester: codex-tester
+
+observability:
+  maxEventsPerRun: 50000
 
 quality:
   commands:
@@ -73,7 +120,7 @@ quality:
       args: [test]
     - command: pnpm
       args: [build]
-  maxReworkAttempts: 2
+  maxReworkAttempts: 1
   commandTimeoutSeconds: 900
 
 github:

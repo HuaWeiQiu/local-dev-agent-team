@@ -52,17 +52,27 @@ profiles:
     permission: read-only
     externalTools: deny
     timeoutSeconds: 900
+
+  grok-worker:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: workspace-write
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 3600
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `adapter` | Registered adapter, currently `codex` or `claude`. |
+| `adapter` | Registered adapter: `codex`, `claude`, or `grok`. |
 | `executable` | Optional executable path/name instead of the adapter default. |
 | `model` | `inherit` or a model name understood by that CLI. |
-| `reasoning` | `low`, `medium`, `high`, `xhigh`; Claude also accepts `max`. |
+| `reasoning` | Generic level validated by the selected adapter. Codex and Claude accept through `max`; Grok accepts `low`, `medium`, or `high`. |
 | `permission` | `read-only` or `workspace-write`. |
 | `externalTools` | `deny` (default) or `inherit` the Agent CLI's MCP configuration. |
 | `nativeProfile` | Optional Codex CLI native profile. |
+| `maxTurns` | Optional Grok headless turn limit, from 1 through 100. |
 | `timeoutSeconds` | Maximum process duration for one invocation. |
 | `args` | Extra non-reserved CLI arguments, passed without a shell. |
 
@@ -73,7 +83,11 @@ structured-output flags cannot be overridden through `args`.
 
 `externalTools: deny` makes Codex ignore user configuration and marks the
 invocation root untrusted so project configuration is disabled (authentication
-is retained). It supplies Claude with a strict empty MCP configuration.
+is retained). It supplies Claude with a strict empty MCP configuration. Grok
+keeps its authenticated `GROK_HOME` but uses a disposable process home so
+compatible user-home MCP sources are not discovered, and it removes MCP
+invocation tools; Grok memory, subagents, and Web tools are also disabled for
+managed runs.
 `inherit` is an explicit opt-in to provider-managed MCP configuration; the
 orchestrator does not load MCP credentials, authorize tools, or own MCP server
 processes. Adapter-managed MCP, directory, permission, session, model, and
@@ -90,6 +104,19 @@ must be stable. User and project MCP configuration is disabled; enterprise
 managed configuration remains host-admin policy. `nativeProfile` also depends
 on user configuration and therefore requires `externalTools: inherit` on a
 workspace-write worker profile.
+
+Grok headless mode receives prompts through a private owner-only temporary file,
+because its headless CLI does not consume piped stdin. The control plane creates
+and removes that file for each invocation; profiles cannot override its path.
+Use `model: grok` for a Grok profile. A Codex model name such as
+`gpt-5.6-sol` is never passed to Grok.
+
+The Grok adapter uses `maxTurns` when configured and otherwise defaults one
+invocation to 24 turns. Scope and workflow behavior belong in the worker role's
+editable `promptFile`, not in the adapter. Workflow-level `maxReworkAttempts` is
+a separate bound; keep it low because deterministic checks and independent
+review, not repeated worker self-revision, decide whether another attempt is
+justified.
 
 ## Role Policy
 
@@ -118,7 +145,8 @@ and fallbacks. Workers normally need `workspace-write`. The tester analyzes
 deterministic test results and therefore remains read-only.
 
 `promptFile` optionally replaces a role's bundled prompt with a path relative
-to the repository root.
+to the repository root. This is the supported place for project-owned agent
+behavior such as task scope, verification discipline, and stopping rules.
 
 ## Named Execution Strategies
 

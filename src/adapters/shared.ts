@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type {
   AdapterDoctorOptions,
   AgentAdapter,
@@ -16,12 +18,20 @@ const reservedArguments = new Set([
   "--sandbox",
   "-s",
   "--permission-mode",
+  "--always-approve",
+  "--yolo",
+  "--allow",
+  "--deny",
   "--model",
   "-m",
   "--cd",
+  "--cwd",
   "-C",
   "--output-schema",
   "--json-schema",
+  "--single",
+  "--prompt-file",
+  "--prompt-json",
   "--output-last-message",
   "-o",
   "--profile",
@@ -36,16 +46,47 @@ const reservedArguments = new Set([
   "--allowed-tools",
   "--disallowedTools",
   "--disallowed-tools",
+  "--max-turns",
+  "--disable-web-search",
+  "--no-auto-update",
+  "--no-memory",
+  "--experimental-memory",
+  "--no-subagents",
+  "--no-plan",
+  "--no-ask-user",
+  "--agent",
+  "--agents",
+  "--rules",
+  "--append-system-prompt",
+  "--system-prompt-override",
+  "--system-prompt",
+  "--verbatim",
   "--setting-sources",
   "--settings",
   "--plugin-dir",
   "--plugin-url",
+  "--agent-profile",
+  "--leader",
+  "--no-leader",
+  "--leader-socket",
+  "--reauth",
+  "--oauth",
+  "--debug",
+  "--debug-file",
+  "--grok-ws-origin",
+  "--grok-ws-url",
+  "--cli-chat-proxy-base-url",
+  "--xai-api-base-url",
+  "--client-identifier",
   "--fallback-model",
   "--resume",
   "-r",
   "--continue",
   "--worktree",
   "-w",
+  "--worktree-ref",
+  "--restore-code",
+  "--trust-folder",
   "--ignore-rules",
   "--ignore-user-config",
   "--approve-for-me",
@@ -66,10 +107,18 @@ const reservedArguments = new Set([
   "--input-format",
   "--no-session-persistence",
   "--effort",
+  "--reasoning-effort",
   "--fork-session",
   "--session-id",
   "--background",
   "--bg",
+  "--no-wait-for-background",
+  "--background-wait-timeout",
+  "--storage-mode",
+  "--todo-gate",
+  "--hunk-tracker-mode",
+  "--fs-read",
+  "--fs-write",
   "--remote-control",
   "--tmux",
   "--from-pr",
@@ -106,6 +155,7 @@ export interface AdapterDoctorSpec {
   executableFallback: string;
   authArgs: string[];
   authPassDetail: string;
+  validateAuth?: (result: ProcessResult) => { ok: boolean; detail: string };
   prepareProbeProfile: (profile: AgentProfile) => AgentProfile;
 }
 
@@ -144,12 +194,16 @@ export async function runAdapterDoctor(
     cwd: options.cwd,
     timeoutMs: 10_000,
   });
+  const authValidation = spec.validateAuth?.(auth) ?? {
+    ok: auth.exitCode === 0,
+    detail: auth.exitCode === 0 ? spec.authPassDetail : auth.stderr.trim(),
+  };
   checks.push({
     profile: options.profileName,
     adapter: adapter.name,
     check: "authentication",
-    status: auth.exitCode === 0 ? "pass" : "fail",
-    detail: auth.exitCode === 0 ? spec.authPassDetail : auth.stderr.trim(),
+    status: authValidation.ok ? "pass" : "fail",
+    detail: authValidation.detail,
   });
 
   const capabilityOk = adapter.supportedReasoning.includes(options.profile.reasoning);
@@ -189,21 +243,52 @@ async function probeAdapterModel(
     timeoutSeconds: Math.min(options.profile.timeoutSeconds, 120),
     args: [],
   };
-  const invocation = adapter.buildInvocation(profile, {
-    cwd: options.cwd,
-    prompt: "Reply with exactly OK. Do not call tools.",
-  });
-  const result = await runProcess(invocation);
+  const prompt = "Reply with exactly OK. Do not call tools.";
+  const promptDirectory =
+    adapter.promptTransport === "file"
+      ? await mkdtemp(path.join(tmpdir(), "agent-team-doctor-prompt-"))
+      : undefined;
+  const promptFile = promptDirectory ? path.join(promptDirectory, "prompt.txt") : undefined;
+  if (promptFile) {
+    await writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
+  }
+  let result: ProcessResult;
+  let parseError: unknown;
+  try {
+    const invocation = adapter.buildInvocation(profile, {
+      cwd: options.cwd,
+      prompt,
+      ...(promptFile ? { promptFile } : {}),
+    });
+    result = await runProcess(invocation);
+    if (result.exitCode === 0) {
+      try {
+        await adapter.parseResult(invocation, result);
+      } catch (error) {
+        parseError = error;
+      }
+    }
+  } finally {
+    if (promptDirectory) {
+      await rm(promptDirectory, { recursive: true, force: true });
+    }
+  }
   return {
     profile: options.profileName,
     adapter: adapter.name,
     check: "model",
-    status: result.exitCode === 0 ? "pass" : "fail",
+    status: result.exitCode === 0 && parseError === undefined ? "pass" : "fail",
     detail:
-      result.exitCode === 0
+      result.exitCode === 0 && parseError === undefined
         ? `Model '${options.profile.model}' accepted by ${spec.displayName}`
-        : result.stderr.trim() || `${spec.displayName} model probe failed`,
+        : parseError
+          ? `${spec.displayName} model probe returned invalid output: ${errorMessage(parseError)}`
+          : result.stderr.trim() || `${spec.displayName} model probe failed`,
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export async function parseOutputFileResult(
@@ -249,6 +334,41 @@ export function parseClaudeJson(process: ProcessResult): AgentRunResult {
       : { text: result, structured, process, ...(usage ? { usage } : {}) };
   } catch {
     return { text, process };
+  }
+}
+
+export function parseGrokJson(process: ProcessResult): AgentRunResult {
+  const rawText = process.stdout.trim();
+  if (!rawText) {
+    if (process.exitCode !== 0) {
+      return { text: "", process };
+    }
+    throw new Error("Grok returned no JSON output");
+  }
+  try {
+    const envelope = JSON.parse(rawText) as Record<string, unknown>;
+    const structured = envelope.structuredOutput ?? envelope.structured_output;
+    const text = typeof envelope.text === "string" ? envelope.text : rawText;
+    const stopReason =
+      typeof envelope.stopReason === "string" ? envelope.stopReason : undefined;
+    if (stopReason && stopReason !== "EndTurn") {
+      throw new Error(`Grok stopped without completing: ${stopReason}`);
+    }
+    if (!text && structured === undefined) {
+      throw new Error("Grok returned no completion text or structured output");
+    }
+    const usage = extractUsage(envelope);
+    return structured === undefined
+      ? { text, process, ...(usage ? { usage } : {}) }
+      : { text, structured, process, ...(usage ? { usage } : {}) };
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      if (process.exitCode !== 0) {
+        return { text: rawText, process };
+      }
+      throw new Error("Grok returned invalid JSON output", { cause: error });
+    }
+    throw error;
   }
 }
 

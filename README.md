@@ -101,7 +101,8 @@ agent-team doctor
 配置的模型确实可用，可以主动探测：
 
 ```bash
-agent-team doctor --profile codex-worker --probe-models
+agent-team doctor --profile grok-worker --probe-models
+agent-team doctor --profile codex-orchestrator --probe-models
 ```
 
 主动探测会发起一次很小的真实模型请求，因此可能消耗少量额度。
@@ -304,29 +305,46 @@ SQLite 中对应的事件。仓库、Git 分支、worktree、配置和自定义�
 
 ```yaml
 profiles:
-  codex-planner:
+  codex-orchestrator:
     adapter: codex
-    model: inherit
-    reasoning: high
+    model: gpt-5.6-sol
+    reasoning: max
     permission: read-only
-    externalTools: deny
-    timeoutSeconds: 900
-
-  codex-worker:
-    adapter: codex
-    model: your-codex-model
-    reasoning: medium
-    permission: workspace-write
     externalTools: deny
     timeoutSeconds: 1800
 
-  claude-reviewer:
-    adapter: claude
-    model: your-claude-model
+  codex-architect:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    timeoutSeconds: 1800
+
+  grok-worker:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: workspace-write
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 3600
+
+  codex-reviewer:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    timeoutSeconds: 1800
+
+  codex-tester:
+    adapter: codex
+    model: gpt-5.6-sol
     reasoning: high
     permission: read-only
     externalTools: deny
-    timeoutSeconds: 900
+    timeoutSeconds: 1200
 ```
 
 模型字段有两种写法：
@@ -337,9 +355,14 @@ profiles:
 模型必须已经能在对应 CLI 中使用。本项目不会绕过 CLI 自己的账号、权限和
 模型可用性限制。
 
+模型名属于各自的 CLI，不能混用：Codex 角色使用 `gpt-5.6-sol`，Grok 执行者使用
+`grok`。上面的配置不需要 Claude Code API Key，也不会调用 Kimi CLI。
+
 `externalTools` 默认是 `deny`：Codex 忽略用户配置并将本次运行的项目配置标记为
-不受信任（登录状态仍保留），
-Claude Code 使用严格空 MCP 配置。只有显式设置为 `inherit` 时，Agent 才会继承
+不受信任（登录状态仍保留），Claude Code 使用严格空 MCP 配置；Grok 保留已认证的
+`GROK_HOME`，但把普通用户目录切到本次调用的临时目录，因此不会发现用户目录中的
+兼容 MCP，同时禁用记忆、子 Agent 和 Web 工具。只有显式设置为
+`inherit` 时，Agent 才会继承
 对应 CLI 自己的 MCP 配置。凭据、server 生命周期和工具授权仍由 CLI 管理，本项目
 不保存 MCP 凭据，也不把 MCP 工具变成控制面命令。由于外部工具不保证服从 CLI
 的文件沙箱，只有 `workspace-write` Worker profile 可以设置 `inherit`；只读
@@ -347,30 +370,35 @@ profile 必须保持 `deny`。Codex 的 deny 模式也不读取用户模型/prov
 `model: inherit` 会使用 CLI 内置默认值；需要固定模型时请显式填写 `model`。
 `nativeProfile` 依赖用户配置，因此只能和 `externalTools: inherit` 一起使用。
 
+Grok Worker 的 `maxTurns` 可配置，本仓库设为 16。行为约束不写死在适配器中，
+而由 `roles.worker.promptFile` 指向的提示词文件控制；当前文件要求它只完成一个任务、
+只修改声明路径、先读测试、检查通过后立即停止。`balanced` 策略最多返工 1 次，
+`strict` 最多返工 2 次；Grok 自己声称“完成”不会跳过 Codex 审查或确定性质量命令。
+
 角色再引用允许使用的 profile：
 
 ```yaml
 roles:
   orchestrator:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner]
+    defaultProfile: codex-orchestrator
+    allowedProfiles: [codex-orchestrator]
 
   architect:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner, claude-reviewer]
+    defaultProfile: codex-architect
+    allowedProfiles: [codex-architect]
 
   worker:
-    defaultProfile: codex-worker
-    allowedProfiles: [codex-worker]
+    defaultProfile: grok-worker
+    allowedProfiles: [grok-worker]
+    promptFile: prompts/grok-worker.md
 
   reviewer:
-    defaultProfile: claude-reviewer
-    allowedProfiles: [claude-reviewer, codex-planner]
-    fallbackProfiles: [codex-planner]
+    defaultProfile: codex-reviewer
+    allowedProfiles: [codex-reviewer]
 
   tester:
-    defaultProfile: codex-planner
-    allowedProfiles: [codex-planner]
+    defaultProfile: codex-tester
+    allowedProfiles: [codex-tester]
 ```
 
 必需角色包括：
@@ -386,8 +414,8 @@ roles:
 ```bash
 agent-team run \
   --goal "为用户列表接口增加游标分页" \
-  --profile architect=claude-architect \
-  --profile worker=codex-worker
+  --profile architect=codex-architect \
+  --profile worker=grok-worker
 ```
 
 所有覆盖都必须符合该角色的 `allowedProfiles`，不会静默使用未授权的 profile。
@@ -434,8 +462,11 @@ strategies:
       approvalGates: [plan, final]
       approvalTimeoutSeconds: 172800
       roleProfiles:
-        reviewer: claude-reviewer
-        tester: codex-planner
+        orchestrator: codex-orchestrator
+        architect: codex-architect
+        worker: grok-worker
+        reviewer: codex-reviewer
+        tester: codex-tester
 ```
 
 为单次运行选择策略：

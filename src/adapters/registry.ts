@@ -1,12 +1,15 @@
 import { ClaudeAdapter } from "./claude.js";
 import { CodexAdapter } from "./codex.js";
+import { GrokAdapter } from "./grok.js";
 import type { AgentAdapter } from "./types.js";
 import { assertAdapterContract } from "./conformance.js";
 
 export class AdapterRegistry {
   private readonly adapters = new Map<string, AgentAdapter>();
 
-  constructor(adapters: AgentAdapter[] = [new CodexAdapter(), new ClaudeAdapter()]) {
+  constructor(
+    adapters: AgentAdapter[] = [new CodexAdapter(), new ClaudeAdapter(), new GrokAdapter()],
+  ) {
     for (const adapter of adapters) {
       assertAdapterContract(adapter);
       if (this.adapters.has(adapter.name)) {

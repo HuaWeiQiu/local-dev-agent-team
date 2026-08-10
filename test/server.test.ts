@@ -69,6 +69,7 @@ describe("control HTTP server", () => {
       adapters: [
         expect.objectContaining({ name: "claude", contractVersion: 1 }),
         expect.objectContaining({ name: "codex", contractVersion: 1 }),
+        expect.objectContaining({ name: "grok", contractVersion: 1 }),
       ],
       protocols: {
         mcp: { specification: "2026-07-28", defaultPolicy: "deny" },

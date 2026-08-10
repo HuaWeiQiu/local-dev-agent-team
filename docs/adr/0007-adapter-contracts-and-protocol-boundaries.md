@@ -29,7 +29,8 @@ contract versions.
 Before spawn, the control plane verifies that the profile names the selected
 adapter, requested reasoning and permission modes are supported, the managed
 working directory and output path are unchanged, the prompt is delivered by
-stdin, and the process timeout does not exceed the profile limit. Adapter-owned
+the adapter's managed stdin-or-file transport, and the process timeout does not
+exceed the profile limit. Adapter-owned
 arguments cannot be overridden through profile extras.
 
 Only `worker` may allow `workspace-write` profiles. Every other role's default,

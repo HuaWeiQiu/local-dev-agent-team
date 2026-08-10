@@ -9,6 +9,7 @@ import type { ProcessResult } from "../process/run.js";
 export interface AgentInvocationRequest {
   cwd: string;
   prompt: string;
+  promptFile?: string;
   outputSchema?: Record<string, unknown>;
   outputFile?: string;
 }
@@ -18,6 +19,8 @@ export interface AgentInvocation {
   args: string[];
   cwd: string;
   stdin?: string;
+  promptFile?: string;
+  env?: NodeJS.ProcessEnv;
   timeoutMs: number;
   outputFile?: string;
 }
@@ -64,6 +67,7 @@ export interface AgentAdapter {
   readonly name: string;
   readonly contract: AgentAdapterContract;
   readonly supportedReasoning: readonly Reasoning[];
+  readonly promptTransport?: "stdin" | "file";
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation;
   parseResult(invocation: AgentInvocation, process: ProcessResult): Promise<AgentRunResult>;
   doctor(options: AdapterDoctorOptions): Promise<DoctorCheck[]>;

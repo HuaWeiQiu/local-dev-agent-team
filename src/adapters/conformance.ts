@@ -54,6 +54,9 @@ export function assertAdapterProfile(
   if (profile.nativeProfile && adapter.name !== "codex") {
     throw new Error("nativeProfile is supported only by the Codex adapter");
   }
+  if (profile.maxTurns !== undefined && adapter.name !== "grok") {
+    throw new Error("maxTurns is currently supported only by the Grok adapter");
+  }
   if (!adapter.supportedReasoning.includes(profile.reasoning)) {
     throw new Error(
       `Adapter '${adapter.name}' does not support reasoning '${profile.reasoning}'`,
@@ -89,7 +92,14 @@ export function assertInvocationContract(
   if (invocation.cwd !== request.cwd) {
     throw new Error(`Adapter '${adapter.name}' changed the managed working directory`);
   }
-  if (invocation.stdin !== request.prompt) {
+  if (adapter.promptTransport === "file") {
+    if (!request.promptFile || invocation.promptFile !== request.promptFile) {
+      throw new Error(`Adapter '${adapter.name}' changed the managed prompt path`);
+    }
+    if (invocation.stdin !== undefined) {
+      throw new Error(`Adapter '${adapter.name}' must not duplicate a file-delivered prompt`);
+    }
+  } else if (invocation.stdin !== request.prompt) {
     throw new Error(`Adapter '${adapter.name}' must pass the prompt through stdin`);
   }
   if (

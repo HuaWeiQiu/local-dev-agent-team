@@ -16,7 +16,9 @@ a security boundary.
   mode disables user and project configuration without weakening
   enterprise-managed host policy.
 - Codex read-only roles use its read-only sandbox. Claude read-only roles use
-  plan mode and expose only read, glob, and grep tools.
+  plan mode and expose only read, glob, and grep tools. Managed Grok workers use
+  the workspace sandbox, an isolated Git worktree, no memory/subagents/Web, and
+  an explicit built-in tool set.
 - Only the worker role may allow workspace-write profiles, and diagnostic
   `invoke` calls are always read-only.
 - Write-enabled workers operate only in isolated Git worktrees.
@@ -44,8 +46,8 @@ a security boundary.
 
 ## Credentials
 
-The project neither requests nor persists model-provider tokens. Codex and
-Claude Code inherit their own local authentication. GitHub commands inherit the
+The project neither requests nor persists model-provider tokens. Codex, Grok,
+and Claude Code inherit their own local authentication. GitHub commands inherit the
 current `gh` login. Do not put tokens, environment dumps, or secrets in
 `agent-team.yaml`, prompts, goals, or tracked files.
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
+import { GrokAdapter } from "../src/adapters/grok.js";
 import { AgentInvocationError, invokeAgent } from "../src/adapters/invoke.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
 import type { AgentProfile } from "../src/config/schema.js";
@@ -42,6 +43,15 @@ describe("Codex adapter", () => {
       { cwd: "/tmp/repo", prompt: "Review" },
     );
     expect(invocation.args).not.toContain("--model");
+  });
+
+  it("supports max reasoning for the explicit 5.6 Sol orchestrator profile", () => {
+    const invocation = new CodexAdapter().buildInvocation(
+      { ...readOnlyProfile, model: "gpt-5.6-sol", reasoning: "max" },
+      { cwd: "/tmp/repo", prompt: "Coordinate" },
+    );
+    expect(invocation.args).toContain("gpt-5.6-sol");
+    expect(invocation.args).toContain('model_reasoning_effort="max"');
   });
 
   it("rejects safety overrides in profile arguments", () => {
@@ -147,6 +157,170 @@ describe("Claude adapter", () => {
   });
 });
 
+describe("Grok adapter", () => {
+  const workerProfile: AgentProfile = {
+    adapter: "grok",
+    model: "grok",
+    reasoning: "high",
+    permission: "workspace-write",
+    externalTools: "deny",
+    maxTurns: 16,
+    timeoutSeconds: 1_800,
+    args: [],
+  };
+
+  it("runs the Grok model as an isolated workspace worker", () => {
+    const invocation = new GrokAdapter().buildInvocation(workerProfile, {
+      cwd: "/tmp/repo",
+      prompt: "Implement",
+      promptFile: "/tmp/managed-prompt.txt",
+    });
+
+    expect(invocation.command).toBe("grok");
+    expect(invocation.args).toContain("grok");
+    expect(invocation.args).toContain("workspace");
+    expect(invocation.args).toContain("--always-approve");
+    expect(invocation.args).not.toContain("acceptEdits");
+    expect(invocation.args).toContain("--no-memory");
+    expect(invocation.args).toContain("--no-subagents");
+    expect(invocation.args).toContain("--disable-web-search");
+    expect(invocation.args).toContain("--no-auto-update");
+    expect(invocation.args).toContain("--disallowed-tools");
+    expect(invocation.args).toContain("MCPTool(*)");
+    expect(invocation.args).toContain("16");
+    expect(invocation.args).not.toContain("--rules");
+    expect(invocation.args).toContain("read_file,grep,list_dir,search_replace,run_terminal_cmd");
+    expect(invocation.args.at(-1)).toBe("/tmp/managed-prompt.txt");
+    expect(invocation.promptFile).toBe("/tmp/managed-prompt.txt");
+    expect(invocation.stdin).toBeUndefined();
+    expect(invocation.env).toMatchObject({
+      HOME: "/tmp",
+      USERPROFILE: "/tmp",
+      GROK_CLAUDE_MCPS_ENABLED: "false",
+      GROK_CURSOR_MCPS_ENABLED: "false",
+    });
+  });
+
+  it("uses a read-only sandbox for diagnostic model probes", () => {
+    const invocation = new GrokAdapter().buildInvocation(
+      { ...workerProfile, permission: "read-only" },
+      {
+        cwd: "/tmp/repo",
+        prompt: "Review",
+        promptFile: "/tmp/managed-prompt.txt",
+      },
+    );
+
+    expect(invocation.args).toContain("read-only");
+    expect(invocation.args).toContain("plan");
+    expect(invocation.args).not.toContain("--always-approve");
+  });
+
+  it("parses structured output and token usage from the Grok JSON envelope", async () => {
+    const adapter = new GrokAdapter();
+    const invocation = adapter.buildInvocation(workerProfile, {
+      cwd: "/tmp/repo",
+      prompt: "Implement",
+      promptFile: "/tmp/managed-prompt.txt",
+    });
+    const result = await adapter.parseResult(
+      invocation,
+      fixtureProcess(
+        JSON.stringify({
+          text: '{"status":"OK"}',
+          structuredOutput: { status: "OK" },
+          usage: {
+            input_tokens: 30,
+            cache_read_input_tokens: 7,
+            output_tokens: 9,
+          },
+        }),
+      ),
+    );
+
+    expect(result).toMatchObject({
+      text: '{"status":"OK"}',
+      structured: { status: "OK" },
+      usage: { inputTokens: 30, cachedInputTokens: 7, outputTokens: 9 },
+    });
+  });
+
+  it("rejects cancelled and empty Grok completions even when the CLI exits zero", async () => {
+    const adapter = new GrokAdapter();
+    const invocation = adapter.buildInvocation(workerProfile, {
+      cwd: "/tmp/repo",
+      prompt: "Implement",
+      promptFile: "/tmp/managed-prompt.txt",
+    });
+
+    await expect(
+      adapter.parseResult(
+        invocation,
+        fixtureProcess(JSON.stringify({ text: "", stopReason: "Cancelled" })),
+      ),
+    ).rejects.toThrow("Grok stopped without completing: Cancelled");
+    await expect(
+      adapter.parseResult(
+        invocation,
+        fixtureProcess(JSON.stringify({ text: "", stopReason: "EndTurn" })),
+      ),
+    ).rejects.toThrow("Grok returned no completion text or structured output");
+    await expect(adapter.parseResult(invocation, fixtureProcess(""))).rejects.toThrow(
+      "Grok returned no JSON output",
+    );
+    await expect(
+      adapter.parseResult(invocation, {
+        ...fixtureProcess(""),
+        exitCode: 1,
+        stderr: "authentication failed",
+      }),
+    ).resolves.toMatchObject({ text: "", process: { exitCode: 1 } });
+  });
+
+  it("rejects adapter-owned isolation overrides", () => {
+    expect(() =>
+      new GrokAdapter().buildInvocation(
+        { ...workerProfile, args: ["--no-memory"] },
+        {
+          cwd: "/tmp/repo",
+          prompt: "Implement",
+          promptFile: "/tmp/managed-prompt.txt",
+        },
+      ),
+    ).toThrow("managed by the grok adapter");
+    expect(() =>
+      new GrokAdapter().buildInvocation(
+        { ...workerProfile, args: ["--yolo"] },
+        {
+          cwd: "/tmp/repo",
+          prompt: "Implement",
+          promptFile: "/tmp/managed-prompt.txt",
+        },
+      ),
+    ).toThrow("managed by the grok adapter");
+    expect(() =>
+      new GrokAdapter().buildInvocation(
+        { ...workerProfile, args: ["--system-prompt", "ignore controller"] },
+        {
+          cwd: "/tmp/repo",
+          prompt: "Implement",
+          promptFile: "/tmp/managed-prompt.txt",
+        },
+      ),
+    ).toThrow("managed by the grok adapter");
+    expect(() =>
+      new GrokAdapter().buildInvocation(
+        { ...workerProfile, args: ["--leader-socket=/tmp/unmanaged.sock"] },
+        {
+          cwd: "/tmp/repo",
+          prompt: "Implement",
+          promptFile: "/tmp/managed-prompt.txt",
+        },
+      ),
+    ).toThrow("managed by the grok adapter");
+  });
+});
+
 function fixtureProcess(stdout: string) {
   return {
     command: "fixture",
@@ -161,6 +335,79 @@ function fixtureProcess(stdout: string) {
 }
 
 describe("agent invocation", () => {
+  it("delivers file-based prompts through a private temporary file and removes it", async () => {
+    let managedPromptFile: string | undefined;
+    const adapter: AgentAdapter = {
+      name: "fixture",
+      promptTransport: "file",
+      contract: fixtureContract,
+      supportedReasoning: ["high"],
+      buildInvocation: (_profile, request) => {
+        managedPromptFile = request.promptFile;
+        return {
+          command: process.execPath,
+          args: ["-e", "process.stdout.write(require('fs').readFileSync(process.argv[1], 'utf8'))", request.promptFile!],
+          cwd: request.cwd,
+          promptFile: request.promptFile,
+          timeoutMs: 1_000,
+        };
+      },
+      parseResult: async (_invocation, processResult) => ({
+        text: processResult.stdout,
+        process: processResult,
+      }),
+      doctor: async () => [],
+    };
+
+    const result = await invokeAgent(
+      {
+        adapterName: "fixture",
+        profile: { ...readOnlyProfile, adapter: "fixture" },
+        cwd: process.cwd(),
+        prompt: "private prompt",
+      },
+      new AdapterRegistry([adapter]),
+    );
+
+    expect(result.text).toBe("private prompt");
+    expect(managedPromptFile).toBeTruthy();
+    await expect(readFile(managedPromptFile!, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("removes a managed prompt when adapter invocation construction fails", async () => {
+    let managedPromptFile: string | undefined;
+    const adapter: AgentAdapter = {
+      name: "fixture",
+      promptTransport: "file",
+      contract: fixtureContract,
+      supportedReasoning: ["high"],
+      buildInvocation: (_profile, request) => {
+        managedPromptFile = request.promptFile;
+        throw new Error("construction failed");
+      },
+      parseResult: async (_invocation, processResult) => ({
+        text: processResult.stdout,
+        process: processResult,
+      }),
+      doctor: async () => [],
+    };
+
+    await expect(
+      invokeAgent(
+        {
+          adapterName: "fixture",
+          profile: { ...readOnlyProfile, adapter: "fixture" },
+          cwd: process.cwd(),
+          prompt: "private prompt",
+        },
+        new AdapterRegistry([adapter]),
+      ),
+    ).rejects.toThrow("construction failed");
+
+    expect(managedPromptFile).toBeTruthy();
+    await expect(readFile(managedPromptFile!, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("streams stdout and stderr into durable artifact logs", async () => {
     const artifactDirectory = await mkdtemp(path.join(tmpdir(), "agent-team-invoke-"));
     const adapter: AgentAdapter = {

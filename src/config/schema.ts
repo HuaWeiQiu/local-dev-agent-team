@@ -25,6 +25,7 @@ export const profileSchema = z.object({
   permission: permissionSchema,
   externalTools: externalToolsSchema.default("deny"),
   nativeProfile: z.string().min(1).optional(),
+  maxTurns: z.number().int().min(1).max(100).optional(),
   timeoutSeconds: z.number().int().positive(),
   args: z.array(z.string()).default([]),
 });
@@ -219,6 +220,13 @@ export const configSchema = z
           code: "custom",
           path: ["profiles", profileName, "nativeProfile"],
           message: "nativeProfile is supported only by the Codex adapter",
+        });
+      }
+      if (profile.maxTurns !== undefined && profile.adapter !== "grok") {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", profileName, "maxTurns"],
+          message: "maxTurns is currently supported only by the Grok adapter",
         });
       }
       if (profile.permission === "read-only" && profile.externalTools === "inherit") {
