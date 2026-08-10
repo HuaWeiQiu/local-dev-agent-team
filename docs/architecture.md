@@ -101,7 +101,7 @@ Every adapter publishes a versioned local-process contract covering supported
 reasoning levels, permissions, external-tool policies, structured output, and
 reported usage fields.
 Before spawn, the control plane verifies adapter/profile ownership, working
-directory, stdin prompt delivery, output path, and timeout. `agent-team interop`
+directory, managed stdin-or-file prompt delivery, output path, and timeout. `agent-team interop`
 and `GET /api/interop` expose the same machine-readable contract.
 
 MCP and A2A have separate ownership boundaries. MCP `2026-07-28` integration is

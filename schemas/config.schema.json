@@ -102,28 +102,7 @@
           "type": "array",
           "items": { "type": "string" }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "required": ["permission"],
-            "properties": { "permission": { "const": "read-only" } }
-          },
-          "then": {
-            "properties": { "externalTools": { "const": "deny" } }
-          }
-        },
-        {
-          "if": { "required": ["nativeProfile"] },
-          "then": {
-            "required": ["externalTools"],
-            "properties": {
-              "adapter": { "const": "codex" },
-              "externalTools": { "const": "inherit" }
-            }
-          }
-        }
-      ]
+      }
     },
     "profile": {
       "type": "object",
@@ -144,12 +123,42 @@
           "default": "deny"
         },
         "nativeProfile": { "type": "string", "minLength": 1 },
+        "maxTurns": { "type": "integer", "minimum": 1, "maximum": 100 },
         "timeoutSeconds": { "type": "integer", "minimum": 1 },
         "args": {
           "type": "array",
           "items": { "type": "string" }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["permission"],
+            "properties": { "permission": { "const": "read-only" } }
+          },
+          "then": {
+            "properties": { "externalTools": { "const": "deny" } }
+          }
+        },
+        {
+          "if": { "required": ["nativeProfile"] },
+          "then": {
+            "required": ["externalTools"],
+            "properties": {
+              "adapter": { "const": "codex" },
+              "externalTools": { "const": "inherit" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["maxTurns"] },
+          "then": {
+            "properties": {
+              "adapter": { "const": "grok" }
+            }
+          }
+        }
+      ]
     },
     "role": {
       "type": "object",

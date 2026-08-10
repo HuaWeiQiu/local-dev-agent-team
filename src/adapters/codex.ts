@@ -16,7 +16,7 @@ import type {
   DoctorCheck,
 } from "./types.js";
 
-const reasoning: readonly Reasoning[] = ["low", "medium", "high", "xhigh"];
+const reasoning: readonly Reasoning[] = ["low", "medium", "high", "xhigh", "max"];
 
 export class CodexAdapter implements AgentAdapter {
   readonly name = "codex";

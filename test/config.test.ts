@@ -39,11 +39,11 @@ describe("configuration", () => {
     await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
     await expect(loadConfig(root)).rejects.toThrow("Unknown agent adapter 'unknown'");
 
-    config.profiles["codex-planner"]!.adapter = "codex";
-    config.profiles["codex-planner"]!.reasoning = "max";
+    config.profiles["codex-planner"]!.adapter = "grok";
+    config.profiles["codex-planner"]!.reasoning = "xhigh";
     await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
     await expect(loadConfig(root)).rejects.toThrow(
-      "Adapter 'codex' does not support reasoning 'max'",
+      "Adapter 'grok' does not support reasoning 'xhigh'",
     );
   });
 
@@ -103,6 +103,17 @@ describe("configuration", () => {
 
     await expect(loadConfig(root)).rejects.toThrow(
       "nativeProfile is supported only by the Codex adapter",
+    );
+  });
+
+  it("rejects Grok-only turn limits on other adapters", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const config = createDefaultConfig("fixture");
+    config.profiles["codex-planner"]!.maxTurns = 16;
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+    await expect(loadConfig(root)).rejects.toThrow(
+      "maxTurns is currently supported only by the Grok adapter",
     );
   });
 
