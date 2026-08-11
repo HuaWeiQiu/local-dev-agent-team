@@ -12,6 +12,17 @@ export const reasoningSchema = z.enum(["low", "medium", "high", "xhigh", "max"])
 export const permissionSchema = z.enum(["read-only", "workspace-write"]);
 export const externalToolsSchema = z.enum(["deny", "inherit"]);
 
+export const codexProviderSchema = z.object({
+  id: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/, "Invalid Codex provider ID"),
+  name: z.string().min(1).optional(),
+  baseUrl: z.url(),
+  wireApi: z.literal("responses").default("responses"),
+  requiresOpenAIAuth: z.boolean().default(true),
+  supportsWebSockets: z.boolean().default(false),
+});
+
 export const commandSchema = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
@@ -25,6 +36,7 @@ export const profileSchema = z.object({
   permission: permissionSchema,
   externalTools: externalToolsSchema.default("deny"),
   nativeProfile: z.string().min(1).optional(),
+  codexProvider: codexProviderSchema.optional(),
   maxTurns: z.number().int().min(1).max(100).optional(),
   timeoutSeconds: z.number().int().positive(),
   args: z.array(z.string()).default([]),
@@ -220,6 +232,13 @@ export const configSchema = z
           code: "custom",
           path: ["profiles", profileName, "nativeProfile"],
           message: "nativeProfile is supported only by the Codex adapter",
+        });
+      }
+      if (profile.codexProvider && profile.adapter !== "codex") {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", profileName, "codexProvider"],
+          message: "codexProvider is supported only by the Codex adapter",
         });
       }
       if (profile.maxTurns !== undefined && profile.adapter !== "grok") {

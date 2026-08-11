@@ -63,6 +63,9 @@ export class CodexAdapter implements AgentAdapter {
         `projects.${JSON.stringify(request.cwd)}.trust_level="untrusted"`,
       );
     }
+    if (profile.codexProvider) {
+      args.push(...codexProviderArguments(profile.codexProvider));
+    }
 
     if (profile.nativeProfile) {
       args.push("--profile", profile.nativeProfile);
@@ -111,3 +114,23 @@ const doctorSpec: AdapterDoctorSpec = {
     return probeProfile;
   },
 };
+
+function codexProviderArguments(
+  provider: NonNullable<AgentProfile["codexProvider"]>,
+): string[] {
+  const prefix = `model_providers.${provider.id}`;
+  return [
+    "-c",
+    `model_provider=${JSON.stringify(provider.id)}`,
+    "-c",
+    `${prefix}.name=${JSON.stringify(provider.name ?? provider.id)}`,
+    "-c",
+    `${prefix}.base_url=${JSON.stringify(provider.baseUrl)}`,
+    "-c",
+    `${prefix}.wire_api=${JSON.stringify(provider.wireApi)}`,
+    "-c",
+    `${prefix}.requires_openai_auth=${provider.requiresOpenAIAuth}`,
+    "-c",
+    `${prefix}.supports_websockets=${provider.supportsWebSockets}`,
+  ];
+}
