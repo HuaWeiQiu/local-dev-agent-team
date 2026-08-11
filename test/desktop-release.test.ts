@@ -7,6 +7,18 @@ import { parse } from "yaml";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
 describe("desktop PR release", () => {
+  it("declares native installer icons for macOS and Windows", async () => {
+    const config = JSON.parse(
+      await readFile(path.join(repositoryRoot, "src-tauri", "tauri.conf.json"), "utf8"),
+    ) as { bundle: { icon: string[] } };
+
+    expect(config.bundle.icon).toContain("icons/icon.icns");
+    expect(config.bundle.icon).toContain("icons/icon.ico");
+    await expect(
+      readFile(path.join(repositoryRoot, "src-tauri", "icons", "icon.ico")),
+    ).resolves.not.toHaveLength(0);
+  });
+
   it("describes the pinned Windows sidecar without downloading it", () => {
     const output = execFileSync(
       process.execPath,
