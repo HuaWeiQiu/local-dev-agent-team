@@ -13,6 +13,7 @@ import {
   transitionProposal,
   type AuditRecord,
   type EvolutionCandidate,
+  type EvolutionEvaluationSource,
   type EvolutionProposal,
   type EvolutionTrustContext,
   type PromotionRecord,
@@ -173,9 +174,27 @@ export class EvolutionCatalog {
    * Failed deterministic or advisory evidence is recorded; promotion remains gated.
    */
   evaluate(proposalId: string, evidence: unknown, at: string): EvolutionProposal {
+    return this.#evaluate(proposalId, evidence, at, "external");
+  }
+
+  /** Attach evidence produced by the fixed server-owned structural preflight. */
+  evaluateServerPreflight(
+    proposalId: string,
+    evidence: unknown,
+    at: string,
+  ): EvolutionProposal {
+    return this.#evaluate(proposalId, evidence, at, "server-structural-preflight-v1");
+  }
+
+  #evaluate(
+    proposalId: string,
+    evidence: unknown,
+    at: string,
+    source: EvolutionEvaluationSource,
+  ): EvolutionProposal {
     return this.#runMutation(() => {
       const current = this.#requireProposal(proposalId);
-      const next = evaluateProposal(current, evidence, at);
+      const next = evaluateProposal(current, evidence, at, source);
       return this.#commit((state) => {
         state.proposals.set(next.id, next);
         return isolate(next);
@@ -191,8 +210,11 @@ export class EvolutionCatalog {
     proposalId: string,
     evidence: unknown,
     decision: unknown,
+    ...auditBinding: [applicationCommandId?: string]
   ): { proposal: EvolutionProposal; record: PromotionRecord } {
     return this.#runMutation(() => {
+      const [applicationCommandId] = auditBinding;
+      this.#assertApplicationCommandIdAvailable(applicationCommandId);
       const current = this.#requireProposal(proposalId);
       const targetKey = candidateTargetKey(current.candidate);
       const previousActiveProposalId = this.#activeByTarget.get(targetKey) ?? null;
@@ -202,6 +224,7 @@ export class EvolutionCatalog {
         evidence,
         decision,
         previousActiveProposalId,
+        ...(applicationCommandId === undefined ? {} : { applicationCommandId }),
       });
 
       return this.#commit((state) => {
@@ -248,8 +271,11 @@ export class EvolutionCatalog {
   rollback(
     proposalId: string,
     decision: unknown,
+    ...auditBinding: [applicationCommandId?: string]
   ): { proposal: EvolutionProposal; record: RollbackRecord } {
     return this.#runMutation(() => {
+      const [applicationCommandId] = auditBinding;
+      this.#assertApplicationCommandIdAvailable(applicationCommandId);
       const current = this.#requireProposal(proposalId);
       const promotionRecord = this.#promotionRecords.get(proposalId);
       if (!promotionRecord && current.status === "promoted") {
@@ -263,6 +289,7 @@ export class EvolutionCatalog {
         proposal: current,
         promotionRecord,
         decision,
+        ...(applicationCommandId === undefined ? {} : { applicationCommandId }),
       });
 
       const targetKey = candidateTargetKey(current.candidate);
@@ -475,6 +502,21 @@ export class EvolutionCatalog {
     return proposal;
   }
 
+  #assertApplicationCommandIdAvailable(applicationCommandId: string | undefined): void {
+    if (
+      applicationCommandId !== undefined &&
+      this.#auditRecords.some(
+        (record) =>
+          "applicationCommandId" in record &&
+          record.applicationCommandId === applicationCommandId,
+      )
+    ) {
+      throw new EvolutionCatalogConflictError(
+        `Application command '${applicationCommandId}' already owns a catalog audit record`,
+      );
+    }
+  }
+
   /**
    * Apply a mutation against a cloned working copy, then commit only after
    * the mutator returns successfully. Domain failures leave catalog state intact.
@@ -660,6 +702,7 @@ function replayRestoreAudit(
   const promotionByProposal = new Map<string, PromotionRecord>();
   const activeByTarget = new Map<string, string>();
   const counts = new Map<string, { promotion: number; rejection: number; rollback: number }>();
+  const applicationCommandIds = new Set<string>();
 
   for (const audit of auditRecords) {
     const proposal = proposalById.get(audit.proposalId);
@@ -671,6 +714,18 @@ function replayRestoreAudit(
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     count[audit.kind] += 1;
     counts.set(proposal.id, count);
+    if (
+      audit.kind !== "rejection" &&
+      audit.applicationCommandId !== undefined &&
+      applicationCommandIds.has(audit.applicationCommandId)
+    ) {
+      throw new EvolutionCatalogError(
+        `Application command '${audit.applicationCommandId}' owns multiple audit records`,
+      );
+    }
+    if (audit.kind !== "rejection" && audit.applicationCommandId !== undefined) {
+      applicationCommandIds.add(audit.applicationCommandId);
+    }
     const targetKey = candidateTargetKey(proposal.candidate);
 
     if (audit.kind === "promotion") {

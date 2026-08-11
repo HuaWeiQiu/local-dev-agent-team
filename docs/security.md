@@ -77,7 +77,7 @@ dependency changes before merging. Branch protection and required status checks
 should be enabled on the remote repository. The project creates draft pull
 requests by default and never auto-merges.
 
-## Bounded Evolution (Phases 1-3)
+## Bounded Evolution (Phases 1-4)
 
 The evolution domain, in-memory catalog, and Phase-2 durable wrapper are an
 additional trust boundary, not a path to unsupervised self-modification:
@@ -92,13 +92,17 @@ additional trust boundary, not a path to unsupervised self-modification:
   in a local immutable object; normal apply/rollback never accept caller paths
   or bytes. Prompt objects and prompt files must not contain secrets.
 - Evaluation requires deterministic evidence; any deterministic failure vetoes
-  advisory (including LLM) approval. Independent review is recommended operator
-  practice and, if recorded, must be included in the evidence passed to
-  `evaluate` (the only evidence-binding step); Phase 1 does not require or
-  automate review, and deterministic-only evidence can pass. Promotion,
+  advisory (including LLM) approval. The Phase-4 HTTP service never accepts
+  evidence or run IDs from the browser: the coordinator emits a fixed,
+  candidate-bound structural preflight. Passing means current trust, schema,
+  prompt object integrity, and target/Git safety checks passed; it does not mean
+  the candidate was executed or behaviorally validated. Promotion,
   rejection, and rollback need a non-empty `actor` and `reason`. These fields
   are audit labels, not authenticated proof of a human identity; the calling
   control plane must authenticate the operator and bind that identity.
+  Evaluation persists a versioned source: legacy or library-supplied evidence
+  defaults to `external` and cannot cross the Phase-4 HTTP promotion boundary as
+  `server-structural-preflight-v1`.
 - Capability flags force automatic execution, automatic promotion, network
   publication, and secret storage to remain false.
 - Catalog mutations are atomic: failed validation leaves proposals, audit
@@ -111,8 +115,14 @@ additional trust boundary, not a path to unsupervised self-modification:
   attacker who can rewrite both the document and its digest.
 - Durable writes fully revalidate and compare the primary document before using
   a `0600` temporary file followed by file fsync, rename, and directory fsync.
-  This detects stale state observed before a mutation but is not cross-process
-  locking; simultaneous writers can still race, so Phase 2 requires one writer.
+  Same-process catalog instances share a per-file commit queue before the disk
+  revision CAS. Cross-process ownership belongs to the project runtime control
+  lease; the low-level Phase-2 catalog is not itself a filesystem lock.
+  The runtime writes and fsyncs a complete owner record before atomically
+  publishing it with a same-directory hard link. Invalid, incomplete, or
+  well-formed stale lease files fail closed and require an operator to verify
+  that no service owns the project before removing `control.lock`; ownership is
+  never stolen automatically.
   A directory-fsync failure after rename seals the instance until reopen because
   durability is indeterminate; it is never treated as a successful memory commit.
 - Opening the Phase-3 application coordinator claims the catalog instance's
@@ -129,6 +139,22 @@ additional trust boundary, not a path to unsupervised self-modification:
   A prompt is considered applied only when Git HEAD proves a clean direct
   one-file commit from the journaled base. A pre-commit crash restores the old
   object and records an abort; unrelated revisions or commits fail closed.
+- Coordinator-owned promotion and rollback audits carry an optional
+  `applicationCommandId` for backward-compatible storage and require exact
+  two-way ownership for all newly controlled mutations. Successful completions
+  must own the catalog audit, aborted commands must not, and command result
+  proposal snapshots must be immutable-history prefixes of the catalog proposal.
+- The Phase-4 HTTP surface requires an authenticated local session for reads and
+  the exact actual loopback Origin for writes. Operator identity is derived from
+  the session token. Browser bodies cannot select policy, path, digest, evidence,
+  actor, timestamps, or confirm-time apply bytes. The client supplies only a
+  format-bounded idempotency key; internal command bindings remain server-owned.
+  All service and queued run operations are sealed and drained before the runtime
+  releases its control lease.
+- Legacy promoted proposals without application proof can be adopted over HTTP
+  only when the exact live target already matches. Any legacy apply, including
+  optional digest-bound prompt bytes, is restricted to the offline CLI while it
+  owns the project control lease.
 - `application-state.json` and prompt objects use repository-local strict
   documents/paths and POSIX `0600` files. Digests detect corruption, not a
   malicious local writer. Phase 3 remains single-process and provides no
@@ -143,7 +169,8 @@ and by strategy budgets such as strict sequential execution and
 Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
 [ADR 0014](./adr/0014-durable-evolution-catalog.md), and
-[ADR 0015](./adr/0015-controlled-evolution-application.md).
+[ADR 0015](./adr/0015-controlled-evolution-application.md), and
+[ADR 0016](./adr/0016-evolution-control-plane.md).
 
 ## Reporting
 

@@ -160,7 +160,7 @@ deterministic order. The primary working tree is never used for agent edits.
 - The worker cannot convert a failed command into a passing result.
 - GitHub publication is opt-in and never implies automatic merge.
 
-## Bounded Evolution (Phases 1-3)
+## Bounded Evolution (Phases 1-4)
 
 Phase 1 adds a **library-grade** bounded-evolution surface inspired by
 OpenRSI-style candidate records, without copying external sources and without
@@ -172,6 +172,7 @@ self-running loops.
 | Catalog | `src/evolution/catalog.ts` | Pure synchronous in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit, trust-validating restore |
 | Persistence | `src/evolution/persistence.ts` | Repository-local versioned document, exact revision witness, ordered audit replay, full pre-write document validation/comparison, symlink-safe paths, atomic file commit, fail-closed reopen |
 | Application | `src/evolution/application.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
+| Control service | `src/server/evolution-service.ts`, `src/server/http.ts` | Session-bound proposal ingress, fixed server preflight, exact preview material, project mutation latch, shutdown drain, sanitized HTTP projection |
 
 Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human
@@ -193,9 +194,31 @@ the exact catalog audit and makes command retries durable. The coordinator
 claims exclusive mutation ownership of its catalog instance so integration code
 cannot perform a catalog-only promotion through the same object.
 
-Deferred work includes evaluation automation, HTTP/UI integration, agent-driven
-suggestions, network publication, secrets, background loops, and automatic
-promotion.
+Phase 4 mounts the coordinator under the runtime's cross-process control lease.
+The browser can submit only candidate intent; proposal identity, policy, path,
+digest, evidence, operator identity, and timestamps are server-owned. Evaluation
+is a fixed structural and safety preflight bound to the immutable candidate. It
+persists the source `server-structural-preflight-v1`; legacy external evaluations
+cannot be relabeled or promoted through the HTTP boundary. It does not claim
+candidate execution or behavioral quality. Promotion and rollback remain separate
+preview/confirm operations and never run automatically. Shutdown seals both
+evolution operations and run action queues before closing stores or releasing the
+lease. Legacy exact-match adoption is available over HTTP; legacy target writes
+require the exclusive offline reconciliation command.
+
+The lease publishes a fully written and fsynced owner record atomically with a
+same-directory hard link. A malformed, incomplete, or stale `control.lock` is
+never replaced automatically: the operator must first verify that no control
+service owns the project and then remove the file explicitly.
+
+New coordinator-owned promotion and rollback records carry their durable
+application command identity. Startup validates catalog audits and application
+completions in both directions and treats stored command result proposals only as
+immutable historical prefixes, so retries cannot return a rewritten lifecycle.
+
+Deferred work includes the Phase-5 UI, candidate-specific isolated behavioral
+evaluation, agent-driven suggestions, network publication, secrets, background
+loops, and automatic promotion.
 
 Operator flow: `propose → evaluate → external independent review of the
 immutable evaluated snapshot → explicit human promote/reject → human
@@ -216,4 +239,5 @@ currently active promotion and restores only catalog-internal provenance.
 See [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
 [ADR 0014](./adr/0014-durable-evolution-catalog.md), and
-[ADR 0015](./adr/0015-controlled-evolution-application.md).
+[ADR 0015](./adr/0015-controlled-evolution-application.md), and
+[ADR 0016](./adr/0016-evolution-control-plane.md).

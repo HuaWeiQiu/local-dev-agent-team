@@ -874,6 +874,53 @@ describe("DurableEvolutionCatalog concurrency and failure recovery", () => {
     expect(reopened.snapshot().proposals).toHaveLength(8);
   });
 
+  it("serializes same-process mutations across catalog instances before disk CAS", async () => {
+    const root = await createTempRoot();
+    let releaseFirstWrite!: () => void;
+    let signalFirstWrite!: () => void;
+    const firstWriteReached = new Promise<void>((resolve) => {
+      signalFirstWrite = resolve;
+    });
+    const firstWriteReleased = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let blockFirstWrite = true;
+    const first = await openDurable(root, {
+      io: {
+        beforeAtomicStage: async (stage) => {
+          if (blockFirstWrite && stage === "write") {
+            blockFirstWrite = false;
+            signalFirstWrite();
+            await firstWriteReleased;
+          }
+        },
+      },
+    });
+    const second = await openDurable(root);
+
+    const firstWrite = first.propose({
+      id: "prop-cross-instance-a",
+      createdAt: now,
+      policy: validPolicy(),
+      candidate: validStrategyCandidate({ name: "cross-instance-a" }),
+    });
+    await firstWriteReached;
+    const secondWrite = second.propose({
+      id: "prop-cross-instance-b",
+      createdAt: "2026-08-11T01:01:00.000Z",
+      policy: validPolicy(),
+      candidate: validStrategyCandidate({ name: "cross-instance-b" }),
+    });
+    releaseFirstWrite();
+
+    await expect(firstWrite).resolves.toMatchObject({ committedRevision: 1 });
+    await expect(secondWrite).rejects.toBeInstanceOf(EvolutionPersistenceConflictError);
+    const reopened = await openDurable(root);
+    expect(reopened.snapshot().proposals.map((proposal) => proposal.id)).toEqual([
+      "prop-cross-instance-a",
+    ]);
+  });
+
   it("rejects stale revision conflicts and leaves memory at the last committed revision", async () => {
     const root = await createTempRoot();
     const first = await openDurable(root);

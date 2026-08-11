@@ -95,12 +95,13 @@ strategy and preserves an A -> B -> rollback B -> rollback A chain without
 guessing material from audit history.
 
 Legacy `adopt` proves only that the current target matches the promoted
-candidate, while legacy `apply` proves the new candidate target but not that
-the captured live baseline belongs to the catalog predecessor. Neither mode
-creates a rollback-safe predecessor proof. A reconciled record may be replaced
-by a later fully journaled application, but it cannot itself be rolled back.
-The operator must reconcile predecessor material explicitly instead of
-allowing catalog and target state to diverge.
+candidate. It is rollback-safe only when an existing application proof supplies
+the exact catalog predecessor; a root adopt remains non-rollback-safe because
+its earlier target is unknowable. Legacy `apply` records the actual live before
+target and is rollback-safe. When its catalog predecessor has no application
+proof, reconciliation accepts that predecessor only if the live target exactly
+matches its immutable candidate, captures one non-rollback-safe baseline layer,
+and preserves that chain for rollback of the newly applied proposal.
 
 ## Consequences
 
@@ -116,7 +117,8 @@ allowing catalog and target state to diverge.
   operation boundary.
 - Phase-2 promotions require explicit `reconcilePromoted`: adopt only when the
   live digest already matches, or apply through the same journal. Legacy prompt
-  material may be supplied only to that privileged reconciliation ingress.
+  material may be supplied only to the privileged offline reconciliation ingress;
+  the Phase-4 browser surface exposes exact-match adopt only.
 
 ## References
 

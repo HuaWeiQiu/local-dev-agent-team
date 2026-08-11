@@ -220,6 +220,10 @@ const proposalIdSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "Invalid proposal id");
 
+const applicationCommandIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
 /**
  * Strategy definition for evolution candidates.
  * Mirrors {@link namedStrategySchema} behavioral rules; topology is strict so unknown
@@ -397,8 +401,16 @@ export const evaluationResultSchema = z
 
 export type EvaluationResult = z.infer<typeof evaluationResultSchema>;
 
+export const evolutionEvaluationSourceSchema = z.enum([
+  "external",
+  "server-structural-preflight-v1",
+]);
+
+export type EvolutionEvaluationSource = z.infer<typeof evolutionEvaluationSourceSchema>;
+
 export const proposalEvaluationSchema = z
   .object({
+    source: evolutionEvaluationSourceSchema.default("external"),
     evidence: evolutionEvidenceSchema,
     result: evaluationResultSchema,
     at: z.string().datetime({ offset: true }),
@@ -427,6 +439,8 @@ export const promotionRecordSchema = z
     evaluation: evaluationResultSchema,
     /** Catalog-level pointer restored on rollback; domain does not apply file mutations. */
     previousActiveProposalId: proposalIdSchema.nullable(),
+    /** Present only when the application coordinator owns this catalog mutation. */
+    applicationCommandId: applicationCommandIdSchema.optional(),
   })
   .strict()
   .superRefine((record, context) => {
@@ -486,6 +500,8 @@ export const rollbackRecordSchema = z
     reason: z.string().trim().min(1).max(2_000),
     at: z.string().datetime({ offset: true }),
     restoredActiveProposalId: proposalIdSchema.nullable(),
+    /** Present only when the application coordinator owns this catalog mutation. */
+    applicationCommandId: applicationCommandIdSchema.optional(),
   })
   .strict();
 
@@ -842,6 +858,7 @@ export function evaluateProposal(
   proposal: EvolutionProposal,
   evidenceInput: unknown,
   at: string,
+  source: EvolutionEvaluationSource = "external",
 ): EvolutionProposal {
   if (proposal.status !== "evaluating") {
     throw new EvolutionLifecycleError(
@@ -865,6 +882,7 @@ export function evaluateProposal(
     status: "evaluated",
     transitions: [...proposal.transitions, transition],
     evaluation: {
+      source,
       evidence: structuredClone(evidence),
       result: structuredClone(result),
       at,
@@ -998,6 +1016,7 @@ export function promoteProposal(input: {
   evidence: unknown;
   decision: unknown;
   previousActiveProposalId?: string | null;
+  applicationCommandId?: string;
 }): { proposal: EvolutionProposal; record: PromotionRecord } {
   const decision = parseHumanDecision(input.decision);
   const evaluation = assertPromotionAllowed({
@@ -1022,6 +1041,9 @@ export function promoteProposal(input: {
       at: decision.decidedAt,
       evaluation: structuredClone(evaluation),
       previousActiveProposalId: input.previousActiveProposalId ?? null,
+      ...(input.applicationCommandId === undefined
+        ? {}
+        : { applicationCommandId: input.applicationCommandId }),
     }),
   );
 
@@ -1092,6 +1114,7 @@ export function rollbackProposal(input: {
   proposal: EvolutionProposal;
   promotionRecord: unknown;
   decision: unknown;
+  applicationCommandId?: string;
 }): { proposal: EvolutionProposal; record: RollbackRecord } {
   const decision = parseHumanDecision(input.decision);
   if (input.proposal.status !== "promoted") {
@@ -1124,6 +1147,9 @@ export function rollbackProposal(input: {
       reason: decision.reason,
       at: decision.decidedAt,
       restoredActiveProposalId: promotionRecord.previousActiveProposalId,
+      ...(input.applicationCommandId === undefined
+        ? {}
+        : { applicationCommandId: input.applicationCommandId }),
     }),
   );
 

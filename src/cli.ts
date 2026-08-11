@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,8 +11,6 @@ import { resolveProfile } from "./profiles/resolve.js";
 import { AdapterRegistry } from "./adapters/registry.js";
 import { invokeAgent } from "./adapters/invoke.js";
 import { runDoctor } from "./doctor.js";
-import { LocalWorkflowRunner } from "./workflow/runner.js";
-import { StrategyBlueprintCatalog } from "./strategies/catalog.js";
 import { RunStateStore } from "./state/store.js";
 import { SqliteEventStore } from "./events/store.js";
 import { filterRunEvents, renderLogLines } from "./logs/render.js";
@@ -220,23 +219,27 @@ program
       strategy?: string;
       config?: string;
     }) => {
-      const catalog = await StrategyBlueprintCatalog.open(
-        await loadConfig(process.cwd(), options.config),
-      );
       const profileOverrides = parseProfileAssignments(options.profile);
-      const state = await new LocalWorkflowRunner(catalog.loaded).run({
-        goal: options.goal,
-        profileOverrides,
-        ...(options.strategy ? { strategyName: options.strategy } : {}),
-      });
-      process.stdout.write(
-        `${state.id}\t${state.status}\t${state.integrationBranch}\n`,
-      );
-      if (state.error) {
-        process.stderr.write(`${state.error}\n`);
-      }
-      if (state.status === "blocked") {
-        process.exitCode = 1;
+      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      try {
+        const started = runtime.supervisor.start({
+          goal: options.goal,
+          profileOverrides,
+          ...(options.strategy ? { strategy: options.strategy } : {}),
+        });
+        const state = await runtime.supervisor.wait(started.runId);
+        if (!state) throw new Error(`Run '${started.runId}' stopped without a final state`);
+        process.stdout.write(
+          `${state.id}\t${state.status}\t${state.integrationBranch}\n`,
+        );
+        if (state.error) {
+          process.stderr.write(`${state.error}\n`);
+        }
+        if (state.status === "blocked") {
+          process.exitCode = 1;
+        }
+      } finally {
+        await runtime.close();
       }
     },
   );
@@ -251,22 +254,82 @@ program
   .action(async (options: { host: string; port: string; config?: string; workspace?: string }) => {
     assertExclusiveConfigOptions(options);
     const port = parsePort(options.port);
-    const sessionToken = process.env.AGENT_TEAM_SESSION_TOKEN;
+    const sessionToken = process.env.AGENT_TEAM_SESSION_TOKEN ?? randomBytes(32).toString("hex");
     const service = options.workspace
       ? await startWorkspaceControlService(
           await loadWorkspace(process.cwd(), options.workspace),
-          { host: options.host, port, ...(sessionToken ? { sessionToken } : {}) },
+          { host: options.host, port, sessionToken },
         )
       : await startControlService(await loadConfig(process.cwd(), options.config), {
           host: options.host,
           port,
-          ...(sessionToken ? { sessionToken } : {}),
+          sessionToken,
         });
     process.stdout.write(
       `Agent Team ${options.workspace ? "workspace " : ""}control service: ${service.url}\n`,
     );
+    process.stdout.write(
+      `Open in browser: ${service.url}/__agent_team/session?token=${sessionToken}\n`,
+    );
     await waitForShutdownSignal();
     await service.close();
+  });
+
+program
+  .command("evolution-reconcile")
+  .description("Reconcile a legacy promoted proposal while the control service is stopped")
+  .argument("<proposal-id>", "legacy promoted proposal identifier")
+  .requiredOption("--mode <mode>", "adopt an exact live target or apply the stored candidate")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "recovery reason")
+  .requiredOption("--command-id <id>", "stable idempotency identifier")
+  .requiredOption("--expected-revision <n>", "catalog revision reviewed for this command")
+  .option("--prompt-file <path>", "legacy prompt bytes, accepted only with --mode apply")
+  .option("-c, --config <path>", "configuration path")
+  .action(async (
+    proposalId: string,
+    options: {
+      mode: string;
+      actor: string;
+      reason: string;
+      commandId: string;
+      expectedRevision: string;
+      promptFile?: string;
+      config?: string;
+    },
+  ) => {
+    if (options.mode !== "adopt" && options.mode !== "apply") {
+      throw new Error("--mode must be 'adopt' or 'apply'");
+    }
+    if (options.mode === "adopt" && options.promptFile) {
+      throw new Error("--prompt-file is only accepted with --mode apply");
+    }
+    const expectedRevision = parseNonNegativeSafeInteger(
+      options.expectedRevision,
+      "--expected-revision",
+    );
+    const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+    try {
+      const promptContent = options.promptFile
+        ? await readFile(path.resolve(options.promptFile))
+        : undefined;
+      const result = await runtime.evolution.withTargetMutation(async () =>
+        await runtime.evolution.coordinator.reconcilePromoted({
+          commandId: options.commandId,
+          proposalId,
+          expectedRevision,
+          operator: options.actor,
+          reason: options.reason,
+          mode: options.mode as "adopt" | "apply",
+          ...(promptContent ? { promptContent } : {}),
+        }),
+      );
+      process.stdout.write(
+        `${proposalId}\t${result.applicationStatus}\trevision=${result.committedCatalogRevision}\tdeduplicated=${String(result.deduplicated)}\n`,
+      );
+    } finally {
+      await runtime.close();
+    }
   });
 
 program
@@ -570,6 +633,14 @@ function parsePort(value: string): number {
     throw new Error(`Invalid port '${value}'`);
   }
   return port;
+}
+
+function parseNonNegativeSafeInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${label} value '${value}'; expected a non-negative safe integer`);
+  }
+  return parsed;
 }
 
 function assertExclusiveConfigOptions(options: { config?: string; workspace?: string }): void {
