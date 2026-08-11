@@ -42,6 +42,12 @@ profiles:
     reasoning: medium
     permission: workspace-write
     externalTools: deny
+    codexProvider:
+      id: compatible-gateway
+      baseUrl: https://gateway.example.com
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
     timeoutSeconds: 1800
     args: []
 
@@ -72,6 +78,7 @@ profiles:
 | `permission` | `read-only` or `workspace-write`. |
 | `externalTools` | `deny` (default) or `inherit` the Agent CLI's MCP configuration. |
 | `nativeProfile` | Optional Codex CLI native profile. |
+| `codexProvider` | Optional explicit Codex-compatible Responses provider used even when user configuration is isolated. It contains no API key. |
 | `maxTurns` | Optional Grok headless turn limit, from 1 through 100. |
 | `timeoutSeconds` | Maximum process duration for one invocation. |
 | `args` | Extra non-reserved CLI arguments, passed without a shell. |
@@ -83,7 +90,9 @@ structured-output flags cannot be overridden through `args`.
 
 `externalTools: deny` makes Codex ignore user configuration and marks the
 invocation root untrusted so project configuration is disabled (authentication
-is retained). It supplies Claude with a strict empty MCP configuration. Grok
+is retained). An optional `codexProvider` is passed back as narrowly scoped CLI
+configuration, so a compatible gateway remains available without loading user
+MCP servers or plugins. It supplies Claude with a strict empty MCP configuration. Grok
 keeps its authenticated `GROK_HOME` but uses a disposable process home so
 compatible user-home MCP sources are not discovered, and it removes MCP
 invocation tools; Grok memory, subagents, and Web tools are also disabled for
@@ -104,6 +113,12 @@ must be stable. User and project MCP configuration is disabled; enterprise
 managed configuration remains host-admin policy. `nativeProfile` also depends
 on user configuration and therefore requires `externalTools: inherit` on a
 workspace-write worker profile.
+
+`codexProvider.id` must be a simple provider identifier. `baseUrl` is the
+compatible endpoint, `wireApi` is currently restricted to `responses`, and the
+authentication secret remains in Codex's own `auth.json`; never put an API key
+in `agent-team.yaml`. Disable WebSockets when the gateway only implements the
+Responses HTTPS transport.
 
 Grok headless mode receives prompts through a private owner-only temporary file,
 because its headless CLI does not consume piped stdin. The control plane creates

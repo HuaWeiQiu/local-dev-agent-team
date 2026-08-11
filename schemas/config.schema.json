@@ -123,6 +123,22 @@
           "default": "deny"
         },
         "nativeProfile": { "type": "string", "minLength": 1 },
+        "codexProvider": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "baseUrl"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+            },
+            "name": { "type": "string", "minLength": 1 },
+            "baseUrl": { "type": "string", "format": "uri" },
+            "wireApi": { "const": "responses", "default": "responses" },
+            "requiresOpenAIAuth": { "type": "boolean", "default": true },
+            "supportsWebSockets": { "type": "boolean", "default": false }
+          }
+        },
         "maxTurns": { "type": "integer", "minimum": 1, "maximum": 100 },
         "timeoutSeconds": { "type": "integer", "minimum": 1 },
         "args": {
@@ -147,6 +163,14 @@
             "properties": {
               "adapter": { "const": "codex" },
               "externalTools": { "const": "inherit" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["codexProvider"] },
+          "then": {
+            "properties": {
+              "adapter": { "const": "codex" }
             }
           }
         },

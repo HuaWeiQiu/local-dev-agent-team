@@ -106,6 +106,24 @@ describe("configuration", () => {
     );
   });
 
+  it("rejects Codex provider settings on non-Codex adapters", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const config = createDefaultConfig("fixture");
+    config.profiles["codex-planner"]!.adapter = "claude";
+    config.profiles["codex-planner"]!.codexProvider = {
+      id: "gateway",
+      baseUrl: "https://gateway.example.test",
+      wireApi: "responses",
+      requiresOpenAIAuth: true,
+      supportsWebSockets: false,
+    };
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+    await expect(loadConfig(root)).rejects.toThrow(
+      "codexProvider is supported only by the Codex adapter",
+    );
+  });
+
   it("rejects Grok-only turn limits on other adapters", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
     const config = createDefaultConfig("fixture");

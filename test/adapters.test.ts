@@ -54,6 +54,32 @@ describe("Codex adapter", () => {
     expect(invocation.args).toContain('model_reasoning_effort="max"');
   });
 
+  it("retains an explicit provider while isolating user configuration", () => {
+    const invocation = new CodexAdapter().buildInvocation(
+      {
+        ...readOnlyProfile,
+        codexProvider: {
+          id: "sub2api",
+          name: "Sub2API",
+          baseUrl: "https://gateway.example.test",
+          wireApi: "responses",
+          requiresOpenAIAuth: true,
+          supportsWebSockets: false,
+        },
+      },
+      { cwd: "/tmp/repo", prompt: "Coordinate" },
+    );
+
+    expect(invocation.args).toContain("--ignore-user-config");
+    expect(invocation.args).toContain('model_provider="sub2api"');
+    expect(invocation.args).toContain(
+      'model_providers.sub2api.base_url="https://gateway.example.test"',
+    );
+    expect(invocation.args).toContain(
+      "model_providers.sub2api.supports_websockets=false",
+    );
+  });
+
   it("rejects safety overrides in profile arguments", () => {
     expect(() =>
       new CodexAdapter().buildInvocation(
@@ -71,10 +97,22 @@ describe("Codex adapter", () => {
 
   it("inherits provider-managed external tools only when explicitly configured", () => {
     const invocation = new CodexAdapter().buildInvocation(
-      { ...readOnlyProfile, permission: "workspace-write", externalTools: "inherit" },
+      {
+        ...readOnlyProfile,
+        permission: "workspace-write",
+        externalTools: "inherit",
+        codexProvider: {
+          id: "gateway",
+          baseUrl: "https://gateway.example.test",
+          wireApi: "responses",
+          requiresOpenAIAuth: true,
+          supportsWebSockets: false,
+        },
+      },
       { cwd: "/tmp/repo", prompt: "Review" },
     );
     expect(invocation.args).not.toContain("--ignore-user-config");
+    expect(invocation.args).toContain('model_provider="gateway"');
     expect(() =>
       new CodexAdapter().buildInvocation(
         { ...readOnlyProfile, externalTools: "inherit" },
