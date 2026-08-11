@@ -55,6 +55,11 @@ Runs started through `agent-team serve` also append ordered events to
 `.agent-team/control.sqlite`. SSE clients reconnect with the last observed
 sequence. Agent stdout and stderr remain available as artifact logs; event
 chunks provide live progress without making the browser the process owner.
+The workbench derives its Agent activity view from controller-owned invocation
+events. Codex-native child lifecycle snapshots, when emitted by the managed CLI,
+are nested under their owning invocation and retain only thread/path/status/model
+metadata. The service does not scan independent Codex session stores or attach
+unrelated terminal sessions to a run.
 Captured process output and cumulative artifacts are bounded by the selected
 strategy. The run snapshot records invocation counts, durations, output bytes,
 truncation, artifact bytes, and any provider-reported token or USD usage.

@@ -129,7 +129,8 @@ agent-team serve
 
 服务默认只监听 `http://127.0.0.1:4317`。在浏览器打开这个地址即可使用 React
 工作台：可视化预检和保存执行策略、选择角色 profile、启动或取消运行、查看任务
-DAG、交付证据、审查结果、质量命令和实时 Agent 输出；阻塞、取消或中断的运行可以作为新的
+DAG、交付证据、审查结果、质量命令和实时 Agent 状态/输出；活动日志中的 `Agent`
+页会直接列出总控、架构、执行、审查、测试等受控调用及其完成状态，阻塞、取消或中断的运行可以作为新的
 关联运行重试。界面保存的策略位于项目状态目录，不会改写 `agent-team.yaml`，并且
 可以通过工作台或 `agent-team run --strategy <name>` 执行。
 
@@ -507,6 +508,17 @@ observability:
 每个事件都带稳定 trace/span ID；`GET /api/runs/<run-id>/telemetry`（工作区模式
 使用对应的项目作用域路径）可导出 OTLP/HTTP JSON。导出只读且不会主动发送到
 外部服务。
+
+工作台的 `Agent` 活动视图由 `agent.invocation.*` 和有界的
+`agent.children.updated` 事件重建。直属行表示 Agent Team 自己启动的 profile 调用；若
+Codex CLI 返回原生子代理生命周期，子代理会缩进显示在线程所属调用下。子代理摘要只保留
+线程 ID、可用的代理路径、状态和模型元数据，不复制 prompt、消息正文或加密内容。
+
+这个监控边界刻意限制在当前控制服务拥有的运行内：它不会扫描 `~/.codex`，也不会把另一个
+终端中的交互式 Codex 会话冒充成当前项目的子代理。Codex 适配器仍使用隔离的 ephemeral
+调用；Agent Team 的多角色并行由控制器直接启动、计入调用预算并显示为直属行。未来 Codex
+CLI 在该隔离模式下提供原生子代理事件时，现有解析器会显示它们，但不会把它们当成第二套
+Agent Team。
 
 ## 项目测试门禁
 

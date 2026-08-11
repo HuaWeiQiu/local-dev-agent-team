@@ -5,7 +5,7 @@ import { finished } from "node:stream/promises";
 import path from "node:path";
 import type { AgentProfile } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
-import type { AgentAdapter, AgentRunResult } from "./types.js";
+import type { AgentActivitySnapshot, AgentAdapter, AgentRunResult } from "./types.js";
 import { AdapterRegistry } from "./registry.js";
 import { assertAdapterProfile, assertInvocationContract } from "./conformance.js";
 
@@ -19,6 +19,7 @@ export interface InvokeOptions {
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  onActivity?: (activity: AgentActivitySnapshot) => void;
   maxOutputBytes?: number;
 }
 
@@ -82,6 +83,7 @@ async function invokePreparedAgent(
   };
   const invocation = adapter.buildInvocation(options.profile, request);
   assertInvocationContract(adapter, options.profile, request, invocation);
+  const activityParser = adapter.createActivityParser?.();
   const stdoutLog = options.artifactDirectory
     ? createWriteStream(path.join(options.artifactDirectory, "stdout.log"), { flags: "w" })
     : undefined;
@@ -100,6 +102,9 @@ async function invokePreparedAgent(
       ...(options.maxOutputBytes ? { maxOutputBytes: options.maxOutputBytes } : {}),
       onStdout: (chunk) => {
         stdoutLog?.write(chunk);
+        for (const activity of activityParser?.push(chunk) ?? []) {
+          options.onActivity?.(activity);
+        }
         options.onStdout?.(chunk);
       },
       onStderr: (chunk) => {
@@ -108,9 +113,15 @@ async function invokePreparedAgent(
       },
     });
   } finally {
-    stdoutLog?.end();
-    stderrLog?.end();
-    await Promise.all(logWrites);
+    try {
+      for (const activity of activityParser?.finish() ?? []) {
+        options.onActivity?.(activity);
+      }
+    } finally {
+      stdoutLog?.end();
+      stderrLog?.end();
+      await Promise.all(logWrites);
+    }
   }
   let result: AgentRunResult;
   try {

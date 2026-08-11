@@ -24,6 +24,7 @@ import {
 } from "./api";
 import { DagCanvas } from "./components/DagCanvas";
 import { EventConsole } from "./components/EventConsole";
+import { retainAgentMonitorEvents } from "./agent-activity";
 import { EvidenceCenter } from "./components/EvidenceCenter";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
@@ -254,7 +255,7 @@ export default function App() {
       if (!active || eventBuffer.current.length === 0) return;
       const pending = eventBuffer.current;
       eventBuffer.current = [];
-      setEvents((current) => [...current, ...pending].slice(-500));
+      setEvents((current) => retainAgentMonitorEvents([...current, ...pending]));
     };
     source.onmessage = (message) => {
       if (!active) return;

@@ -144,6 +144,37 @@ await writeFile(
 );
 
 const events = new SqliteEventStore(path.join(visualRoot, ".agent-team", "control.sqlite"));
+events.emit(state.id, "agent.invocation.started", {
+  invocationId: "fixture-worker-invocation",
+  role: "worker",
+  profile: "codex-worker",
+  adapter: "codex",
+  model: "gpt-5.6-sol",
+  artifactKey: "tasks/refund-api/attempt-2/worker",
+});
+events.emit(state.id, "agent.children.updated", {
+  invocationId: "fixture-worker-invocation",
+  role: "worker",
+  profile: "codex-worker",
+  adapter: "codex",
+  artifactKey: "tasks/refund-api/attempt-2/worker",
+  agents: [{
+    threadId: "019ff217-2ee2-7362-9522-a2bb9d6be27c",
+    path: "/root/contracts_final_review",
+    status: "completed",
+    model: "gpt-5.6-sol",
+  }],
+});
+events.emit(state.id, "agent.invocation.completed", {
+  invocationId: "fixture-worker-invocation",
+  role: "worker",
+  profile: "codex-worker",
+  adapter: "codex",
+  model: "gpt-5.6-sol",
+  artifactKey: "tasks/refund-api/attempt-2/worker",
+  durationMs: 32_000,
+  success: true,
+});
 events.emit(state.id, "agent.stdout", {
   role: "worker",
   profile: "codex-worker",
