@@ -38,6 +38,7 @@
 - 返工、并发数、进程时间和 CI 修复次数都有明确上限。
 - 可以创建 GitHub 草稿 PR、等待 Actions 检查并执行一次受限修复。
 - 不自动合并代码，最终合并必须由人确认。
+- 提供库内受控演进事务：只有经过评估、预览和人工确认的自定义策略或配置角色提示词才能应用，并保留幂等命令、崩溃恢复和回滚链；该能力目前尚未开放到 Web/API。
 
 当前内置以下 CLI 适配器：
 
@@ -598,6 +599,7 @@ agent-team complete <run-id>
 - Codex CLI 和 Claude Code。
 - Git worktree 隔离。
 - GitHub PR 与 Actions 质量门禁。
+- 受限自演进 Phase 1-3：候选/证据/人工门禁、仓库本地持久化，以及受控 target apply/rollback。
 
 运行状态会持久保存。当前版本不会重新连接已经终止的 Agent CLI 进程，但可以从
 经过 Git 验证的任务检查点人工恢复；未完成波次会使用新的分支重新执行。其他
@@ -607,11 +609,12 @@ Agent CLI 需要通过适配器接口接入。
 
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
-- [安全模型](docs/security.md)（含受限自演进 Phase 1-2 信任与持久化边界）
-- [系统架构](docs/architecture.md)（含 domain / catalog / persistence 分层）
-- [受限自演进 Phase 1-2](docs/evolution-phase-1.zh-CN.md)（候选记录、人工晋升/回滚、持久化与延期能力分界）
+- [安全模型](docs/security.md)（含受限自演进 Phase 1-3 信任、持久化与应用边界）
+- [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
+- [受限自演进 Phase 1-3](docs/evolution-phase-1.zh-CN.md)（候选记录、人工晋升、受控应用/回滚与延期能力分界）
 - [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014：演进 catalog 持久化边界](docs/adr/0014-durable-evolution-catalog.md)
+- [ADR 0015：受控演进应用事务](docs/adr/0015-controlled-evolution-application.md)
 - [开源多 Agent 框架对照与补缺](docs/ecosystem-review.md)
 - [可视化策略蓝图](docs/strategy-blueprints.md)
 - [桌面 App 与 Android/Termux 集成方案](docs/app-runtime-plan.zh-CN.md)

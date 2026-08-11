@@ -168,7 +168,8 @@ async function toEvaluated(
   const evaluatedAt = new Date(createdMs + 120_000).toISOString();
   await durable.beginEvaluation(proposalId, evaluatingAt);
   const evaluating = durable.getProposal(proposalId)!;
-  return await durable.evaluate(proposalId, boundEvidence(evaluating, items), evaluatedAt);
+  return (await durable.evaluate(proposalId, boundEvidence(evaluating, items), evaluatedAt))
+    .proposal;
 }
 
 function evolutionDir(root: string, stateDirectory = ".agent-team"): string {
@@ -330,24 +331,27 @@ describe("DurableEvolutionCatalog lifecycle durability", () => {
       policy: validPolicy(),
       candidate: validStrategyCandidate(),
     });
-    expect(proposed.status).toBe("proposed");
+    expect(proposed.proposal.status).toBe("proposed");
+    expect(proposed.committedRevision).toBe(1);
     expect(first.revision).toBe(1);
 
     const evaluating = await first.beginEvaluation("prop-a", "2026-08-11T01:01:00.000Z");
-    expect(evaluating.status).toBe("evaluating");
+    expect(evaluating.proposal.status).toBe("evaluating");
+    expect(evaluating.committedRevision).toBe(2);
     expect(first.revision).toBe(2);
 
     const evaluated = await first.evaluate(
       "prop-a",
-      boundEvidence(evaluating),
+      boundEvidence(evaluating.proposal),
       "2026-08-11T01:02:00.000Z",
     );
-    expect(evaluated.status).toBe("evaluated");
+    expect(evaluated.proposal.status).toBe("evaluated");
+    expect(evaluated.committedRevision).toBe(3);
     expect(first.revision).toBe(3);
 
     const { proposal: promoted, record: promotion } = await first.promote(
       "prop-a",
-      boundEvidence(evaluated),
+      boundEvidence(evaluated.proposal),
       humanDecision(),
     );
     expect(promoted.status).toBe("promoted");
