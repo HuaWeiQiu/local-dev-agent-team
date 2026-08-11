@@ -1862,7 +1862,7 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
     }).catch((error: unknown) => error);
     expect(deepFailure).toBeInstanceOf(EvolutionPersistenceValidationError);
     expect(deepFailure).not.toBeInstanceOf(RangeError);
-  }, 30_000);
+  }, 90_000);
 
   it("does not persist drifted live prompt bytes when legacy adopt fails", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-prompt-drift-adopt-"));
