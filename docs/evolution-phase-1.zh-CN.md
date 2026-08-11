@@ -306,7 +306,7 @@ agent-team resume <run-id> \
 - **校验失败**：domain 抛错，catalog 不提交工作副本 → 提案、审计、active 指针保持原样。
 - **多字段更新**：`promote` 同时写提案状态、审计记录、内部 promotion record、active 指针；任一步在提交前失败则全部不生效。
 - **非 active 回滚**：若目标上的 active 已指向更新的晋升提案，旧的 `promoted` 提案不能被回滚（避免破坏恢复链）。
-- **回滚结果**：active 恢复为 promotion record 中的 `previousActiveProposalId`；若为 `null` 则删除该目标的 active 指针。回滚**不**还原 prompt/strategy 源文件（Phase 1/2 均不应用这些文件）。Phase 2 下，catalog 自身的磁盘文档会随 mutation 原子更新；rename 前失败时内存与主文件均停留在上一已提交 revision。若 rename 已完成但目录 fsync 失败，则结果属于不确定状态：内存不交换、当前实例拒绝继续写，必须重开并接受完整旧版或新版，绝不猜测覆盖。
+- **回滚结果**：active 恢复为 promotion record 中的 `previousActiveProposalId`；若为 `null` 则删除该目标的 active 指针。Phase 1/2 只更新 catalog；Phase 3 必须通过 `EvolutionApplicationCoordinator` 才会同时还原已经应用的 prompt/strategy 目标。Phase 2 下，catalog 自身的磁盘文档会随 mutation 原子更新；rename 前失败时内存与主文件均停留在上一已提交 revision。若 rename 已完成但目录 fsync 失败，则结果属于不确定状态：内存不交换、当前实例拒绝继续写，必须重开并接受完整旧版或新版，绝不猜测覆盖。
 
 ## 9. 分阶段路线图
 
@@ -320,9 +320,11 @@ agent-team resume <run-id> \
 
    Phase 2 **不改变** Phase 1 domain 语义，也不应用文件、不提供 HTTP/UI、不执行 Agent、不自动评估或自动晋升。
 
-3. **Phase 3 — 受控应用（未实现）**
+3. **Phase 3 — 受控应用（已实现，库内 API）**
 
-   在人工批准后，有界地应用 role-prompt 文件或策略蓝图到项目拥有路径，并保留可回滚的文件级审计。
+   `EvolutionApplicationCoordinator` 是 catalog mutation 的唯一 facade。它提供不可变、限时的预览 token；命令使用 `commandId + expectedRevision + token + operator + reason`，并持久化幂等响应。role-prompt 内容只在提案入口以字节形式接收一次，严格校验 UTF-8、256 KiB 上限和 SHA-256 后保存为本地不可变对象；apply/rollback 不接收内容或路径。提示词只能修改已经配置、存在且由 Git 跟踪的 Markdown `promptFile`，写入后生成只包含该文件的前向提交并保留原权限；策略只能条件式修改自定义蓝图，不能改配置内置策略。
+
+   `application-state.json` 使用严格 version/revision/payload digest、pending write-ahead journal、completed 审计和 command binding。启动恢复同时验证 target、catalog audit/active pointer 和 prompt Git 提交；不能证明的组合一律 `RECOVERY_REQUIRED`。提示词对象仅用于本地恢复，**提示词文件不得包含秘密**。当前仍只支持单进程 writer，也还没有 HTTP/UI。详见 [ADR 0015](./adr/0015-controlled-evolution-application.md)。
 
 4. **Phase 4 — 评估与工作流集成（未实现）**
 
@@ -336,11 +338,11 @@ agent-team resume <run-id> \
 
 - [ ] 是否只修改了文档声明路径，而没有“顺手”改 `src/` 冒充已应用候选？
 - [ ] 文档中的 Grok / strict 数字是否仍与 `agent-team.yaml` 一致？
-- [ ] 是否把“记录候选”误写成“已能改 prompt 文件”？
+- [ ] 是否只有 Phase 3 coordinator 在改 prompt/strategy，而没有绕过 journal 直接调用 catalog promote？
 - [ ] 是否声称 LLM 批准可以覆盖失败的确定性命令？（不可以）
 - [ ] ADR 0013 与本文对 domain/catalog 边界的描述是否一致？
 - [ ] ADR 0014 对持久化合同（信任边界、revision、digest 威胁模型、原子提交、fail-closed 重开）的描述是否与实现一致？
-- [ ] 是否把 Phase 2 的“可重开持久化”误写成“已能应用 prompt/strategy 文件”？
+- [ ] 是否把 Phase 2 的“可重开持久化”和 Phase 3 的“受控应用证明”混为一谈？
 
 ## 11. 相关文档
 
@@ -351,3 +353,4 @@ agent-team resume <run-id> \
 - [ADR 0012 Grok Worker](./adr/0012-grok-headless-worker-adapter.md)
 - [ADR 0013 Domain/Catalog 边界](./adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014 持久化演进 Catalog](./adr/0014-durable-evolution-catalog.md)
+- [ADR 0015 受控演进应用](./adr/0015-controlled-evolution-application.md)

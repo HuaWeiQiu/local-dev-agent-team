@@ -133,6 +133,7 @@ export class DurableEvolutionCatalog {
   #io: DurableEvolutionFileIo;
   #mutationQueue: Promise<void> = Promise.resolve();
   #indeterminate = false;
+  #exclusiveWriter: object | null = null;
 
   private constructor(options: {
     root: string;
@@ -272,51 +273,181 @@ export class DurableEvolutionCatalog {
     return this.#catalog.snapshot();
   }
 
-  async propose(input: {
+  /**
+   * Atomically read the committed catalog revision together with a snapshot.
+   * Callers must not pair a separate `revision` getter read with `snapshot()`
+   * across `await` boundaries.
+   */
+  async readSnapshot(): Promise<{
+    revision: number;
+    snapshot: EvolutionCatalogSnapshot;
+  }> {
+    return await this.#enqueue(async () => ({
+      revision: this.#revision,
+      snapshot: this.#catalog.snapshot(),
+    }));
+  }
+
+  /**
+   * Permanently bind mutations on this instance to one coordinator-owned lease.
+   * Reads and pure preflights remain available to observers.
+   */
+  claimExclusiveWriter(): object {
+    if (this.#exclusiveWriter) {
+      throw new EvolutionPersistenceError(
+        "Durable evolution catalog already has an exclusive mutation owner",
+      );
+    }
+    const lease = Object.freeze({});
+    this.#exclusiveWriter = lease;
+    return lease;
+  }
+
+  /** Validate a proposal against the current catalog without writing state. */
+  async validateProposal(input: {
     id: string;
     createdAt: string;
     policy: unknown;
     candidate: unknown;
   }): Promise<EvolutionProposal> {
-    return await this.#mutate((working) => working.propose(input));
+    return await this.#enqueue(async () => {
+      const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
+      return working.propose(input);
+    });
   }
 
-  async beginEvaluation(proposalId: string, at: string): Promise<EvolutionProposal> {
-    return await this.#mutate((working) => working.beginEvaluation(proposalId, at));
+  /** Run the full promotion transition against an isolated catalog clone. */
+  async preflightPromote(
+    proposalId: string,
+    evidence: unknown,
+    decision: unknown,
+  ): Promise<{ proposal: EvolutionProposal; record: PromotionRecord }> {
+    return await this.#enqueue(async () => {
+      const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
+      return working.promote(proposalId, evidence, decision);
+    });
+  }
+
+  /** Run the full rollback transition against an isolated catalog clone. */
+  async preflightRollback(
+    proposalId: string,
+    decision: unknown,
+  ): Promise<{ proposal: EvolutionProposal; record: RollbackRecord }> {
+    return await this.#enqueue(async () => {
+      const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
+      return working.rollback(proposalId, decision);
+    });
+  }
+
+  async propose(
+    input: {
+      id: string;
+      createdAt: string;
+      policy: unknown;
+      candidate: unknown;
+    },
+    writer?: object,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) => working.propose(input));
+    return Object.freeze({ proposal: result, committedRevision });
+  }
+
+  async beginEvaluation(
+    proposalId: string,
+    at: string,
+    writer?: object,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.beginEvaluation(proposalId, at),
+    );
+    return Object.freeze({ proposal: result, committedRevision });
   }
 
   async evaluate(
     proposalId: string,
     evidence: unknown,
     at: string,
-  ): Promise<EvolutionProposal> {
-    return await this.#mutate((working) => working.evaluate(proposalId, evidence, at));
+    writer?: object,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.evaluate(proposalId, evidence, at),
+    );
+    return Object.freeze({ proposal: result, committedRevision });
   }
 
   async promote(
     proposalId: string,
     evidence: unknown,
     decision: unknown,
-  ): Promise<{ proposal: EvolutionProposal; record: PromotionRecord }> {
-    return await this.#mutate((working) => working.promote(proposalId, evidence, decision));
+    writer?: object,
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: PromotionRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.promote(proposalId, evidence, decision),
+    );
+    return { ...result, committedRevision };
   }
 
   async reject(
     proposalId: string,
     decision: unknown,
-  ): Promise<{ proposal: EvolutionProposal; record: RejectionRecord }> {
-    return await this.#mutate((working) => working.reject(proposalId, decision));
+    writer?: object,
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: RejectionRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.reject(proposalId, decision),
+    );
+    return { ...result, committedRevision };
   }
 
   async rollback(
     proposalId: string,
     decision: unknown,
-  ): Promise<{ proposal: EvolutionProposal; record: RollbackRecord }> {
-    return await this.#mutate((working) => working.rollback(proposalId, decision));
+    writer?: object,
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: RollbackRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.rollback(proposalId, decision),
+    );
+    return { ...result, committedRevision };
   }
 
-  #mutate<T>(operation: (working: EvolutionCatalog) => T): Promise<T> {
-    const run = async (): Promise<T> => {
+  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#mutationQueue.then(operation);
+    this.#mutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  #assertWriter(writer: object | undefined): void {
+    if (this.#exclusiveWriter && writer !== this.#exclusiveWriter) {
+      throw new EvolutionPersistenceError(
+        "Durable evolution catalog mutations are owned by its application coordinator",
+      );
+    }
+  }
+
+  #mutate<T>(
+    operation: (working: EvolutionCatalog) => T,
+  ): Promise<{ result: T; committedRevision: number }> {
+    return this.#enqueue(async () => {
       if (this.#indeterminate) {
         throw new EvolutionPersistenceError(
           "Durable evolution catalog commit outcome is indeterminate; reopen the catalog before another mutation",
@@ -336,15 +467,8 @@ export class DurableEvolutionCatalog {
       // Memory swap only after durable success.
       this.#catalog = working;
       this.#revision = nextRevision;
-      return result;
-    };
-
-    const result = this.#mutationQueue.then(run);
-    this.#mutationQueue = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+      return { result, committedRevision: nextRevision };
+    });
   }
 
   async #persist(

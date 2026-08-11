@@ -77,7 +77,7 @@ dependency changes before merging. Branch protection and required status checks
 should be enabled on the remote repository. The project creates draft pull
 requests by default and never auto-merges.
 
-## Bounded Evolution (Phases 1-2)
+## Bounded Evolution (Phases 1-3)
 
 The evolution domain, in-memory catalog, and Phase-2 durable wrapper are an
 additional trust boundary, not a path to unsupervised self-modification:
@@ -87,8 +87,10 @@ additional trust boundary, not a path to unsupervised self-modification:
   policy alone. Durable open derives that context only from the loaded project
   role configuration; the pure catalog validates the context supplied by its
   caller but does not load or authenticate configuration itself.
-- Role-prompt candidates store a repository-relative path and content digest
-  only; Phase 1 does not read, write, or apply prompt or strategy files.
+- Role-prompt candidates store a repository-relative path and content digest.
+  Phase 3 accepts matching UTF-8 bytes only at proposal ingress and stores them
+  in a local immutable object; normal apply/rollback never accept caller paths
+  or bytes. Prompt objects and prompt files must not contain secrets.
 - Evaluation requires deterministic evidence; any deterministic failure vetoes
   advisory (including LLM) approval. Independent review is recommended operator
   practice and, if recorded, must be included in the evidence passed to
@@ -113,6 +115,24 @@ additional trust boundary, not a path to unsupervised self-modification:
   locking; simultaneous writers can still race, so Phase 2 requires one writer.
   A directory-fsync failure after rename seals the instance until reopen because
   durability is indeterminate; it is never treated as a successful memory commit.
+- Opening the Phase-3 application coordinator claims the catalog instance's
+  mutation lease. Previews are opaque, expiring, operator/revision/target-bound
+  capabilities; returned records are cloned and frozen. Commands are durably
+  idempotent and cannot supply evaluation evidence, promotion provenance, or
+  apply-time material.
+- Prompt application requires a quiescent project, a clean primary worktree, an
+  existing configured tracked Markdown file, symlink-safe parents, an atomic
+  same-directory write that preserves permissions, and an exact one-file
+  forward Git commit. Strategy application can mutate only custom blueprints
+  with exact expected-before state; config-defined strategies remain read-only.
+- Crash recovery validates the exact expected catalog audit and active pointer.
+  A prompt is considered applied only when Git HEAD proves a clean direct
+  one-file commit from the journaled base. A pre-commit crash restores the old
+  object and records an abort; unrelated revisions or commits fail closed.
+- `application-state.json` and prompt objects use repository-local strict
+  documents/paths and POSIX `0600` files. Digests detect corruption, not a
+  malicious local writer. Phase 3 remains single-process and provides no
+  cross-process lock.
 
 Grok workers used by the default workflow remain bounded by profile and adapter
 policy (`maxTurns`, workspace-write only inside an isolated worktree,
@@ -122,7 +142,8 @@ and by strategy budgets such as strict sequential execution and
 
 Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
-[ADR 0014](./adr/0014-durable-evolution-catalog.md).
+[ADR 0014](./adr/0014-durable-evolution-catalog.md), and
+[ADR 0015](./adr/0015-controlled-evolution-application.md).
 
 ## Reporting
 
