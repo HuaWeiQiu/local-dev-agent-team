@@ -1847,12 +1847,18 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
       assertQuiescent: () => undefined,
     })).rejects.toThrow("application history is too deep");
 
-    let overDeep: Record<string, unknown> | null = null;
+    let overDeepJson = "null";
     for (let index = 0; index < 10_000; index += 1) {
-      overDeep = { previousApplication: overDeep };
+      overDeepJson = `{"previousApplication":${overDeepJson}}`;
     }
-    validDocument.payload.applications = [overDeep!];
-    await writeFile(applicationPath, `${JSON.stringify(validDocument)}\n`, "utf8");
+    validDocument.payload.applications = [];
+    const shallowJson = JSON.stringify(validDocument);
+    const deepJson = shallowJson.replace(
+      '"applications":[]',
+      `"applications":[${overDeepJson}]`,
+    );
+    expect(deepJson).not.toBe(shallowJson);
+    await writeFile(applicationPath, `${deepJson}\n`, "utf8");
     const deepFailure = await EvolutionApplicationCoordinator.open({
       catalog: await DurableEvolutionCatalog.open(harness.loaded),
       strategies: await StrategyBlueprintCatalog.open(harness.loaded),
