@@ -1,4 +1,4 @@
-import { Activity, Ban, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -25,6 +25,7 @@ import {
 import { DagCanvas } from "./components/DagCanvas";
 import { EventConsole } from "./components/EventConsole";
 import { EvidenceCenter } from "./components/EvidenceCenter";
+import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunActionDialog } from "./components/RunActionDialog";
@@ -78,9 +79,9 @@ export default function App() {
   const [cleanupPreview, setCleanupPreview] = useState<RunCleanupPreview>();
   const [cleanupError, setCleanupError] = useState<string>();
   const [error, setError] = useState<string>();
-  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design">("monitor");
+  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution">("monitor");
   const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence" | "usage">("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
   const [usageReport, setUsageReport] = useState<UsageReport>();
   const [usageLoading, setUsageLoading] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
@@ -499,6 +500,15 @@ export default function App() {
           >
             <Workflow size={20} /><span>编排</span>
           </button>
+          <button
+            className={workspaceMode === "evolution" ? "is-active" : ""}
+            onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }}
+            aria-label="演进工作台"
+            title="演进工作台"
+            disabled={!config}
+          >
+            <Sparkles size={20} /><span>演进</span>
+          </button>
         </nav>
         <span className={`navigation-stream ${connected ? "is-connected" : ""}`} title={connected ? "事件流已连接" : "事件流未连接"}>
           <Radio size={18} />
@@ -535,7 +545,7 @@ export default function App() {
           <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
         </div>
         <div className="topbar-run">
-          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : run ? (
+          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : run ? (
             <>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
@@ -543,6 +553,7 @@ export default function App() {
           ) : <span>本地 Agent 控制台</span>}
         </div>
         <div className="topbar-actions">
+          {workspaceMode !== "evolution" && <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} disabled={!config} aria-label="演进工作台" title="演进工作台"><Sparkles size={17} /><span>演进</span></button>}
           {workspaceMode === "monitor" && pendingApproval && (
             <button
               className="button secondary"
@@ -577,22 +588,30 @@ export default function App() {
           >
             {themeMode === "light" ? <Sun size={17} /> : themeMode === "dark" ? <Moon size={17} /> : <Monitor size={17} />}
           </button>
-          <button className="button primary" aria-label="新建运行" title="新建运行" disabled={!config} onClick={() => openLauncher()}><Plus size={16} /><span>新建运行</span></button>
+          {workspaceMode === "monitor" && <button className="button primary" aria-label="新建运行" title="新建运行" disabled={!config} onClick={() => openLauncher()}><Plus size={16} /><span>新建运行</span></button>}
         </div>
       </header>
 
       <nav className="mobile-nav" aria-label="移动端视图">
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
-        <MobileTab active={workspaceMode === "design"} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "flow"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Workflow size={16} />} label="任务图" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "details"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("details"); }} icon={<CircleDot size={16} />} label="详情" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
-        <MobileTab active={workspaceMode === "monitor" && mobileView === "usage"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("usage"); setMobileView("usage"); }} icon={<Gauge size={16} />} label="用量" />
+        {workspaceMode === "evolution" ? <>
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Activity size={16} />} label="运行" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
+          <MobileTab active onClick={() => setMobileView("evolution")} icon={<Sparkles size={16} />} label="演进" />
+        </> : <>
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
+          <MobileTab active={workspaceMode === "design"} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "flow"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Workflow size={16} />} label="任务图" />
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "details"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("details"); }} icon={<CircleDot size={16} />} label="详情" />
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
+          <MobileTab active={workspaceMode === "monitor" && mobileView === "usage"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("usage"); setMobileView("usage"); }} icon={<Gauge size={16} />} label="用量" />
+        </>}
       </nav>
 
       <div className="workspace-shell">
-        {workspaceMode === "design" && config ? (
+        {workspaceMode === "evolution" && config && scope ? (
+          <EvolutionWorkbench key={scopeKey} scope={scope} config={config} />
+        ) : workspaceMode === "design" && config ? (
           <StrategyComposer
             config={config}
             onPreflight={preflightBlueprint}

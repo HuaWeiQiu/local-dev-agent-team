@@ -160,7 +160,7 @@ deterministic order. The primary working tree is never used for agent edits.
 - The worker cannot convert a failed command into a passing result.
 - GitHub publication is opt-in and never implies automatic merge.
 
-## Bounded Evolution (Phases 1-4)
+## Bounded Evolution (Phases 1-5)
 
 Phase 1 adds a **library-grade** bounded-evolution surface inspired by
 OpenRSI-style candidate records, without copying external sources and without
@@ -173,6 +173,7 @@ self-running loops.
 | Persistence | `src/evolution/persistence.ts` | Repository-local versioned document, exact revision witness, ordered audit replay, full pre-write document validation/comparison, symlink-safe paths, atomic file commit, fail-closed reopen |
 | Application | `src/evolution/application.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
 | Control service | `src/server/evolution-service.ts`, `src/server/http.ts` | Session-bound proposal ingress, fixed server preflight, exact preview material, project mutation latch, shutdown drain, sanitized HTTP projection |
+| Workbench | `web/src/components/EvolutionWorkbench.tsx`, `web/src/api.ts` | React/Tauri state-driven proposal UI, exact preview confirmation, stable per-intent idempotency keys, stale-preview cleanup, responsive navigation |
 
 Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human
@@ -205,6 +206,13 @@ preview/confirm operations and never run automatically. Shutdown seals both
 evolution operations and run action queues before closing stores or releasing the
 lease. Legacy exact-match adoption is available over HTTP; legacy target writes
 require the exclusive offline reconciliation command.
+
+Phase 5 exposes the narrow control service in the existing React/Tauri shell.
+The workbench never accepts operator identity, target paths, digests, evidence,
+or confirm-time material from the user. It keeps preview tokens and command IDs
+only in component memory, clears them on scope or revision changes, and refetches
+the authoritative snapshot after each mutation. Mobile uses a list/detail flow;
+desktop keeps proposal index, detail, and next-action panes visible together.
 
 The lease publishes a fully written and fsynced owner record atomically with a
 same-directory hard link. A malformed, incomplete, or stale `control.lock` is

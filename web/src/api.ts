@@ -2,6 +2,9 @@ import type {
   ProjectScope,
   PublicConfig,
   EvidenceFilePreview,
+  EvolutionPreviewResponse,
+  EvolutionProposal,
+  EvolutionSnapshot,
   RunCleanupPreview,
   RunCleanupResult,
   RunEvidence,
@@ -18,6 +21,7 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code: string | undefined = undefined,
   ) {
     super(message);
   }
@@ -172,6 +176,104 @@ export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
   return await request<UsageReport>(`${apiRoot(scope)}/usage`);
 }
 
+export async function getEvolution(scope: ProjectScope): Promise<EvolutionSnapshot> {
+  return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution`, { cache: "no-store" });
+}
+
+export async function proposeEvolutionStrategy(
+  scope: ProjectScope,
+  input: { name: string; definition: StrategyBlueprintDefinition },
+  commandId: string,
+): Promise<{ proposal: EvolutionProposal }> {
+  return await request<{ proposal: EvolutionProposal }>(`${apiRoot(scope)}/evolution/proposals/strategy`, {
+    method: "POST",
+    cache: "no-store",
+    headers: commandHeaders(commandId),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function proposeEvolutionPrompt(
+  scope: ProjectScope,
+  input: { role: string; encoding: "base64"; content: string },
+  commandId: string,
+): Promise<{ proposal: EvolutionProposal }> {
+  return await request<{ proposal: EvolutionProposal }>(`${apiRoot(scope)}/evolution/proposals/prompt`, {
+    method: "POST",
+    cache: "no-store",
+    headers: commandHeaders(commandId),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function evaluateEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "evaluate", {});
+}
+
+export async function rejectEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  reason: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "reject", { reason });
+}
+
+export async function previewEvolutionPromotion(
+  scope: ProjectScope,
+  proposalId: string,
+  expectedRevision: number,
+): Promise<EvolutionPreviewResponse> {
+  return await evolutionAction<EvolutionPreviewResponse>(
+    scope,
+    proposalId,
+    "promote/preview",
+    { expectedRevision },
+  );
+}
+
+export async function confirmEvolutionPromotion(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { expectedRevision: number; token: string; reason: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "promote/confirm", input, commandId);
+}
+
+export async function previewEvolutionRollback(
+  scope: ProjectScope,
+  proposalId: string,
+  expectedRevision: number,
+): Promise<EvolutionPreviewResponse> {
+  return await evolutionAction<EvolutionPreviewResponse>(
+    scope,
+    proposalId,
+    "rollback/preview",
+    { expectedRevision },
+  );
+}
+
+export async function confirmEvolutionRollback(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { expectedRevision: number; token: string; reason: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "rollback/confirm", input, commandId);
+}
+
+export async function reconcileEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { expectedRevision: number; reason: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "reconcile", input, commandId);
+}
+
 export function runExportUrl(scope: ProjectScope, runId: string): string {
   return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/export`;
 }
@@ -180,10 +282,14 @@ export function runExportUrl(scope: ProjectScope, runId: string): string {
 export async function downloadRunEvents(scope: ProjectScope, runId: string): Promise<void> {
   const response = await fetch(runExportUrl(scope, runId));
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: unknown;
+      code?: unknown;
+    };
     throw new ApiError(
       response.status,
       typeof body.error === "string" ? body.error : `请求失败 (${response.status})`,
+      typeof body.code === "string" ? body.code : undefined,
     );
   }
   const blob = await response.blob();
@@ -207,17 +313,39 @@ async function request<T = unknown>(url: string, init?: RequestInit): Promise<T>
     },
   });
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: unknown;
+      code?: unknown;
+    };
     throw new ApiError(
       response.status,
       typeof body.error === "string" ? body.error : `请求失败 (${response.status})`,
+      typeof body.code === "string" ? body.code : undefined,
     );
   }
   return (await response.json()) as T;
 }
 
-function commandHeaders(): HeadersInit {
-  return { "Idempotency-Key": crypto.randomUUID() };
+function commandHeaders(commandId: string = crypto.randomUUID()): HeadersInit {
+  return { "Idempotency-Key": commandId };
+}
+
+async function evolutionAction<T = unknown>(
+  scope: ProjectScope,
+  proposalId: string,
+  action: string,
+  body: unknown,
+  commandId?: string,
+): Promise<T> {
+  return await request<T>(
+    `${apiRoot(scope)}/evolution/proposals/${encodeURIComponent(proposalId)}/actions/${action}`,
+    {
+      method: "POST",
+      cache: "no-store",
+      ...(commandId ? { headers: commandHeaders(commandId) } : {}),
+      body: JSON.stringify(body),
+    },
+  );
 }
 
 function apiRoot(scope: ProjectScope): string {

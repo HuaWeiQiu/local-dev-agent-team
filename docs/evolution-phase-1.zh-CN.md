@@ -1,6 +1,6 @@
-# 受限自演进 Phase 1-4
+# 受限自演进 Phase 1-5
 
-本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1-4：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计的候选记录、受控应用与人工门禁**，不复制任何 OpenRSI 源码或协议文本。
+本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1-5：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计的候选记录、受控应用与人工门禁**，不复制任何 OpenRSI 源码或协议文本。
 
 实现入口：
 
@@ -11,6 +11,7 @@
 | Persistence（Phase 2） | `src/evolution/persistence.ts` | 异步 `DurableEvolutionCatalog`：受信任 open、失败可恢复的 promise 队列、原子磁盘提交、重开时 fail-closed 校验 |
 | Application（Phase 3） | `src/evolution/application.ts` | 精确预览、对象存储、应用 journal、幂等确认、崩溃恢复与回滚链 |
 | Control（Phase 4） | `src/server/evolution-service.ts`、`src/server/http.ts` | 本地会话、服务端固定预检、项目 mutation latch、窄 HTTP API 与关闭排空 |
+| Workbench（Phase 5） | `web/src/components/EvolutionWorkbench.tsx`、`web/src/api.ts` | React/Tauri 候选列表、结构预检、精确预览、人工确认、回滚与移动端单页流程 |
 
 相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md) 与 [ADR 0014](./adr/0014-durable-evolution-catalog.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
 
@@ -50,6 +51,7 @@ Phase 1 只回答一个问题：
 | Phase 2 持久化包装 | `DurableEvolutionCatalog` 在 `stateDirectory/evolution/catalog.json` 保存版本化文档；单调 `revision`、payload SHA-256 完整性摘要（检测损坏，**不是**对抗可写文件系统攻击者的认证）、原子 `wx`/`0600`/fsync/rename 提交；重开时用当前 `LoadedConfig.roles` 派生信任并重新校验全部提案与审计 |
 | Phase 3 受控应用 | prompt 对象只在提案入口接收一次；精确 before/after、人工 confirm、write-ahead journal、Git 单文件提交、崩溃恢复和回滚链 |
 | Phase 4 本地控制面 | session + Origin 边界、服务端固定预检及来源标记、稳定错误码、项目 mutation latch、关闭排空和窄 HTTP API |
+| Phase 5 可视化工作台 | 桌面三栏与手机列表/详情视图；只显示当前合法操作；preview/confirm、理由门禁、固定命令幂等键、项目切换与 stale preview 清理 |
 
 ### 2.2 延期能力（未实现）
 
@@ -59,7 +61,6 @@ Phase 1 只回答一个问题：
 | --- | --- |
 | Agent 执行演进 | 无“演进 Agent”工作流阶段，也不自动调用 worker 去实现候选 |
 | 候选行为评估 | 当前自动预检只验证结构、信任、对象完整性和 Git 目标安全，不执行候选 |
-| UI 集成 | Phase 4 已有窄 HTTP API，React/Tauri 演进工作区在 Phase 5 实现 |
 | 网络发布 | 不把候选或晋升结果发布到远程 |
 | 秘密存储 | 载荷禁止 token/secret/env 等键；不提供密钥保管 |
 | 后台 / 自运行循环 | 无定时或事件驱动的自我演进循环 |
@@ -343,11 +344,16 @@ agent-team resume <run-id> \
    preview + confirm，并与 Agent run/审批/策略直改互斥；关闭前会排空在途操作。详见
    [ADR 0016](./adr/0016-evolution-control-plane.md)。
 
-5. **Phase 5 — React/Tauri 可视化演进工作台（未实现）**
+5. **Phase 5 — React/Tauri 可视化演进工作台（已实现）**
 
-   在现有工作台增加“演进”工作区，提供候选列表、状态筛选、结构预检、精确 before/after
-   对比、理由确认与回滚操作。更强隔离下的候选行为评估、半自动建议、网络发布和秘密存储
-   继续延期；自动晋升仍禁止。
+   现有工作台增加“演进”主模式，提供候选列表与筛选、策略/提示词候选表单、服务端结构
+   预检、精确 before/after、决定理由、应用、回滚和旧版精确匹配采纳。前端不接收或生成
+   target path、proposal ID、policy、digest、evidence、actor 或 apply material；确认命令在一次
+   用户意图内固定幂等键，项目切换、目标变化和预览过期均会清理短生命周期 token。每次
+   mutation 后重新获取服务端 snapshot，不使用乐观目标状态。桌面采用三栏，手机采用候选
+   列表/详情单页切换，并保留同一人工边界。
+
+   更强隔离下的候选行为评估、半自动建议、网络发布和秘密存储继续延期；自动晋升仍禁止。
 
 ## 10. 维护者快速核对清单
 
