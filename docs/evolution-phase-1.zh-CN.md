@@ -1,4 +1,4 @@
-# 受限自演进 Phase 1
+# 受限自演进 Phase 1-2
 
 本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计的候选记录与人工门禁**，不复制任何 OpenRSI 源码或协议文本。
 
@@ -7,9 +7,10 @@
 | 模块 | 路径 | 职责摘要 |
 | --- | --- | --- |
 | Domain | `src/evolution/domain.ts` | schema、信任校验、摘要、证据绑定、生命周期、纯函数 guarded operations |
-| Catalog | `src/evolution/catalog.ts` | 运行期索引、审计、active 指针、内部 promotion provenance、确定性快照、事务式提交 |
+| Catalog | `src/evolution/catalog.ts` | 纯同步运行期索引、审计、active 指针、内部 promotion provenance、确定性快照、事务式提交 |
+| Persistence（Phase 2） | `src/evolution/persistence.ts` | 异步 `DurableEvolutionCatalog`：受信任 open、失败可恢复的 promise 队列、原子磁盘提交、重开时 fail-closed 校验 |
 
-相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
+相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md) 与 [ADR 0014](./adr/0014-durable-evolution-catalog.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
 
 ## 1. 核心思想（受限，而非自治）
 
@@ -20,7 +21,8 @@ Phase 1 只回答一个问题：
 因此：
 
 - **可以**：在受信任上下文中提出候选、绑定 SHA-256 摘要与证据、记录不可变生命周期、由人晋升/拒绝/回滚、在内存 catalog 中原子更新审计与 active 指针。
-- **不可以（本阶段明确不做）**：把候选写成磁盘上的配置、让 Agent 自动执行演进、持久化 catalog、网络发布、秘密存储、后台自运行或自动晋升。
+- **不可以（Phase 1 domain/catalog 明确不做）**：把候选应用为真实 prompt/strategy 文件、让 Agent 自动执行演进、网络发布、秘密存储、后台自运行或自动晋升。
+- **Phase 2 补充（不改变 Phase 1 语义）**：`DurableEvolutionCatalog` 可在仓库拥有的 `stateDirectory/evolution` 下原子持久化同一套提案/审计/active/provenance，并在当前信任配置下 fail-closed 重开；仍不应用文件、不自动晋升。
 
 演进策略能力标志在 domain 中被强制为字面量 `false`：
 
@@ -43,6 +45,7 @@ Phase 1 只回答一个问题：
 | 确定性快照 | `proposals`、`auditRecords`、`activeProposals` 使用稳定排序，适合相等比较 |
 | 原子提交 | 多字段更新先在克隆工作副本上完成，成功后整体替换；校验失败不留下半状态 |
 | 内部 promotion provenance | 晋升记录由 catalog 内部保留，调用方不能注入或替换回滚来源 |
+| Phase 2 持久化包装 | `DurableEvolutionCatalog` 在 `stateDirectory/evolution/catalog.json` 保存版本化文档；单调 `revision`、payload SHA-256 完整性摘要（检测损坏，**不是**对抗可写文件系统攻击者的认证）、原子 `wx`/`0600`/fsync/rename 提交；重开时用当前 `LoadedConfig.roles` 派生信任并重新校验全部提案与审计 |
 
 ### 2.2 延期能力（未实现）
 
@@ -50,7 +53,6 @@ Phase 1 只回答一个问题：
 
 | 延期项 | 说明 |
 | --- | --- |
-| 持久化 catalog | 进程退出后内存状态不保留；无正式磁盘 catalog 格式的运行时加载 |
 | 应用 prompt/strategy 文件 | 不读取、写入或替换真实 `promptFile` / 策略定义文件 |
 | Agent 执行演进 | 无“演进 Agent”工作流阶段，也不自动调用 worker 去实现候选 |
 | 评估自动化 | 无内置自动跑门禁并把结果写入证据的编排 |
@@ -304,25 +306,29 @@ agent-team resume <run-id> \
 - **校验失败**：domain 抛错，catalog 不提交工作副本 → 提案、审计、active 指针保持原样。
 - **多字段更新**：`promote` 同时写提案状态、审计记录、内部 promotion record、active 指针；任一步在提交前失败则全部不生效。
 - **非 active 回滚**：若目标上的 active 已指向更新的晋升提案，旧的 `promoted` 提案不能被回滚（避免破坏恢复链）。
-- **回滚结果**：active 恢复为 promotion record 中的 `previousActiveProposalId`；若为 `null` 则删除该目标的 active 指针。回滚**不**还原磁盘文件（本阶段本来也没有写文件）。
+- **回滚结果**：active 恢复为 promotion record 中的 `previousActiveProposalId`；若为 `null` 则删除该目标的 active 指针。回滚**不**还原 prompt/strategy 源文件（Phase 1/2 均不应用这些文件）。Phase 2 下，catalog 自身的磁盘文档会随 mutation 原子更新；rename 前失败时内存与主文件均停留在上一已提交 revision。若 rename 已完成但目录 fsync 失败，则结果属于不确定状态：内存不交换、当前实例拒绝继续写，必须重开并接受完整旧版或新版，绝不猜测覆盖。
 
-## 9. 分阶段未来路线图（全部为未实现）
+## 9. 分阶段路线图
 
-下列阶段是规划方向，**当前均未实现**，不应在运维或集成中依赖：
+1. **Phase 1 — Domain 与内存 Catalog（已实现）**
 
-1. **Phase 2 — 持久化与重开**
+   纯 domain 语义 + 同步 `EvolutionCatalog`：生命周期、证据绑定、人工晋升/拒绝/回滚、审计与 active 指针。详见上文与 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md)。
 
-   版本化磁盘 catalog、信任上下文下的 reopen 校验、进程崩溃后的可恢复索引。（domain 已为 reopen 预留部分纯校验辅助，但无运行时持久化。）
+2. **Phase 2 — 持久化与重开（已实现）**
 
-2. **Phase 3 — 受控应用**
+   异步 `DurableEvolutionCatalog` 包装层：仅从 `LoadedConfig.roles` 派生 `EvolutionTrustContext`；要求仓库拥有的相对 `stateDirectory`，逐级拒绝 symlink 并在提交前复核真实路径；在 `stateDirectory/evolution/catalog.json` 写入严格版本化 JSON；保留全部提案、有序审计、promotion provenance 与 active 恢复信息；revision 必须精确等于可重建的 mutation 数 + 确定性 payload SHA-256（检测损坏，非认证）；每次变更经 promise 队列、工作副本 staging、唯一 `wx` 临时文件、mode `0600`、文件 fsync、rename、目录 fsync，成功后才交换内存。rename 前失败不污染已提交状态；rename 后目录 fsync 失败会封闭实例并要求重开。重开对畸形 JSON、不支持版本、摘要不匹配、伪造 allowlist/profile、不可能的生命周期/晋升链、无效 active、重复 ID、陈旧 revision **fail closed**。孤儿临时文件可忽略或安全清理，但**绝不能**把损坏的主文件当作空 catalog。详见 [ADR 0014](./adr/0014-durable-evolution-catalog.md)。
+
+   Phase 2 **不改变** Phase 1 domain 语义，也不应用文件、不提供 HTTP/UI、不执行 Agent、不自动评估或自动晋升。
+
+3. **Phase 3 — 受控应用（未实现）**
 
    在人工批准后，有界地应用 role-prompt 文件或策略蓝图到项目拥有路径，并保留可回滚的文件级审计。
 
-3. **Phase 4 — 评估与工作流集成**
+4. **Phase 4 — 评估与工作流集成（未实现）**
 
    将确定性门禁与（仍为可选的）独立审查证据自动写入；可选工作台/API 展示提案；仍禁止自动晋升。
 
-4. **Phase 5 — 更强隔离下的自动化（可选）**
+5. **Phase 5 — 更强隔离下的自动化（可选，未实现）**
 
    仅在显式策略与多重人工门禁下，考虑有限的半自动晋升建议；网络发布与秘密存储仍默认关闭。
 
@@ -333,6 +339,8 @@ agent-team resume <run-id> \
 - [ ] 是否把“记录候选”误写成“已能改 prompt 文件”？
 - [ ] 是否声称 LLM 批准可以覆盖失败的确定性命令？（不可以）
 - [ ] ADR 0013 与本文对 domain/catalog 边界的描述是否一致？
+- [ ] ADR 0014 对持久化合同（信任边界、revision、digest 威胁模型、原子提交、fail-closed 重开）的描述是否与实现一致？
+- [ ] 是否把 Phase 2 的“可重开持久化”误写成“已能应用 prompt/strategy 文件”？
 
 ## 11. 相关文档
 
@@ -342,3 +350,4 @@ agent-team resume <run-id> \
 - [策略蓝图](./strategy-blueprints.md) — 工作台自定义策略（与演进候选不同源）
 - [ADR 0012 Grok Worker](./adr/0012-grok-headless-worker-adapter.md)
 - [ADR 0013 Domain/Catalog 边界](./adr/0013-bounded-evolution-domain-catalog-boundary.md)
+- [ADR 0014 持久化演进 Catalog](./adr/0014-durable-evolution-catalog.md)

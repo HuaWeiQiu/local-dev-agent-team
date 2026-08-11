@@ -160,7 +160,7 @@ deterministic order. The primary working tree is never used for agent edits.
 - The worker cannot convert a failed command into a passing result.
 - GitHub publication is opt-in and never implies automatic merge.
 
-## Bounded Evolution (Phase 1)
+## Bounded Evolution (Phases 1-2)
 
 Phase 1 adds a **library-grade** bounded-evolution surface inspired by
 OpenRSI-style candidate records, without copying external sources and without
@@ -169,14 +169,22 @@ self-running loops.
 | Layer | Module | Owns |
 | --- | --- | --- |
 | Domain | `src/evolution/domain.ts` | Schemas, trust context from role config, digests, evidence binding, lifecycle, pure guarded promote/reject/rollback |
-| Catalog | `src/evolution/catalog.ts` | Runtime-private in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit |
+| Catalog | `src/evolution/catalog.ts` | Pure synchronous in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit, trust-validating restore |
+| Persistence | `src/evolution/persistence.ts` | Repository-local versioned document, exact revision witness, ordered audit replay, full pre-write document validation/comparison, symlink-safe paths, atomic file commit, fail-closed reopen |
 
-Current capabilities stop at trust-aware `strategy-blueprint` / `role-prompt`
+Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human
-promotion/rejection/rollback, and atomic active-pointer updates. Deferred work
-includes durable persistence, applying prompt or strategy files, agent
-execution, evaluation automation, API/UI integration, network publication,
-secrets, background loops, and automatic promotion.
+promotion/rejection/rollback, atomic active-pointer updates, and Phase-2
+durability under `<stateDirectory>/evolution/catalog.json`. Reopen derives
+trust only from current role config and validates proposal state, ordered audit
+history, promotion provenance, active pointers, exact mutation revision, and
+payload integrity before restoring memory. Writes use a unique `0600` temporary
+file, file fsync, rename, and directory fsync; a post-rename fsync failure seals
+the instance until reopen because durability is indeterminate.
+
+Deferred work includes applying prompt or strategy files, agent execution,
+evaluation automation, API/UI integration, network publication, secrets,
+background loops, and automatic promotion.
 
 Operator flow: `propose → evaluate → external independent review of the
 immutable evaluated snapshot → explicit human promote/reject → human
@@ -194,5 +202,6 @@ present non-approving advisory verdict fails evaluation. Any deterministic
 failure vetoes LLM or other advisory approval. Rollback applies only to the
 currently active promotion and restores only catalog-internal provenance.
 
-See [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md) and
-[ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md).
+See [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
+[ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
+[ADR 0014](./adr/0014-durable-evolution-catalog.md).
