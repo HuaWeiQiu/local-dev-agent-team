@@ -68,8 +68,9 @@ Apache-2.0 或 MIT 例外，实际集成时必须按采用的具体文件逐项�
 3. 增加 `AndroidTermuxIntent`，在真实设备验证完整 Agent 工作流。
 4. 根据体积、稳定性和维护成本决定是否实现 `AndroidEmbeddedRuntime`。
 
-当前仓库已完成第 1 阶段和第 2 阶段的 macOS arm64 基线，包括安装包、sidecar
-生命周期、会话认证和实机启动验证；Apple Developer ID 签名与公证留在发布阶段完成。
-Windows/Linux 仍需在各自目标平台完成运行时准备、安装包与签名验证；后续阶段不能绕过
+当前仓库已完成第 1 阶段和第 2 阶段，包括 macOS arm64 实机基线、Windows x64 与
+macOS arm64/x64 的 PR 自动打包、sidecar 生命周期和会话认证。每个同仓库 PR commit
+创建唯一的 unsigned GitHub Pre-release；fork PR 只生成无写权限的 Actions artifacts。
+当前不配置 Windows/macOS 签名和公证，系统可能显示未知开发者提示。后续阶段不能绕过
 现有权限、质量门禁、Git 检查点和证据契约。桌面壳的具体边界见
 [ADR 0011](adr/0011-desktop-shell-and-runtime-lifecycle.md)。

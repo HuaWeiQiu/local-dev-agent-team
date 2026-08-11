@@ -703,10 +703,14 @@ pnpm desktop:build
 SHA-256，安装包不依赖客户另行安装 Node。Codex、Claude Code 等 Agent CLI 仍需按
 项目配置安装并完成登录，App 会在后续环境检查中统一提示。
 
-当前已实机验证 macOS arm64。运行时准备脚本同时支持 macOS 和 Linux 的 arm64/x64；
-Windows 使用同一 Tauri/React/Rust 架构，目标运行时与签名打包会在对应平台阶段补齐。
-当前 macOS 本地安装包用于开发验证，尚未配置发行签名；公开分发前仍需配置 Apple
-Developer ID 签名和公证。
+当前已实机验证 macOS arm64。运行时准备脚本支持 macOS arm64/x64、Windows x64 和
+Linux arm64/x64。每次 PR 创建或提交新 commit，GitHub Actions 都会构建
+Windows x64、macOS Apple Silicon 和 macOS Intel 安装包。同仓库 PR 会按
+`pr-<编号>-<commit SHA>` 创建对应的 GitHub Pre-release；外部 fork PR 只保留 Actions
+artifacts，不向不受信任代码授予 Release 写权限。
+
+这些自动产物不签名、不公证，也不需要仓库配置证书 secret。Windows SmartScreen 与
+macOS Gatekeeper 可能显示未知开发者提示，适合当前开源自用和测试分发范围。
 
 ### 全量检查
 

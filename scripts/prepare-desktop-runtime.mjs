@@ -11,25 +11,42 @@ if (rustc.status !== 0) {
   throw new Error(`Unable to inspect the Rust target: ${rustc.stderr || "rustc failed"}`);
 }
 
-const host = rustc.stdout.match(/^host:\s+(.+)$/m)?.[1];
+const host = rustc.stdout.match(/^host:\s+(.+)$/m)?.[1]?.trim();
 if (!host) {
   throw new Error("Unable to determine the Rust host target");
 }
 
 const target = process.env.AGENT_TEAM_TAURI_TARGET ?? process.env.TAURI_ENV_TARGET_TRIPLE ?? host;
-if (target !== host) {
-  throw new Error(
-    `Desktop packaging target ${target} needs a matching Node runtime; this host can prepare ${host}`,
-  );
-}
-
 const distribution = distributionFor(target);
 const archiveName = `node-v${nodeVersion}-${distribution.name}.${distribution.extension}`;
 const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
 const cacheRoot = path.join(repositoryRoot, ".cache", "desktop-runtime", `node-v${nodeVersion}`);
 const archivePath = path.join(cacheRoot, archiveName);
 const extractedRoot = path.join(cacheRoot, `node-v${nodeVersion}-${distribution.name}`);
-const sourceBinary = path.join(extractedRoot, "bin", distribution.binaryName);
+const sourceBinary = path.join(extractedRoot, ...distribution.binaryPath);
+const binaryDirectory = path.join(repositoryRoot, "src-tauri", "binaries");
+const destinationName = `agent-team-node-${target}${distribution.platform === "windows" ? ".exe" : ""}`;
+const destination = path.join(binaryDirectory, destinationName);
+
+if (process.argv.includes("--describe-target")) {
+  process.stdout.write(`${JSON.stringify({
+    target,
+    archiveName,
+    binaryPath: distribution.binaryPath.join("/"),
+    destinationName,
+  })}\n`);
+  process.exit(0);
+}
+
+const hostDistribution = distributionFor(host);
+const supportsCrossArchitecture = distribution.platform === "darwin"
+  && hostDistribution.platform === "darwin";
+if (target !== host && !supportsCrossArchitecture) {
+  throw new Error(
+    `Desktop packaging target ${target} needs a matching native host; current host is ${host}`,
+  );
+}
+
 await mkdir(cacheRoot, { recursive: true });
 
 if (!(await exists(sourceBinary))) {
@@ -57,11 +74,6 @@ if (!(await exists(sourceBinary))) {
   }
 }
 
-const binaryDirectory = path.join(repositoryRoot, "src-tauri", "binaries");
-const destination = path.join(
-  binaryDirectory,
-  `agent-team-node-${target}${distribution.binaryName.endsWith(".exe") ? ".exe" : ""}`,
-);
 await mkdir(binaryDirectory, { recursive: true });
 const [sourceInfo, destinationInfo] = await Promise.all([
   stat(sourceBinary),
@@ -71,7 +83,7 @@ const needsCopy = !destinationInfo || destinationInfo.size !== sourceInfo.size;
 if (needsCopy) {
   await copyFile(sourceBinary, destination);
 }
-if (!target.includes("windows") && (needsCopy || (destinationInfo.mode & 0o111) === 0)) {
+if (distribution.platform !== "windows" && (needsCopy || (destinationInfo.mode & 0o111) === 0)) {
   await chmod(destination, 0o755);
 }
 
@@ -91,28 +103,39 @@ process.stdout.write(`Prepared Node v${nodeVersion} desktop runtime for ${target
 function distributionFor(targetTriple) {
   const supported = {
     "aarch64-apple-darwin": {
+      platform: "darwin",
       name: "darwin-arm64",
       extension: "tar.gz",
-      binaryName: "node",
+      binaryPath: ["bin", "node"],
       tarArguments: ["-xzf"],
     },
     "x86_64-apple-darwin": {
+      platform: "darwin",
       name: "darwin-x64",
       extension: "tar.gz",
-      binaryName: "node",
+      binaryPath: ["bin", "node"],
       tarArguments: ["-xzf"],
     },
     "aarch64-unknown-linux-gnu": {
+      platform: "linux",
       name: "linux-arm64",
       extension: "tar.xz",
-      binaryName: "node",
+      binaryPath: ["bin", "node"],
       tarArguments: ["-xJf"],
     },
     "x86_64-unknown-linux-gnu": {
+      platform: "linux",
       name: "linux-x64",
       extension: "tar.xz",
-      binaryName: "node",
+      binaryPath: ["bin", "node"],
       tarArguments: ["-xJf"],
+    },
+    "x86_64-pc-windows-msvc": {
+      platform: "windows",
+      name: "win-x64",
+      extension: "zip",
+      binaryPath: ["node.exe"],
+      tarArguments: ["-xf"],
     },
   };
   const selected = supported[targetTriple];
