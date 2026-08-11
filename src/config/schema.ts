@@ -108,6 +108,58 @@ export const observabilitySchema = z.object({
   maxEventsPerRun: z.number().int().min(100).max(1_000_000).default(50_000),
 });
 
+export const automaticEvolutionSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    autoStart: z.literal(false).default(false),
+    maxCycles: z.number().int().min(1).max(10).default(3),
+    maxConsecutiveNoImprovement: z.number().int().min(1).max(10).default(2),
+    evaluationRepeats: z.number().int().min(1).max(2).default(1),
+    minimumScoreDelta: z.number().int().min(0).max(1_000).default(1),
+    proposerRole: z.string().min(1).default("orchestrator"),
+    proposerProfile: z.string().min(1).optional(),
+    baselineStrategy: z.string().min(1).optional(),
+    targetStrategy: z
+      .string()
+      .regex(
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/,
+        "Automatic evolution target must be a valid strategy name",
+      )
+      .default("auto-evolved"),
+    evaluationGoal: z.string().trim().max(20_000).default(""),
+  })
+  .strict()
+  .superRefine((automation, context) => {
+    if (automation.enabled && !automation.evaluationGoal) {
+      context.addIssue({
+        code: "custom",
+        path: ["evaluationGoal"],
+        message: "Enabled automatic evolution requires a fixed evaluationGoal",
+      });
+    }
+    if (automation.maxConsecutiveNoImprovement > automation.maxCycles) {
+      context.addIssue({
+        code: "custom",
+        path: ["maxConsecutiveNoImprovement"],
+        message: "Consecutive no-improvement limit cannot exceed maxCycles",
+      });
+    }
+  });
+
+export const evolutionConfigSchema = z.object({
+  automatic: automaticEvolutionSchema.default({
+    enabled: false,
+    autoStart: false,
+    maxCycles: 3,
+    maxConsecutiveNoImprovement: 2,
+    evaluationRepeats: 1,
+    minimumScoreDelta: 1,
+    proposerRole: "orchestrator",
+    targetStrategy: "auto-evolved",
+    evaluationGoal: "",
+  }),
+});
+
 export const configSchema = z
   .object({
     version: z.literal(1),
@@ -121,6 +173,19 @@ export const configSchema = z
     roles: z.record(z.string().min(1), roleSchema),
     strategies: strategiesSchema.optional(),
     observability: observabilitySchema.default({ maxEventsPerRun: 50_000 }),
+    evolution: evolutionConfigSchema.default({
+      automatic: {
+        enabled: false,
+        autoStart: false,
+        maxCycles: 3,
+        maxConsecutiveNoImprovement: 2,
+        evaluationRepeats: 1,
+        minimumScoreDelta: 1,
+        proposerRole: "orchestrator",
+        targetStrategy: "auto-evolved",
+        evaluationGoal: "",
+      },
+    }),
     quality: z.object({
       commands: z.array(commandSchema),
       maxReworkAttempts: z.number().int().min(0).max(10),
@@ -209,6 +274,57 @@ export const configSchema = z
       }
     }
 
+    const automation = config.evolution.automatic;
+    if (automation.enabled) {
+      if (config.quality.commands.length === 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["quality", "commands"],
+          message: "Enabled automatic evolution requires at least one deterministic quality command",
+        });
+      }
+      const proposerRole = config.roles[automation.proposerRole];
+      if (!proposerRole) {
+        context.addIssue({
+          code: "custom",
+          path: ["evolution", "automatic", "proposerRole"],
+          message: `Automatic evolution references unknown role '${automation.proposerRole}'`,
+        });
+      } else {
+        const proposerProfile = automation.proposerProfile ?? proposerRole.defaultProfile;
+        if (!proposerRole.allowedProfiles.includes(proposerProfile)) {
+          context.addIssue({
+            code: "custom",
+            path: ["evolution", "automatic", "proposerProfile"],
+            message: `Profile '${proposerProfile}' is not allowed for role '${automation.proposerRole}'`,
+          });
+        } else if (config.profiles[proposerProfile]?.permission !== "read-only") {
+          context.addIssue({
+            code: "custom",
+            path: ["evolution", "automatic", "proposerProfile"],
+            message: "Automatic evolution proposer must use a read-only profile",
+          });
+        }
+        for (const fallbackProfile of proposerRole.fallbackProfiles) {
+          if (config.profiles[fallbackProfile]?.permission === "workspace-write") {
+            context.addIssue({
+              code: "custom",
+              path: ["evolution", "automatic", "proposerRole"],
+              message: `Automatic evolution proposer fallback '${fallbackProfile}' must be read-only`,
+            });
+          }
+        }
+      }
+      const baselineStrategy = automation.baselineStrategy ?? config.strategies?.default;
+      if (!baselineStrategy || !config.strategies?.definitions[baselineStrategy]) {
+        context.addIssue({
+          code: "custom",
+          path: ["evolution", "automatic", "baselineStrategy"],
+          message: `Automatic evolution baseline strategy '${baselineStrategy ?? ""}' is not defined`,
+        });
+      }
+    }
+
     for (const [roleName, role] of Object.entries(config.roles)) {
       if (roleName === "worker") continue;
       for (const profileName of new Set([
@@ -282,3 +398,4 @@ export type ApprovalGate = z.infer<typeof approvalGateSchema>;
 export type StrategyTopologyMode = z.infer<typeof strategyTopologyModeSchema>;
 export type StrategyTopology = z.infer<typeof strategyTopologySchema>;
 export type ObservabilityConfig = z.infer<typeof observabilitySchema>;
+export type AutomaticEvolutionConfig = z.infer<typeof automaticEvolutionSchema>;

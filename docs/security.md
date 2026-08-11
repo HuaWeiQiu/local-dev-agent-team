@@ -77,10 +77,10 @@ dependency changes before merging. Branch protection and required status checks
 should be enabled on the remote repository. The project creates draft pull
 requests by default and never auto-merges.
 
-## Bounded Evolution (Phases 1-5)
+## Bounded Evolution (Phases 1-6)
 
-The evolution domain, in-memory catalog, and Phase-2 durable wrapper are an
-additional trust boundary, not a path to unsupervised self-modification:
+The evolution domain, durable application layer, and bounded automation owner
+are an additional trust boundary, not a path to unbounded self-modification:
 
 - A trusted integration must build the trust context from configured role
   `promptFile` paths and `allowedProfiles`, not from self-declared candidate
@@ -108,8 +108,9 @@ additional trust boundary, not a path to unsupervised self-modification:
   operator identity, or apply bytes. Preview tokens and idempotency keys remain
   in short-lived component memory and are cleared on project/target/revision
   changes; every mutation is followed by an authoritative snapshot read.
-- Capability flags force automatic execution, automatic promotion, network
-  publication, and secret storage to remain false.
+- Proposal capability flags force candidate self-authorization, network
+  publication, and secret storage to remain false. Phase 6 automation is
+  authorized only by static project config and the server-owned controller.
 - Catalog mutations are atomic: failed validation leaves proposals, audit
   records, and active pointers unchanged. Rollback is limited to the currently
   active promotion and uses only internal promotion provenance.
@@ -160,6 +161,26 @@ additional trust boundary, not a path to unsupervised self-modification:
   only when the exact live target already matches. Any legacy apply, including
   optional digest-bound prompt bytes, is restricted to the offline CLI while it
   owns the project control lease.
+- The Phase-6 automatic strategy loop requires explicit project configuration
+  and an operator click. Its proposer profile is read-only. One automation owner
+  blocks ordinary runs, run actions, and target writes until the bounded loop
+  finishes or is stopped. Evaluation evidence is derived only from persisted run
+  outcomes; agent text and browser-supplied evidence cannot authorize promotion.
+  Requested cycles cannot exceed the configured 1-10 limit, repeated evaluation
+  is capped at two, and consecutive non-improvement stops the loop early.
+- All proposer fallbacks are read-only, automatic mode requires at least one
+  deterministic quality command, and a candidate cannot increase incumbent resource,
+  retry, parallelism, or timeout budgets. Only a completed server-owned evaluation
+  run with exact goal/strategy provenance can pass.
+- Proposer invocations use persisted run state and tighter output/artifact/deadline
+  budgets, so their artifacts participate in normal cleanup. Crash-orphaned shadow
+  strategies are removed only with matching automatic origin, derived proposal ID,
+  and exact definition evidence; name prefixes alone never authorize deletion.
+- Start authorization is durably idempotent and bound to the authenticated local
+  session operator and requested cycle count. Promotion/rejection audits preserve
+  that operator; a process restart cannot replay an accepted key into a new loop.
+- Automatic evaluation runs never publish or merge. Process start/restart cannot
+  start a loop; only an already applied winner is restored as runtime default.
 - `application-state.json` and prompt objects use repository-local strict
   documents/paths and POSIX `0600` files. Digests detect corruption, not a
   malicious local writer. Phase 3 remains single-process and provides no
@@ -175,7 +196,8 @@ Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
 [ADR 0014](./adr/0014-durable-evolution-catalog.md), and
 [ADR 0015](./adr/0015-controlled-evolution-application.md), and
-[ADR 0016](./adr/0016-evolution-control-plane.md).
+[ADR 0016](./adr/0016-evolution-control-plane.md), and
+[ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md).
 
 ## Reporting
 

@@ -434,7 +434,10 @@ export interface EvolutionEvidenceItem {
 }
 
 export interface EvolutionEvaluation {
-  source: "external" | "server-structural-preflight-v1";
+  source:
+    | "external"
+    | "server-structural-preflight-v1"
+    | "server-automatic-run-evaluation-v1";
   evidence: {
     proposalId: string;
     candidateDigest: string;
@@ -515,6 +518,53 @@ export interface EvolutionCompletedApplication {
   completedAt: string;
 }
 
+export interface AutomaticEvolutionCycle {
+  cycle: number;
+  proposalId: string;
+  rationale: string;
+  candidateDefinition: StrategyBlueprintDefinition;
+  candidateRunIds: string[];
+  incumbentScore: number;
+  candidateScore: number;
+  scoreDelta: number;
+  improved: boolean;
+  decision: "promoted" | "rejected";
+  completedAt: string;
+}
+
+export interface AutomaticEvolutionSnapshot {
+  enabled: boolean;
+  autoStart: false;
+  status: "idle" | "running" | "stopping" | "completed" | "stopped" | "failed";
+  phase:
+    | "idle"
+    | "baseline"
+    | "proposing"
+    | "evaluating"
+    | "deciding"
+    | "applying"
+    | "stopping"
+    | "finished";
+  configuredMaxCycles: number;
+  requestedMaxCycles: number | null;
+  completedCycles: number;
+  maxConsecutiveNoImprovement: number;
+  consecutiveNoImprovement: number;
+  evaluationRepeats: number;
+  minimumScoreDelta: number;
+  baselineStrategy: string | null;
+  targetStrategy: string;
+  sessionId: string | null;
+  activeRunId: string | null;
+  incumbentScore: number | null;
+  incumbentStrategy: string | null;
+  stopReason: string | null;
+  error: string | null;
+  startedAt: string | null;
+  updatedAt: string;
+  cycles: AutomaticEvolutionCycle[];
+}
+
 export interface EvolutionSnapshot {
   catalogRevision: number;
   applicationRevision: number;
@@ -534,6 +584,7 @@ export interface EvolutionSnapshot {
     proposalId: string;
     startedAt: string;
   } | null;
+  automation: AutomaticEvolutionSnapshot;
   evidenceScope: "server-structural-preflight-not-candidate-execution";
 }
 

@@ -109,6 +109,16 @@ describe("strategy blueprint catalog", () => {
         roleProfiles: { reviewer: "codex-worker" },
       }),
     ).toThrow("is not allowed for role 'reviewer'");
+    const reserved = "auto-eval-0123456789abcdef01234567-1";
+    expect(() => catalog.preflight(reserved, sampleDefinition)).toThrow(
+      "reserved automatic evaluation format",
+    );
+    await expect(catalog.save(reserved, sampleDefinition)).rejects.toThrow(
+      "reserved automatic evaluation format",
+    );
+    await catalog.saveAutomaticShadow(reserved, sampleDefinition);
+    await expect(catalog.delete(reserved)).resolves.toBeUndefined();
+    await expect(catalog.save("auto-eval-manual-1", sampleDefinition)).resolves.toBeDefined();
   });
 
   it("returns deeply immutable custom definition reads and never exposes configured strategies", async () => {

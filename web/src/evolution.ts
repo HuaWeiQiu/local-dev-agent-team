@@ -36,6 +36,9 @@ export function evolutionStatusTone(status: EvolutionLifecycleStatus): string {
 
 export function proposalStatusLabel(proposal: EvolutionProposal): string {
   if (proposal.status === "evaluated") {
+    if (proposal.evaluation?.source === "server-automatic-run-evaluation-v1") {
+      return "自动决策中";
+    }
     if (proposal.evaluation?.source === "external") return "需当前预检";
     if (proposal.evaluation && !proposal.evaluation.result.passed) return "预检未通过";
   }
@@ -45,6 +48,12 @@ export function proposalStatusLabel(proposal: EvolutionProposal): string {
 }
 
 export function proposalStatusTone(proposal: EvolutionProposal): string {
+  if (
+    proposal.status === "evaluated" &&
+    proposal.evaluation?.source === "server-automatic-run-evaluation-v1"
+  ) {
+    return "active";
+  }
   if (proposal.status === "evaluated" && proposal.evaluation && !proposal.evaluation.result.passed) {
     return "danger";
   }
@@ -111,7 +120,10 @@ export function visibleEvolutionProposals(
 }
 
 export function evolutionLocked(snapshot: EvolutionSnapshot): boolean {
-  return snapshot.recoveryRequired || snapshot.pendingOperation !== null;
+  return snapshot.recoveryRequired
+    || snapshot.pendingOperation !== null
+    || snapshot.automation.status === "running"
+    || snapshot.automation.status === "stopping";
 }
 
 export function utf8ToBase64(value: string): string {

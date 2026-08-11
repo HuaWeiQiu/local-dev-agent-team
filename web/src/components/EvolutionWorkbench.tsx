@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   Ban,
+  Bot,
   Braces,
   CheckCircle2,
   ChevronRight,
@@ -10,11 +11,13 @@ import {
   GitCompareArrows,
   History,
   LockKeyhole,
+  Play,
   Plus,
   RefreshCw,
   RotateCcw,
   Search,
   ShieldCheck,
+  Square,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -29,6 +32,8 @@ import {
   proposeEvolutionStrategy,
   reconcileEvolutionProposal,
   rejectEvolutionProposal,
+  startAutomaticEvolution,
+  stopAutomaticEvolution,
 } from "../api";
 import {
   evolutionLocked,
@@ -44,6 +49,7 @@ import {
 } from "../evolution";
 import { errorMessage } from "../presentation";
 import type {
+  AutomaticEvolutionSnapshot,
   EvolutionAuditRecord,
   EvolutionCompletedApplication,
   EvolutionProposal,
@@ -72,7 +78,13 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [pollError, setPollError] = useState<string>();
   const [dialogError, setDialogError] = useState<string>();
+  const [requestedCycles, setRequestedCycles] = useState(3);
+  const [automationStartIntent, setAutomationStartIntent] = useState<{
+    commandId: string;
+    maxCycles: number;
+  }>();
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
 
@@ -101,11 +113,15 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     setDecision(undefined);
     setCreating(false);
     setError(undefined);
+    setPollError(undefined);
+    setAutomationStartIntent(undefined);
     setLoading(true);
     void getEvolution(scope)
       .then((next) => {
         if (!active) return;
         setSnapshot(next);
+        setPollError(undefined);
+        setRequestedCycles(Math.min(3, next.automation.configuredMaxCycles));
         setSelectedId(window.innerWidth > 800 ? next.proposals[0]?.id : undefined);
       })
       .catch((requestError: unknown) => {
@@ -116,6 +132,32 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
       });
     return () => { active = false; };
   }, [scope]);
+
+  const automationStatus = snapshot?.automation.status;
+  useEffect(() => {
+    if (automationStatus !== "running" && automationStatus !== "stopping") return;
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await getEvolution(scope);
+        if (!active) return;
+        setSnapshot(next);
+        setPollError(undefined);
+        if (next.automation.status !== "running" && next.automation.status !== "stopping") {
+          return;
+        }
+      } catch (requestError) {
+        if (active) setPollError(evolutionErrorMessage(requestError));
+      }
+      if (active) timer = window.setTimeout(() => void poll(), 1_500);
+    };
+    timer = window.setTimeout(() => void poll(), 1_500);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [automationStatus, scope]);
 
   const proposals = useMemo(
     () => visibleEvolutionProposals(snapshot?.proposals ?? [], filter, query),
@@ -253,6 +295,36 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     }, { closeDecision: true });
   };
 
+  const startAutomation = async () => {
+    const intent = automationStartIntent ?? {
+      commandId: crypto.randomUUID(),
+      maxCycles: requestedCycles,
+    };
+    setAutomationStartIntent(intent);
+    setBusy(true);
+    setError(undefined);
+    try {
+      await startAutomaticEvolution(scope, intent.maxCycles, intent.commandId);
+      await refresh();
+      setAutomationStartIntent(undefined);
+    } catch (requestError) {
+      const message = evolutionErrorMessage(requestError);
+      try {
+        const latest = await refresh();
+        setAutomationStartIntent(undefined);
+        if (latest.automation.status === "idle") setError(message);
+      } catch {
+        setError("启动结果暂时无法确认。请使用同一按钮重试，系统不会重复启动同一循环。");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stopAutomation = async () => {
+    await mutate(() => stopAutomaticEvolution(scope));
+  };
+
   if (!snapshot) {
     return (
       <section className="evolution-boot" aria-label="演进工作台">
@@ -266,6 +338,16 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
 
   return (
     <section className={`evolution-workbench ${selected ? "has-selection" : ""}`} aria-label="演进工作台">
+      <AutomationBar
+        automation={snapshot.automation}
+        requestedCycles={requestedCycles}
+        busy={busy}
+        startIntentPending={automationStartIntent !== undefined}
+        mutationLocked={snapshot.recoveryRequired || snapshot.pendingOperation !== null}
+        onCyclesChange={setRequestedCycles}
+        onStart={() => void startAutomation()}
+        onStop={() => void stopAutomation()}
+      />
       {(snapshot.recoveryRequired || snapshot.pendingOperation) && (
         <div className="evolution-lock-banner" role="alert"><CircleAlert size={17} /><div><strong>演进操作已锁定</strong><span>{snapshot.recoveryRequired ? "本地状态需要先恢复，所有变更操作均已停用。" : "已有目标变更正在处理，请等待完成后刷新。"}</span></div></div>
       )}
@@ -325,13 +407,53 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
         {selected ? (
           <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} />
         ) : <div className="evolution-inspector-empty">选择候选后显示可执行操作</div>}
-        <section className="evolution-scope-note"><ShieldCheck size={16} /><div><strong>人工控制</strong><span>结构预检不会执行候选，也不会自动应用或发布。</span></div></section>
+        <section className="evolution-scope-note"><ShieldCheck size={16} /><div><strong>{selected?.evaluation?.source === "server-automatic-run-evaluation-v1" ? "自动演进记录" : "人工候选控制"}</strong><span>{selected?.evaluation?.source === "server-automatic-run-evaluation-v1" ? "项目级控制器已隔离评测并按确定性分数决定；候选本身不能自授权。" : "结构预检不会执行候选；应用与回滚仍需要人工查看精确预览。"}</span></div></section>
         {selected && <section className="evolution-metadata"><h3>目标信息</h3><dl className="detail-list"><div><dt>类型</dt><dd>{selected.candidate.kind === "strategy-blueprint" ? "执行策略" : "角色提示词"}</dd></div><div><dt>Catalog</dt><dd>修订 {snapshot.catalogRevision}</dd></div><div><dt>目标摘要</dt><dd><code>{shortDigest(selected.application?.afterTargetDigest ?? null)}</code></dd></div><div><dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd></div></dl></section>}
-        {error && <p className="evolution-inline-error" role="alert">{error}</p>}
+        {(error || pollError) && <p className="evolution-inline-error" role="alert">{error ?? pollError}</p>}
       </aside>
 
       <EvolutionProposalDialog open={creating} config={config} snapshot={snapshot} busy={busy} {...(dialogError ? { error: dialogError } : {})} onClose={() => { if (!busy) { setCreating(false); setDialogError(undefined); } }} onSubmit={submitProposal} />
       <EvolutionDecisionDialog decision={decision} busy={busy} {...(dialogError ? { error: dialogError } : {})} onClose={() => { if (!busy) { setDecision(undefined); setDialogError(undefined); } }} onSubmit={submitDecision} />
+    </section>
+  );
+}
+
+function AutomationBar({ automation, requestedCycles, busy, startIntentPending, mutationLocked, onCyclesChange, onStart, onStop }: {
+  automation: AutomaticEvolutionSnapshot;
+  requestedCycles: number;
+  busy: boolean;
+  startIntentPending: boolean;
+  mutationLocked: boolean;
+  onCyclesChange(value: number): void;
+  onStart(): void;
+  onStop(): void;
+}) {
+  const active = automation.status === "running" || automation.status === "stopping";
+  const latest = automation.cycles.at(-1);
+  return (
+    <section className={`evolution-automation tone-${automationTone(automation.status)}`} aria-label="自动演进控制">
+      <div className="evolution-automation-heading">
+        <span className="evolution-automation-icon"><Bot size={18} /></span>
+        <div><strong>自动演进</strong><span>{automation.enabled ? automationStatusText(automation) : "当前项目未启用"}</span></div>
+        <span className={`status-badge tone-${automationTone(automation.status)}`}>{automationStatusLabel(automation.status)}</span>
+      </div>
+      {automation.enabled && (
+        <div className="evolution-automation-metrics" aria-label="自动演进限制">
+          <span>完成 <strong>{automation.completedCycles}/{automation.requestedMaxCycles ?? requestedCycles}</strong> 轮</span>
+          <span>连续无提升 <strong>{automation.consecutiveNoImprovement}/{automation.maxConsecutiveNoImprovement}</strong></span>
+          <span>每个策略 <strong>{automation.evaluationRepeats}</strong> 次评测</span>
+          {latest && <span className={latest.improved ? "is-improved" : "is-rejected"}>最近 Δ <strong>{formatScoreDelta(latest.scoreDelta)}</strong></span>}
+        </div>
+      )}
+      <div className="evolution-automation-controls">
+        {!active ? (
+          <>
+            <label><span>循环次数</span><input type="number" min={1} max={automation.configuredMaxCycles} step={1} value={requestedCycles} disabled={!automation.enabled || busy || mutationLocked || startIntentPending} onChange={(event) => onCyclesChange(clampCycles(Number(event.target.value), automation.configuredMaxCycles))} /></label>
+            <button className="button primary" onClick={onStart} disabled={!automation.enabled || busy || mutationLocked}><Play size={15} />{startIntentPending ? "重试" : "开始"}</button>
+          </>
+        ) : <button className="button danger-quiet" onClick={onStop} disabled={busy || automation.status === "stopping"}><Square size={14} />{automation.status === "stopping" ? "正在停止" : "停止"}</button>}
+      </div>
+      {(automation.error || (!active && automation.stopReason)) && <p className={automation.error ? "is-error" : ""}>{automation.error ?? automation.stopReason}</p>}
     </section>
   );
 }
@@ -352,6 +474,9 @@ function ActionPanel({ proposal, locked, busy, onEvaluate, onPromote, onRollback
   if (proposal.status === "evaluated" && proposal.evaluation?.result.passed && proposal.evaluation.source === "server-structural-preflight-v1") {
     return <section className="evolution-next-action"><CheckCircle2 size={22} /><h3>检查精确变更</h3><p>先查看当前值与应用后的完整内容，再作人工决定。</p><button className="button primary" onClick={onPromote} disabled={disabled}><GitCompareArrows size={16} />查看并应用</button><button className="button danger-quiet" onClick={onReject} disabled={disabled}><Ban size={15} />拒绝候选</button></section>;
   }
+  if (proposal.status === "evaluated" && proposal.evaluation?.source === "server-automatic-run-evaluation-v1") {
+    return <section className="evolution-next-action"><RefreshCw className="is-spinning" size={22} /><h3>自动比较中</h3><p>系统正在根据隔离运行结果完成本轮决定，请等待状态刷新。</p></section>;
+  }
   if (proposal.status === "evaluated") return <section className="evolution-next-action"><CircleAlert size={22} /><h3>{proposal.evaluation?.source === "external" ? "需要当前结构预检" : "预检未通过"}</h3><p>{proposal.evaluation?.result.summary ?? "候选没有可用于应用的服务端预检证据。"}</p><button className="button danger-quiet" onClick={onReject} disabled={disabled}><Ban size={15} />拒绝候选</button></section>;
   if (proposal.status === "promoted" && proposal.application?.rollbackSafe) return <section className="evolution-next-action"><RotateCcw size={22} /><h3>已受控应用</h3><p>可以预览并恢复到应用前的精确目标。</p><button className="button secondary" onClick={onRollback} disabled={disabled}><RotateCcw size={16} />预览回滚</button></section>;
   if (proposal.status === "promoted" && !proposal.application) return <section className="evolution-next-action"><LockKeyhole size={22} /><h3>登记旧版应用</h3><p>仅当当前目标逐字匹配候选时，采纳现状并建立应用记录。</p><button className="button secondary" onClick={onAdopt} disabled={disabled}><ShieldCheck size={16} />采纳当前目标</button></section>;
@@ -360,22 +485,24 @@ function ActionPanel({ proposal, locked, busy, onEvaluate, onPromote, onRollback
 
 function ProposalProgress({ proposal }: { proposal: EvolutionProposal }) {
   const { step, finalLabel } = proposalProgress(proposal);
-  return <ol className="evolution-progress" aria-label="候选进度"><li className="is-done"><span>1</span>候选</li><li className={step >= 2 ? "is-done" : ""}><span>2</span>结构预检</li><li className={step >= 3 ? "is-done" : ""}><span>3</span>人工决定</li><li className={step >= 4 ? "is-done" : ""}><span>4</span>{finalLabel}</li></ol>;
+  const automatic = proposal.evaluation?.source === "server-automatic-run-evaluation-v1";
+  return <ol className="evolution-progress" aria-label="候选进度"><li className="is-done"><span>1</span>候选</li><li className={step >= 2 ? "is-done" : ""}><span>2</span>{automatic ? "隔离评测" : "结构预检"}</li><li className={step >= 3 ? "is-done" : ""}><span>3</span>{automatic ? "自动比较" : "人工决定"}</li><li className={step >= 4 ? "is-done" : ""}><span>4</span>{finalLabel}</li></ol>;
 }
 
 function Overview({ proposal }: { proposal: EvolutionProposal }) {
   return <>
     <section className="evolution-section"><span className="section-kicker">CHANGE TARGET</span><h2>{proposalTarget(proposal)}</h2><p>{proposal.candidate.kind === "strategy-blueprint" ? "候选将更新一个本地自定义执行策略。应用前会再次比较目标摘要。" : "候选指向项目已配置的角色提示词。内容只在精确预览和本地对象存储中使用。"}</p></section>
     {proposal.candidate.kind === "strategy-blueprint" ? <section className="evolution-section"><h3>执行参数</h3><dl className="evolution-definition-grid"><div><dt>拓扑</dt><dd>{proposal.candidate.definition.topology?.mode === "sequential" ? "顺序执行" : "依赖并行"}</dd></div><div><dt>最大并行</dt><dd>{proposal.candidate.definition.maxParallel ?? "默认"}</dd></div><div><dt>最多返工</dt><dd>{proposal.candidate.definition.maxReworkAttempts ?? "默认"}</dd></div><div><dt>Agent 调用上限</dt><dd>{proposal.candidate.definition.maxAgentInvocations ?? "默认"}</dd></div><div><dt>执行超时</dt><dd>{proposal.candidate.definition.executionTimeoutSeconds ? `${proposal.candidate.definition.executionTimeoutSeconds} 秒` : "默认"}</dd></div><div><dt>人工门禁</dt><dd>{proposal.candidate.definition.approvalGates?.join("、") || "沿用默认"}</dd></div></dl></section> : <section className="evolution-section"><h3>材料摘要</h3><dl className="detail-list"><div><dt>仓库路径</dt><dd><code>{proposal.candidate.path}</code></dd></div><div><dt>SHA-256</dt><dd><code>{proposal.candidate.contentDigest}</code></dd></div></dl></section>}
-    <section className="evolution-section"><h3>自动能力</h3><div className="evolution-capabilities"><span><LockKeyhole size={14} />不自动执行</span><span><LockKeyhole size={14} />不自动晋升</span><span><LockKeyhole size={14} />不网络发布</span><span><LockKeyhole size={14} />不存储秘密</span></div></section>
+    <section className="evolution-section"><h3>候选权限</h3><div className="evolution-capabilities"><span><LockKeyhole size={14} />不能自行执行</span><span><LockKeyhole size={14} />不能自行晋升</span><span><LockKeyhole size={14} />不网络发布</span><span><LockKeyhole size={14} />不存储秘密</span></div>{proposal.evaluation?.source === "server-automatic-run-evaluation-v1" && <p>自动演进由项目级受限控制器授权，候选策略本身始终没有执行或晋升权限。</p>}</section>
   </>;
 }
 
 function Evidence({ proposal }: { proposal: EvolutionProposal }) {
   if (!proposal.evaluation) return <div className="evolution-tab-empty"><FileCheck2 size={25} /><strong>尚未运行结构预检</strong><span>预检由服务端生成并绑定当前候选。</span></div>;
+  const automatic = proposal.evaluation.source === "server-automatic-run-evaluation-v1";
   return <>
-    <section className={`evolution-evidence-summary ${proposal.evaluation.result.passed ? "is-pass" : "is-fail"}`}><span>{proposal.evaluation.result.passed ? <CheckCircle2 size={22} /> : <CircleAlert size={22} />}</span><div><strong>{proposal.evaluation.result.passed ? "结构预检通过" : "结构预检未通过"}</strong><p>{proposal.evaluation.result.passed ? "所有确定性检查均已通过，未出现否决项。" : proposal.evaluation.result.summary}</p></div></section>
-    <p className="evolution-evidence-scope"><ShieldCheck size={15} />此结果只验证结构和本地安全条件，未执行候选策略或提示词。</p>
+    <section className={`evolution-evidence-summary ${proposal.evaluation.result.passed ? "is-pass" : "is-fail"}`}><span>{proposal.evaluation.result.passed ? <CheckCircle2 size={22} /> : <CircleAlert size={22} />}</span><div><strong>{proposal.evaluation.result.passed ? (automatic ? "隔离评测通过" : "结构预检通过") : (automatic ? "隔离评测未通过" : "结构预检未通过")}</strong><p>{proposal.evaluation.result.passed ? (automatic ? "候选通过固定目标的隔离运行，并达到配置的最低分数提升。" : "所有确定性检查均已通过，未出现否决项。") : proposal.evaluation.result.summary}</p></div></section>
+    <p className="evolution-evidence-scope"><ShieldCheck size={15} />{automatic ? "结果来自项目内隔离工作树的固定目标运行；不包含自动发布，也不授予候选自执行权限。" : "此结果只验证结构和本地安全条件，未执行候选策略或提示词。"}</p>
     <section className="evolution-evidence-list">{proposal.evaluation.evidence.items.map((item) => { const passed = item.kind === "deterministic" ? item.status === "pass" : item.verdict === "approve"; return <div key={item.id}><span className={passed ? "is-pass" : "is-fail"}>{passed ? <CheckCircle2 size={16} /> : <CircleAlert size={16} />}</span><div><strong>{evidenceItemSummary(item.id, item.summary, passed)}</strong><code>{item.id}</code></div><small>{item.kind === "deterministic" ? (item.status === "pass" ? "通过" : "失败") : item.verdict}</small></div>; })}</section>
   </>;
 }
@@ -400,6 +527,13 @@ function evolutionErrorMessage(error: unknown): string {
     if (error.code === "ORIGIN_DENIED") return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
     if (error.code === "ACTIVE_RUN_CONFLICT") return "项目中仍有 Agent 操作正在进行，结束后可使用同一确认重新提交。";
     if (error.code === "RECOVERY_REQUIRED") return "本地演进状态需要恢复，当前操作已安全停止。";
+    if (error.code === "AUTOMATION_DISABLED") return "当前项目未启用自动演进，请先更新 agent-team.yaml。";
+    if (error.code === "AUTOMATION_RUNNING") return "自动演进已经在运行，请等待完成或先停止。";
+    if (error.code === "AUTOMATION_NOT_RUNNING") return "自动演进已经停止，当前没有可停止的循环。";
+    if (error.code === "AUTOMATION_CYCLE_LIMIT") return "循环次数超出当前项目配置的安全上限。";
+    if (error.code === "AUTOMATION_TARGET_CONFLICT") return "自动演进目标已被其他策略占用，未修改现有目标。";
+    if (error.code === "AUTOMATION_BUDGET_EXPANSION") return "候选提高了资源或时间上限，已安全拒绝本轮自动应用。";
+    if (error.code === "AUTOMATION_COMMAND_CONFLICT") return "这个启动请求已被其他自动演进会话使用，请刷新状态后再决定。";
   }
   return errorMessage(error);
 }
@@ -416,4 +550,46 @@ function evidenceItemSummary(id: string, fallback: string, passed: boolean): str
   if (id === "server-prompt-object-integrity-v1") return "提示词对象摘要、大小、权限与 UTF-8 检查通过；候选未执行";
   if (id === "server-prompt-target-trust-v1") return "提示词目标路径、内容与 Git 跟踪条件检查通过；候选未执行";
   return fallback;
+}
+
+function automationStatusLabel(status: AutomaticEvolutionSnapshot["status"]): string {
+  if (status === "running") return "运行中";
+  if (status === "stopping") return "停止中";
+  if (status === "completed") return "已完成";
+  if (status === "stopped") return "已停止";
+  if (status === "failed") return "失败封闭";
+  return "待启动";
+}
+
+function automationTone(status: AutomaticEvolutionSnapshot["status"]): string {
+  if (status === "running" || status === "stopping") return "active";
+  if (status === "completed") return "success";
+  if (status === "failed") return "danger";
+  return "neutral";
+}
+
+function automationStatusText(automation: AutomaticEvolutionSnapshot): string {
+  if (automation.status === "running" || automation.status === "stopping") {
+    const phases: Record<AutomaticEvolutionSnapshot["phase"], string> = {
+      idle: "准备中",
+      baseline: "评测当前策略",
+      proposing: "生成保守候选",
+      evaluating: "隔离评测候选",
+      deciding: "比较确定性分数",
+      applying: "应用提升策略",
+      stopping: "正在安全停止",
+      finished: "正在收尾",
+    };
+    return `${phases[automation.phase]}${automation.activeRunId ? ` · ${automation.activeRunId.slice(0, 12)}` : ""}`;
+  }
+  return `最多 ${automation.configuredMaxCycles} 轮，连续 ${automation.maxConsecutiveNoImprovement} 轮无提升即停止`;
+}
+
+function clampCycles(value: number, maximum: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(maximum, Math.max(1, Math.trunc(value)));
+}
+
+function formatScoreDelta(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
 }

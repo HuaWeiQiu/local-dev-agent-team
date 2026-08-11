@@ -62,6 +62,17 @@ export async function loadConfig(
     throw new Error(`Invalid configuration at ${configPath}:\n${details}`);
   }
 
+  const automation = result.data.evolution.automatic;
+  if (
+    automation.enabled &&
+    result.data.strategies?.definitions[automation.targetStrategy]
+  ) {
+    throw new Error(
+      `Invalid configuration at ${configPath}:\nevolution.automatic.targetStrategy: ` +
+      "Automatic evolution target cannot replace a configured strategy",
+    );
+  }
+
   for (const [profileName, profile] of Object.entries(result.data.profiles)) {
     try {
       assertAdapterProfile(registry.get(profile.adapter), profile, false);

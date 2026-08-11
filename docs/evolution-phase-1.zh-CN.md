@@ -1,6 +1,6 @@
-# 受限自演进 Phase 1-5
+# 受限自演进 Phase 1-6
 
-本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1-5：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计的候选记录、受控应用与人工门禁**，不复制任何 OpenRSI 源码或协议文本。
+本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1-6：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计候选、受控应用、人工门禁，以及显式启动且有硬上限的自动策略循环**，不复制任何 OpenRSI 源码或协议文本。
 
 实现入口：
 
@@ -12,8 +12,9 @@
 | Application（Phase 3） | `src/evolution/application.ts` | 精确预览、对象存储、应用 journal、幂等确认、崩溃恢复与回滚链 |
 | Control（Phase 4） | `src/server/evolution-service.ts`、`src/server/http.ts` | 本地会话、服务端固定预检、项目 mutation latch、窄 HTTP API 与关闭排空 |
 | Workbench（Phase 5） | `web/src/components/EvolutionWorkbench.tsx`、`web/src/api.ts` | React/Tauri 候选列表、结构预检、精确预览、人工确认、回滚与移动端单页流程 |
+| Automation（Phase 6） | `src/evolution/automation.ts`、`src/server/evolution-automation.ts` | 只读提案器、固定目标隔离评测、确定性评分、有限循环、自动应用与停止控制 |
 
-相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md) 与 [ADR 0014](./adr/0014-durable-evolution-catalog.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
+相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md) 至 [ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
 
 ## 1. 核心思想（受限，而非自治）
 
@@ -34,6 +35,10 @@ Phase 1 只回答一个问题：
 - `networkPublication: false`
 - `secretStorage: false`
 
+这些标志表示**候选本身不能自授权**。Phase 6 的自动执行与应用由项目配置、服务端
+automation owner、固定评分和既有 application journal 共同授权，浏览器和候选都不能把
+这些字段改成 `true`。
+
 ## 2. Phase 1 已实现 vs 延期
 
 ### 2.1 已实现能力
@@ -52,6 +57,7 @@ Phase 1 只回答一个问题：
 | Phase 3 受控应用 | prompt 对象只在提案入口接收一次；精确 before/after、人工 confirm、write-ahead journal、Git 单文件提交、崩溃恢复和回滚链 |
 | Phase 4 本地控制面 | session + Origin 边界、服务端固定预检及来源标记、稳定错误码、项目 mutation latch、关闭排空和窄 HTTP API |
 | Phase 5 可视化工作台 | 桌面三栏与手机列表/详情视图；只显示当前合法操作；preview/confirm、理由门禁、固定命令幂等键、项目切换与 stale preview 清理 |
+| Phase 6 自动策略循环 | 显式点击后自动运行有限轮次；同目标基线/候选隔离评测、最差重复分数、自动应用更优策略、连续无提升提前停止、手动停止与重启不自启 |
 
 ### 2.2 延期能力（未实现）
 
@@ -59,12 +65,12 @@ Phase 1 只回答一个问题：
 
 | 延期项 | 说明 |
 | --- | --- |
-| Agent 执行演进 | 无“演进 Agent”工作流阶段，也不自动调用 worker 去实现候选 |
-| 候选行为评估 | 当前自动预检只验证结构、信任、对象完整性和 Git 目标安全，不执行候选 |
+| 角色提示词自动演进 | Phase 6 只评测策略蓝图；提示词仍必须走人工结构预检、精确预览和确认 |
+| 多基准综合评估 | 当前每个项目配置一个固定 `evaluationGoal`；没有跨任务 benchmark 权重系统 |
 | 网络发布 | 不把候选或晋升结果发布到远程 |
 | 秘密存储 | 载荷禁止 token/secret/env 等键；不提供密钥保管 |
-| 后台 / 自运行循环 | 无定时或事件驱动的自我演进循环 |
-| 自动晋升 | `automaticPromotion` 恒为 false；无无人值守晋升路径 |
+| 后台 / 定时循环 | 不随启动、定时器或事件自动运行；每个有限会话必须由操作者显式启动 |
+| 自动发布或合并 | 自动策略循环只更新本地自定义策略；评测 run 不创建 PR、不发布、不合并 |
 
 ## 3. 端到端流程
 
@@ -353,7 +359,31 @@ agent-team resume <run-id> \
    mutation 后重新获取服务端 snapshot，不使用乐观目标状态。桌面采用三栏，手机采用候选
    列表/详情单页切换，并保留同一人工边界。
 
-   更强隔离下的候选行为评估、半自动建议、网络发布和秘密存储继续延期；自动晋升仍禁止。
+   人工候选仍保留同一 preview/confirm 边界。网络发布、秘密存储和自动合并继续延期。
+
+6. **Phase 6 — 有硬上限的自动策略循环（已实现）**
+
+   项目可在 `evolution.automatic` 中显式启用策略自动演进。操作者在工作台选择不超过配置
+   上限的轮数并点击一次开始；服务端先对 incumbent 跑固定目标基线，再由只读 proposer
+   生成策略候选，并在独立 worktree 中用相同目标运行完整工作流。自动评测 run 通过本地
+   质量与最终决定后直接进入 `completed`，不会请求 plan/final 人工门禁，也不会进入发布或
+   合并流程；架构、工作、独立审查、测试和确定性命令仍全部执行。
+
+   评分只读取持久化 RunState 的质量、最终决定、命令退出码、合并任务、尝试次数和 Agent
+   调用次数；多次评测取最差分。候选必须通过全部门禁且达到 `minimumScoreDelta` 才会通过
+   既有 application coordinator 自动应用，否则写入 rejection。胜者成为下一轮 incumbent；
+   达到 `maxCycles` 或连续无提升达到 `maxConsecutiveNoImprovement` 后结束。服务关闭或用户
+   点击停止会取消活动评测并安全释放项目 owner。
+
+   `maxCycles` 服务端限制为 1-10，`evaluationRepeats` 为 1-2；`autoStart` 只能是 false。
+   普通 run、审批、继续、重试和人工目标写入在循环期间均被拒绝。完成的 run、proposal、
+   application 和目标策略持久化；循环进度不跨进程自动续跑，重启只恢复已应用胜者为运行时
+   默认策略。详见 [ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md)。
+
+   启用时至少需要一条确定性 `quality.commands`；proposer 的主 profile 和全部 fallback 必须
+   只读。候选不能提高 incumbent 的并发、重试、Agent 调用、执行超时、输出、产物或审批等待
+   预算。通过证据仅接受精确匹配服务端固定目标/策略且状态为 `completed` 的自动评测 run。
+   Start 幂等键持久绑定请求轮数和已认证本地 session operator，重启不会把同一请求再次执行。
 
 ## 10. 维护者快速核对清单
 
@@ -364,6 +394,8 @@ agent-team resume <run-id> \
 - [ ] ADR 0013 与本文对 domain/catalog 边界的描述是否一致？
 - [ ] ADR 0014 对持久化合同（信任边界、revision、digest 威胁模型、原子提交、fail-closed 重开）的描述是否与实现一致？
 - [ ] 是否把 Phase 2 的“可重开持久化”和 Phase 3 的“受控应用证明”混为一谈？
+- [ ] 自动循环是否仍由显式点击启动、受 1-10 轮硬上限约束，并且不发布或合并？
+- [ ] 自动证据是否只来自持久化运行结果，而没有混入 stdout/stderr、浏览器证据或模型自述？
 
 ## 11. 相关文档
 
@@ -376,3 +408,4 @@ agent-team resume <run-id> \
 - [ADR 0014 持久化演进 Catalog](./adr/0014-durable-evolution-catalog.md)
 - [ADR 0015 受控演进应用](./adr/0015-controlled-evolution-application.md)
 - [ADR 0016 本地演进控制面](./adr/0016-evolution-control-plane.md)
+- [ADR 0017 有硬上限的自动策略演进](./adr/0017-bounded-automatic-strategy-evolution.md)

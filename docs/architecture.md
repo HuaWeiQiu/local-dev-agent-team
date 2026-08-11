@@ -160,11 +160,11 @@ deterministic order. The primary working tree is never used for agent edits.
 - The worker cannot convert a failed command into a passing result.
 - GitHub publication is opt-in and never implies automatic merge.
 
-## Bounded Evolution (Phases 1-5)
+## Bounded Evolution (Phases 1-6)
 
 Phase 1 adds a **library-grade** bounded-evolution surface inspired by
-OpenRSI-style candidate records, without copying external sources and without
-self-running loops.
+OpenRSI-style candidate records without copying external sources. Phase 6 adds
+an explicitly started, hard-bounded strategy loop on top of those records.
 
 | Layer | Module | Owns |
 | --- | --- | --- |
@@ -174,6 +174,7 @@ self-running loops.
 | Application | `src/evolution/application.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
 | Control service | `src/server/evolution-service.ts`, `src/server/http.ts` | Session-bound proposal ingress, fixed server preflight, exact preview material, project mutation latch, shutdown drain, sanitized HTTP projection |
 | Workbench | `web/src/components/EvolutionWorkbench.tsx`, `web/src/api.ts` | React/Tauri state-driven proposal UI, exact preview confirmation, stable per-intent idempotency keys, stale-preview cleanup, responsive navigation |
+| Automatic strategy loop | `src/evolution/automation.ts`, `src/server/evolution-automation.ts` | Read-only candidate proposer, isolated fixed-goal evaluation runs, deterministic scoring, bounded stopping, automatic strategy apply, runtime-default recovery |
 
 Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human
@@ -201,8 +202,9 @@ digest, evidence, operator identity, and timestamps are server-owned. Evaluation
 is a fixed structural and safety preflight bound to the immutable candidate. It
 persists the source `server-structural-preflight-v1`; legacy external evaluations
 cannot be relabeled or promoted through the HTTP boundary. It does not claim
-candidate execution or behavioral quality. Promotion and rollback remain separate
-preview/confirm operations and never run automatically. Shutdown seals both
+candidate execution or behavioral quality. Ordinary Phase-4 promotion and rollback
+remain separate preview/confirm operations and never run automatically. The separately
+authorized, bounded Phase-6 path is described below. Shutdown seals both
 evolution operations and run action queues before closing stores or releasing the
 lease. Legacy exact-match adoption is available over HTTP; legacy target writes
 require the exclusive offline reconciliation command.
@@ -214,6 +216,21 @@ only in component memory, clears them on scope or revision changes, and refetche
 the authoritative snapshot after each mutation. Mobile uses a list/detail flow;
 desktop keeps proposal index, detail, and next-action panes visible together.
 
+Phase 6 adds a separate project-authorized automation path for strategy
+blueprints. It acquires exclusive supervisor ownership, evaluates the incumbent
+and each candidate against the same configured goal in isolated worktrees, and
+persists evidence as `server-automatic-run-evaluation-v1`. A candidate must pass
+all local gates and exceed the incumbent's deterministic score by the configured
+delta. The loop stops at the requested/configured cycle limit or after the
+configured number of consecutive non-improvements. It never publishes or merges,
+does not evolve role prompts, and cannot start automatically on process launch.
+Applied winners are restored as the runtime default after restart.
+
+The Start command is durably idempotent and bound to the authenticated session
+operator. Only completed, server-owned evaluation runs with exact goal/strategy
+provenance and successful deterministic commands can pass. Proposer fallbacks remain
+read-only, and candidates cannot increase resource or time budgets above the incumbent.
+
 The lease publishes a fully written and fsynced owner record atomically with a
 same-directory hard link. A malformed, incomplete, or stale `control.lock` is
 never replaced automatically: the operator must first verify that no control
@@ -224,9 +241,9 @@ application command identity. Startup validates catalog audits and application
 completions in both directions and treats stored command result proposals only as
 immutable historical prefixes, so retries cannot return a rewritten lifecycle.
 
-Deferred work includes the Phase-5 UI, candidate-specific isolated behavioral
-evaluation, agent-driven suggestions, network publication, secrets, background
-loops, and automatic promotion.
+Deferred work includes automatic role-prompt evaluation, multi-benchmark suites,
+agent-driven suggestion queues, network publication, secrets, scheduled/background
+loops, and automatic code/PR merge.
 
 Operator flow: `propose → evaluate → external independent review of the
 immutable evaluated snapshot → explicit human promote/reject → human
@@ -248,4 +265,5 @@ See [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md), and
 [ADR 0014](./adr/0014-durable-evolution-catalog.md), and
 [ADR 0015](./adr/0015-controlled-evolution-application.md), and
-[ADR 0016](./adr/0016-evolution-control-plane.md).
+[ADR 0016](./adr/0016-evolution-control-plane.md), and
+[ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md).

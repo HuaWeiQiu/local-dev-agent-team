@@ -149,6 +149,7 @@ export interface RunState {
   strategy: ResolvedStrategy;
   supervisorId?: string;
   parentRunId?: string;
+  purpose?: "evolution-evaluation" | "evolution-proposer";
   intake?: GoalIntake;
   plan?: TaskPlan;
   tasks: TaskRunState[];

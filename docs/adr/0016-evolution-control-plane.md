@@ -66,11 +66,16 @@ control lease 先写入并 fsync 完整所有者记录，再通过同目录 hard
 ## 后果
 
 - Phase 5 前端只调用窄 API，不持有文件路径、证据或写权限；preview token 与命令 ID 仅保留在短生命周期内存中。
-- 人工仍是晋升与回滚的最终边界；没有自动晋升、后台自循环、网络发布或秘密存储。
+- 本 ADR 定义的普通 HTTP 候选路径仍以人工晋升与回滚为最终边界；Phase 4 本身不提供自动
+  晋升、后台自循环、网络发布或秘密存储。
 - 当前预检只覆盖结构与安全。真正的候选行为质量验证必须等待服务端创建、持久绑定并在
   隔离环境执行 candidate-specific evaluation run，不能复用普通历史 run。
 - 原有策略工作室的直接保存/删除仍是兼容入口，并受同一 mutation latch 保护，但不会生成
   evolution proposal、评估或审计链；需要演进门禁时必须走 evolution API。
+
+> 后续说明：ADR 0017 在独立的项目级 automation owner 下增加了显式启动、硬上限的策略
+> 自动评测与应用路径。本文的人工 HTTP 候选边界保持不变；浏览器仍不能伪造自动评测证据，
+> 人工 promote/rollback 仍要求 preview/confirm。
 
 ## 参考
 
@@ -80,3 +85,4 @@ control lease 先写入并 fsync 完整所有者记录，再通过同目录 hard
 - `src/evolution/application.ts`
 - `test/evolution-server.test.ts`
 - [ADR 0015](./0015-controlled-evolution-application.md)
+- [ADR 0017](./0017-bounded-automatic-strategy-evolution.md)

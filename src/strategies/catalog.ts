@@ -37,6 +37,8 @@ export const strategyBlueprintNameSchema = z
     "Strategy name must be 1-64 letters, numbers, dots, underscores, or hyphens",
   );
 
+const automaticShadowNamePattern = /^auto-eval-[a-f0-9]{24}-[1-9][0-9]?$/;
+
 const persistedBlueprintsSchema = z.object({
   version: z.literal(1),
   definitions: z.record(strategyBlueprintNameSchema, namedStrategySchema),
@@ -157,6 +159,7 @@ export class StrategyBlueprintCatalog {
   private readonly baseDefinitions: Record<string, NamedStrategy>;
   private readonly baseNames: Set<string>;
   private readonly defaultName: string;
+  private runtimeDefaultName: string;
   private readonly io: StrategyBlueprintFileIo;
   private customDefinitions: Record<string, NamedStrategy> = {};
   private persistedContents: string | null = null;
@@ -177,6 +180,7 @@ export class StrategyBlueprintCatalog {
     this.baseDefinitions = structuredClone(baseline.definitions);
     this.baseNames = new Set(Object.keys(this.baseDefinitions));
     this.defaultName = baseline.default;
+    this.runtimeDefaultName = this.defaultName;
     this.root = options.root;
     this.stateDirectory = options.stateDirectory;
     this.filePath = options.filePath;
@@ -263,6 +267,24 @@ export class StrategyBlueprintCatalog {
     return Object.keys(this.customDefinitions).sort();
   }
 
+  automaticShadowNames(): string[] {
+    return this.customNames().filter((name) => automaticShadowNamePattern.test(name));
+  }
+
+  setRuntimeDefault(nameInput?: string): void {
+    const name = nameInput === undefined ? this.defaultName : parseName(nameInput);
+    if (
+      !Object.hasOwn(this.baseDefinitions, name) &&
+      !Object.hasOwn(this.customDefinitions, name)
+    ) {
+      throw new StrategyBlueprintNotFoundError(
+        `Strategy blueprint '${name}' cannot become the runtime default because it does not exist`,
+      );
+    }
+    this.runtimeDefaultName = name;
+    this.refreshEffectiveConfig();
+  }
+
   /**
    * Return a deeply frozen clone of a custom definition, or `undefined` when
    * the name is not a custom blueprint. Configured strategies are never returned.
@@ -277,6 +299,11 @@ export class StrategyBlueprintCatalog {
 
   preflight(nameInput: string, definitionInput: unknown): CheckedStrategyBlueprint {
     const name = parseName(nameInput);
+    this.assertPublicName(name);
+    return this.preflightDefinition(name, definitionInput);
+  }
+
+  private preflightDefinition(name: string, definitionInput: unknown): CheckedStrategyBlueprint {
     const definitionResult = namedStrategySchema.safeParse(definitionInput);
     if (!definitionResult.success) {
       throw validationError(name, definitionResult.error.issues);
@@ -308,16 +335,39 @@ export class StrategyBlueprintCatalog {
     definitionInput: unknown,
     options: { expectedBefore?: StrategyBlueprintExpectedBefore } = {},
   ): Promise<CheckedStrategyBlueprint> {
+    return await this.saveBlueprint(nameInput, definitionInput, options, false);
+  }
+
+  async saveAutomaticShadow(
+    nameInput: string,
+    definitionInput: unknown,
+  ): Promise<CheckedStrategyBlueprint> {
+    const name = parseName(nameInput);
+    if (!automaticShadowNamePattern.test(name)) {
+      throw new StrategyBlueprintValidationError(
+        `Automatic shadow strategy '${name}' does not match the reserved name format`,
+      );
+    }
+    return await this.saveBlueprint(name, definitionInput, { expectedBefore: null }, true);
+  }
+
+  private async saveBlueprint(
+    nameInput: string,
+    definitionInput: unknown,
+    options: { expectedBefore?: StrategyBlueprintExpectedBefore },
+    allowAutomaticShadow: boolean,
+  ): Promise<CheckedStrategyBlueprint> {
     return await this.enqueue(async () => {
       this.assertMutable();
       const name = parseName(nameInput);
+      if (!allowAutomaticShadow) this.assertPublicName(name);
       if (this.baseNames.has(name)) {
         throw new StrategyBlueprintConflictError(
           `Configured strategy '${name}' is read-only; save the blueprint under a new name`,
         );
       }
       this.assertExpectedBefore(name, options.expectedBefore);
-      const checked = this.preflight(name, definitionInput);
+      const checked = this.preflightDefinition(name, definitionInput);
       const next = { ...this.customDefinitions, [name]: structuredClone(checked.definition) };
       await this.persist(next);
       this.customDefinitions = next;
@@ -329,6 +379,23 @@ export class StrategyBlueprintCatalog {
   async delete(
     nameInput: string,
     options: { expectedBefore?: StrategyBlueprintExpectedBefore } = {},
+  ): Promise<void> {
+    await this.deleteBlueprint(nameInput, options);
+  }
+
+  async deleteAutomaticShadow(nameInput: string): Promise<void> {
+    const name = parseName(nameInput);
+    if (!automaticShadowNamePattern.test(name)) {
+      throw new StrategyBlueprintValidationError(
+        `Strategy blueprint '${name}' is not in the reserved automatic shadow namespace`,
+      );
+    }
+    await this.deleteBlueprint(name, {});
+  }
+
+  private async deleteBlueprint(
+    nameInput: string,
+    options: { expectedBefore?: StrategyBlueprintExpectedBefore },
   ): Promise<void> {
     await this.enqueue(async () => {
       this.assertMutable();
@@ -351,8 +418,20 @@ export class StrategyBlueprintCatalog {
       delete next[name];
       await this.persist(next);
       this.customDefinitions = next;
+      if (this.runtimeDefaultName === name) this.runtimeDefaultName = this.defaultName;
       this.refreshEffectiveConfig();
     });
+  }
+
+  private assertPublicName(name: string): void {
+    if (
+      automaticShadowNamePattern.test(name) &&
+      !Object.hasOwn(this.customDefinitions, name)
+    ) {
+      throw new StrategyBlueprintConflictError(
+        `Strategy blueprint '${name}' matches the reserved automatic evaluation format`,
+      );
+    }
   }
 
   private assertMutable(): void {
@@ -429,7 +508,7 @@ export class StrategyBlueprintCatalog {
     const effective = configSchema.safeParse({
       ...this.loaded.config,
       strategies: {
-        default: this.defaultName,
+        default: this.runtimeDefaultName,
         definitions: { ...this.baseDefinitions, ...this.customDefinitions },
       },
     });
@@ -443,7 +522,7 @@ export class StrategyBlueprintCatalog {
 
   private refreshEffectiveConfig(): void {
     this.loaded.config.strategies = {
-      default: this.defaultName,
+      default: this.runtimeDefaultName,
       definitions: { ...this.baseDefinitions, ...this.customDefinitions },
     };
   }

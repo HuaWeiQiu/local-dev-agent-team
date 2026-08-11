@@ -107,6 +107,22 @@ strategies:
 observability:
   maxEventsPerRun: 50000
 
+evolution:
+  automatic:
+    enabled: false
+    autoStart: false
+    maxCycles: 3
+    maxConsecutiveNoImprovement: 2
+    evaluationRepeats: 1
+    minimumScoreDelta: 1
+    proposerRole: orchestrator
+    proposerProfile: codex-orchestrator
+    baselineStrategy: balanced
+    targetStrategy: auto-evolved
+    evaluationGoal: >-
+      Improve one small, well-tested reliability issue without changing public
+      behavior or release configuration. Run every configured quality command.
+
 quality:
   commands:
     - command: pnpm

@@ -55,6 +55,58 @@ afterEach(async () => {
 });
 
 describe("evolution HTTP control surface", () => {
+  it("protects the automatic loop mutation and reports disabled projects without starting work", async () => {
+    const service = await startFixtureService("automatic-disabled");
+    const cookie = await bootstrapSession(service.url);
+    const missingOrigin = await fetch(`${service.url}/api/evolution/automation/start`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ maxCycles: 1 }),
+    });
+    expect(missingOrigin.status).toBe(403);
+
+    const response = await fetch(`${service.url}/api/evolution/automation/start`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: new URL(service.url).origin,
+        "content-type": "application/json",
+        "idempotency-key": "disabled-automation-start",
+      },
+      body: JSON.stringify({ maxCycles: 1 }),
+    });
+    expect(response.status).toBe(403);
+    await expect(expectJson<{ code: string }>(response)).resolves.toMatchObject({
+      code: "AUTOMATION_DISABLED",
+    });
+
+    const snapshot = await fetch(`${service.url}/api/evolution`, { headers: { cookie } });
+    await expect(expectJson<EvolutionSnapshot & { automation: { status: string; enabled: boolean } }>(snapshot))
+      .resolves.toMatchObject({ automation: { status: "idle", enabled: false } });
+  });
+
+  it("maps ordinary cancellation during automation ownership to a stable conflict", async () => {
+    const service = await startFixtureService("automatic-cancel-conflict");
+    const cookie = await bootstrapSession(service.url);
+    const automation = service.supervisor.beginAutomationSession();
+
+    const response = await fetch(`${service.url}/api/runs/not-active/actions/cancel`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: new URL(service.url).origin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(expectJson<{ code: string }>(response)).resolves.toMatchObject({
+      code: "ACTIVE_RUN_CONFLICT",
+    });
+    automation.release();
+  });
+
   it("requires a local session and exact Origin, then exposes an empty snapshot", async () => {
     const service = await startFixtureService("security");
 

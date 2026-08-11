@@ -210,15 +210,19 @@ describe("run supervisor", () => {
     expired.approvals![0]!.expiresAt = new Date(Date.now() - 1_000).toISOString();
     const foreign = fakeState("foreign-active", "Run owned by a stopped service", "implementing");
     foreign.supervisorId = randomUUID();
+    const proposer = fakeState("orphaned-proposer", "Generate candidate", "orchestrating");
+    proposer.supervisorId = randomUUID();
+    proposer.purpose = "evolution-proposer";
     await Promise.all([
       states.save(plan),
       states.save(final),
       states.save(expired),
       states.save(foreign),
+      states.save(proposer),
     ]);
     const supervisor = new RunSupervisor(loaded, events);
 
-    expect(await supervisor.reconcileInterruptedRuns()).toBe(4);
+    expect(await supervisor.reconcileInterruptedRuns()).toBe(5);
     await expect(supervisor.get(plan.id)).resolves.toMatchObject({ status: "interrupted" });
     await expect(supervisor.get(final.id)).resolves.toMatchObject({ status: "ready-to-merge" });
     await expect(supervisor.get(expired.id)).resolves.toMatchObject({
@@ -229,6 +233,11 @@ describe("run supervisor", () => {
       status: "interrupted",
       error: "The owning control service stopped before the run completed",
     });
+    await expect(supervisor.get(proposer.id)).resolves.toMatchObject({
+      status: "cancelled",
+      purpose: "evolution-proposer",
+    });
+    await expect(supervisor.retry(proposer.id)).rejects.toThrow("cannot be retried directly");
     await supervisor.close();
     events.close();
   });
@@ -477,6 +486,45 @@ describe("run supervisor", () => {
       error: "Operator added a note",
     });
 
+    await supervisor.close();
+    events.close();
+  });
+
+  it("gives a bounded automation session exclusive run and target ownership", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    let finishRun!: () => void;
+    const runFinished = new Promise<void>((resolve) => {
+      finishRun = resolve;
+    });
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        await runFinished;
+        return fakeState(context.runId, request.goal, "completed");
+      },
+    });
+    const automation = supervisor.beginAutomationSession();
+
+    expect(() => supervisor.start({ goal: "ordinary run", profileOverrides: {} }))
+      .toThrow("Automatic evolution owns the project");
+    expect(() => supervisor.beginEvolutionMutation())
+      .toThrow("Automatic evolution owns the project");
+    const releaseMutation = automation.beginTargetMutation();
+    expect(() => automation.start({ goal: "overlap target write", profileOverrides: {} }))
+      .toThrow("Project target mutation is in progress");
+    releaseMutation();
+
+    const evaluation = automation.start({ goal: "isolated evaluation", profileOverrides: {} });
+    expect(() => automation.release()).toThrow("cannot release project ownership");
+    expect(() => supervisor.cancel(evaluation.runId)).toThrow(
+      "Automatic evolution owns run cancellation",
+    );
+    finishRun();
+    await expect(supervisor.wait(evaluation.runId)).resolves.toMatchObject({ status: "completed" });
+    automation.release();
+
+    const ordinary = supervisor.start({ goal: "ordinary run after release", profileOverrides: {} });
+    await expect(supervisor.wait(ordinary.runId)).resolves.toMatchObject({ status: "completed" });
     await supervisor.close();
     events.close();
   });

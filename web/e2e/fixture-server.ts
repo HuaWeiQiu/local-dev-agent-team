@@ -36,6 +36,15 @@ config.roles.reviewer = {
   allowedProfiles: ["claude-reviewer", "codex-planner"],
   fallbackProfiles: ["codex-planner"],
 };
+config.evolution.automatic = {
+  ...config.evolution.automatic,
+  enabled: true,
+  maxCycles: 3,
+  maxConsecutiveNoImprovement: 2,
+  baselineStrategy: "balanced",
+  evaluationGoal: "Run the fixed visual fixture reliability benchmark.",
+};
+config.quality.commands = [{ command: "node", args: ["-e", "process.exit(0)"] }];
 config.strategies!.definitions.strict = {
   topology: { mode: "sequential" },
   maxParallel: 1,
