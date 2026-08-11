@@ -1422,6 +1422,111 @@ code {
   color: var(--muted);
 }
 
+.agent-activity-list {
+  min-height: 100%;
+}
+
+.agent-activity-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-activity-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto 96px;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 9px 20px;
+}
+
+.agent-activity-row.is-child {
+  grid-template-columns: 18px minmax(0, 1fr) auto 96px;
+  min-height: 50px;
+  padding-left: 40px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.agent-activity-identity {
+  min-width: 0;
+}
+
+.agent-activity-identity strong,
+.agent-activity-identity small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-activity-identity strong {
+  color: var(--ink);
+  font-size: var(--text-12);
+}
+
+.agent-activity-identity small,
+.agent-activity-row time {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.agent-activity-row time {
+  margin: 0;
+  text-align: right;
+}
+
+.agent-state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.agent-state-dot.is-running,
+.agent-state-dot.is-pending {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.agent-state-dot.is-completed {
+  background: var(--success);
+}
+
+.agent-state-dot.is-failed {
+  background: var(--danger);
+}
+
+.agent-state-dot.is-interrupted,
+.agent-state-dot.is-shutdown {
+  background: var(--warning);
+}
+
+.agent-state {
+  min-width: 52px;
+  color: var(--muted);
+  font-size: var(--text-11);
+  text-align: right;
+}
+
+.agent-state.is-running,
+.agent-state.is-pending {
+  color: var(--accent-ink);
+}
+
+.agent-state.is-completed {
+  color: var(--success-ink);
+}
+
+.agent-state.is-failed {
+  color: var(--danger-ink);
+}
+
+.agent-state.is-interrupted,
+.agent-state.is-shutdown {
+  color: var(--warning-ink);
+}
+
 .output-log {
   min-height: 100%;
   margin: 0;
@@ -3019,17 +3124,139 @@ button.palette-item:disabled {
   height: 100%;
   min-height: 0;
   grid-template-columns: 286px minmax(0, 1fr) 348px;
-  grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: "evolution-rail evolution-detail evolution-inspector";
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "evolution-automation evolution-automation evolution-automation"
+    "evolution-rail evolution-detail evolution-inspector";
   overflow: hidden;
   background: var(--surface-1);
 }
 
 .evolution-workbench:has(.evolution-lock-banner) {
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   grid-template-areas:
+    "evolution-automation evolution-automation evolution-automation"
     "evolution-lock evolution-lock evolution-lock"
     "evolution-rail evolution-detail evolution-inspector";
+}
+
+.evolution-automation {
+  grid-area: evolution-automation;
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: minmax(260px, auto) minmax(280px, 1fr) auto;
+  align-items: center;
+  gap: 12px 22px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.evolution-automation-heading,
+.evolution-automation-heading > div,
+.evolution-automation-metrics,
+.evolution-automation-controls,
+.evolution-automation-controls label {
+  display: flex;
+  align-items: center;
+}
+
+.evolution-automation-heading {
+  min-width: 0;
+  gap: 9px;
+}
+
+.evolution-automation-heading > div {
+  min-width: 0;
+  flex: 1;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evolution-automation-heading strong {
+  font-size: var(--text-12);
+}
+
+.evolution-automation-heading span,
+.evolution-automation-metrics,
+.evolution-automation-controls label > span,
+.evolution-automation > p {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.evolution-automation-heading > div > span {
+  overflow: hidden;
+  max-width: 360px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evolution-automation-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--accent-ink);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
+.evolution-automation-metrics {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+}
+
+.evolution-automation-metrics span {
+  white-space: nowrap;
+}
+
+.evolution-automation-metrics strong {
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.evolution-automation-metrics .is-improved strong {
+  color: var(--success-ink);
+}
+
+.evolution-automation-metrics .is-rejected strong {
+  color: var(--danger-ink);
+}
+
+.evolution-automation-controls {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.evolution-automation-controls label {
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.evolution-automation-controls input {
+  width: 58px;
+  height: 32px;
+  padding: 0 5px 0 8px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.evolution-automation > p {
+  grid-column: 1 / -1;
+  margin: -4px 0 0 41px;
+}
+
+.evolution-automation > p.is-error {
+  color: var(--danger-ink);
 }
 
 .evolution-lock-banner {
@@ -4251,6 +4478,20 @@ button.palette-item:disabled {
     margin-bottom: 8px;
   }
 
+  .agent-activity-row {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    padding: 9px 13px;
+  }
+
+  .agent-activity-row.is-child {
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    padding-left: 25px;
+  }
+
+  .agent-activity-row time {
+    display: none;
+  }
+
   .event-console > header {
     min-height: 44px;
     padding: 0 10px;
@@ -4306,6 +4547,32 @@ button.palette-item:disabled {
     display: block;
     height: 100%;
     overflow: auto;
+  }
+
+  .evolution-automation {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 9px 12px;
+    padding: 10px 12px;
+  }
+
+  .evolution-automation-metrics {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+
+  .evolution-automation-controls {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .evolution-automation-heading > .status-badge {
+    display: none;
+  }
+
+  .evolution-automation > p {
+    grid-column: 1 / -1;
+    margin: 0;
+    order: 4;
   }
 
   .evolution-lock-banner {

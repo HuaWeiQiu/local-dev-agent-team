@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
+import { CodexActivityParser } from "../src/adapters/codex-events.js";
 import { GrokAdapter } from "../src/adapters/grok.js";
 import { AgentInvocationError, invokeAgent } from "../src/adapters/invoke.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
@@ -142,6 +143,106 @@ describe("Codex adapter", () => {
 
     await expect(adapter.parseResult(invocation, processResult)).resolves.toMatchObject({
       usage: { inputTokens: 12, cachedInputTokens: 3, outputTokens: 5 },
+    });
+  });
+
+  it("normalizes streamed native child-agent lifecycle events without retaining prompts", () => {
+    const parser = new CodexActivityParser();
+    const started = JSON.stringify({
+      type: "item.started",
+      item: {
+        id: "item-1",
+        type: "collab_tool_call",
+        tool: "spawnAgent",
+        status: "in_progress",
+        receiver_thread_ids: ["thread-child-1"],
+        receiver_agents: [{
+          thread_id: "thread-child-1",
+          agent_path: "/root/contracts_final_review",
+          model: "gpt-5.6-sol",
+          reasoning_effort: "xhigh",
+        }],
+        prompt: "private task material",
+        agents_states: {},
+      },
+    });
+    const running = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item-1",
+        type: "collab_tool_call",
+        tool: "spawnAgent",
+        status: "completed",
+        receiver_thread_ids: ["thread-child-1"],
+        agents_states: { "thread-child-1": { status: "running", message: "private" } },
+      },
+    });
+    const completed = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item-2",
+        type: "collabAgentToolCall",
+        tool: "wait",
+        status: "completed",
+        receiverThreadIds: ["thread-child-1"],
+        agentsStates: { "thread-child-1": { status: "completed", message: "private" } },
+      },
+    });
+
+    expect(parser.push(started.slice(0, 30))).toEqual([]);
+    const snapshots = [
+      ...parser.push(`${started.slice(30)}\n${running}\n`),
+      ...parser.push(`${completed}\n`),
+    ];
+    expect(snapshots.map((snapshot) => snapshot.agents[0]?.status)).toEqual([
+      "pending",
+      "running",
+      "completed",
+    ]);
+    expect(snapshots.at(-1)?.agents[0]).toEqual({
+      threadId: "thread-child-1",
+      path: "/root/contracts_final_review",
+      status: "completed",
+      model: "gpt-5.6-sol",
+      reasoning: "xhigh",
+    });
+    expect(JSON.stringify(snapshots)).not.toContain("private");
+    expect(parser.finish()).toEqual([]);
+  });
+
+  it("marks unfinished native children interrupted when the Codex process exits", () => {
+    const parser = new CodexActivityParser();
+    const snapshots = parser.push(`${JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "sub_agent_activity",
+        agent_thread_id: "thread-child-2",
+        agent_path: "/root/worker_probe",
+        kind: "started",
+      },
+    })}\n`);
+    expect(snapshots.at(-1)?.agents[0]?.status).toBe("running");
+    expect(parser.finish().at(-1)?.agents[0]?.status).toBe("interrupted");
+  });
+
+  it("drops oversized JSONL records without losing the next child event", () => {
+    const parser = new CodexActivityParser();
+    const validEvent = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "sub_agent_activity",
+        agent_thread_id: "thread-after-oversized-record",
+        kind: "started",
+      },
+    });
+
+    expect(parser.push("x".repeat(1024 * 1024 + 1))).toEqual([]);
+    const snapshots = parser.push(`ignored-tail\n${validEvent}\n`);
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.agents[0]).toMatchObject({
+      threadId: "thread-after-oversized-record",
+      status: "running",
     });
   });
 });
@@ -490,6 +591,57 @@ describe("agent invocation", () => {
     await expect(readFile(path.join(artifactDirectory, "stderr.log"), "utf8")).resolves.toBe(
       "err",
     );
+  });
+
+  it("streams normalized adapter activity without exposing the raw event payload", async () => {
+    const adapter: AgentAdapter = {
+      name: "fixture",
+      contract: fixtureContract,
+      supportedReasoning: ["high"],
+      createActivityParser: () => new CodexActivityParser(),
+      buildInvocation: (_profile, request) => ({
+        command: process.execPath,
+        args: ["-e", `process.stdout.write(${JSON.stringify(`${JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "collab_tool_call",
+            tool: "spawnAgent",
+            status: "completed",
+            receiver_thread_ids: ["thread-streamed"],
+            receiver_agents: [{ thread_id: "thread-streamed", agent_path: "/root/streamed" }],
+            agents_states: { "thread-streamed": { status: "completed", message: "secret" } },
+            prompt: "secret prompt",
+          },
+        })}\n`)})`],
+        cwd: request.cwd,
+        stdin: request.prompt,
+        timeoutMs: 1_000,
+      }),
+      parseResult: async (_invocation, processResult) => ({
+        text: processResult.stdout,
+        process: processResult,
+      }),
+      doctor: async () => [],
+    };
+    const activities: unknown[] = [];
+
+    await invokeAgent(
+      {
+        adapterName: "fixture",
+        profile: { ...readOnlyProfile, adapter: "fixture" },
+        cwd: process.cwd(),
+        prompt: "ignored",
+        onActivity: (activity) => activities.push(activity),
+      },
+      new AdapterRegistry([adapter]),
+    );
+
+    expect(activities).toEqual([{ type: "child-agents", agents: [{
+      threadId: "thread-streamed",
+      path: "/root/streamed",
+      status: "completed",
+    }] }]);
+    expect(JSON.stringify(activities)).not.toContain("secret");
   });
 
   it("preserves capped process metrics when an invocation fails", async () => {

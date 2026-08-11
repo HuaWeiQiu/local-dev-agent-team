@@ -7,6 +7,7 @@ import {
   type AdapterDoctorSpec,
 } from "./shared.js";
 import { assertAdapterProfile } from "./conformance.js";
+import { CodexActivityParser } from "./codex-events.js";
 import type {
   AdapterDoctorOptions,
   AgentAdapter,
@@ -29,6 +30,10 @@ export class CodexAdapter implements AgentAdapter {
     usage: ["inputTokens", "cachedInputTokens", "outputTokens"],
   } as const;
   readonly supportedReasoning = reasoning;
+
+  createActivityParser(): CodexActivityParser {
+    return new CodexActivityParser();
+  }
 
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation {
     assertAdapterProfile(this, profile, request.outputSchema !== undefined);

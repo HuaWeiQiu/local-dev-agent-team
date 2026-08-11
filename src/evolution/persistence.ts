@@ -320,6 +320,7 @@ export class DurableEvolutionCatalog {
     createdAt: string;
     policy: unknown;
     candidate: unknown;
+    origin?: "automatic-controller-v1";
   }): Promise<EvolutionProposal> {
     return await this.#enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
@@ -358,6 +359,7 @@ export class DurableEvolutionCatalog {
       createdAt: string;
       policy: unknown;
       candidate: unknown;
+      origin?: "automatic-controller-v1";
     },
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
@@ -400,6 +402,19 @@ export class DurableEvolutionCatalog {
     this.#assertWriter(writer);
     const { result, committedRevision } = await this.#mutate((working) =>
       working.evaluateServerPreflight(proposalId, evidence, at),
+    );
+    return Object.freeze({ proposal: result, committedRevision });
+  }
+
+  async evaluateAutomaticRun(
+    proposalId: string,
+    evidence: unknown,
+    at: string,
+    writer?: object,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.evaluateAutomaticRun(proposalId, evidence, at),
     );
     return Object.freeze({ proposal: result, committedRevision });
   }

@@ -76,6 +76,19 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
     observability: {
       maxEventsPerRun: 50_000,
     },
+    evolution: {
+      automatic: {
+        enabled: false,
+        autoStart: false,
+        maxCycles: 3,
+        maxConsecutiveNoImprovement: 2,
+        evaluationRepeats: 1,
+        minimumScoreDelta: 1,
+        proposerRole: "orchestrator",
+        targetStrategy: "auto-evolved",
+        evaluationGoal: "",
+      },
+    },
     quality: {
       commands: [],
       maxReworkAttempts: 2,

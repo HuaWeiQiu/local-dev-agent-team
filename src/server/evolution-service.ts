@@ -13,6 +13,11 @@ import {
   type EvolutionProposal,
 } from "../evolution/domain.js";
 import type { NamedStrategy } from "../config/schema.js";
+import type { StrategyBlueprintCatalog } from "../strategies/catalog.js";
+import {
+  AutomaticEvolutionController,
+  type AutomaticEvolutionDependencies,
+} from "./evolution-automation.js";
 import type { RunSupervisor } from "./supervisor.js";
 
 export const EVOLUTION_EVIDENCE_SCOPE =
@@ -38,15 +43,31 @@ export class EvolutionProjectService {
   private sealed = false;
   private readonly inFlight = new Set<Promise<unknown>>();
   private targetMutationQueue: Promise<void> = Promise.resolve();
+  readonly automatic: AutomaticEvolutionController;
 
   constructor(
     readonly loaded: LoadedConfig,
     readonly coordinator: EvolutionApplicationCoordinator,
     readonly supervisor: RunSupervisor,
-  ) {}
+    readonly strategies: StrategyBlueprintCatalog,
+    automationDependencies: AutomaticEvolutionDependencies = {},
+  ) {
+    this.automatic = new AutomaticEvolutionController(
+      loaded,
+      coordinator,
+      strategies,
+      supervisor,
+      automationDependencies,
+    );
+  }
+
+  async initialize(): Promise<void> {
+    await this.automatic.restoreRuntimeDefault();
+  }
 
   async close(): Promise<void> {
     this.sealed = true;
+    await this.automatic.close();
     const results = await Promise.allSettled([...this.inFlight]);
     const errors: unknown[] = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -102,9 +123,24 @@ export class EvolutionProjectService {
               startedAt: control.application.pending.startedAt,
             }
           : null,
+        automation: this.automatic.snapshot(),
         evidenceScope: EVOLUTION_EVIDENCE_SCOPE,
       };
     });
+  }
+
+  startAutomatic(maxCycles: number | undefined, commandId: string, operator: string): unknown {
+    if (this.sealed) {
+      throw new EvolutionServiceError("SERVICE_CLOSED", "Evolution control is closed for this project");
+    }
+    return this.automatic.start(maxCycles, commandId, operator);
+  }
+
+  async stopAutomatic(): Promise<unknown> {
+    if (this.sealed) {
+      throw new EvolutionServiceError("SERVICE_CLOSED", "Evolution control is closed for this project");
+    }
+    return await this.automatic.stop();
   }
 
   async proposeStrategy(

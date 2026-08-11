@@ -92,6 +92,12 @@
   background: var(--danger-soft);
 }
 
+.launcher-hero-icon.is-busy {
+  color: var(--warning-ink);
+  border-color: color-mix(in oklab, var(--warning) 30%, transparent);
+  background: var(--warning-soft);
+}
+
 .launcher-kicker {
   min-height: 18px;
   margin: 0 0 7px;

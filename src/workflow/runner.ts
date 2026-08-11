@@ -55,6 +55,7 @@ export interface WorkflowRunOptions {
   signal?: AbortSignal;
   supervisorId?: string;
   parentRunId?: string;
+  purpose?: "evolution-evaluation";
 }
 
 export interface WorkflowDependencies {
@@ -120,6 +121,7 @@ export class LocalWorkflowRunner {
       strategy,
       ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+      ...(options.purpose ? { purpose: options.purpose } : {}),
       tasks: [],
       history: [{ at: now, status: "created", message: "Run created" }],
     };
@@ -185,7 +187,10 @@ export class LocalWorkflowRunner {
       }));
       await store.transition(state, "planned", `Architect produced ${state.tasks.length} task(s)`);
       const checkpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
-      if (state.strategy.approvalGates.includes("plan")) {
+      if (
+        state.strategy.approvalGates.includes("plan") &&
+        state.purpose !== "evolution-evaluation"
+      ) {
         await this.requestApproval(
           state,
           store,
@@ -361,6 +366,14 @@ export class LocalWorkflowRunner {
       git,
       "local-gates-passed",
     );
+    if (state.purpose === "evolution-evaluation") {
+      await store.transition(
+        state,
+        "completed",
+        "Automatic evolution evaluation completed without publication",
+      );
+      return state;
+    }
     await this.requestApproval(
       state,
       store,

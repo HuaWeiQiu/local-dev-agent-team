@@ -121,6 +121,7 @@ export class EvolutionCatalog {
     createdAt: string;
     policy: unknown;
     candidate: unknown;
+    origin?: "automatic-controller-v1";
   }): EvolutionProposal {
     return this.#runMutation(() => {
       let proposal: EvolutionProposal;
@@ -130,6 +131,7 @@ export class EvolutionCatalog {
           createdAt: input.createdAt,
           policy: input.policy,
           candidate: input.candidate,
+          ...(input.origin ? { origin: input.origin } : {}),
           trust: this.#trust,
         });
       } catch (error) {
@@ -184,6 +186,15 @@ export class EvolutionCatalog {
     at: string,
   ): EvolutionProposal {
     return this.#evaluate(proposalId, evidence, at, "server-structural-preflight-v1");
+  }
+
+  /** Attach deterministic evidence produced by the bounded automatic run loop. */
+  evaluateAutomaticRun(
+    proposalId: string,
+    evidence: unknown,
+    at: string,
+  ): EvolutionProposal {
+    return this.#evaluate(proposalId, evidence, at, "server-automatic-run-evaluation-v1");
   }
 
   #evaluate(

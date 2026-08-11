@@ -36,6 +36,13 @@ export interface StartRunResult {
   deduplicated: boolean;
 }
 
+export interface EvolutionAutomationSession {
+  start(request: StartRunRequest, idempotencyKey?: string): StartRunResult;
+  cancel(runId: string): boolean;
+  beginTargetMutation(): () => void;
+  release(): void;
+}
+
 export interface RunActionResult {
   runId: string;
   status: "resuming" | "ready-to-merge" | "blocked" | "unchanged";
@@ -90,7 +97,12 @@ export interface UsageReport {
 export interface SupervisorDependencies {
   runWorkflow?: (
     request: StartRunRequest,
-    context: { runId: string; signal: AbortSignal; supervisorId: string },
+    context: {
+      runId: string;
+      signal: AbortSignal;
+      supervisorId: string;
+      purpose?: "evolution-evaluation";
+    },
   ) => Promise<RunState>;
   resumeWorkflow?: (
     state: RunState,
@@ -130,6 +142,7 @@ export class RunSupervisor {
   private evolutionOperationsSealed = false;
   private evolutionMutationFinished: Promise<void> = Promise.resolve();
   private finishEvolutionMutation: (() => void) | undefined;
+  private automationOwner: symbol | undefined;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -144,6 +157,49 @@ export class RunSupervisor {
   }
 
   start(request: StartRunRequest, idempotencyKey?: string): StartRunResult {
+    return this.startOwned(request, idempotencyKey);
+  }
+
+  beginAutomationSession(): EvolutionAutomationSession {
+    if (this.evolutionOperationsSealed) {
+      throw new ProjectMutationConflictError(
+        "Automatic evolution cannot start while the control service is closing",
+      );
+    }
+    if (this.automationOwner) {
+      throw new ProjectMutationConflictError("Automatic evolution is already running");
+    }
+    if (this.evolutionMutationActive) {
+      throw new ProjectMutationConflictError("A project target mutation is already in progress");
+    }
+    this.assertEvolutionQuiescent();
+    const owner = Symbol("evolution-automation");
+    this.automationOwner = owner;
+    let released = false;
+    return {
+      start: (request, idempotencyKey) =>
+        this.startOwned(request, idempotencyKey, owner, "evolution-evaluation"),
+      cancel: (runId) => this.cancelOwned(runId, owner),
+      beginTargetMutation: () => this.beginOwnedEvolutionMutation(owner),
+      release: () => {
+        if (released) return;
+        if (this.evolutionMutationActive || this.active.size > 0 || this.actionQueues.size > 0) {
+          throw new ProjectMutationConflictError(
+            "Automatic evolution cannot release project ownership while work is active",
+          );
+        }
+        released = true;
+        if (this.automationOwner === owner) this.automationOwner = undefined;
+      },
+    };
+  }
+
+  private startOwned(
+    request: StartRunRequest,
+    idempotencyKey?: string,
+    automationOwner?: symbol,
+    purpose?: "evolution-evaluation",
+  ): StartRunResult {
     resolveStrategy(this.loaded.config, request.strategy);
     for (const [role, profile] of Object.entries(request.profileOverrides)) {
       resolveProfile(this.loaded.config, role, profile);
@@ -168,7 +224,7 @@ export class RunSupervisor {
 
     let workflow: Promise<RunState>;
     try {
-      this.assertRunStartAllowed();
+      this.assertRunStartAllowed(automationOwner);
       const controller = new AbortController();
       this.events.emit(runId, "run.queued", {
         goal: request.goal,
@@ -180,6 +236,7 @@ export class RunSupervisor {
             runId,
             signal: controller.signal,
             supervisorId: this.id,
+            ...(purpose ? { purpose } : {}),
           })
         : new LocalWorkflowRunner(this.loaded, { eventSink: this.events }).run({
             goal: request.goal,
@@ -189,6 +246,7 @@ export class RunSupervisor {
             signal: controller.signal,
             supervisorId: this.id,
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+            ...(purpose ? { purpose } : {}),
           });
       this.track(runId, controller, workflow, request.parentRunId);
     } catch (error) {
@@ -206,6 +264,10 @@ export class RunSupervisor {
    * an await, so a run cannot start between quiescence validation and ownership.
    */
   beginEvolutionMutation(): () => void {
+    return this.beginOwnedEvolutionMutation();
+  }
+
+  private beginOwnedEvolutionMutation(automationOwner?: symbol): () => void {
     if (this.evolutionOperationsSealed) {
       throw new ProjectMutationConflictError(
         "Evolution mutations are sealed while the control service is closing",
@@ -213,6 +275,11 @@ export class RunSupervisor {
     }
     if (this.evolutionMutationActive) {
       throw new ProjectMutationConflictError("Another project mutation is already in progress");
+    }
+    if (this.automationOwner && this.automationOwner !== automationOwner) {
+      throw new ProjectMutationConflictError(
+        "Automatic evolution owns the project until its bounded loop finishes",
+      );
     }
     this.assertEvolutionQuiescent();
     this.evolutionMutationActive = true;
@@ -236,6 +303,15 @@ export class RunSupervisor {
   }
 
   cancel(runId: string): boolean {
+    return this.cancelOwned(runId);
+  }
+
+  private cancelOwned(runId: string, automationOwner?: symbol): boolean {
+    if (this.automationOwner && this.automationOwner !== automationOwner) {
+      throw new ProjectMutationConflictError(
+        "Automatic evolution owns run cancellation until its bounded loop finishes",
+      );
+    }
     const active = this.active.get(runId);
     if (!active) {
       return false;
@@ -250,6 +326,9 @@ export class RunSupervisor {
       const source = await this.get(runId);
       if (!source) {
         throw new Error(`Run '${runId}' was not found`);
+      }
+      if (source.purpose === "evolution-proposer") {
+        throw new Error(`Automatic evolution proposer run '${runId}' cannot be retried directly`);
       }
       if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
         throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
@@ -557,7 +636,11 @@ export class RunSupervisor {
         activeStatuses.has(state.status)
       ) {
         state.error = "The owning control service stopped before the run completed";
-        await this.stateStore.transition(state, "interrupted", state.error);
+        await this.stateStore.transition(
+          state,
+          state.purpose === "evolution-proposer" ? "cancelled" : "interrupted",
+          state.error,
+        );
         count += 1;
       }
     }
@@ -619,7 +702,7 @@ export class RunSupervisor {
     this.track(state.id, controller, workflow);
   }
 
-  private assertRunStartAllowed(): void {
+  private assertRunStartAllowed(automationOwner?: symbol): void {
     if (this.evolutionOperationsSealed) {
       throw new ProjectMutationConflictError(
         "Control service is closing and cannot start another run",
@@ -628,6 +711,11 @@ export class RunSupervisor {
     if (this.evolutionMutationActive) {
       throw new ProjectMutationConflictError(
         "Project target mutation is in progress; retry after it finishes",
+      );
+    }
+    if (this.automationOwner && this.automationOwner !== automationOwner) {
+      throw new ProjectMutationConflictError(
+        "Automatic evolution owns the project until its bounded loop finishes",
       );
     }
   }
@@ -854,9 +942,9 @@ export class RunSupervisor {
   }
 
   private async serializeActions<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
-    if (this.evolutionOperationsSealed || this.evolutionMutationActive) {
+    if (this.evolutionOperationsSealed || this.evolutionMutationActive || this.automationOwner) {
       throw new ProjectMutationConflictError(
-        "Project target mutation is in progress; run actions are temporarily unavailable",
+        "Project evolution is in progress; run actions are temporarily unavailable",
       );
     }
     const ids = [...new Set(runIds)].sort();

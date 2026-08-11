@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Circle,
   FolderOpen,
+  LockKeyhole,
   LoaderCircle,
   RotateCcw,
   ShieldCheck,
@@ -16,7 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { errorMessage } from "./presentation";
 import { applyTheme, getInitialTheme } from "./theme";
 
-type DesktopState = "needsProject" | "needsSetup" | "starting" | "ready" | "error";
+type DesktopState = "needsProject" | "needsSetup" | "starting" | "ready" | "busy" | "error";
 
 interface DesktopStatus {
   state: DesktopState;
@@ -51,6 +52,7 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
 
   const checks = useMemo(() => launcherChecks(status), [status]);
   const isError = status.state === "error";
+  const isBusy = status.state === "busy";
   const needsSetup = status.state === "needsSetup";
 
   async function chooseProject() {
@@ -117,8 +119,12 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
 
       <main className="launcher-main">
         <section className="launcher-content" aria-live="polite">
-          <div className={`launcher-hero-icon ${isError ? "is-error" : ""}`}>
-            {isError ? <AlertCircle size={30} /> : <FolderOpen size={30} />}
+          <div className={`launcher-hero-icon ${isError ? "is-error" : isBusy ? "is-busy" : ""}`}>
+            {isError
+              ? <AlertCircle size={30} />
+              : isBusy
+                ? <LockKeyhole size={30} />
+                : <FolderOpen size={30} />}
           </div>
           <p className="launcher-kicker">{status.projectName ?? "本地项目"}</p>
           <h1>{headline(status)}</h1>
@@ -144,11 +150,11 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
                 </button>
               </>
             )}
-            {isError && (
+            {(isError || isBusy) && (
               <>
                 <button className="launcher-primary" onClick={() => void retry()} disabled={busy}>
                   <RotateCcw size={18} />
-                  重试
+                  {isBusy ? "再次检查" : "重试"}
                 </button>
                 <button className="launcher-secondary" onClick={() => void chooseProject()} disabled={busy}>
                   选择其他项目
@@ -217,6 +223,7 @@ async function runCommand(
 function headline(status: DesktopStatus): string {
   if (status.state === "needsProject") return "选择一个项目";
   if (status.state === "needsSetup") return "项目需要初始化";
+  if (status.state === "busy") return "项目正在运行";
   if (status.state === "error") return "没有打开成功";
   if (status.state === "ready") return "正在进入工作台";
   return "正在打开项目";
@@ -239,7 +246,13 @@ function launcherChecks(status: DesktopStatus) {
     },
     {
       label: "工作台",
-      detail: status.state === "ready" ? "已就绪" : opening ? "正在启动" : "等待项目",
+      detail: status.state === "ready"
+        ? "已就绪"
+        : status.state === "busy"
+          ? "由另一进程管理"
+          : opening
+            ? "正在启动"
+            : "等待项目",
       state: status.state === "ready" ? "done" : opening && configured ? "active" : "waiting",
     },
   ] as Array<{ label: string; detail: string; state: "done" | "active" | "waiting" }>;
@@ -260,6 +273,14 @@ function previewStatus(state: DesktopState): DesktopStatus {
       message: "请重试，或换一个项目文件夹",
       projectName: "example-project",
       technicalDetail: "示例：配置文件格式无效（第 12 行）",
+    };
+  }
+  if (state === "busy") {
+    return {
+      state,
+      message: "这个项目已由另一个 Agent Team 进程管理，正在运行的任务不会受到影响",
+      projectName: "example-project",
+      technicalDetail: "Another control service is already running with PID 42",
     };
   }
   if (state === "ready") {

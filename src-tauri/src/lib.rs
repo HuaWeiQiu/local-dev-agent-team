@@ -147,7 +147,8 @@ fn boot_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
 
     match load_settings(app) {
         Ok(Some(root)) => match canonical_project_root(&root) {
-            Ok(root) => open_project_sync(app, runtime, root),
+            Ok(root) if should_remember_project(&root) => open_project_sync(app, runtime, root),
+            Ok(_) => needs_project_status(),
             Err(detail) => error_status("上次打开的项目已经不可用", None, detail),
         },
         Ok(None) => needs_project_status(),
@@ -203,7 +204,7 @@ fn open_project_sync(app: &AppHandle, runtime: &DesktopRuntime, root: PathBuf) -
             }
             status
         }
-        Err(detail) => error_status("这个项目暂时无法打开", Some(project_name), detail),
+        Err(detail) => service_start_error_status(project_name, detail),
     }
 }
 
@@ -479,7 +480,7 @@ fn resolve_runtime_paths(app: &AppHandle) -> Result<RuntimePaths, String> {
         .path()
         .resource_dir()
         .map_err(|error| error.to_string())?
-        .join("runtime/dist/cli.js");
+        .join("runtime/app/dist/cli.js");
     let sibling_node = std::env::current_exe()
         .map_err(|error| error.to_string())?
         .parent()
@@ -567,6 +568,9 @@ fn load_settings(app: &AppHandle) -> Result<Option<PathBuf>, String> {
 }
 
 fn save_settings(app: &AppHandle, root: &Path) -> Result<(), String> {
+    if !should_remember_project(root) {
+        return Ok(());
+    }
     let path = settings_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -576,6 +580,19 @@ fn save_settings(app: &AppHandle, root: &Path) -> Result<(), String> {
     };
     let contents = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
     fs::write(path, contents).map_err(|error| error.to_string())
+}
+
+fn should_remember_project(root: &Path) -> bool {
+    let mut temporary_roots = vec![std::env::temp_dir()];
+    #[cfg(unix)]
+    {
+        temporary_roots.push(PathBuf::from("/tmp"));
+        temporary_roots.push(PathBuf::from("/private/tmp"));
+    }
+    temporary_roots
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .all(|temporary_root| !root.starts_with(temporary_root))
 }
 
 fn navigate_to(app: &AppHandle, destination: &str) -> Result<(), String> {
@@ -623,6 +640,19 @@ fn error_status(
         project_name,
         technical_detail: Some(detail),
     }
+}
+
+fn service_start_error_status(project_name: String, detail: String) -> DesktopStatus {
+    if detail.contains("Another control service is already running with PID") {
+        eprintln!("Agent Team desktop project busy: {detail}");
+        return DesktopStatus {
+            state: "busy",
+            message: "这个项目已由另一个 Agent Team 进程管理，正在运行的任务不会受到影响".into(),
+            project_name: Some(project_name),
+            technical_detail: Some(detail),
+        };
+    }
+    error_status("这个项目暂时无法打开", Some(project_name), detail)
 }
 
 fn project_name(root: &Path) -> String {
@@ -813,6 +843,38 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn presents_an_existing_control_service_as_a_busy_project() {
+        let status = service_start_error_status(
+            "fixture".into(),
+            "Error: Another control service is already running with PID 42".into(),
+        );
+        assert_eq!(status.state, "busy");
+        assert_eq!(status.project_name.as_deref(), Some("fixture"));
+        assert!(status.message.contains("正在运行的任务不会受到影响"));
+    }
+
+    #[test]
+    fn does_not_remember_temporary_projects() {
+        let root = tempdir().unwrap();
+        let temporary_project = root.path().canonicalize().unwrap();
+        assert!(!should_remember_project(&temporary_project));
+        #[cfg(unix)]
+        assert!(!should_remember_project(
+            &Path::new("/tmp")
+                .canonicalize()
+                .unwrap()
+                .join("desktop-smoke")
+        ));
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        assert!(should_remember_project(&repository));
     }
 
     #[test]

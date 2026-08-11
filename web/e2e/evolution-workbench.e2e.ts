@@ -12,6 +12,14 @@ test("creates, preflights, applies and rolls back an evolution candidate", async
   await page.getByRole("button", { name: "演进工作台", exact: true }).click();
   const workbench = page.getByRole("region", { name: "演进工作台" });
   await expect(workbench).toBeVisible();
+  const automation = workbench.getByRole("region", { name: "自动演进控制" });
+  await expect(automation).toBeVisible();
+  await expect(automation.getByText("最多 3 轮，连续 2 轮无提升即停止")).toBeVisible();
+  const cycleInput = automation.getByRole("spinbutton", { name: "循环次数" });
+  await expect(cycleInput).toHaveValue("3");
+  await cycleInput.fill("2");
+  await expect(cycleInput).toHaveValue("2");
+  await expect(automation.getByRole("button", { name: "开始", exact: true })).toBeEnabled();
 
   const newCandidateButton = workbench.getByRole("button", { name: "新建", exact: true });
   await newCandidateButton.click();

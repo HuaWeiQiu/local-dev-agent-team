@@ -200,6 +200,20 @@ export class ProfiledAgentService implements RoleAgentService {
               onStderr: (chunk) => {
                 batcher.push("stderr", boundedOutputChunk(chunk));
               },
+              ...(invocationId
+                ? {
+                    onActivity: (activity) => {
+                      this.store.emit(options.runId, "agent.children.updated", {
+                        invocationId,
+                        role: options.role,
+                        profile: candidate.name,
+                        adapter: candidate.profile.adapter,
+                        artifactKey: options.artifactKey,
+                        agents: activity.agents,
+                      });
+                    },
+                  }
+                : {}),
             },
             this.registry,
           );

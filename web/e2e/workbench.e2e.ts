@@ -201,8 +201,22 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     await page.getByRole("button", { name: "运行监控", exact: true }).click();
   }
 
-  if (testInfo.project.name === "desktop") {
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "日志", exact: true }).click();
+  } else {
     await page.getByRole("tab", { name: "活动日志" }).click();
+  }
+  const agentActivity = page.locator(".agent-activity-list");
+  await expect(agentActivity.getByText("执行", { exact: true })).toBeVisible();
+  await expect(agentActivity.getByText("codex-worker", { exact: false })).toBeVisible();
+  await expect(agentActivity.getByText("contracts_final_review", { exact: true })).toBeVisible();
+  await expect(agentActivity.getByText("已完成", { exact: true })).toHaveCount(2);
+  await page.screenshot({
+    path: testInfo.outputPath(`${testInfo.project.name}-agent-activity.png`),
+    fullPage: false,
+  });
+
+  if (testInfo.project.name === "desktop") {
     await page.getByRole("tab", { name: /输出/ }).click();
     await expect(page.locator(".output-log")).toContainText("implemented refund idempotency ledger");
   }

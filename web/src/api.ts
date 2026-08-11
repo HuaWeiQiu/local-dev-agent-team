@@ -1,4 +1,5 @@
 import type {
+  AutomaticEvolutionSnapshot,
   ProjectScope,
   PublicConfig,
   EvidenceFilePreview,
@@ -178,6 +179,29 @@ export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
 
 export async function getEvolution(scope: ProjectScope): Promise<EvolutionSnapshot> {
   return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution`, { cache: "no-store" });
+}
+
+export async function startAutomaticEvolution(
+  scope: ProjectScope,
+  maxCycles: number,
+  commandId: string,
+): Promise<AutomaticEvolutionSnapshot> {
+  return await request<AutomaticEvolutionSnapshot>(`${apiRoot(scope)}/evolution/automation/start`, {
+    method: "POST",
+    cache: "no-store",
+    headers: commandHeaders(commandId),
+    body: JSON.stringify({ maxCycles }),
+  });
+}
+
+export async function stopAutomaticEvolution(
+  scope: ProjectScope,
+): Promise<AutomaticEvolutionSnapshot> {
+  return await request<AutomaticEvolutionSnapshot>(`${apiRoot(scope)}/evolution/automation/stop`, {
+    method: "POST",
+    cache: "no-store",
+    body: JSON.stringify({}),
+  });
 }
 
 export async function proposeEvolutionStrategy(

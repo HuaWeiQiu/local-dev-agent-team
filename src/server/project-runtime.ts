@@ -41,7 +41,8 @@ export async function startProjectRuntime(loaded: LoadedConfig): Promise<Project
       loaded,
       assertQuiescent: () => supervisor!.assertEvolutionQuiescent(),
     });
-    evolution = new EvolutionProjectService(loaded, coordinator, supervisor);
+    evolution = new EvolutionProjectService(loaded, coordinator, supervisor, strategies);
+    await evolution.initialize();
 
     let closePromise: Promise<void> | undefined;
     const close = (): Promise<void> => {

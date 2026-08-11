@@ -40,11 +40,7 @@
       "binaries/agent-team-node"
     ],
     "resources": {
-      "../dist/": "runtime/dist/",
-      "../web/dist/": "runtime/web/dist/",
-      "../prompts/": "runtime/prompts/",
-      "../schemas/": "runtime/schemas/",
-      "runtime/": "runtime/licenses/"
+      "runtime/": "runtime/"
     }
   }
 }

@@ -38,6 +38,7 @@ import {
   cleanupPreviewRequestSchema,
   cleanupRunRequestSchema,
   evolutionConfirmRequestSchema,
+  evolutionAutomationStartRequestSchema,
   evolutionEmptyRequestSchema,
   evolutionPreviewRequestSchema,
   evolutionPromptProposalRequestSchema,
@@ -50,6 +51,7 @@ import {
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
 import { EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
+import { AutomaticEvolutionError } from "./evolution-automation.js";
 import {
   ProjectMutationConflictError,
   type RunSupervisor,
@@ -401,6 +403,44 @@ const projectApiRoutes: ProjectApiRoute[] = [
       requireEvolutionSession(sessionOperator);
       try {
         sendJson(response, 200, await requireEvolutionService(context).snapshot());
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/automation/start",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionAutomationStartRequestSchema.safeParse(
+        await readEvolutionJson(request),
+      );
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          202,
+          requireEvolutionService(context).startAutomatic(
+            parsed.data.maxCycles,
+            requireIdempotencyKey(request),
+            requireEvolutionSession(sessionOperator),
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/automation/stop",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionEmptyRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(response, 200, await requireEvolutionService(context).stopAutomatic());
       } catch (error) {
         throw evolutionHttpError(error);
       }
@@ -811,10 +851,14 @@ const projectApiRoutes: ProjectApiRoute[] = [
     pattern: "/runs/:runId/actions/cancel",
     handler: async (context, _request, response, _url, params) => {
       const runId = decodePathSegment(params.runId!);
-      if (!context.supervisor.cancel(runId)) {
-        throw new HttpError(409, "Run is not active in this control service");
+      try {
+        if (!context.supervisor.cancel(runId)) {
+          throw new HttpError(409, "Run is not active in this control service");
+        }
+        sendJson(response, 202, { runId, status: "cancel-requested" });
+      } catch (error) {
+        throw runActionHttpError(error);
       }
-      sendJson(response, 202, { runId, status: "cancel-requested" });
     },
   },
   {
@@ -1181,6 +1225,12 @@ function evolutionHttpError(error: unknown): HttpError {
     }
     if (error.code === "SERVICE_CLOSED") {
       return new HttpError(503, message, error.code);
+    }
+    return new HttpError(409, message, error.code);
+  }
+  if (error instanceof AutomaticEvolutionError) {
+    if (error.code === "AUTOMATION_DISABLED") {
+      return new HttpError(403, message, error.code);
     }
     return new HttpError(409, message, error.code);
   }

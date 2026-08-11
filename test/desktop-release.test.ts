@@ -7,6 +7,22 @@ import { parse } from "yaml";
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
 describe("desktop PR release", () => {
+  it("packages a self-contained production runtime", async () => {
+    const config = JSON.parse(
+      await readFile(path.join(repositoryRoot, "src-tauri", "tauri.conf.json"), "utf8"),
+    ) as { bundle: { resources: Record<string, string> } };
+    const preparation = await readFile(
+      path.join(repositoryRoot, "scripts", "prepare-desktop-runtime.mjs"),
+      "utf8",
+    );
+
+    expect(config.bundle.resources).toEqual({ "runtime/": "runtime/" });
+    expect(preparation).toContain('"--prod"');
+    expect(preparation).toContain('"--frozen-lockfile"');
+    expect(preparation).toContain('"--config.node-linker=hoisted"');
+    expect(preparation).toContain('"dist", "cli.js"), "--version"');
+  });
+
   it("declares native installer icons for macOS and Windows", async () => {
     const config = JSON.parse(
       await readFile(path.join(repositoryRoot, "src-tauri", "tauri.conf.json"), "utf8"),

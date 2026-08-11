@@ -57,6 +57,10 @@ export const evolutionPromptProposalRequestSchema = z
 
 export const evolutionEmptyRequestSchema = z.object({}).strict();
 
+export const evolutionAutomationStartRequestSchema = z
+  .object({ maxCycles: z.number().int().min(1).max(10).optional() })
+  .strict();
+
 export const evolutionReasonRequestSchema = z
   .object({ reason: z.string().trim().min(1).max(2_000) })
   .strict();

@@ -851,6 +851,7 @@ export class EvolutionApplicationCoordinator {
     policy: unknown;
     candidate: unknown;
     promptContent?: Uint8Array;
+    origin?: "automatic-controller-v1";
   }): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
       this.#assertWritable();
@@ -859,6 +860,7 @@ export class EvolutionApplicationCoordinator {
         createdAt: new Date(this.#now()).toISOString(),
         policy: input.policy,
         candidate: input.candidate,
+        ...(input.origin ? { origin: input.origin } : {}),
       };
       let validated: EvolutionProposal;
       try {
@@ -907,6 +909,21 @@ export class EvolutionApplicationCoordinator {
     return await this.#enqueue(async () => {
       this.#assertWritable();
       return await this.#catalog.evaluate(
+        proposalId,
+        evidence,
+        new Date(this.#now()).toISOString(),
+        this.#catalogWriter,
+      );
+    });
+  }
+
+  async evaluateAutomaticRun(
+    proposalId: string,
+    evidence: unknown,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    return await this.#enqueue(async () => {
+      this.#assertWritable();
+      return await this.#catalog.evaluateAutomaticRun(
         proposalId,
         evidence,
         new Date(this.#now()).toISOString(),

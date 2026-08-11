@@ -404,6 +404,7 @@ export type EvaluationResult = z.infer<typeof evaluationResultSchema>;
 export const evolutionEvaluationSourceSchema = z.enum([
   "external",
   "server-structural-preflight-v1",
+  "server-automatic-run-evaluation-v1",
 ]);
 
 export type EvolutionEvaluationSource = z.infer<typeof evolutionEvaluationSourceSchema>;
@@ -539,6 +540,7 @@ const evolutionProposalObjectSchema = z
     id: proposalIdSchema,
     createdAt: z.string().datetime({ offset: true }),
     status: z.enum(evolutionLifecycleStatuses),
+    origin: z.literal("automatic-controller-v1").optional(),
     policy: evolutionPolicySchema,
     candidate: evolutionCandidateSchema,
     transitions: z.array(lifecycleTransitionSchema).default([]),
@@ -678,6 +680,7 @@ export function createEvolutionProposal(input: {
   policy: unknown;
   candidate: unknown;
   trust: EvolutionTrustContext;
+  origin?: "automatic-controller-v1";
 }): EvolutionProposal {
   const policy = parseEvolutionPolicy(input.policy, input.trust);
   const candidate = parseEvolutionCandidate(input.candidate, policy, input.trust);
@@ -685,6 +688,7 @@ export function createEvolutionProposal(input: {
     id: input.id,
     createdAt: input.createdAt,
     status: "proposed",
+    ...(input.origin ? { origin: input.origin } : {}),
     policy,
     candidate,
     transitions: [],

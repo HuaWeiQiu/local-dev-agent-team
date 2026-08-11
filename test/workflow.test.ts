@@ -133,6 +133,39 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
+  it("completes an isolated evolution evaluation after local gates without publication approval", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-evaluation-workflow-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Agent Team Test"]);
+    await git(root, ["config", "user.email", "agent-team@example.com"]);
+    const config = createDefaultConfig("evaluation-fixture");
+    config.strategies!.definitions.balanced!.approvalGates = ["plan", "final"];
+    config.quality.commands = [
+      { command: process.execPath, args: ["-e", "process.exit(0)"] },
+    ];
+    await writeFile(path.join(root, ".gitignore"), ".agent-team/\n");
+    await writeFile(path.join(root, "README.md"), "# Evaluation Fixture\n");
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial"]);
+
+    const state = await new LocalWorkflowRunner(await loadConfig(root), {
+      createAgentService: () => new FakeAgentService(),
+    }).run({
+      goal: "Evaluate the strategy in an isolated worktree",
+      purpose: "evolution-evaluation",
+    });
+
+    expect(state).toMatchObject({
+      purpose: "evolution-evaluation",
+      status: "completed",
+      finalQuality: { passed: true },
+      finalDecision: { decision: "ready" },
+    });
+    expect(state.approvals).toBeUndefined();
+    expect(state.pullRequestUrl).toBeUndefined();
+  }, 30_000);
+
   it("recovers only from a verified boundary and preserves abandoned task evidence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-recovery-"));
     await git(root, ["init", "-b", "main"]);

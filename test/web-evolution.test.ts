@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, getEvolution } from "../web/src/api.js";
 import {
+  ApiError,
+  getEvolution,
+  startAutomaticEvolution,
+  stopAutomaticEvolution,
+} from "../web/src/api.js";
+import {
+  evolutionLocked,
   proposalStatusLabel,
   proposalProgress,
   toBlueprintDefinition,
@@ -8,7 +14,7 @@ import {
   utf8ToBase64,
   visibleEvolutionProposals,
 } from "../web/src/evolution.js";
-import type { EvolutionProposal, StrategyDefinition } from "../web/src/types.js";
+import type { EvolutionProposal, EvolutionSnapshot, StrategyDefinition } from "../web/src/types.js";
 
 describe("web evolution presentation", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -73,6 +79,43 @@ describe("web evolution presentation", () => {
       .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 409, code: "STALE_PREVIEW" });
+  });
+
+  it("uses the bounded automation endpoints and locks manual mutations while the loop owns the project", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "running" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: "stopped" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const scope = { mode: "single", projectId: "project" } as const;
+
+    await expect(startAutomaticEvolution(scope, 3, "start-intent-1")).resolves.toMatchObject({ status: "running" });
+    await expect(stopAutomaticEvolution(scope)).resolves.toMatchObject({ status: "stopped" });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/evolution/automation/start", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ maxCycles: 3 }),
+      headers: expect.objectContaining({ "Idempotency-Key": "start-intent-1" }),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/evolution/automation/stop", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({}),
+    }));
+
+    const snapshot = {
+      recoveryRequired: false,
+      pendingOperation: null,
+      automation: { status: "idle" },
+    } as EvolutionSnapshot;
+    expect(evolutionLocked(snapshot)).toBe(false);
+    snapshot.automation.status = "running";
+    expect(evolutionLocked(snapshot)).toBe(true);
+    snapshot.automation.status = "stopping";
+    expect(evolutionLocked(snapshot)).toBe(true);
   });
 });
 

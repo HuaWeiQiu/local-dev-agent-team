@@ -230,6 +230,64 @@ They are observational because provider CLIs do not expose one stable shared
 cost contract. Use `maxAgentInvocations` as the enforceable provider-neutral
 spend bound.
 
+## Bounded Automatic Evolution
+
+Automatic evolution is opt-in and currently changes only strategy blueprints:
+
+```yaml
+evolution:
+  automatic:
+    enabled: true
+    autoStart: false
+    maxCycles: 3
+    maxConsecutiveNoImprovement: 2
+    evaluationRepeats: 1
+    minimumScoreDelta: 1
+    proposerRole: orchestrator
+    proposerProfile: codex-orchestrator
+    baselineStrategy: balanced
+    targetStrategy: auto-evolved
+    evaluationGoal: >-
+      Improve one small, well-tested reliability issue without changing public
+      behavior or release configuration. Run every configured quality command.
+```
+
+`autoStart` is deliberately restricted to `false`: the operator starts a bounded
+session from the evolution workbench, after which all requested cycles run
+automatically. `maxCycles` is 1-10 and is also the hard ceiling exposed by the UI.
+`maxConsecutiveNoImprovement` cannot exceed it. `evaluationRepeats` is 1-2 and the
+worst repeated score wins the aggregate. `minimumScoreDelta` is 0-1000.
+
+The proposer role/profile must resolve to a read-only profile. `baselineStrategy`
+must name a configured strategy. `targetStrategy` must be a valid custom strategy
+name and cannot replace a strategy declared under `strategies.definitions`.
+`evaluationGoal` is required when enabled and remains identical for incumbent and
+candidate runs. Every fallback on the proposer role must also resolve to a read-only
+profile. At least one deterministic `quality.commands` entry is required.
+
+Candidates may reduce, but cannot increase, the incumbent's parallelism, retries,
+agent invocations, execution timeout, process output, artifact, or approval timeout
+budgets. A passing outcome must be a persisted `completed` run with purpose
+`evolution-evaluation`, the exact server-issued goal and strategy, at least one
+successful deterministic command, a ready final decision, and all tasks merged.
+
+If a custom strategy already occupies `targetStrategy`, automation continues
+only when the active automatic proposal, durable application proof, and live
+definition match exactly. A manually managed or drifted target fails closed and
+is never overwritten.
+
+During the loop, ordinary runs and target mutations are temporarily unavailable.
+Evaluation runs use isolated worktrees, execute the normal deterministic quality
+commands, and never publish or merge. The applied winner becomes the runtime
+default strategy. Closing the service stops the current loop; restart restores an
+already applied winner but never starts another loop automatically. See
+[ADR 0017](adr/0017-bounded-automatic-strategy-evolution.md).
+
+The Start request is durably idempotent and bound to the authenticated local session
+operator and requested cycle count. A retry in the same live session replays its
+snapshot; after process restart an already accepted key fails closed instead of
+starting a duplicate loop. Promotion and rejection audits use that trusted operator.
+
 ## Observability
 
 ```yaml

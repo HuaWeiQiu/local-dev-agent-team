@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { AgentInvocationObserver } from "../src/agents/service.js";
 import { ProfiledAgentService } from "../src/agents/service.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
+import { CodexActivityParser } from "../src/adapters/codex-events.js";
 import type { AgentAdapter } from "../src/adapters/types.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import type { AgentTeamConfig } from "../src/config/schema.js";
@@ -89,6 +90,87 @@ describe("ProfiledAgentService fallback chain", () => {
     ).rejects.toBeInstanceOf(RunBudgetExceededError);
     // The primary candidate was prepared but the fallback was never attempted.
     expect(fixture.models).toEqual(["boom"]);
+  });
+
+  it("binds normalized child activity to the controller-owned invocation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-activity-"));
+    const config = fallbackConfig(false);
+    config.profiles["primary-worker"]!.model = "ok";
+    const emitted: Array<{ runId: string; type: string; payload: unknown }> = [];
+    const store = {
+      artifactDirectory: (runId: string, ...parts: string[]) =>
+        path.join(root, runId, "artifacts", ...parts),
+      emit: (runId: string, type: string, payload: unknown) => {
+        emitted.push({ runId, type, payload });
+      },
+    };
+    const adapter: AgentAdapter = {
+      name: "fixture",
+      contract: {
+        version: 1,
+        transport: "local-process",
+        permissions: ["read-only", "workspace-write"],
+        externalTools: ["deny"],
+        structuredOutput: true,
+        usage: [],
+      },
+      supportedReasoning: ["medium"],
+      createActivityParser: () => new CodexActivityParser(),
+      buildInvocation: (_profile, request) => ({
+        command: process.execPath,
+        args: ["-e", `process.stdout.write(${JSON.stringify(`${JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "collab_tool_call",
+            tool: "wait",
+            status: "completed",
+            receiver_thread_ids: ["thread-child"],
+            agents_states: { "thread-child": { status: "completed" } },
+          },
+        })}\n`)})`],
+        cwd: request.cwd,
+        stdin: request.prompt,
+        timeoutMs: 1_000,
+      }),
+      parseResult: async (_invocation, processResult) => ({
+        text: processResult.stdout,
+        process: processResult,
+      }),
+      doctor: async () => [],
+    };
+    const observer: AgentInvocationObserver = {
+      beforeInvocation: async () => "invocation-owned",
+      afterInvocation: async () => {},
+    };
+    const service = new ProfiledAgentService(
+      config,
+      root,
+      store as unknown as RunStateStore,
+      {},
+      undefined,
+      observer,
+      new AdapterRegistry([adapter]),
+    );
+
+    await service.runText({
+      role: "worker",
+      context: { case: "native-child" },
+      runId: "run-native-child",
+      artifactKey: "worker/native-child",
+    });
+
+    expect(emitted.find((event) => event.type === "agent.children.updated")).toEqual({
+      runId: "run-native-child",
+      type: "agent.children.updated",
+      payload: {
+        invocationId: "invocation-owned",
+        role: "worker",
+        profile: "primary-worker",
+        adapter: "fixture",
+        artifactKey: "worker/native-child",
+        agents: [{ threadId: "thread-child", status: "completed" }],
+      },
+    });
   });
 });
 
