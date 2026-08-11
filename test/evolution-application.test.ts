@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   stat,
   writeFile,
@@ -306,6 +307,131 @@ async function proposeEvaluatedPrompt(
   if (!evaluating) throw new Error(`Proposal '${id}' disappeared before evaluation`);
   return (await harness.coordinator.evaluate(id, boundEvidence(evaluating))).proposal;
 }
+
+describe("EvolutionApplicationCoordinator server-owned preflight", () => {
+  it("binds fixed strategy checks to the current candidate and replays evaluated state", async () => {
+    const harness = await createHarness();
+    await harness.coordinator.propose({
+      id: "server-preflight-strategy",
+      policy: { ...validPolicy(), allowedPromptPaths: [] },
+      candidate: strategyCandidate("server-preflight", strategyA),
+    });
+
+    const evaluated = await harness.coordinator.evaluateServerPreflight(
+      "server-preflight-strategy",
+    );
+    expect(evaluated.proposal).toMatchObject({
+      status: "evaluated",
+      evaluation: {
+        source: "server-structural-preflight-v1",
+        result: { passed: true, deterministicPassed: true },
+        evidence: {
+          proposalId: "server-preflight-strategy",
+          candidateDigest: computeCandidateDigest(
+            strategyCandidate("server-preflight", strategyA),
+          ),
+          items: [
+            { id: "server-candidate-trust-v1", status: "pass" },
+            { id: "server-strategy-preflight-v1", status: "pass" },
+          ],
+        },
+      },
+    });
+    expect(
+      evaluated.proposal.evaluation?.evidence.items.every((item) =>
+        item.summary.includes("candidate was not executed"),
+      ),
+    ).toBe(true);
+
+    const revision = harness.catalog.revision;
+    const replay = await harness.coordinator.evaluateServerPreflight(
+      "server-preflight-strategy",
+    );
+    expect(replay.committedRevision).toBe(revision);
+    expect(harness.catalog.revision).toBe(revision);
+  });
+
+  it("rejects legacy external evidence instead of relabeling it as server preflight", async () => {
+    const harness = await createHarness();
+    await harness.coordinator.propose({
+      id: "legacy-external-evaluation",
+      policy: { ...validPolicy(), allowedPromptPaths: [] },
+      candidate: strategyCandidate("legacy-external", strategyA),
+    });
+    await harness.coordinator.beginEvaluation("legacy-external-evaluation");
+    const evaluating = harness.coordinator.readProposal("legacy-external-evaluation");
+    if (!evaluating) throw new Error("Legacy proposal disappeared");
+    const evaluated = await harness.coordinator.evaluate(
+      evaluating.id,
+      boundEvidence(evaluating),
+    );
+
+    expect(evaluated.proposal.evaluation?.source).toBe("external");
+    await expect(
+      harness.coordinator.evaluateServerPreflight(evaluating.id),
+    ).rejects.toMatchObject({ code: "EVALUATION_SOURCE_UNTRUSTED" });
+    await expect(
+      harness.coordinator.assertServerPreflightEvaluation(evaluating.id),
+    ).rejects.toMatchObject({ code: "EVALUATION_SOURCE_UNTRUSTED" });
+  });
+
+  it("records a deterministic failure for a configured read-only strategy", async () => {
+    const harness = await createHarness();
+    await harness.coordinator.propose({
+      id: "server-preflight-configured",
+      policy: { ...validPolicy(), allowedPromptPaths: [] },
+      candidate: strategyCandidate("balanced", strategyA),
+    });
+
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "server-preflight-configured",
+    );
+    expect(result.proposal).toMatchObject({
+      status: "evaluated",
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: [
+            "server-candidate-trust-v1",
+            "server-strategy-preflight-v1",
+          ],
+        },
+      },
+    });
+  });
+
+  it("verifies prompt object integrity and the live Git-tracked target", async () => {
+    const harness = await createHarness();
+    const content = Buffer.from("Candidate prompt verified by server preflight\n", "utf8");
+    await harness.coordinator.propose({
+      id: "server-preflight-prompt",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "server-preflight-prompt",
+    );
+    expect(result.proposal).toMatchObject({
+      status: "evaluated",
+      evaluation: {
+        result: { passed: true },
+        evidence: {
+          items: [
+            { id: "server-candidate-trust-v1", status: "pass" },
+            { id: "server-prompt-object-integrity-v1", status: "pass" },
+            { id: "server-prompt-target-trust-v1", status: "pass" },
+          ],
+        },
+      },
+    });
+  });
+});
 
 describe("EvolutionApplicationCoordinator strategy lifecycle", () => {
   it("proposes, evaluates, applies, replaces, and rolls back the full strategy chain", async () => {
@@ -759,6 +885,364 @@ describe("EvolutionApplicationCoordinator durable state", () => {
     });
   });
 
+  it("rejects recomputed application and command results that contradict durable witnesses", async () => {
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(
+      harness,
+      "semantic-state",
+      "semantic-state",
+      strategyA,
+    );
+    await promoteStrategy(
+      harness,
+      "semantic-state",
+      "semantic-state-command",
+      "Generate semantic application witnesses",
+    );
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const validApplicationState = await readFile(applicationPath, "utf8");
+    const expectRejectedReopen = async (): Promise<void> => {
+      const loaded = createLoadedConfig(harness.root);
+      await expect(EvolutionApplicationCoordinator.open({
+        catalog: await DurableEvolutionCatalog.open(loaded),
+        strategies: await StrategyBlueprintCatalog.open(loaded),
+        git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+        loaded,
+        assertQuiescent: () => undefined,
+      })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+    };
+
+    const applicationDocument = JSON.parse(validApplicationState) as {
+      payload: {
+        applications: Array<{
+          beforeTarget: unknown;
+          beforeTargetDigest: string | null;
+        }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const forgedBeforeDigest = canonicalDigest(strategyB);
+    applicationDocument.payload.applications[0]!.beforeTarget = {
+      kind: "strategy-blueprint",
+      identity: "semantic-state",
+      digest: forgedBeforeDigest,
+      present: true,
+      strategyDefinition: strategyB,
+    };
+    applicationDocument.payload.applications[0]!.beforeTargetDigest = forgedBeforeDigest;
+    applicationDocument.payloadDigest = computePayloadDigest(applicationDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(applicationDocument)}\n`, "utf8");
+    await expectRejectedReopen();
+
+    const commandDocument = JSON.parse(validApplicationState) as {
+      payload: {
+        completed: Array<{
+          status: string;
+          beforeTargetDigest: string | null;
+          afterTargetDigest: string | null;
+          catalogRevisionBefore: number;
+          catalogRevisionAfter: number;
+        }>;
+        commands: Array<{
+          expectedRevision: number;
+          result: {
+            proposal: { status: string };
+            applicationStatus: string;
+            beforeTargetDigest: string | null;
+            afterTargetDigest: string | null;
+            committedCatalogRevision: number;
+          };
+        }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const completed = commandDocument.payload.completed[0]!;
+    const command = commandDocument.payload.commands[0]!;
+    completed.status = "aborted";
+    completed.afterTargetDigest = completed.beforeTargetDigest;
+    completed.catalogRevisionAfter = completed.catalogRevisionBefore;
+    command.result.proposal.status = "evaluated";
+    command.result.applicationStatus = "aborted";
+    command.result.afterTargetDigest = command.result.beforeTargetDigest;
+    command.result.committedCatalogRevision = command.expectedRevision;
+    commandDocument.payloadDigest = computePayloadDigest(commandDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(commandDocument)}\n`, "utf8");
+    await expectRejectedReopen();
+
+    const proposalDocument = JSON.parse(validApplicationState) as {
+      payload: {
+        commands: Array<{ result: { proposal: { createdAt: string } } }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    proposalDocument.payload.commands[0]!.result.proposal.createdAt =
+      "2020-01-01T00:00:00.000Z";
+    proposalDocument.payloadDigest = computePayloadDigest(proposalDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(proposalDocument)}\n`, "utf8");
+    await expectRejectedReopen();
+
+    const decisionDocument = JSON.parse(validApplicationState) as {
+      payload: {
+        applications: Array<{
+          operator: string;
+          reason: string;
+          appliedAt: string;
+        }>;
+        completed: Array<{
+          operator: string;
+          reason: string;
+          humanDecision: { actor: string; reason: string; decidedAt: string };
+        }>;
+        commands: Array<{
+          operation: string;
+          proposalId: string;
+          expectedRevision: number;
+          previewTokenDigest: string;
+          operator: string;
+          reason: string;
+          materialDigest: string | null;
+          requestDigest: string;
+        }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const forgedActor = "forged-operator";
+    const forgedReason = "Forged decision with internally consistent witnesses";
+    const forgedDecidedAt = "2026-08-11T01:30:00.000Z";
+    const application = decisionDocument.payload.applications[0]!;
+    const decisionCompletion = decisionDocument.payload.completed[0]!;
+    const decisionCommand = decisionDocument.payload.commands[0]!;
+    application.operator = forgedActor;
+    application.reason = forgedReason;
+    application.appliedAt = forgedDecidedAt;
+    decisionCompletion.operator = forgedActor;
+    decisionCompletion.reason = forgedReason;
+    decisionCompletion.humanDecision = {
+      actor: forgedActor,
+      reason: forgedReason,
+      decidedAt: forgedDecidedAt,
+    };
+    decisionCommand.operator = forgedActor;
+    decisionCommand.reason = forgedReason;
+    decisionCommand.requestDigest = canonicalDigest({
+      operation: decisionCommand.operation,
+      proposalId: decisionCommand.proposalId,
+      expectedRevision: decisionCommand.expectedRevision,
+      tokenDigest: decisionCommand.previewTokenDigest,
+      operator: forgedActor,
+      reason: forgedReason,
+      materialDigest: decisionCommand.materialDigest,
+    });
+    decisionDocument.payloadDigest = computePayloadDigest(decisionDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(decisionDocument)}\n`, "utf8");
+    await expectRejectedReopen();
+  });
+
+  it("rejects rewriting a historically audited promotion as aborted after rollback", async () => {
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(
+      harness,
+      "historical-audit-binding",
+      "historical-audit-binding",
+      strategyA,
+    );
+    await promoteStrategy(
+      harness,
+      "historical-audit-binding",
+      "historical-audit-promote-command",
+      "Create the catalog promotion audit witness",
+    );
+    await rollbackStrategy(
+      harness,
+      "historical-audit-binding",
+      "historical-audit-rollback-command",
+      "Remove the active application while retaining its history",
+    );
+    expect(harness.coordinator.getApplication("historical-audit-binding")).toBeUndefined();
+
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        completed: Array<{
+          commandId: string;
+          status: string;
+          beforeTargetDigest: string | null;
+          afterTargetDigest: string | null;
+          catalogRevisionBefore: number;
+          catalogRevisionAfter: number;
+          humanDecision: { decidedAt: string };
+        }>;
+        commands: Array<{
+          commandId: string;
+          expectedRevision: number;
+          result: {
+            proposal: { status: string };
+            applicationStatus: string;
+            beforeTargetDigest: string | null;
+            afterTargetDigest: string | null;
+            committedCatalogRevision: number;
+          };
+        }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const completed = document.payload.completed.find(
+      (record) => record.commandId === "historical-audit-promote-command",
+    );
+    const command = document.payload.commands.find(
+      (record) => record.commandId === "historical-audit-promote-command",
+    );
+    if (!completed || !command) throw new Error("Historical promotion witnesses missing");
+    completed.status = "aborted";
+    completed.afterTargetDigest = completed.beforeTargetDigest;
+    completed.catalogRevisionAfter = completed.catalogRevisionBefore;
+    completed.humanDecision.decidedAt = "2020-01-01T00:00:00.000Z";
+    command.result.proposal.status = "evaluated";
+    command.result.applicationStatus = "aborted";
+    command.result.afterTargetDigest = command.result.beforeTargetDigest;
+    command.result.committedCatalogRevision = command.expectedRevision;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    const loaded = createLoadedConfig(harness.root);
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+  });
+
+  it("rejects an orphan synthetic completion with no application or pending owner", async () => {
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(
+      harness,
+      "orphan-completion",
+      "orphan-completion",
+      strategyA,
+    );
+    await promoteStrategy(
+      harness,
+      "orphan-completion",
+      "orphan-completion-command",
+      "Create a valid completion to clone",
+    );
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        completed: Array<{
+          commandId: string;
+          operation: string;
+          status: string;
+          catalogRevisionBefore: number;
+          catalogRevisionAfter: number;
+        }>;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const orphan = structuredClone(document.payload.completed[0]!);
+    orphan.commandId = `legacy:${"a".repeat(64)}`;
+    orphan.operation = "reconcile-promoted";
+    orphan.status = "adopted";
+    orphan.catalogRevisionBefore = orphan.catalogRevisionAfter;
+    document.payload.completed.push(orphan);
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    const loaded = createLoadedConfig(harness.root);
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+  });
+
+  it("reopens an aborted command followed by a successful retry with the same decision tuple", async () => {
+    const fixedTime = Date.parse("2026-08-11T02:00:00.000Z");
+    const fixedClock: TestClock = {
+      now: () => fixedTime,
+      advance: () => undefined,
+    };
+    let crashAfterPendingRename = false;
+    const crashRename: typeof rename = async (oldPath, newPath) => {
+      await rename(oldPath, newPath);
+      if (
+        crashAfterPendingRename &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        crashAfterPendingRename = false;
+        throw new Error("preserve same-decision aborted pending command");
+      }
+    };
+    const harness = await createHarness({ io: { rename: crashRename }, clock: fixedClock });
+    await proposeEvaluatedStrategy(
+      harness,
+      "same-decision-retry",
+      "same-decision-retry",
+      strategyA,
+    );
+    const reason = "Retry the same reviewed decision";
+    const firstPreview = await harness.coordinator.previewPromotion({
+      proposalId: "same-decision-retry",
+      operator,
+    });
+    crashAfterPendingRename = true;
+    await expect(harness.coordinator.promoteAndApply({
+      commandId: "same-decision-aborted-command",
+      proposalId: "same-decision-retry",
+      expectedRevision: firstPreview.catalogRevision,
+      token: firstPreview.token,
+      operator,
+      reason,
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    const recovered = await createHarness({ root: harness.root, clock: fixedClock });
+    expect(recovered.coordinator.getApplicationState()).toMatchObject({
+      completed: [{ commandId: "same-decision-aborted-command", status: "aborted" }],
+    });
+    const retryPreview = await recovered.coordinator.previewPromotion({
+      proposalId: "same-decision-retry",
+      operator,
+    });
+    await recovered.coordinator.promoteAndApply({
+      commandId: "same-decision-success-command",
+      proposalId: "same-decision-retry",
+      expectedRevision: retryPreview.catalogRevision,
+      token: retryPreview.token,
+      operator,
+      reason,
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: fixedClock });
+    expect(reopened.coordinator.getApplication("same-decision-retry")).toMatchObject({
+      status: "applied",
+    });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      completed: [
+        { commandId: "same-decision-aborted-command", status: "aborted" },
+        { commandId: "same-decision-success-command", status: "applied" },
+      ],
+    });
+  });
+
   it("does not poison the queue after an atomic persistence failure and can resume after reopen", async () => {
     let failNextRename = false;
     const injectedRename: typeof rename = async (oldPath, newPath) => {
@@ -936,7 +1420,7 @@ describe("EvolutionApplicationCoordinator durable state", () => {
 });
 
 describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
-  it("refuses rollback preview for adopted legacy state without changing target or catalog", async () => {
+  it("refuses rollback of an adopted root legacy state without predecessor material", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-adopt-"));
     await initializeRepository(root);
     const loaded = createLoadedConfig(root);
@@ -974,7 +1458,6 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
       now: clock.now,
     });
     const catalogRevision = catalog.revision;
-    const targetBefore = strategies.customDefinition(strategyName);
     const adopted = await coordinator.reconcilePromoted({
       commandId: "adopt-legacy-strategy-command",
       proposalId,
@@ -987,8 +1470,10 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
       applicationStatus: "adopted",
       committedCatalogRevision: catalogRevision,
     });
-    const applicationStateBefore = coordinator.getApplicationState();
-
+    expect(coordinator.getApplication(proposalId)).toMatchObject({
+      rollbackSafe: false,
+      previousApplication: null,
+    });
     await expect(
       coordinator.reconcilePromoted({
         commandId: "adopt-legacy-strategy-command",
@@ -1001,25 +1486,105 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
       }),
     ).rejects.toMatchObject({ code: "POLICY_DENIED" });
 
-    await expect(
-      coordinator.previewRollback({
-        proposalId,
-        operator,
-        expectedRevision: catalogRevision,
-      }),
-    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await expect(coordinator.previewRollback({
+      proposalId,
+      operator,
+      expectedRevision: catalogRevision,
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(catalog.revision).toBe(catalogRevision);
     expect(catalog.getProposal(proposalId)).toMatchObject({ status: "promoted" });
     expect(catalog.getActiveProposalId({
       kind: "strategy-blueprint",
       name: strategyName,
     })).toBe(proposalId);
-    expect(strategies.customDefinition(strategyName)).toEqual(targetBefore);
-    expect(coordinator.getApplication(proposalId)).toMatchObject({ status: "adopted" });
-    expect(coordinator.getApplicationState()).toEqual(applicationStateBefore);
+    expect(strategies.customDefinition(strategyName)).toEqual(strategyB);
+
+    const applicationPath = path.join(
+      root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const validApplicationState = await readFile(applicationPath, "utf8");
+    const materialDocument = JSON.parse(validApplicationState) as {
+      payload: {
+        applications: Array<Record<string, unknown>>;
+        commands: Array<{
+          operation: string;
+          proposalId: string;
+          expectedRevision: number;
+          operator: string;
+          reason: string;
+          previewTokenDigest: string;
+          materialDigest: string | null;
+          requestDigest: string;
+        }>;
+      };
+      payloadDigest: string;
+    };
+    const forgedMaterial = materialDocument.payload.commands[0]!;
+    forgedMaterial.materialDigest = "a".repeat(64);
+    forgedMaterial.requestDigest = canonicalDigest({
+      operation: forgedMaterial.operation,
+      proposalId: forgedMaterial.proposalId,
+      expectedRevision: forgedMaterial.expectedRevision,
+      operator: forgedMaterial.operator,
+      reason: forgedMaterial.reason,
+      mode: "adopt",
+      materialDigest: forgedMaterial.materialDigest,
+    });
+    materialDocument.payloadDigest = computePayloadDigest(materialDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(materialDocument)}\n`, "utf8");
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+
+    const modeDocument = JSON.parse(validApplicationState) as typeof materialDocument;
+    const forgedMode = modeDocument.payload.commands[0]!;
+    forgedMode.previewTokenDigest = "reconcile:apply";
+    forgedMode.requestDigest = canonicalDigest({
+      operation: forgedMode.operation,
+      proposalId: forgedMode.proposalId,
+      expectedRevision: forgedMode.expectedRevision,
+      operator: forgedMode.operator,
+      reason: forgedMode.reason,
+      mode: "apply",
+      materialDigest: forgedMode.materialDigest,
+    });
+    modeDocument.payloadDigest = computePayloadDigest(modeDocument.payload);
+    await writeFile(applicationPath, `${JSON.stringify(modeDocument)}\n`, "utf8");
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+
+    await writeFile(applicationPath, validApplicationState, "utf8");
+    const document = JSON.parse(validApplicationState) as {
+      payload: { applications: Array<Record<string, unknown>> };
+      payloadDigest: string;
+    };
+    document.payload.applications[0]!.rollbackSafe = true;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+    const reopenedCatalog = await DurableEvolutionCatalog.open(loaded);
+    const reopenedStrategies = await StrategyBlueprintCatalog.open(loaded);
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: reopenedCatalog,
+      strategies: reopenedStrategies,
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
   });
 
-  it("refuses rollback preview after legacy apply reconciliation without changing target or catalog", async () => {
+  it("rolls back legacy apply reconciliation to the actual pre-apply target", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-legacy-apply-"));
     await initializeRepository(root);
     const loaded = createLoadedConfig(root);
@@ -1072,26 +1637,530 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
     expect(strategies.customDefinition(strategyName)).toEqual(strategyB);
     expect(coordinator.getApplication(proposalId)).toMatchObject({
       status: "applied",
-      rollbackSafe: false,
+      rollbackSafe: true,
       beforeTarget: { strategyDefinition: manuallyManagedStrategy },
     });
-    const stateBefore = coordinator.getApplicationState();
-
-    await expect(
-      coordinator.previewRollback({
-        proposalId,
-        operator,
-        expectedRevision: catalogRevision,
-      }),
-    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
-    expect(catalog.revision).toBe(catalogRevision);
-    expect(catalog.getProposal(proposalId)).toMatchObject({ status: "promoted" });
+    const preview = await coordinator.previewRollback({
+      proposalId,
+      operator,
+      expectedRevision: catalogRevision,
+    });
+    await expect(coordinator.rollbackAppliedPromotion({
+      commandId: "rollback-applied-legacy-strategy-command",
+      proposalId,
+      expectedRevision: preview.catalogRevision,
+      token: preview.token,
+      operator,
+      reason: "Restore the manually managed strategy",
+    })).resolves.toMatchObject({
+      applicationStatus: "rolled-back",
+      proposal: { status: "rolled-back" },
+    });
+    expect(catalog.revision).toBe(catalogRevision + 1);
+    expect(catalog.getProposal(proposalId)).toMatchObject({ status: "rolled-back" });
     expect(catalog.getActiveProposalId({
       kind: "strategy-blueprint",
       name: strategyName,
-    })).toBe(proposalId);
-    expect(strategies.customDefinition(strategyName)).toEqual(strategyB);
-    expect(coordinator.getApplicationState()).toEqual(stateBefore);
+    })).toBeNull();
+    expect(strategies.customDefinition(strategyName)).toEqual(manuallyManagedStrategy);
+    expect(coordinator.getApplication(proposalId)).toBeUndefined();
+  });
+
+  it("preserves an existing application predecessor through legacy adopt and rollback", async () => {
+    const harness = await createHarness();
+    const strategyName = "legacy-adopt-chain";
+    await proposeEvaluatedStrategy(harness, "legacy-chain-a", strategyName, strategyA);
+    await promoteStrategy(
+      harness,
+      "legacy-chain-a",
+      "promote-legacy-chain-a",
+      "Establish the verified predecessor",
+    );
+
+    const legacyCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    await legacyCatalog.propose({
+      id: "legacy-chain-b",
+      createdAt: new Date(harness.clock.now()).toISOString(),
+      policy: validPolicy(),
+      candidate: strategyCandidate(strategyName, strategyB),
+    });
+    await legacyCatalog.beginEvaluation(
+      "legacy-chain-b",
+      new Date(harness.clock.now()).toISOString(),
+    );
+    const evaluating = legacyCatalog.getProposal("legacy-chain-b");
+    if (!evaluating) throw new Error("Legacy replacement disappeared before evaluation");
+    const evidence = boundEvidence(evaluating);
+    await legacyCatalog.evaluate(
+      "legacy-chain-b",
+      evidence,
+      new Date(harness.clock.now()).toISOString(),
+    );
+    await legacyCatalog.promote("legacy-chain-b", evidence, {
+      actor: operator,
+      reason: "Legacy replacement outside the application coordinator",
+      decidedAt: new Date(harness.clock.now()).toISOString(),
+    });
+    const legacyStrategies = await StrategyBlueprintCatalog.open(harness.loaded);
+    await legacyStrategies.save(strategyName, strategyB, { expectedBefore: strategyA });
+
+    const reopenedCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    const reopenedStrategies = await StrategyBlueprintCatalog.open(harness.loaded);
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog: reopenedCatalog,
+      strategies: reopenedStrategies,
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded: harness.loaded,
+      assertQuiescent: () => undefined,
+      now: harness.clock.now,
+    });
+    const adopted = await coordinator.reconcilePromoted({
+      commandId: "adopt-legacy-chain-b",
+      proposalId: "legacy-chain-b",
+      expectedRevision: reopenedCatalog.revision,
+      operator,
+      reason: "Attach the verified predecessor chain",
+      mode: "adopt",
+    });
+    expect(adopted).toMatchObject({ applicationStatus: "adopted" });
+    expect(coordinator.getApplication("legacy-chain-b")).toMatchObject({
+      rollbackSafe: true,
+      previousApplication: {
+        proposalId: "legacy-chain-a",
+        afterTarget: { strategyDefinition: strategyA },
+      },
+    });
+
+    const preview = await coordinator.previewRollback({
+      proposalId: "legacy-chain-b",
+      operator,
+      expectedRevision: reopenedCatalog.revision,
+    });
+    await coordinator.rollbackAppliedPromotion({
+      commandId: "rollback-legacy-chain-b",
+      proposalId: "legacy-chain-b",
+      expectedRevision: preview.catalogRevision,
+      token: preview.token,
+      operator,
+      reason: "Restore the verified predecessor",
+    });
+
+    expect(reopenedCatalog.getActiveProposalId({
+      kind: "strategy-blueprint",
+      name: strategyName,
+    })).toBe("legacy-chain-a");
+    expect(reopenedStrategies.customDefinition(strategyName)).toEqual(strategyA);
+    expect(coordinator.getApplication("legacy-chain-b")).toBeUndefined();
+    expect(coordinator.getApplication("legacy-chain-a")).toMatchObject({
+      proposalId: "legacy-chain-a",
+      rollbackSafe: true,
+    });
+  });
+
+  it("rejects legacy reconciliation before it would persist an over-deep history", async () => {
+    const harness = await createHarness();
+    const strategyName = "bounded-legacy-chain";
+    for (let index = 0; index < 100; index += 1) {
+      const proposalId = `bounded-chain-${index}`;
+      const definition = index % 2 === 0 ? strategyA : strategyB;
+      await proposeEvaluatedStrategy(harness, proposalId, strategyName, definition);
+      await promoteStrategy(
+        harness,
+        proposalId,
+        `bounded-chain-command-${index}`,
+        `Extend bounded application history at step ${index}`,
+      );
+    }
+
+    const legacyCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    const legacyId = "bounded-chain-legacy-overflow";
+    await legacyCatalog.propose({
+      id: legacyId,
+      createdAt: new Date(harness.clock.now()).toISOString(),
+      policy: validPolicy(),
+      candidate: strategyCandidate(strategyName, strategyA),
+    });
+    await legacyCatalog.beginEvaluation(legacyId, new Date(harness.clock.now()).toISOString());
+    const evaluating = legacyCatalog.getProposal(legacyId);
+    if (!evaluating) throw new Error("Legacy overflow proposal disappeared");
+    const evidence = boundEvidence(evaluating);
+    await legacyCatalog.evaluate(legacyId, evidence, new Date(harness.clock.now()).toISOString());
+    await legacyCatalog.promote(legacyId, evidence, {
+      actor: operator,
+      reason: "Legacy promotion beyond the supported application history",
+      decidedAt: new Date(harness.clock.now()).toISOString(),
+    });
+    const legacyStrategies = await StrategyBlueprintCatalog.open(harness.loaded);
+    await legacyStrategies.save(strategyName, strategyA, { expectedBefore: strategyB });
+
+    const reopenedCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog: reopenedCatalog,
+      strategies: await StrategyBlueprintCatalog.open(harness.loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded: harness.loaded,
+      assertQuiescent: () => undefined,
+      now: harness.clock.now,
+    });
+    const applicationRevision = coordinator.getApplicationState().revision;
+    await expect(coordinator.reconcilePromoted({
+      commandId: "bounded-chain-reconcile-overflow",
+      proposalId: legacyId,
+      expectedRevision: reopenedCatalog.revision,
+      operator,
+      reason: "This must fail before persisting an unreadable chain",
+      mode: "adopt",
+    })).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    expect(coordinator.getApplicationState()).toMatchObject({
+      revision: applicationRevision,
+      pending: null,
+      recoveryRequired: false,
+      applications: [{ proposalId: "bounded-chain-99" }],
+    });
+    await coordinator.close();
+
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const validDocument = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: { applications: Array<Record<string, unknown>> };
+      payloadDigest: string;
+    };
+    const top = validDocument.payload.applications[0]!;
+    let tail = top;
+    let count = 1;
+    while (tail.previousApplication) {
+      tail = tail.previousApplication as Record<string, unknown>;
+      count += 1;
+    }
+    expect(count).toBe(100);
+    tail.previousApplication = { ...tail, previousApplication: null };
+    await writeFile(applicationPath, `${JSON.stringify(validDocument)}\n`, "utf8");
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(harness.loaded),
+      strategies: await StrategyBlueprintCatalog.open(harness.loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded: harness.loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toThrow("application history is too deep");
+
+    let overDeep: Record<string, unknown> | null = null;
+    for (let index = 0; index < 10_000; index += 1) {
+      overDeep = { previousApplication: overDeep };
+    }
+    validDocument.payload.applications = [overDeep!];
+    await writeFile(applicationPath, `${JSON.stringify(validDocument)}\n`, "utf8");
+    const deepFailure = await EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(harness.loaded),
+      strategies: await StrategyBlueprintCatalog.open(harness.loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded: harness.loaded,
+      assertQuiescent: () => undefined,
+    }).catch((error: unknown) => error);
+    expect(deepFailure).toBeInstanceOf(EvolutionPersistenceValidationError);
+    expect(deepFailure).not.toBeInstanceOf(RangeError);
+  }, 30_000);
+
+  it("does not persist drifted live prompt bytes when legacy adopt fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-prompt-drift-adopt-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const clock = createClock();
+    const proposalId = "legacy-drifted-prompt";
+    const candidate = Buffer.from("Candidate does not match live prompt\n", "utf8");
+    await catalog.propose({
+      id: proposalId,
+      createdAt: new Date(clock.now()).toISOString(),
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(candidate),
+      },
+    });
+    await catalog.beginEvaluation(proposalId, new Date(clock.now()).toISOString());
+    const evaluating = catalog.getProposal(proposalId);
+    if (!evaluating) throw new Error("Legacy drifted prompt disappeared");
+    const evidence = boundEvidence(evaluating);
+    await catalog.evaluate(proposalId, evidence, new Date(clock.now()).toISOString());
+    await catalog.promote(proposalId, evidence, {
+      actor: operator,
+      reason: "Legacy prompt promotion with a drifted live target",
+      decidedAt: new Date(clock.now()).toISOString(),
+    });
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    const beforeObjects = await readdir(coordinator.objectsDirectory);
+    await expect(coordinator.reconcilePromoted({
+      commandId: "legacy-drifted-prompt-adopt",
+      proposalId,
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Reject drift without retaining unrelated live bytes",
+      mode: "adopt",
+    })).rejects.toMatchObject({ code: "TARGET_DRIFTED" });
+    expect(await readdir(coordinator.objectsDirectory)).toEqual(beforeObjects);
+  });
+
+  it("rejects a forged adopt-mode pending reconciliation", async () => {
+    let failPendingRename = false;
+    const crashRename: typeof rename = async (oldPath, newPath) => {
+      await rename(oldPath, newPath);
+      if (
+        failPendingRename &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        failPendingRename = false;
+        throw new Error("preserve reconcile pending journal");
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-reconcile-pending-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const strategies = await StrategyBlueprintCatalog.open(loaded);
+    const clock = createClock();
+    const proposalId = "legacy-pending-apply";
+    await strategies.save(proposalId, manuallyManagedStrategy, { expectedBefore: null });
+    await catalog.propose({
+      id: proposalId,
+      createdAt: new Date(clock.now()).toISOString(),
+      policy: validPolicy(),
+      candidate: strategyCandidate(proposalId, strategyB),
+    });
+    await catalog.beginEvaluation(proposalId, new Date(clock.now()).toISOString());
+    const evaluating = catalog.getProposal(proposalId);
+    if (!evaluating) throw new Error("Legacy pending proposal disappeared");
+    const evidence = boundEvidence(evaluating);
+    await catalog.evaluate(proposalId, evidence, new Date(clock.now()).toISOString());
+    await catalog.promote(proposalId, evidence, {
+      actor: operator,
+      reason: "Legacy pending promotion",
+      decidedAt: new Date(clock.now()).toISOString(),
+    });
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies,
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      io: { rename: crashRename },
+      now: clock.now,
+    });
+    failPendingRename = true;
+    await expect(coordinator.reconcilePromoted({
+      commandId: "legacy-pending-apply-command",
+      proposalId,
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Leave a real apply pending journal",
+      mode: "apply",
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    const applicationPath = path.join(
+      root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        pending: {
+          operation: string;
+          proposalId: string;
+          catalogRevisionBefore: number;
+          operator: string;
+          reason: string;
+          previewTokenDigest: string;
+          materialDigest: string | null;
+          requestDigest: string;
+        };
+      };
+      payloadDigest: string;
+    };
+    const pending = document.payload.pending;
+    expect(pending.previewTokenDigest).toBe("reconcile:apply");
+    pending.previewTokenDigest = "reconcile:adopt";
+    pending.requestDigest = canonicalDigest({
+      operation: pending.operation,
+      proposalId: pending.proposalId,
+      expectedRevision: pending.catalogRevisionBefore,
+      operator: pending.operator,
+      reason: pending.reason,
+      mode: "adopt",
+      materialDigest: pending.materialDigest,
+    });
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+  });
+
+  it("removes an unowned synthetic predecessor when legacy reconcile apply aborts", async () => {
+    let crashAfterPendingRename = false;
+    const crashRename: typeof rename = async (oldPath, newPath) => {
+      await rename(oldPath, newPath);
+      if (
+        crashAfterPendingRename &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        crashAfterPendingRename = false;
+        throw new Error("preserve legacy reconcile pending before target apply");
+      }
+    };
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-reconcile-abort-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const strategies = await StrategyBlueprintCatalog.open(loaded);
+    const clock = createClock();
+    const targetName = "legacy-aborted-synthetic";
+    await strategies.save(targetName, strategyA, { expectedBefore: null });
+
+    for (const [proposalId, definition] of [
+      ["legacy-aborted-v1", strategyA],
+      ["legacy-aborted-v2", strategyB],
+    ] as const) {
+      await catalog.propose({
+        id: proposalId,
+        createdAt: new Date(clock.now()).toISOString(),
+        policy: validPolicy(),
+        candidate: strategyCandidate(targetName, definition),
+      });
+      await catalog.beginEvaluation(proposalId, new Date(clock.now()).toISOString());
+      const evaluating = catalog.getProposal(proposalId);
+      if (!evaluating) throw new Error(`Legacy proposal '${proposalId}' disappeared`);
+      const evidence = boundEvidence(evaluating);
+      await catalog.evaluate(proposalId, evidence, new Date(clock.now()).toISOString());
+      await catalog.promote(proposalId, evidence, {
+        actor: operator,
+        reason: `Legacy promotion for ${proposalId}`,
+        decidedAt: new Date(clock.now()).toISOString(),
+      });
+    }
+
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies,
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      io: { rename: crashRename },
+      now: clock.now,
+    });
+    crashAfterPendingRename = true;
+    await expect(coordinator.reconcilePromoted({
+      commandId: "legacy-aborted-reconcile-command",
+      proposalId: "legacy-aborted-v2",
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Abort before replacing the verified legacy predecessor",
+      mode: "apply",
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    const recovered = await createHarness({ root, clock });
+    expect(recovered.strategies.customDefinition(targetName)).toEqual(strategyA);
+    expect(recovered.coordinator.getApplicationState()).toMatchObject({
+      applications: [],
+      pending: null,
+      recoveryRequired: false,
+      completed: [
+        { commandId: "legacy-aborted-reconcile-command", status: "aborted" },
+      ],
+    });
+    const reopenedAgain = await createHarness({ root, clock });
+    expect(reopenedAgain.coordinator.getApplicationState()).toMatchObject({
+      applications: [],
+      pending: null,
+      recoveryRequired: false,
+      completed: [
+        { commandId: "legacy-aborted-reconcile-command", status: "aborted" },
+      ],
+    });
+  });
+
+  it("preserves UTF-8 BOM bytes while adopting and reopening a legacy prompt", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-phase3-prompt-bom-"));
+    await initializeRepository(root);
+    const bomPrompt = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("Legacy prompt with BOM\n", "utf8"),
+    ]);
+    await writeFile(path.join(root, promptPath), bomPrompt);
+    await git(root, ["add", promptPath]);
+    await git(root, ["commit", "-m", "add legacy BOM prompt"]);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const clock = createClock();
+    const proposalId = "legacy-bom-prompt";
+    await catalog.propose({
+      id: proposalId,
+      createdAt: new Date(clock.now()).toISOString(),
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(bomPrompt),
+      },
+    });
+    await catalog.beginEvaluation(proposalId, new Date(clock.now()).toISOString());
+    const evaluating = catalog.getProposal(proposalId);
+    if (!evaluating) throw new Error("Legacy BOM proposal disappeared");
+    const evidence = boundEvidence(evaluating);
+    await catalog.evaluate(proposalId, evidence, new Date(clock.now()).toISOString());
+    await catalog.promote(proposalId, evidence, {
+      actor: operator,
+      reason: "Legacy BOM prompt promotion",
+      decidedAt: new Date(clock.now()).toISOString(),
+    });
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    await coordinator.reconcilePromoted({
+      commandId: "legacy-bom-adopt",
+      proposalId,
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Adopt exact BOM-preserving live bytes",
+      mode: "adopt",
+    });
+    await coordinator.close();
+
+    const reopenedCatalog = await DurableEvolutionCatalog.open(loaded);
+    const reopened = await EvolutionApplicationCoordinator.open({
+      catalog: reopenedCatalog,
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    expect(reopened.getApplication(proposalId)).toMatchObject({
+      beforeTargetDigest: sha256(bomPrompt),
+      afterTargetDigest: sha256(bomPrompt),
+      rollbackSafe: false,
+    });
+    await expect(readFile(path.join(root, promptPath))).resolves.toEqual(bomPrompt);
   });
 
   it("binds legacy prompt material content and presence to reconcile command idempotency", async () => {
@@ -1348,6 +2417,78 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     });
   });
 
+  it("finalizes rollback when the catalog committed but the final journal write was lost", async () => {
+    let failRollbackFinal = false;
+    let rollbackApplicationRenameCount = 0;
+    const failFinalRollbackRename: typeof rename = async (oldPath, newPath) => {
+      if (
+        failRollbackFinal &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        rollbackApplicationRenameCount += 1;
+        if (rollbackApplicationRenameCount === 2) {
+          failRollbackFinal = false;
+          throw new Error("simulated crash before final rollback journal rename");
+        }
+      }
+      await rename(oldPath, newPath);
+    };
+    const harness = await createHarness({ io: { rename: failFinalRollbackRename } });
+    const targetName = "recover-rollback-new-new";
+    await proposeEvaluatedStrategy(harness, "recover-rollback-v1", targetName, strategyA);
+    await promoteStrategy(
+      harness,
+      "recover-rollback-v1",
+      "recover-rollback-v1-command",
+      "Establish the rollback predecessor",
+    );
+    await proposeEvaluatedStrategy(harness, "recover-rollback-v2", targetName, strategyB);
+    await promoteStrategy(
+      harness,
+      "recover-rollback-v2",
+      "recover-rollback-v2-command",
+      "Apply the target that will be interrupted during rollback",
+    );
+    const preview = await harness.coordinator.previewRollback({
+      proposalId: "recover-rollback-v2",
+      operator,
+    });
+    failRollbackFinal = true;
+
+    await expect(harness.coordinator.rollbackAppliedPromotion({
+      commandId: "recover-rollback-final-command",
+      proposalId: "recover-rollback-v2",
+      expectedRevision: preview.catalogRevision,
+      token: preview.token,
+      operator,
+      reason: "Crash after rollback audit and before final proof",
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(harness.catalog.getProposal("recover-rollback-v2")).toMatchObject({
+      status: "rolled-back",
+    });
+    expect(harness.catalog.getActiveProposalId({
+      kind: "strategy-blueprint",
+      name: targetName,
+    })).toBe("recover-rollback-v1");
+    expect(harness.strategies.customDefinition(targetName)).toEqual(strategyA);
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplication("recover-rollback-v2")).toBeUndefined();
+    expect(reopened.coordinator.getApplication("recover-rollback-v1")).toMatchObject({
+      proposalId: "recover-rollback-v1",
+      status: "applied",
+    });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+      completed: [
+        { commandId: "recover-rollback-v1-command", status: "applied" },
+        { commandId: "recover-rollback-v2-command", status: "applied" },
+        { commandId: "recover-rollback-final-command", status: "rolled-back" },
+      ],
+    });
+  });
+
   it("rejects a pending journal whose predecessor keeps its id but changes complete application content", async () => {
     let crashAfterPendingRename = false;
     const crashRename: typeof rename = async (oldPath, newPath) => {
@@ -1437,6 +2578,88 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
         assertQuiescent: () => undefined,
       }),
     ).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+  });
+
+  it("rejects a pending promotion whose recomputed target plan describes the old live strategy as new", async () => {
+    let crashAfterPendingRename = false;
+    const crashRename: typeof rename = async (oldPath, newPath) => {
+      await rename(oldPath, newPath);
+      if (
+        crashAfterPendingRename &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        crashAfterPendingRename = false;
+        throw new Error("preserve pending target plan for tampering");
+      }
+    };
+    const harness = await createHarness({ io: { rename: crashRename } });
+    const targetName = "tampered-pending-target-plan";
+    await harness.strategies.save(targetName, strategyA, { expectedBefore: null });
+    await proposeEvaluatedStrategy(
+      harness,
+      "tampered-pending-target-plan-proposal",
+      targetName,
+      strategyB,
+    );
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "tampered-pending-target-plan-proposal",
+      operator,
+    });
+    crashAfterPendingRename = true;
+    await expect(harness.coordinator.promoteAndApply({
+      commandId: "tampered-pending-target-plan-command",
+      proposalId: "tampered-pending-target-plan-proposal",
+      expectedRevision: preview.catalogRevision,
+      token: preview.token,
+      operator,
+      reason: "Leave the authentic old target pending before apply",
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(harness.strategies.customDefinition(targetName)).toEqual(strategyA);
+    expect(harness.catalog.getProposal("tampered-pending-target-plan-proposal")).toMatchObject({
+      status: "evaluated",
+    });
+
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        pending: {
+          beforeTarget: Record<string, unknown>;
+          afterTarget: Record<string, unknown>;
+        } | null;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    const pending = document.payload.pending;
+    if (!pending) throw new Error("Pending target plan missing");
+    const authenticOldTarget = pending.beforeTarget;
+    pending.afterTarget = authenticOldTarget;
+    pending.beforeTarget = {
+      kind: "strategy-blueprint",
+      identity: targetName,
+      digest: canonicalDigest(manuallyManagedStrategy),
+      present: true,
+      strategyDefinition: manuallyManagedStrategy,
+    };
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    const loaded = createLoadedConfig(harness.root);
+    await expect(EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(harness.root, path.join(harness.root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    })).rejects.toBeInstanceOf(EvolutionPersistenceValidationError);
+    expect(harness.catalog.getProposal("tampered-pending-target-plan-proposal")).toMatchObject({
+      status: "evaluated",
+    });
+    expect(harness.strategies.customDefinition(targetName)).toEqual(strategyA);
   });
 
   it("does not treat an unrelated catalog plus-one revision as the pending promotion", async () => {
@@ -1837,6 +3060,21 @@ describe("EvolutionApplicationCoordinator role-prompt application", () => {
 
 function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function canonicalDigest(value: unknown): string {
+  const sort = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(sort);
+    if (input && typeof input === "object") {
+      return Object.fromEntries(
+        Object.entries(input as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, sort(child)]),
+      );
+    }
+    return input;
+  };
+  return createHash("sha256").update(JSON.stringify(sort(value))).digest("hex");
 }
 
 async function changedPaths(root: string, range: string): Promise<string[]> {

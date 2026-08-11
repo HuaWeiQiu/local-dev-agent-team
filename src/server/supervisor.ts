@@ -41,6 +41,22 @@ export interface RunActionResult {
   status: "resuming" | "ready-to-merge" | "blocked" | "unchanged";
 }
 
+export class RunNotFoundError extends Error {
+  constructor(runId: string) {
+    super(`Run '${runId}' was not found`);
+    this.name = "RunNotFoundError";
+  }
+}
+
+export class ProjectMutationConflictError extends Error {
+  readonly code = "ACTIVE_RUN_CONFLICT" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectMutationConflictError";
+  }
+}
+
 export interface RunUsageDetail {
   agentInvocations: number;
   agentDurationMs: number;
@@ -110,6 +126,10 @@ export class RunSupervisor {
   private readonly stateStore: RunStateStore;
   private readonly evidenceStore: LocalEvidenceStore;
   private readonly cleanupPreviews = new Map<string, CleanupPreviewSnapshot>();
+  private evolutionMutationActive = false;
+  private evolutionOperationsSealed = false;
+  private evolutionMutationFinished: Promise<void> = Promise.resolve();
+  private finishEvolutionMutation: (() => void) | undefined;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -146,14 +166,15 @@ export class RunSupervisor {
       }
     }
 
-    const controller = new AbortController();
-    this.events.emit(runId, "run.queued", {
-      goal: request.goal,
-      strategy: request.strategy ?? this.loaded.config.strategies?.default ?? "legacy",
-      ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
-    });
     let workflow: Promise<RunState>;
     try {
+      this.assertRunStartAllowed();
+      const controller = new AbortController();
+      this.events.emit(runId, "run.queued", {
+        goal: request.goal,
+        strategy: request.strategy ?? this.loaded.config.strategies?.default ?? "legacy",
+        ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+      });
       workflow = this.dependencies.runWorkflow
         ? this.dependencies.runWorkflow(request, {
             runId,
@@ -169,14 +190,49 @@ export class RunSupervisor {
             supervisorId: this.id,
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
           });
+      this.track(runId, controller, workflow, request.parentRunId);
     } catch (error) {
       if (idempotencyKey && hash) {
         this.events.releaseCommand(idempotencyKey, hash);
       }
       throw error;
     }
-    this.track(runId, controller, workflow, request.parentRunId);
     return { runId, deduplicated: false };
+  }
+
+  /**
+   * Acquire the project-wide target-mutation latch before an evolution apply,
+   * rollback, or direct strategy mutation. The check and latch happen without
+   * an await, so a run cannot start between quiescence validation and ownership.
+   */
+  beginEvolutionMutation(): () => void {
+    if (this.evolutionOperationsSealed) {
+      throw new ProjectMutationConflictError(
+        "Evolution mutations are sealed while the control service is closing",
+      );
+    }
+    if (this.evolutionMutationActive) {
+      throw new ProjectMutationConflictError("Another project mutation is already in progress");
+    }
+    this.assertEvolutionQuiescent();
+    this.evolutionMutationActive = true;
+    this.evolutionMutationFinished = new Promise<void>((resolve) => {
+      this.finishEvolutionMutation = resolve;
+    });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.evolutionMutationActive = false;
+      this.finishEvolutionMutation?.();
+      this.finishEvolutionMutation = undefined;
+    };
+  }
+
+  assertEvolutionQuiescent(): void {
+    if (this.active.size > 0 || this.actionQueues.size > 0) {
+      throw new ProjectMutationConflictError("Project has an active run or run action");
+    }
   }
 
   cancel(runId: string): boolean {
@@ -509,6 +565,9 @@ export class RunSupervisor {
   }
 
   async close(): Promise<void> {
+    this.evolutionOperationsSealed = true;
+    await this.evolutionMutationFinished;
+    await Promise.all([...new Set(this.actionQueues.values())]);
     this.cleanupPreviews.clear();
     for (const [runId, active] of this.active) {
       this.events.emit(runId, "run.cancel-requested", {
@@ -544,6 +603,7 @@ export class RunSupervisor {
     state: RunState,
     options: Omit<WorkflowResumeOptions, "signal" | "supervisorId">,
   ): void {
+    this.assertRunStartAllowed();
     const controller = new AbortController();
     const resumeOptions: WorkflowResumeOptions = {
       ...options,
@@ -557,6 +617,19 @@ export class RunSupervisor {
           resumeOptions,
         );
     this.track(state.id, controller, workflow);
+  }
+
+  private assertRunStartAllowed(): void {
+    if (this.evolutionOperationsSealed) {
+      throw new ProjectMutationConflictError(
+        "Control service is closing and cannot start another run",
+      );
+    }
+    if (this.evolutionMutationActive) {
+      throw new ProjectMutationConflictError(
+        "Project target mutation is in progress; retry after it finishes",
+      );
+    }
   }
 
   private async recordApprovalResponse(
@@ -579,7 +652,7 @@ export class RunSupervisor {
 
   private async requireRun(runId: string): Promise<RunState> {
     const state = await this.get(runId);
-    if (!state) throw new Error(`Run '${runId}' was not found`);
+    if (!state) throw new RunNotFoundError(runId);
     return state;
   }
 
@@ -781,6 +854,11 @@ export class RunSupervisor {
   }
 
   private async serializeActions<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
+    if (this.evolutionOperationsSealed || this.evolutionMutationActive) {
+      throw new ProjectMutationConflictError(
+        "Project target mutation is in progress; run actions are temporarily unavailable",
+      );
+    }
     const ids = [...new Set(runIds)].sort();
     const previous = ids.map((runId) => this.actionQueues.get(runId) ?? Promise.resolve());
     const result = Promise.all(previous.map(async (queued) => await queued.catch(() => undefined)))

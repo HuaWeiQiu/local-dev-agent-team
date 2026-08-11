@@ -38,7 +38,7 @@
 - 返工、并发数、进程时间和 CI 修复次数都有明确上限。
 - 可以创建 GitHub 草稿 PR、等待 Actions 检查并执行一次受限修复。
 - 不自动合并代码，最终合并必须由人确认。
-- 提供库内受控演进事务：只有经过评估、预览和人工确认的自定义策略或配置角色提示词才能应用，并保留幂等命令、崩溃恢复和回滚链；该能力目前尚未开放到 Web/API。
+- 提供受控演进后端：通过演进控制面提交的自定义策略或角色提示词候选必须经过服务端结构预检、精确材料预览和人工确认才能应用，并保留本地会话保护、幂等命令、崩溃恢复和回滚链；Web 可视化工作台将在 Phase 5 接入。
 
 当前内置以下 CLI 适配器：
 
@@ -137,6 +137,10 @@ DAG、交付证据、审查结果、质量命令和实时 Agent 输出；阻塞�
 `.agent-team/control.sqlite`，大型日志、上下文、diff 和测试制品继续保存在
 `.agent-team/runs/`。同一项目同时只允许一个控制服务持有运行租约，浏览器不会
 直接创建本地进程或修改运行状态。
+
+控制锁的完整所有者记录会先落盘，再原子发布为 `.agent-team/control.lock`。若进程异常
+退出后留下有效但已失效的锁，先确认对应 PID 和该项目的控制服务均未运行，再手动删除该
+文件；内容损坏或不完整的锁同样会 fail closed，不会被新服务自动抢占。
 
 一个工作台也可以安全管理多个项目。创建 `agent-team.workspace.yaml`：
 
@@ -244,6 +248,9 @@ pnpm check、pnpm test、pnpm build 必须全部通过。
    计划审批和角色 profile。
 4. 点击“预检”，让服务端编译并校验当前草稿。
 5. 点击“保存”，将蓝图保存为项目本地的自定义策略。
+
+这里是兼容原有工作流的手工策略编辑入口，不会创建演进 proposal 或评估证据；需要审计、
+预览、晋升与回滚链时，应使用下文的受控演进流程。
 6. 保存成功后点击“运行”，用该策略创建新运行。
 
 `parallel-dag` 允许满足依赖和路径隔离条件的 Worker 并行执行；`sequential` 强制
@@ -591,6 +598,45 @@ agent-team complete <run-id>
 - 运行状态和 Agent 上下文保存在 `.agent-team/`，并默认被 Git 忽略。
 - 不执行自动合并或强制推送。
 
+## 受控演进后端（Phase 4）
+
+`agent-team serve` 会生成本地会话 token，并输出可直接打开的 bootstrap URL。演进接口
+只监听 loopback；读接口要求该本地会话，写接口还要求浏览器发送与实际监听地址完全
+一致的 `Origin`。浏览器不能提交 proposal ID、policy、目标路径、摘要、操作者、证据或
+应用内容。
+
+当前流程是：创建策略/提示词候选 → 服务端结构与安全预检 → 查看精确 before/after →
+填写理由并人工确认晋升 → 必要时预览并人工回滚。预检证据固定绑定当前 proposal 与
+candidate digest；它只证明 schema、当前信任、提示词对象完整性和 Git 目标安全，**不代表
+候选已在 Agent 运行中执行，也不代表行为质量通过**。任意历史 run 不能作为晋升证据。
+评估来源以 `server-structural-preflight-v1` 持久化；升级前的外部评估会标记为 `external`，
+不能通过 Phase 4 的晋升入口冒充当前预检。
+
+晋升和回滚使用项目级 mutation latch，与运行启动、继续、审批和策略直改互斥；相同命令
+可安全重放。服务关闭时先封闭并排空所有演进操作，再释放项目控制锁。Phase 5 将把这些
+能力接入 React/Tauri 工作台；当前没有自动晋升、后台自循环、网络发布或秘密存储。
+
+升级前已经 promoted、但没有 application proof 的目标，可在 Web API 中仅以 `adopt` 模式
+登记：实时目标必须逐字节匹配候选，浏览器不能上传 apply 内容。若必须重新应用旧候选，先
+停止控制服务，再使用独占的离线命令：
+
+```bash
+agent-team evolution-reconcile <proposal-id> \
+  --mode apply \
+  --actor "alice" \
+  --reason "恢复升级前的已晋升候选" \
+  --command-id "legacy-reconcile-20260811" \
+  --expected-revision 4
+```
+
+仅当旧提示词对象缺失时，`--mode apply` 可额外指定 `--prompt-file <path>`；内容仍必须与
+proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
+`--expected-revision` 使用操作员检查过的 catalog revision，并被纳入命令幂等绑定；重试时
+必须继续使用同一个值，不能偷偷跟随新的 catalog 状态。
+
+详细边界见 [受限自演进 Phase 1-4](docs/evolution-phase-1.zh-CN.md) 与
+[ADR 0016](docs/adr/0016-evolution-control-plane.md)。
+
 ## 当前范围与限制
 
 当前 `0.1` 版本专注于：
@@ -599,7 +645,7 @@ agent-team complete <run-id>
 - Codex CLI 和 Claude Code。
 - Git worktree 隔离。
 - GitHub PR 与 Actions 质量门禁。
-- 受限自演进 Phase 1-3：候选/证据/人工门禁、仓库本地持久化，以及受控 target apply/rollback。
+- 受限自演进 Phase 1-4：候选/证据/人工门禁、仓库本地持久化、受控 target apply/rollback，以及本地会话保护的 HTTP 控制面。
 
 运行状态会持久保存。当前版本不会重新连接已经终止的 Agent CLI 进程，但可以从
 经过 Git 验证的任务检查点人工恢复；未完成波次会使用新的分支重新执行。其他
@@ -609,12 +655,13 @@ Agent CLI 需要通过适配器接口接入。
 
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
-- [安全模型](docs/security.md)（含受限自演进 Phase 1-3 信任、持久化与应用边界）
+- [安全模型](docs/security.md)（含受限自演进 Phase 1-4 信任、持久化、应用与控制面边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
-- [受限自演进 Phase 1-3](docs/evolution-phase-1.zh-CN.md)（候选记录、人工晋升、受控应用/回滚与延期能力分界）
+- [受限自演进 Phase 1-4](docs/evolution-phase-1.zh-CN.md)（候选记录、服务端预检、人工晋升、受控应用/回滚与延期能力分界）
 - [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014：演进 catalog 持久化边界](docs/adr/0014-durable-evolution-catalog.md)
 - [ADR 0015：受控演进应用事务](docs/adr/0015-controlled-evolution-application.md)
+- [ADR 0016：本地演进控制面](docs/adr/0016-evolution-control-plane.md)
 - [开源多 Agent 框架对照与补缺](docs/ecosystem-review.md)
 - [可视化策略蓝图](docs/strategy-blueprints.md)
 - [桌面 App 与 Android/Termux 集成方案](docs/app-runtime-plan.zh-CN.md)

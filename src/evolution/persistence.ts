@@ -110,6 +110,8 @@ const defaultFileIo: DurableEvolutionFileIo = {
   syncDirectory: defaultSyncDirectory,
 };
 
+const catalogFileMutationQueues = new Map<string, Promise<void>>();
+
 /**
  * Asynchronous durable wrapper around a pure {@link EvolutionCatalog}.
  *
@@ -303,6 +305,15 @@ export class DurableEvolutionCatalog {
     return lease;
   }
 
+  releaseExclusiveWriter(writer: object): void {
+    if (this.#exclusiveWriter !== writer) {
+      throw new EvolutionPersistenceError(
+        "Only the current exclusive mutation owner can release the durable catalog",
+      );
+    }
+    this.#exclusiveWriter = null;
+  }
+
   /** Validate a proposal against the current catalog without writing state. */
   async validateProposal(input: {
     id: string;
@@ -321,10 +332,11 @@ export class DurableEvolutionCatalog {
     proposalId: string,
     evidence: unknown,
     decision: unknown,
+    applicationCommandId?: string,
   ): Promise<{ proposal: EvolutionProposal; record: PromotionRecord }> {
     return await this.#enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
-      return working.promote(proposalId, evidence, decision);
+      return working.promote(proposalId, evidence, decision, applicationCommandId);
     });
   }
 
@@ -332,10 +344,11 @@ export class DurableEvolutionCatalog {
   async preflightRollback(
     proposalId: string,
     decision: unknown,
+    applicationCommandId?: string,
   ): Promise<{ proposal: EvolutionProposal; record: RollbackRecord }> {
     return await this.#enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
-      return working.rollback(proposalId, decision);
+      return working.rollback(proposalId, decision, applicationCommandId);
     });
   }
 
@@ -378,11 +391,25 @@ export class DurableEvolutionCatalog {
     return Object.freeze({ proposal: result, committedRevision });
   }
 
+  async evaluateServerPreflight(
+    proposalId: string,
+    evidence: unknown,
+    at: string,
+    writer?: object,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.evaluateServerPreflight(proposalId, evidence, at),
+    );
+    return Object.freeze({ proposal: result, committedRevision });
+  }
+
   async promote(
     proposalId: string,
     evidence: unknown,
     decision: unknown,
     writer?: object,
+    applicationCommandId?: string,
   ): Promise<{
     proposal: EvolutionProposal;
     record: PromotionRecord;
@@ -390,7 +417,7 @@ export class DurableEvolutionCatalog {
   }> {
     this.#assertWriter(writer);
     const { result, committedRevision } = await this.#mutate((working) =>
-      working.promote(proposalId, evidence, decision),
+      working.promote(proposalId, evidence, decision, applicationCommandId),
     );
     return { ...result, committedRevision };
   }
@@ -415,6 +442,7 @@ export class DurableEvolutionCatalog {
     proposalId: string,
     decision: unknown,
     writer?: object,
+    applicationCommandId?: string,
   ): Promise<{
     proposal: EvolutionProposal;
     record: RollbackRecord;
@@ -422,7 +450,7 @@ export class DurableEvolutionCatalog {
   }> {
     this.#assertWriter(writer);
     const { result, committedRevision } = await this.#mutate((working) =>
-      working.rollback(proposalId, decision),
+      working.rollback(proposalId, decision, applicationCommandId),
     );
     return { ...result, committedRevision };
   }
@@ -447,7 +475,7 @@ export class DurableEvolutionCatalog {
   #mutate<T>(
     operation: (working: EvolutionCatalog) => T,
   ): Promise<{ result: T; committedRevision: number }> {
-    return this.#enqueue(async () => {
+    return this.#enqueue(async () => await serializeCatalogFileMutation(this.filePath, async () => {
       if (this.#indeterminate) {
         throw new EvolutionPersistenceError(
           "Durable evolution catalog commit outcome is indeterminate; reopen the catalog before another mutation",
@@ -468,7 +496,7 @@ export class DurableEvolutionCatalog {
       this.#catalog = working;
       this.#revision = nextRevision;
       return { result, committedRevision: nextRevision };
-    });
+    }));
   }
 
   async #persist(
@@ -587,6 +615,22 @@ export class DurableEvolutionCatalog {
       );
     }
   }
+}
+
+function serializeCatalogFileMutation<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
+  const previous = catalogFileMutationQueues.get(filePath) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(operation);
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  catalogFileMutationQueues.set(filePath, settled);
+  void settled.finally(() => {
+    if (catalogFileMutationQueues.get(filePath) === settled) {
+      catalogFileMutationQueues.delete(filePath);
+    }
+  });
+  return result;
 }
 
 function buildDurableDocument(
@@ -875,6 +919,7 @@ function replayAuditHistory(
     string,
     { promotion: number; rejection: number; rollback: number }
   >();
+  const applicationCommandIds = new Set<string>();
 
   for (const [index, audit] of auditRecords.entries()) {
     const proposal = proposalById.get(audit.proposalId);
@@ -884,6 +929,20 @@ function replayAuditHistory(
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     count[audit.kind] += 1;
     counts.set(proposal.id, count);
+    if (
+      audit.kind !== "rejection" &&
+      audit.applicationCommandId !== undefined &&
+      applicationCommandIds.has(audit.applicationCommandId)
+    ) {
+      throw invalidHistory(
+        filePath,
+        index,
+        `duplicates application command '${audit.applicationCommandId}'`,
+      );
+    }
+    if (audit.kind !== "rejection" && audit.applicationCommandId !== undefined) {
+      applicationCommandIds.add(audit.applicationCommandId);
+    }
     const targetKey = candidateTargetKey(proposal.candidate);
 
     if (audit.kind === "promotion") {

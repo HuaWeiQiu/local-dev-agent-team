@@ -5,6 +5,17 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LoadedConfig } from "../config/load.js";
+import {
+  EvolutionApplicationError,
+  EVOLUTION_PROMPT_MATERIAL_MAX_BYTES,
+} from "../evolution/application.js";
+import {
+  EvolutionDomainError,
+  EvolutionLifecycleError,
+  EvolutionPromotionError,
+  EvolutionValidationError,
+} from "../evolution/domain.js";
+import { EvolutionPersistenceError } from "../evolution/persistence.js";
 import type { RunEvent } from "../events/types.js";
 import { buildOtlpTraceExport } from "../observability/otlp.js";
 import { buildInteropManifest } from "../interop/manifest.js";
@@ -26,14 +37,26 @@ import {
   approvalResponseRequestSchema,
   cleanupPreviewRequestSchema,
   cleanupRunRequestSchema,
+  evolutionConfirmRequestSchema,
+  evolutionEmptyRequestSchema,
+  evolutionPreviewRequestSchema,
+  evolutionPromptProposalRequestSchema,
+  evolutionReconcileRequestSchema,
+  evolutionReasonRequestSchema,
+  evolutionStrategyProposalRequestSchema,
   resumeRunRequestSchema,
   startRunRequestSchema,
   strategyBlueprintPreflightRequestSchema,
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
-import type { RunSupervisor } from "./supervisor.js";
+import { EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
+import {
+  ProjectMutationConflictError,
+  type RunSupervisor,
+} from "./supervisor.js";
 
 const maxBodyBytes = 64 * 1024;
+const maxEvolutionPromptBodyBytes = 384 * 1024;
 const desktopSessionPath = "/__agent_team/session";
 const desktopSessionTokenPattern = /^[a-f0-9]{64}$/;
 
@@ -55,6 +78,7 @@ export interface ProjectHttpContext {
   loaded: LoadedConfig;
   supervisor: RunSupervisor;
   strategies?: StrategyBlueprintCatalog;
+  evolution?: EvolutionProjectService;
 }
 
 export async function listenControlServer(
@@ -65,6 +89,7 @@ export async function listenControlServer(
     port: number;
     staticDirectory?: string;
     strategyCatalog?: StrategyBlueprintCatalog;
+    evolutionService?: EvolutionProjectService;
     sessionToken?: string;
   },
 ): Promise<ListeningControlServer> {
@@ -73,10 +98,18 @@ export async function listenControlServer(
     loaded,
     supervisor,
     ...(options.strategyCatalog ? { strategies: options.strategyCatalog } : {}),
+    ...(options.evolutionService ? { evolution: options.evolutionService } : {}),
   };
   return await listenHttpServer(
-    (request, response, staticDirectory) =>
-      handleSingleProjectRequest(context, request, response, staticDirectory),
+    (request, response, staticDirectory, serverOrigin, sessionOperator) =>
+      handleSingleProjectRequest(
+        context,
+        request,
+        response,
+        staticDirectory,
+        serverOrigin,
+        sessionOperator,
+      ),
     options,
   );
 }
@@ -93,8 +126,16 @@ export async function listenWorkspaceServer(
     throw new Error("Workspace project IDs must be unique");
   }
   return await listenHttpServer(
-    (request, response, staticDirectory) =>
-      handleWorkspaceRequest(projects, byId, request, response, staticDirectory),
+    (request, response, staticDirectory, serverOrigin, sessionOperator) =>
+      handleWorkspaceRequest(
+        projects,
+        byId,
+        request,
+        response,
+        staticDirectory,
+        serverOrigin,
+        sessionOperator,
+      ),
     options,
   );
 }
@@ -104,6 +145,8 @@ async function listenHttpServer(
     request: IncomingMessage,
     response: ServerResponse,
     staticDirectory: string,
+    serverOrigin: string,
+    sessionOperator: string | undefined,
   ) => Promise<void>,
   options: HttpServerOptions,
 ): Promise<ListeningControlServer> {
@@ -112,21 +155,32 @@ async function listenHttpServer(
     throw new Error("Desktop session token must contain 64 lowercase hexadecimal characters");
   }
   const staticDirectory = options.staticDirectory ?? bundledWebDirectory;
+  let serverOrigin = "";
+  const sessionOperator = options.sessionToken
+    ? `local-session:${createHash("sha256").update(options.sessionToken).digest("hex").slice(0, 16)}`
+    : undefined;
   const server = createServer((request, response) => {
     setSecurityHeaders(response);
     void Promise.resolve()
       .then(() => handleDesktopSession(request, response, options.sessionToken))
       .then(async (handled) => {
-        if (!handled) await handler(request, response, staticDirectory);
+        if (!handled) {
+          await handler(request, response, staticDirectory, serverOrigin, sessionOperator);
+        }
       })
       .catch((error: unknown) => {
         if (response.headersSent) {
           response.destroy(error instanceof Error ? error : undefined);
           return;
         }
-        const status = error instanceof HttpError ? error.status : 500;
-        sendJson(response, status, {
-          error: error instanceof Error ? error.message : String(error),
+        const handled = error instanceof HttpError;
+        sendJson(response, handled ? error.status : 500, {
+          error: handled ? error.message : "Internal server error",
+          ...(handled
+            ? error.code
+              ? { code: error.code }
+              : {}
+            : { code: "INTERNAL_ERROR" }),
         });
       });
   });
@@ -139,6 +193,7 @@ async function listenHttpServer(
   });
   const address = server.address() as AddressInfo;
   const url = `http://${formatHost(options.host)}:${address.port}`;
+  serverOrigin = url;
   let closePromise: Promise<void> | undefined;
   return {
     server,
@@ -214,9 +269,11 @@ async function handleSingleProjectRequest(
   request: IncomingMessage,
   response: ServerResponse,
   staticDirectory: string,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
 ): Promise<void> {
   setSecurityHeaders(response);
-  validateOrigin(request);
+  validateOrigin(request, serverOrigin);
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const method = request.method ?? "GET";
 
@@ -224,7 +281,17 @@ async function handleSingleProjectRequest(
     sendJson(response, 200, workspaceProjection("single", [context]));
     return;
   }
-  if (await dispatchProjectApi(context, request, response, url, "/api")) {
+  if (
+    await dispatchProjectApi(
+      context,
+      request,
+      response,
+      url,
+      "/api",
+      serverOrigin,
+      sessionOperator,
+    )
+  ) {
     return;
   }
   if ((method === "GET" || method === "HEAD") && !isApiPath(url.pathname)) {
@@ -241,9 +308,11 @@ async function handleWorkspaceRequest(
   request: IncomingMessage,
   response: ServerResponse,
   staticDirectory: string,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
 ): Promise<void> {
   setSecurityHeaders(response);
-  validateOrigin(request);
+  validateOrigin(request, serverOrigin);
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const method = request.method ?? "GET";
 
@@ -267,7 +336,17 @@ async function handleWorkspaceRequest(
       throw new HttpError(404, "Project not found");
     }
     const apiRoot = `/api/projects/${match[1]}`;
-    if (await dispatchProjectApi(context, request, response, url, apiRoot)) {
+    if (
+      await dispatchProjectApi(
+        context,
+        request,
+        response,
+        url,
+        apiRoot,
+        serverOrigin,
+        sessionOperator,
+      )
+    ) {
       return;
     }
   }
@@ -285,6 +364,8 @@ type ProjectApiHandler = (
   response: ServerResponse,
   url: URL,
   params: Record<string, string>,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
 ) => Promise<void> | void;
 
 interface ProjectApiRoute {
@@ -311,6 +392,211 @@ const projectApiRoutes: ProjectApiRoute[] = [
     pattern: "/config",
     handler: (context, _request, response) => {
       sendJson(response, 200, buildPublicConfig(context.loaded, context.strategies));
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/evolution",
+    handler: async (context, _request, response, _url, _params, _serverOrigin, sessionOperator) => {
+      requireEvolutionSession(sessionOperator);
+      try {
+        sendJson(response, 200, await requireEvolutionService(context).snapshot());
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/strategy",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionStrategyProposalRequestSchema.safeParse(
+        await readEvolutionJson(request),
+      );
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      const commandId = requireIdempotencyKey(request);
+      try {
+        const result = await requireEvolutionService(context).proposeStrategy(commandId, parsed.data);
+        sendJson(response, result.deduplicated ? 200 : 201, result);
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/prompt",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionPromptProposalRequestSchema.safeParse(
+        await readEvolutionJson(request, maxEvolutionPromptBodyBytes),
+      );
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      const commandId = requireIdempotencyKey(request);
+      const content = decodeCanonicalBase64(parsed.data.content);
+      if (content.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
+        throw new HttpError(413, "Prompt content exceeds 256 KiB", "REQUEST_TOO_LARGE");
+      }
+      try {
+        const result = await requireEvolutionService(context).proposePrompt(commandId, {
+          role: parsed.data.role,
+          content,
+        });
+        sendJson(response, result.deduplicated ? 200 : 201, result);
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/evaluate",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionEmptyRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).evaluate(
+            decodePathSegment(params.proposalId!),
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/reject",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionReasonRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).reject(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.reason,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/promote/preview",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionPreviewRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).previewPromotion(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.expectedRevision,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/promote/confirm",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionConfirmRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(response, 200, await requireEvolutionService(context).promote({
+          commandId: requireIdempotencyKey(request),
+          proposalId: decodePathSegment(params.proposalId!),
+          operator,
+          reason: parsed.data.reason,
+          expectedRevision: parsed.data.expectedRevision,
+          token: parsed.data.token,
+        }));
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/rollback/preview",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionPreviewRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).previewRollback(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.expectedRevision,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/rollback/confirm",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionConfirmRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(response, 200, await requireEvolutionService(context).rollback({
+          commandId: requireIdempotencyKey(request),
+          proposalId: decodePathSegment(params.proposalId!),
+          operator,
+          reason: parsed.data.reason,
+          expectedRevision: parsed.data.expectedRevision,
+          token: parsed.data.token,
+        }));
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/reconcile",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionReconcileRequestSchema.safeParse(
+        await readEvolutionJson(request),
+      );
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(response, 200, await requireEvolutionService(context).adoptLegacyPromotion({
+          commandId: requireIdempotencyKey(request),
+          proposalId: decodePathSegment(params.proposalId!),
+          operator,
+          reason: parsed.data.reason,
+          expectedRevision: parsed.data.expectedRevision,
+        }));
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
     },
   },
   {
@@ -344,7 +630,10 @@ const projectApiRoutes: ProjectApiRoute[] = [
         if (!parsed.success) {
           throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
         }
-        const checked = await catalog.save(name, parsed.data.definition);
+        const save = async () => await catalog.save(name, parsed.data.definition);
+        const checked = context.evolution
+          ? await context.evolution.withTargetMutation(save)
+          : await save();
         sendJson(response, 200, blueprintProjection(checked, "custom"));
       } catch (error) {
         if (error instanceof HttpError) throw error;
@@ -359,7 +648,12 @@ const projectApiRoutes: ProjectApiRoute[] = [
       const name = decodePathSegment(params.name!);
       const catalog = requireStrategyCatalog(context);
       try {
-        await catalog.delete(name);
+        const remove = async () => await catalog.delete(name);
+        if (context.evolution) {
+          await context.evolution.withTargetMutation(remove);
+        } else {
+          await remove();
+        }
         sendJson(response, 200, { name, deleted: true });
       } catch (error) {
         if (error instanceof HttpError) throw error;
@@ -390,8 +684,12 @@ const projectApiRoutes: ProjectApiRoute[] = [
         throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
       }
       const idempotency = singleHeader(request.headers["idempotency-key"]);
-      const result = context.supervisor.start(parsed.data, idempotency);
-      sendJson(response, result.deduplicated ? 200 : 202, result);
+      try {
+        const result = context.supervisor.start(parsed.data, idempotency);
+        sendJson(response, result.deduplicated ? 200 : 202, result);
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
     },
   },
   {
@@ -416,7 +714,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
       try {
         sendJson(response, 200, await context.supervisor.cleanup(parsed.data.token));
       } catch (error) {
-        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+        throw runActionHttpError(error);
       }
     },
   },
@@ -529,7 +827,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
         const result = await context.supervisor.retry(runId, idempotency);
         sendJson(response, result.deduplicated ? 200 : 202, result);
       } catch (error) {
-        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+        throw runActionHttpError(error);
       }
     },
   },
@@ -548,7 +846,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
         );
         sendJson(response, result.status === "resuming" ? 202 : 200, result);
       } catch (error) {
-        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+        throw runActionHttpError(error);
       }
     },
   },
@@ -564,7 +862,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
         const result = await context.supervisor.resume(decodePathSegment(params.runId!), parsed.data);
         sendJson(response, 202, result);
       } catch (error) {
-        throw new HttpError(409, error instanceof Error ? error.message : String(error));
+        throw runActionHttpError(error);
       }
     },
   },
@@ -576,6 +874,8 @@ async function dispatchProjectApi(
   response: ServerResponse,
   url: URL,
   apiRoot: string,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
 ): Promise<boolean> {
   if (url.pathname !== apiRoot && !url.pathname.startsWith(`${apiRoot}/`)) {
     return false;
@@ -586,7 +886,15 @@ async function dispatchProjectApi(
     if (route.method !== method) continue;
     const params = matchRoutePattern(route.pattern, localPath);
     if (!params) continue;
-    await route.handler(context, request, response, url, params);
+    await route.handler(
+      context,
+      request,
+      response,
+      url,
+      params,
+      serverOrigin,
+      sessionOperator,
+    );
     return true;
   }
   return false;
@@ -673,14 +981,14 @@ function streamEvents(
   });
 }
 
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage, limit = maxBodyBytes): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
     size += buffer.length;
-    if (size > maxBodyBytes) {
-      throw new HttpError(413, "Request body is too large");
+    if (size > limit) {
+      throw new HttpError(413, "Request body is too large", "REQUEST_TOO_LARGE");
     }
     chunks.push(buffer);
   }
@@ -690,7 +998,7 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
   } catch {
-    throw new HttpError(400, "Request body must be valid JSON");
+    throw new HttpError(400, "Request body must be valid JSON", "INVALID_REQUEST");
   }
 }
 
@@ -773,8 +1081,137 @@ function requireStrategyCatalog(context: ProjectHttpContext): StrategyBlueprintC
   return context.strategies;
 }
 
+function requireEvolutionService(context: ProjectHttpContext): EvolutionProjectService {
+  if (!context.evolution) {
+    throw new HttpError(503, "Evolution control is unavailable", "EVOLUTION_UNAVAILABLE");
+  }
+  return context.evolution;
+}
+
+function requireEvolutionMutation(
+  request: IncomingMessage,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
+): string {
+  const operator = requireEvolutionSession(sessionOperator);
+  const origin = singleHeader(request.headers.origin);
+  if (!origin || origin !== serverOrigin) {
+    throw new HttpError(403, "Evolution mutations require the exact local origin", "ORIGIN_DENIED");
+  }
+  return operator;
+}
+
+function requireEvolutionSession(sessionOperator: string | undefined): string {
+  if (!sessionOperator) {
+    throw new HttpError(401, "A local control session is required", "SESSION_REQUIRED");
+  }
+  return sessionOperator;
+}
+
+function requireIdempotencyKey(request: IncomingMessage): string {
+  const value = singleHeader(request.headers["idempotency-key"]);
+  if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
+    throw new HttpError(
+      400,
+      "Idempotency-Key must contain 1-128 safe identifier characters",
+      "INVALID_IDEMPOTENCY_KEY",
+    );
+  }
+  return value;
+}
+
+async function readEvolutionJson(
+  request: IncomingMessage,
+  limit = maxBodyBytes,
+): Promise<unknown> {
+  const contentType = singleHeader(request.headers["content-type"]);
+  if (contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    throw new HttpError(415, "Content-Type must be application/json", "UNSUPPORTED_MEDIA_TYPE");
+  }
+  const contentEncoding = singleHeader(request.headers["content-encoding"]);
+  if (contentEncoding && contentEncoding.toLowerCase() !== "identity") {
+    throw new HttpError(415, "Compressed request bodies are not supported", "UNSUPPORTED_MEDIA_TYPE");
+  }
+  return await readJson(request, limit);
+}
+
+function decodeCanonicalBase64(value: string): Buffer {
+  if (
+    value.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    throw new HttpError(422, "Prompt content must be canonical base64", "INVALID_PROMPT_MATERIAL");
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) {
+    throw new HttpError(422, "Prompt content must be canonical base64", "INVALID_PROMPT_MATERIAL");
+  }
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(decoded);
+  } catch {
+    throw new HttpError(422, "Prompt content must be valid UTF-8", "INVALID_PROMPT_MATERIAL");
+  }
+  return decoded;
+}
+
+function invalidRequest(messages: string[]): HttpError {
+  return new HttpError(400, messages.join("; "), "INVALID_REQUEST");
+}
+
+function evolutionHttpError(error: unknown): HttpError {
+  if (error instanceof HttpError) return error;
+  const message = error instanceof Error ? error.message : "Evolution request failed";
+  if (error instanceof ProjectMutationConflictError) {
+    return new HttpError(409, message, error.code);
+  }
+  if (error instanceof EvolutionApplicationError) {
+    if (error.code === "PROPOSAL_NOT_FOUND") return new HttpError(404, message, error.code);
+    if (error.code === "POLICY_DENIED") return new HttpError(403, message, error.code);
+    if (error.code === "MATERIAL_MISSING" || error.code === "RECOVERY_REQUIRED") {
+      return new HttpError(503, message, error.code);
+    }
+    return new HttpError(409, message, error.code);
+  }
+  if (error instanceof EvolutionServiceError) {
+    if (error.code === "PROPOSAL_NOT_FOUND") {
+      return new HttpError(404, message, error.code);
+    }
+    if (error.code === "PROMPT_ROLE_NOT_FOUND") {
+      return new HttpError(400, message, error.code);
+    }
+    if (error.code === "SERVICE_CLOSED") {
+      return new HttpError(503, message, error.code);
+    }
+    return new HttpError(409, message, error.code);
+  }
+  if (error instanceof EvolutionLifecycleError || error instanceof EvolutionPromotionError) {
+    return new HttpError(409, message, "INVALID_LIFECYCLE");
+  }
+  if (error instanceof EvolutionValidationError) {
+    return new HttpError(400, message, "INVALID_REQUEST");
+  }
+  if (error instanceof EvolutionPersistenceError) {
+    return new HttpError(503, "Evolution persistence is unavailable", "EVOLUTION_UNAVAILABLE");
+  }
+  if (error instanceof EvolutionDomainError) {
+    return new HttpError(400, message, "INVALID_REQUEST");
+  }
+  return new HttpError(500, "Evolution request failed", "INTERNAL_ERROR");
+}
+
+function runActionHttpError(error: unknown): HttpError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ProjectMutationConflictError) {
+    return new HttpError(409, message, error.code);
+  }
+  return new HttpError(409, message);
+}
+
 function strategyHttpError(error: unknown): HttpError {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ProjectMutationConflictError) {
+    return new HttpError(409, message, error.code);
+  }
   if (error instanceof StrategyBlueprintConflictError) return new HttpError(409, message);
   if (error instanceof StrategyBlueprintNotFoundError) return new HttpError(404, message);
   return new HttpError(400, message);
@@ -803,7 +1240,7 @@ function decodePathSegment(value: string): string {
   }
 }
 
-function validateOrigin(request: IncomingMessage): void {
+function validateOrigin(request: IncomingMessage, serverOrigin: string): void {
   const origin = singleHeader(request.headers.origin);
   if (!origin) {
     return;
@@ -814,7 +1251,7 @@ function validateOrigin(request: IncomingMessage): void {
   } catch {
     throw new HttpError(403, "Invalid request origin");
   }
-  if (originUrl.host !== request.headers.host || originUrl.protocol !== "http:") {
+  if (originUrl.origin !== serverOrigin) {
     throw new HttpError(403, "Cross-origin requests are not allowed");
   }
 }
@@ -914,6 +1351,7 @@ class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message);
   }

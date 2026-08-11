@@ -31,6 +31,7 @@ export async function startWorkspaceControlService(
     loaded: runtime.loaded,
     supervisor: runtime.supervisor,
     strategies: runtime.strategies,
+    evolution: runtime.evolution,
   }));
   const listening = await listenWorkspaceServer(contexts, {
     host: options.host ?? "127.0.0.1",

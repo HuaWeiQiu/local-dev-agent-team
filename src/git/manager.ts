@@ -162,6 +162,14 @@ export class GitManager {
     return authorization;
   }
 
+  /** Read-only proof that a repository-relative path is a regular file tracked by HEAD. */
+  async verifyTrackedRegularFile(repositoryRelativePath: string): Promise<string> {
+    const root = await this.resolveCanonicalPrimaryRoot();
+    const normalizedPath = normalizeRepositoryRelativePath(repositoryRelativePath);
+    await this.assertTrackedRegularFile(root, normalizedPath);
+    return normalizedPath;
+  }
+
   /**
    * Commit exactly one already-authorized tracked file after the caller's mutation.
    *

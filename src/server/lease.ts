@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
 
 export interface ControlLease {
@@ -11,13 +11,19 @@ export async function acquireControlLease(stateRoot: string): Promise<ControlLea
   const lockPath = path.join(stateRoot, "control.lock");
   const token = randomUUID();
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const candidatePath = path.join(
+      stateRoot,
+      `.control.lock.${process.pid}.${randomUUID()}.tmp`,
+    );
+    const handle = await open(candidatePath, "wx", 0o600);
     try {
-      const handle = await open(lockPath, "wx", 0o600);
       try {
         await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`, "utf8");
+        await handle.sync();
       } finally {
         await handle.close();
       }
+      await link(candidatePath, lockPath);
       return {
         release: async () => {
           const current = await readLock(lockPath);
@@ -31,37 +37,49 @@ export async function acquireControlLease(stateRoot: string): Promise<ControlLea
         throw error;
       }
       const current = await readLock(lockPath);
+      if (!current) continue;
       if (current && processIsAlive(current.pid)) {
         throw new Error(`Another control service is already running with PID ${current.pid}`);
       }
-      const stalePath = `${lockPath}.stale-${randomUUID()}`;
-      try {
-        await rename(lockPath, stalePath);
-        await unlink(stalePath).catch(ignoreMissing);
-      } catch (renameError) {
-        if (!isCode(renameError, "ENOENT")) {
-          throw renameError;
-        }
-      }
+      throw new Error(
+        `A stale control lease exists for PID ${current.pid}; verify no service is running, then remove '${lockPath}' manually`,
+      );
+    } finally {
+      await unlink(candidatePath).catch(ignoreMissing);
     }
   }
   throw new Error("Could not acquire the control service lease");
 }
 
 async function readLock(lockPath: string): Promise<{ pid: number; token: string } | undefined> {
+  let text: string;
   try {
-    const parsed = JSON.parse(await readFile(lockPath, "utf8")) as {
-      pid?: unknown;
-      token?: unknown;
-    };
-    return typeof parsed.pid === "number" && typeof parsed.token === "string"
-      ? { pid: parsed.pid, token: parsed.token }
-      : undefined;
+    text = await readFile(lockPath, "utf8");
   } catch (error) {
     if (isCode(error, "ENOENT")) {
       return undefined;
     }
-    return undefined;
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(text) as { pid?: unknown; token?: unknown };
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 2 ||
+      !Number.isSafeInteger(parsed.pid) ||
+      (parsed.pid as number) <= 0 ||
+      typeof parsed.token !== "string" ||
+      !/^[a-f0-9-]{36}$/.test(parsed.token)
+    ) {
+      throw new Error("invalid owner fields");
+    }
+    return { pid: parsed.pid as number, token: parsed.token };
+  } catch {
+    throw new Error(
+      `Control lease '${lockPath}' is incomplete or invalid; refusing to take ownership`,
+    );
   }
 }
 

@@ -255,6 +255,168 @@ describe("run supervisor", () => {
     events.close();
   });
 
+  it("rejects evolution mutation while a run is active", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fakeState(context.runId, request.goal, "cancelled");
+      },
+    });
+    const run = supervisor.start({ goal: "Hold active run", profileOverrides: {} });
+
+    expect(() => supervisor.beginEvolutionMutation()).toThrow(
+      "Project has an active run or run action",
+    );
+
+    expect(supervisor.cancel(run.runId)).toBe(true);
+    await expect(supervisor.wait(run.runId)).resolves.toMatchObject({ status: "cancelled" });
+    const release = supervisor.beginEvolutionMutation();
+    release();
+    await supervisor.close();
+    events.close();
+  });
+
+  it("rejects evolution mutation while a run action is queued", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeApprovalState("queued-final-action", "final");
+    await states.save(state);
+    const supervisor = new RunSupervisor(loaded, events);
+
+    const action = supervisor.respondApproval(state.id, {
+      requestId: state.approvals![0]!.id,
+      decision: "approved",
+      actor: "release-owner",
+      reason: "Approve while checking the mutation gate",
+    });
+    expect(() => supervisor.beginEvolutionMutation()).toThrow(
+      "Project has an active run or run action",
+    );
+    await expect(action).resolves.toEqual({ runId: state.id, status: "ready-to-merge" });
+
+    const release = supervisor.beginEvolutionMutation();
+    release();
+    await supervisor.close();
+    events.close();
+  });
+
+  it("blocks new runs, approval continuations, and actions while mutation latch is held", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const plan = fakeApprovalState("blocked-plan-continuation", "plan");
+    const retryable = fakeState("blocked-retry-action", "Retry after mutation", "interrupted");
+    await Promise.all([states.save(plan), states.save(retryable)]);
+    let starts = 0;
+    let continuations = 0;
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        starts += 1;
+        return fakeState(context.runId, request.goal, "completed");
+      },
+      resumeWorkflow: async (state) => {
+        continuations += 1;
+        return state;
+      },
+    });
+    const release = supervisor.beginEvolutionMutation();
+
+    expect(() =>
+      supervisor.start({ goal: "Must wait for mutation", profileOverrides: {} }),
+    ).toThrow("Project target mutation is in progress");
+    await expect(
+      supervisor.respondApproval(plan.id, {
+        requestId: plan.approvals![0]!.id,
+        decision: "approved",
+        actor: "tech-lead",
+        reason: "Continuation must remain blocked",
+      }),
+    ).rejects.toThrow("run actions are temporarily unavailable");
+    await expect(supervisor.retry(retryable.id, "retry-during-mutation")).rejects.toThrow(
+      "run actions are temporarily unavailable",
+    );
+    expect(starts).toBe(0);
+    expect(continuations).toBe(0);
+    await expect(supervisor.get(plan.id)).resolves.toMatchObject({
+      status: "awaiting-human",
+      approvals: [{ status: "pending" }],
+    });
+
+    release();
+    await supervisor.close();
+    events.close();
+  });
+
+  it("waits for a held mutation latch before closing", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const supervisor = new RunSupervisor(loaded, events);
+    const release = supervisor.beginEvolutionMutation();
+    const closing = supervisor.close();
+
+    expect(
+      await Promise.race([
+        closing.then(() => "closed" as const),
+        Promise.resolve("waiting" as const),
+      ]),
+    ).toBe("waiting");
+    expect(() => supervisor.beginEvolutionMutation()).toThrow(
+      "Evolution mutations are sealed while the control service is closing",
+    );
+
+    release();
+    await expect(withTimeout(closing, 1_000)).resolves.toBeUndefined();
+    events.close();
+  });
+
+  it("drains an already queued run action before closing its stores", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeApprovalState("closing-queued-action", "final");
+    await states.save(state);
+    const supervisor = new RunSupervisor(loaded, events);
+    const originalGet = supervisor.get.bind(supervisor);
+    let signalGetStarted!: () => void;
+    let releaseGet!: () => void;
+    const getStarted = new Promise<void>((resolve) => {
+      signalGetStarted = resolve;
+    });
+    const getReleased = new Promise<void>((resolve) => {
+      releaseGet = resolve;
+    });
+    supervisor.get = async (runId) => {
+      signalGetStarted();
+      await getReleased;
+      return await originalGet(runId);
+    };
+
+    const action = supervisor.respondApproval(state.id, {
+      requestId: state.approvals![0]!.id,
+      decision: "approved",
+      actor: "release-owner",
+      reason: "This accepted action must finish before shutdown",
+    });
+    await getStarted;
+    const closing = supervisor.close();
+    expect(
+      await Promise.race([
+        closing.then(() => "closed" as const),
+        Promise.resolve("waiting" as const),
+      ]),
+    ).toBe("waiting");
+
+    releaseGet();
+    await expect(action).resolves.toEqual({ runId: state.id, status: "ready-to-merge" });
+    await expect(withTimeout(closing, 1_000)).resolves.toBeUndefined();
+    events.close();
+  });
+
   it("previews and removes only old terminal runs with a one-time token", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
@@ -386,4 +548,18 @@ function fakeApprovalState(runId: string, gate: "plan" | "final"): RunState {
     },
   ];
   return state;
+}
+
+async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("Timed out waiting for supervisor close")), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }

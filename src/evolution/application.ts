@@ -78,6 +78,7 @@ export const evolutionApplicationErrorCodes = [
   "PROPOSAL_NOT_FOUND",
   "INVALID_LIFECYCLE",
   "EVALUATION_NOT_PASSED",
+  "EVALUATION_SOURCE_UNTRUSTED",
   "STALE_CATALOG_REVISION",
   "STALE_PREVIEW",
   "ACTIVE_TARGET_CONFLICT",
@@ -225,6 +226,29 @@ export type ApplicationPreview = {
   readonly afterTarget: Omit<TargetDigestState, "strategyDefinition">;
 };
 
+export type ApplicationPreviewMaterial =
+  | {
+      readonly kind: "role-prompt";
+      readonly identity: string;
+      readonly digest: string | null;
+      readonly present: boolean;
+      readonly content: string | null;
+    }
+  | {
+      readonly kind: "strategy-blueprint";
+      readonly identity: string;
+      readonly digest: string | null;
+      readonly present: boolean;
+      readonly definition: NamedStrategy | null;
+    };
+
+export type ApplicationPreviewDescription = {
+  readonly kind: "promote-and-apply" | "rollback-applied";
+  readonly proposalId: string;
+  readonly before: ApplicationPreviewMaterial;
+  readonly after: ApplicationPreviewMaterial;
+};
+
 export type ApplicationStateSnapshot = {
   readonly revision: number;
   readonly applications: readonly ApplicationRecord[];
@@ -361,7 +385,32 @@ const completedApplicationRecordSchema = z
     completedAt: z.string().datetime({ offset: true }),
     humanDecision: humanDecisionSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const validStatus =
+      (value.operation === "promote-and-apply" &&
+        ["applied", "aborted"].includes(value.status)) ||
+      (value.operation === "rollback-applied" &&
+        ["rolled-back", "aborted"].includes(value.status)) ||
+      (value.operation === "reconcile-promoted" &&
+        ["applied", "adopted", "aborted"].includes(value.status));
+    if (!validStatus) {
+      context.addIssue({ code: "custom", message: "completed operation status is invalid" });
+    }
+    const expectedRevisionAfter =
+      value.operation === "reconcile-promoted" || value.status === "aborted"
+        ? value.catalogRevisionBefore
+        : value.catalogRevisionBefore + 1;
+    if (value.catalogRevisionAfter !== expectedRevisionAfter) {
+      context.addIssue({ code: "custom", message: "completed catalog revision is invalid" });
+    }
+    if (
+      value.status === "aborted" &&
+      value.beforeTargetDigest !== value.afterTargetDigest
+    ) {
+      context.addIssue({ code: "custom", message: "aborted target digest changed" });
+    }
+  });
 const pendingApplicationOperationSchema = z
   .object({
     commandId: commandIdSchema,
@@ -387,6 +436,21 @@ const pendingApplicationOperationSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    const reconcileToken = value.previewTokenDigest.startsWith("reconcile:");
+    if (
+      (value.operation === "reconcile-promoted" &&
+        value.previewTokenDigest !== "reconcile:apply") ||
+      (value.operation !== "reconcile-promoted" && reconcileToken)
+    ) {
+      context.addIssue({ code: "custom", message: "pending operation mode is invalid" });
+    }
+    if (
+      value.humanDecision.actor !== value.operator ||
+      value.humanDecision.reason !== value.reason ||
+      value.humanDecision.decidedAt !== value.startedAt
+    ) {
+      context.addIssue({ code: "custom", message: "pending human decision is invalid" });
+    }
     if ((value.gitBaseHead === null) !== (value.gitPath === null)) {
       context.addIssue({ code: "custom", message: "Git recovery fields must appear together" });
     }
@@ -452,7 +516,7 @@ const pendingApplicationOperationSchema = z
       (value.operation === "rollback-applied" &&
         (value.previousActiveProposalId !== value.proposalId || previousId !== value.proposalId)) ||
       (value.operation === "reconcile-promoted" &&
-        (value.previousActiveProposalId !== value.proposalId || value.previousApplication !== null))
+        value.previousActiveProposalId !== value.proposalId)
     ) {
       context.addIssue({ code: "custom", message: "pending predecessor proof mismatch" });
     }
@@ -482,8 +546,52 @@ const commandIdempotencyBindingSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.operation !== "reconcile-promoted" && value.materialDigest !== null) {
-      context.addIssue({ code: "custom", message: "normal command cannot carry material" });
+    const reconcileToken = value.previewTokenDigest.startsWith("reconcile:");
+    const reconcileMode = reconcileToken
+      ? value.previewTokenDigest.slice("reconcile:".length)
+      : null;
+    const validStatus =
+      (value.operation === "promote-and-apply" &&
+        ["applied", "aborted"].includes(value.result.applicationStatus)) ||
+      (value.operation === "rollback-applied" &&
+        ["rolled-back", "aborted"].includes(value.result.applicationStatus)) ||
+      (reconcileMode === "adopt" && value.result.applicationStatus === "adopted") ||
+      (reconcileMode === "apply" &&
+        ["applied", "aborted"].includes(value.result.applicationStatus));
+    if (
+      (value.operation === "reconcile-promoted") !== reconcileToken ||
+      !validStatus
+    ) {
+      context.addIssue({ code: "custom", message: "command operation mode/status is invalid" });
+    }
+    if (
+      (value.operation !== "reconcile-promoted" && value.materialDigest !== null) ||
+      (reconcileMode === "adopt" && value.materialDigest !== null)
+    ) {
+      context.addIssue({ code: "custom", message: "command material binding is invalid" });
+    }
+    const expectedResultRevision =
+      value.operation === "reconcile-promoted" || value.result.applicationStatus === "aborted"
+        ? value.expectedRevision
+        : value.expectedRevision + 1;
+    if (value.result.committedCatalogRevision !== expectedResultRevision) {
+      context.addIssue({ code: "custom", message: "command result revision is invalid" });
+    }
+    if (
+      value.result.applicationStatus === "aborted" &&
+      value.result.beforeTargetDigest !== value.result.afterTargetDigest
+    ) {
+      context.addIssue({ code: "custom", message: "aborted command target digest changed" });
+    }
+    const expectedProposalStatus =
+      value.result.applicationStatus === "rolled-back"
+        ? "rolled-back"
+        : value.result.applicationStatus === "aborted" &&
+            value.operation === "promote-and-apply"
+          ? "evaluated"
+          : "promoted";
+    if (value.result.proposal.status !== expectedProposalStatus) {
+      context.addIssue({ code: "custom", message: "command result proposal status is invalid" });
     }
     const expected = sha256Canonical(
       value.operation === "reconcile-promoted"
@@ -567,7 +675,7 @@ export class EvolutionApplicationCoordinator {
   readonly #strategies: StrategyBlueprintCatalog;
   readonly #git: GitManager;
   readonly #loaded: LoadedConfig;
-  #catalogWriter!: object;
+  #catalogWriter: object | undefined;
   #io: EvolutionApplicationFileIo;
   #assertQuiescent: () => void | Promise<void>;
   #now: () => number;
@@ -672,10 +780,27 @@ export class EvolutionApplicationCoordinator {
     });
     await coordinator.#loadOrInit();
     coordinator.#catalogWriter = options.catalog.claimExclusiveWriter();
-    await coordinator.#reconcilePendingOnOpen();
-    coordinator.#publishCommittedState();
-    coordinator.#opened = true;
-    return coordinator;
+    try {
+      await coordinator.#reconcilePendingOnOpen();
+      coordinator.#publishCommittedState();
+      coordinator.#opened = true;
+      return coordinator;
+    } catch (error) {
+      options.catalog.releaseExclusiveWriter(coordinator.#catalogWriter);
+      coordinator.#catalogWriter = undefined;
+      throw error;
+    }
+  }
+
+  async close(): Promise<void> {
+    return await this.#enqueue(async () => {
+      this.#previews.clear();
+      this.#opened = false;
+      if (this.#catalogWriter) {
+        this.#catalog.releaseExclusiveWriter(this.#catalogWriter);
+        this.#catalogWriter = undefined;
+      }
+    });
   }
 
   /** Read a proposal from the durable catalog (no mutation). */
@@ -787,6 +912,189 @@ export class EvolutionApplicationCoordinator {
         new Date(this.#now()).toISOString(),
         this.#catalogWriter,
       );
+    });
+  }
+
+  /**
+   * Run the fixed, server-owned Phase-4 structural preflight and bind its
+   * evidence directly to the immutable proposal. This does not claim that the
+   * candidate has been executed or behaviorally validated.
+   */
+  async evaluateServerPreflight(
+    proposalId: string,
+  ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
+    return await this.#enqueue(async () => {
+      this.#assertWritable();
+      let proposal = this.#requireProposal(proposalId);
+      if (proposal.status === "evaluated") {
+        this.#assertServerPreflightEvaluation(proposal);
+        return { proposal, committedRevision: this.#catalog.revision };
+      }
+      if (proposal.status === "proposed") {
+        const begun = await this.#catalog.beginEvaluation(
+          proposal.id,
+          new Date(this.#now()).toISOString(),
+          this.#catalogWriter,
+        );
+        proposal = begun.proposal;
+      } else if (proposal.status !== "evaluating") {
+        throw new EvolutionApplicationError(
+          "INVALID_LIFECYCLE",
+          `Proposal '${proposal.id}' cannot run server preflight from status '${proposal.status}'`,
+        );
+      }
+
+      const candidateDigest = computeCandidateDigest(proposal.candidate);
+      const items: Array<{
+        kind: "deterministic";
+        id: string;
+        status: "pass" | "fail";
+        summary: string;
+      }> = [];
+      let trusted = true;
+      try {
+        this.#assertPolicyAllows(proposal);
+        if (proposal.candidate.kind === "strategy-blueprint") {
+          if (proposal.policy.allowedPromptPaths.length !== 0) {
+            throw new EvolutionApplicationError(
+              "POLICY_DENIED",
+              "Strategy candidates cannot carry prompt path capabilities",
+            );
+          }
+          const configuredNames = new Set(
+            Object.keys(this.#loaded.config.strategies?.definitions ?? {}),
+          );
+          if (configuredNames.has(proposal.candidate.name)) {
+            throw new EvolutionApplicationError(
+              "POLICY_DENIED",
+              `Configured strategy '${proposal.candidate.name}' is read-only`,
+            );
+          }
+        } else {
+          const trustedPaths = new Set(
+            Object.values(this.#loaded.config.roles)
+              .map((role) => role.promptFile)
+              .filter((value): value is string => typeof value === "string"),
+          );
+          if (
+            !trustedPaths.has(proposal.candidate.path) ||
+            proposal.policy.allowedPromptPaths.length !== 1 ||
+            proposal.policy.allowedPromptPaths[0] !== proposal.candidate.path
+          ) {
+            throw new EvolutionApplicationError(
+              "POLICY_DENIED",
+              `Prompt candidate path '${proposal.candidate.path}' is not the exact current trusted path`,
+            );
+          }
+        }
+        items.push(serverPreflightItem(
+          "server-candidate-trust-v1",
+          "pass",
+          "Current project trust and bounded capabilities accepted; candidate was not executed",
+        ));
+      } catch (error) {
+        if (!(error instanceof EvolutionApplicationError) || error.code !== "POLICY_DENIED") {
+          throw error;
+        }
+        trusted = false;
+        items.push(serverPreflightItem(
+          "server-candidate-trust-v1",
+          "fail",
+          `Current project trust rejected the candidate: ${error.message}; candidate was not executed`,
+        ));
+      }
+
+      if (proposal.candidate.kind === "strategy-blueprint") {
+        if (!trusted) {
+          items.push(serverPreflightItem(
+            "server-strategy-preflight-v1",
+            "fail",
+            "Strategy preflight was not run because candidate trust failed; candidate was not executed",
+          ));
+        } else {
+          try {
+            this.#strategies.preflight(
+              proposal.candidate.name,
+              proposal.candidate.definition,
+            );
+            items.push(serverPreflightItem(
+              "server-strategy-preflight-v1",
+              "pass",
+              "Strategy schema, topology, profiles, and current catalog composition passed; candidate was not executed",
+            ));
+          } catch (error) {
+            if (!(error instanceof StrategyBlueprintError)) throw error;
+            items.push(serverPreflightItem(
+              "server-strategy-preflight-v1",
+              "fail",
+              `Strategy preflight rejected the candidate: ${error.message}; candidate was not executed`,
+            ));
+          }
+        }
+      } else if (!trusted) {
+        items.push(
+          serverPreflightItem(
+            "server-prompt-object-integrity-v1",
+            "fail",
+            "Prompt object verification was not run because candidate trust failed; candidate was not executed",
+          ),
+          serverPreflightItem(
+            "server-prompt-target-trust-v1",
+            "fail",
+            "Prompt target verification was not run because candidate trust failed; candidate was not executed",
+          ),
+        );
+      } else {
+        await this.#readPromptObject(proposal.candidate.contentDigest);
+        items.push(serverPreflightItem(
+          "server-prompt-object-integrity-v1",
+          "pass",
+          "Content-addressed prompt object digest, size, permissions, and UTF-8 passed; candidate was not executed",
+        ));
+        try {
+          const live = await this.#readTargetState(proposal.candidate);
+          if (!live.present || !live.digest) {
+            throw new EvolutionApplicationError(
+              "POLICY_DENIED",
+              `Prompt target '${proposal.candidate.path}' must already exist`,
+            );
+          }
+          await this.#readLivePromptText(proposal.candidate.path, live.digest);
+          await this.#git.verifyTrackedRegularFile(proposal.candidate.path);
+          items.push(serverPreflightItem(
+            "server-prompt-target-trust-v1",
+            "pass",
+            "Live prompt target is canonical, readable UTF-8, size-bounded, and tracked by HEAD; candidate was not executed",
+          ));
+        } catch (error) {
+          const mapped = error instanceof GitManagerError ? mapGitError(error) : error;
+          if (
+            !(mapped instanceof EvolutionApplicationError) ||
+            (mapped.code !== "POLICY_DENIED" && mapped.code !== "TARGET_DRIFTED")
+          ) {
+            throw mapped;
+          }
+          items.push(serverPreflightItem(
+            "server-prompt-target-trust-v1",
+            "fail",
+            `Live prompt target failed trust checks: ${mapped.message}; candidate was not executed`,
+          ));
+        }
+      }
+
+      return await this.#catalog.evaluateServerPreflight(
+        proposal.id,
+        { proposalId: proposal.id, candidateDigest, items },
+        new Date(this.#now()).toISOString(),
+        this.#catalogWriter,
+      );
+    });
+  }
+
+  async assertServerPreflightEvaluation(proposalId: string): Promise<void> {
+    await this.#enqueue(async () => {
+      this.#assertOpen();
+      this.#assertServerPreflightEvaluation(this.#requireProposal(proposalId));
     });
   }
 
@@ -910,6 +1218,89 @@ export class EvolutionApplicationCoordinator {
     });
   }
 
+  /** Resolve an already completed exact command without entering a new write. */
+  async replayCommand(input: {
+    commandId: string;
+    operation: "promote-and-apply" | "rollback-applied";
+    proposalId: string;
+    expectedRevision: number;
+    token: string;
+    operator: string;
+    reason: string;
+  }): Promise<ApplicationCommandResult | undefined> {
+    return await this.#enqueue(async () => {
+      this.#assertOpen();
+      const commandId = requireCommandId(input.commandId);
+      const operator = requireNonEmpty(input.operator, "operator");
+      const reason = requireNonEmpty(input.reason, "reason");
+      const previewTokenDigest = sha256Text(input.token);
+      const materialDigest = null;
+      const requestDigest = sha256Canonical({
+        operation: input.operation,
+        proposalId: input.proposalId,
+        expectedRevision: input.expectedRevision,
+        tokenDigest: previewTokenDigest,
+        operator,
+        reason,
+        materialDigest,
+      });
+      const existing = this.#commands.get(commandId);
+      if (!existing) return undefined;
+      return this.#dedupeOrConflict(existing, {
+        operation: input.operation,
+        proposalId: input.proposalId,
+        operator,
+        reason,
+        expectedRevision: input.expectedRevision,
+        previewTokenDigest,
+        requestDigest,
+        materialDigest,
+      });
+    });
+  }
+
+  /** Resolve an already completed exact legacy reconciliation command. */
+  async replayReconcileCommand(input: {
+    commandId: string;
+    proposalId: string;
+    expectedRevision: number;
+    operator: string;
+    reason: string;
+    mode: "adopt" | "apply";
+    promptContent?: Uint8Array;
+  }): Promise<ApplicationCommandResult | undefined> {
+    return await this.#enqueue(async () => {
+      this.#assertOpen();
+      const commandId = requireCommandId(input.commandId);
+      const operator = requireNonEmpty(input.operator, "operator");
+      const reason = requireNonEmpty(input.reason, "reason");
+      const materialDigest = input.promptContent
+        ? sha256Bytes(Buffer.from(input.promptContent))
+        : null;
+      const requestDigest = sha256Canonical({
+        operation: "reconcile-promoted",
+        proposalId: input.proposalId,
+        expectedRevision: input.expectedRevision,
+        operator,
+        reason,
+        mode: input.mode,
+        materialDigest,
+      });
+      const existing = this.#commands.get(commandId);
+      if (!existing) return undefined;
+      return this.#dedupeOrConflict(existing, {
+        operation: "reconcile-promoted",
+        proposalId: input.proposalId,
+        operator,
+        reason,
+        expectedRevision: input.expectedRevision,
+        previewTokenDigest: `reconcile:${input.mode}`,
+        requestDigest,
+        materialDigest,
+      });
+    });
+  }
+
   async previewRollback(input: {
     proposalId: string;
     operator: string;
@@ -1013,6 +1404,94 @@ export class EvolutionApplicationCoordinator {
   }
 
   /**
+   * Return the exact human-review material already bound to an unexpired
+   * preview. This never accepts a path or replacement content from the caller.
+   */
+  async describePreview(input: {
+    token: string;
+    kind: "promote-and-apply" | "rollback-applied";
+    proposalId: string;
+    operator: string;
+    expectedRevision: number;
+  }): Promise<ApplicationPreviewDescription> {
+    return await this.#enqueue(async () => {
+      this.#assertOpen();
+      const preview = this.#consumePreview(input.token, input);
+      const proposal = this.#requireProposal(input.proposalId);
+      if (proposal.candidate.kind === "strategy-blueprint") {
+        if (
+          preview.beforeTarget.kind !== "strategy-blueprint" ||
+          preview.afterTarget.kind !== "strategy-blueprint"
+        ) {
+          throw new EvolutionApplicationError(
+            "STALE_PREVIEW",
+            "Preview target kind no longer matches its proposal",
+          );
+        }
+        return isolate({
+          kind: input.kind,
+          proposalId: proposal.id,
+          before: {
+            kind: "strategy-blueprint" as const,
+            identity: preview.beforeTarget.identity,
+            digest: preview.beforeTarget.digest,
+            present: preview.beforeTarget.present,
+            definition: preview.beforeTarget.strategyDefinition ?? null,
+          },
+          after: {
+            kind: "strategy-blueprint" as const,
+            identity: preview.afterTarget.identity,
+            digest: preview.afterTarget.digest,
+            present: preview.afterTarget.present,
+            definition: preview.afterTarget.strategyDefinition ?? null,
+          },
+        });
+      }
+
+      if (
+        preview.beforeTarget.kind !== "role-prompt" ||
+        preview.afterTarget.kind !== "role-prompt"
+      ) {
+        throw new EvolutionApplicationError(
+          "STALE_PREVIEW",
+          "Preview target kind no longer matches its proposal",
+        );
+      }
+      const live = await this.#readTargetState(proposal.candidate);
+      if (!targetStatesEqual(live, preview.beforeTarget)) {
+        throw new EvolutionApplicationError(
+          "TARGET_DRIFTED",
+          "Prompt target changed before preview material was reviewed",
+        );
+      }
+      const beforeContent = preview.beforeTarget.present
+        ? await this.#readLivePromptText(proposal.candidate.path, preview.beforeTarget.digest!)
+        : null;
+      const afterContent = preview.afterTarget.present
+        ? decodeUtf8(await this.#readPromptObject(preview.afterTarget.digest!))
+        : null;
+      return isolate({
+        kind: input.kind,
+        proposalId: proposal.id,
+        before: {
+          kind: "role-prompt" as const,
+          identity: preview.beforeTarget.identity,
+          digest: preview.beforeTarget.digest,
+          present: preview.beforeTarget.present,
+          content: beforeContent,
+        },
+        after: {
+          kind: "role-prompt" as const,
+          identity: preview.afterTarget.identity,
+          digest: preview.afterTarget.digest,
+          present: preview.afterTarget.present,
+          content: afterContent,
+        },
+      });
+    });
+  }
+
+  /**
    * Explicit human reconciliation for Phase-2 promotions that lack application
    * proof. When `mode` is `adopt`, the live target digest must already match the
    * candidate; when `mode` is `apply`, material is applied through the journal.
@@ -1073,7 +1552,7 @@ export class EvolutionApplicationCoordinator {
       }
       this.#assertWritable();
 
-      const { revision } = await this.#catalog.readSnapshot();
+      const { revision, snapshot } = await this.#catalog.readSnapshot();
       if (input.expectedRevision !== revision) {
         throw new EvolutionApplicationError(
           "STALE_CATALOG_REVISION",
@@ -1111,6 +1590,45 @@ export class EvolutionApplicationCoordinator {
       });
       const candidateDigest = computeCandidateDigest(proposal.candidate);
       const beforeTarget = await this.#readTargetState(proposal.candidate);
+      let livePromptContent: Buffer | undefined;
+      if (proposal.candidate.kind === "role-prompt") {
+        if (!beforeTarget.present || !beforeTarget.digest) {
+          throw new EvolutionApplicationError(
+            "TARGET_DRIFTED",
+            `Prompt target '${proposal.candidate.path}' must already exist for reconciliation`,
+          );
+        }
+        livePromptContent = await this.#readLivePromptBytes(
+          proposal.candidate.path,
+          beforeTarget.digest,
+        );
+      }
+      const rollbackPreflight = await this.#catalog.preflightRollback(
+        proposal.id,
+        humanDecision,
+      );
+      const legacyPredecessor = await this.#resolveLegacyPredecessor({
+        snapshot,
+        restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
+        liveTarget: beforeTarget,
+        mode: input.mode,
+        catalogRevision: revision,
+        operator,
+        reason,
+        decidedAt,
+        humanDecision,
+        commandId,
+      });
+      if (
+        legacyPredecessor.application &&
+        applicationHistoryDepth(legacyPredecessor.application) >= MAX_APPLICATION_HISTORY_DEPTH
+      ) {
+        throw new EvolutionApplicationError(
+          "POLICY_DENIED",
+          `Application history for '${targetKey(target)}' reached the bounded depth of ${MAX_APPLICATION_HISTORY_DEPTH}`,
+        );
+      }
+      const applicationBeforeTarget = legacyPredecessor.application?.afterTarget ?? beforeTarget;
 
       if (input.mode === "adopt") {
         await this.#assertQuiescentSafe();
@@ -1124,23 +1642,32 @@ export class EvolutionApplicationCoordinator {
             `Cannot adopt proposal '${proposal.id}': live target digest does not match candidate`,
           );
         }
+        if (livePromptContent) {
+          await this.#ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
+        }
         const application: ApplicationRecord = {
           proposalId: proposal.id,
           candidateDigest,
           target,
           status: "adopted",
-          beforeTargetDigest: beforeTarget.digest,
+          beforeTargetDigest: applicationBeforeTarget.digest,
           afterTargetDigest: beforeTarget.digest!,
-          beforeTarget,
+          beforeTarget: applicationBeforeTarget,
           afterTarget: beforeTarget,
-          previousApplication: null,
-          rollbackSafe: false,
+          previousApplication: legacyPredecessor.application,
+          rollbackSafe: legacyPredecessor.application !== null,
           catalogRevision: revision,
           operator,
           reason,
           appliedAt: decidedAt,
           commandId,
         };
+        if (legacyPredecessor.completion) {
+          this.#completed.push(legacyPredecessor.completion);
+        }
+        if (legacyPredecessor.application) {
+          this.#applications.delete(legacyPredecessor.application.proposalId);
+        }
         this.#applications.set(proposal.id, application);
         const completed: CompletedApplicationRecord = {
           commandId,
@@ -1148,7 +1675,7 @@ export class EvolutionApplicationCoordinator {
           proposalId: proposal.id,
           candidateDigest,
           status: "adopted",
-          beforeTargetDigest: beforeTarget.digest,
+          beforeTargetDigest: applicationBeforeTarget.digest,
           afterTargetDigest: beforeTarget.digest,
           catalogRevisionBefore: revision,
           catalogRevisionAfter: revision,
@@ -1162,7 +1689,7 @@ export class EvolutionApplicationCoordinator {
           proposal,
           committedCatalogRevision: revision,
           applicationStatus: "adopted",
-          beforeTargetDigest: beforeTarget.digest,
+          beforeTargetDigest: applicationBeforeTarget.digest,
           afterTargetDigest: beforeTarget.digest,
         };
         const binding: CommandIdempotencyBinding = {
@@ -1184,7 +1711,7 @@ export class EvolutionApplicationCoordinator {
           proposal,
           committedCatalogRevision: revision,
           applicationStatus: "adopted",
-          beforeTargetDigest: beforeTarget.digest,
+          beforeTargetDigest: applicationBeforeTarget.digest,
           afterTargetDigest: beforeTarget.digest,
           deduplicated: false,
         };
@@ -1218,6 +1745,9 @@ export class EvolutionApplicationCoordinator {
           throw mapGitError(error);
         }
       }
+      if (livePromptContent) {
+        await this.#ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
+      }
       const previewTokenDigest = `reconcile:${input.mode}`;
       const pending: PendingApplicationOperation = {
         commandId,
@@ -1229,10 +1759,10 @@ export class EvolutionApplicationCoordinator {
         humanDecision,
         catalogRevisionBefore: revision,
         expectedCatalogRevisionAfter: revision,
-        beforeTarget,
+        beforeTarget: applicationBeforeTarget,
         afterTarget,
         previousActiveProposalId: activeProposalId,
-        previousApplication: null,
+        previousApplication: legacyPredecessor.application,
         previewTokenDigest,
         requestDigest,
         materialDigest,
@@ -1241,6 +1771,9 @@ export class EvolutionApplicationCoordinator {
         gitPath: gitAuthorization?.repositoryRelativePath ?? null,
         startedAt: decidedAt,
       };
+      if (legacyPredecessor.completion) {
+        this.#completed.push(legacyPredecessor.completion);
+      }
       this.#pending = pending;
       await this.#persistApplicationState(this.#revision + 1);
 
@@ -1282,18 +1815,21 @@ export class EvolutionApplicationCoordinator {
         candidateDigest,
         target,
         status: "applied",
-        beforeTargetDigest: beforeTarget.digest,
+        beforeTargetDigest: applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest!,
-        beforeTarget,
+        beforeTarget: applicationBeforeTarget,
         afterTarget,
-        previousApplication: null,
-        rollbackSafe: false,
+        previousApplication: legacyPredecessor.application,
+        rollbackSafe: true,
         catalogRevision: revision,
         operator,
         reason,
         appliedAt: decidedAt,
         commandId,
       };
+      if (legacyPredecessor.application) {
+        this.#applications.delete(legacyPredecessor.application.proposalId);
+      }
       this.#applications.set(proposal.id, application);
       const completed: CompletedApplicationRecord = {
         commandId,
@@ -1301,7 +1837,7 @@ export class EvolutionApplicationCoordinator {
         proposalId: proposal.id,
         candidateDigest,
         status: "applied",
-        beforeTargetDigest: beforeTarget.digest,
+        beforeTargetDigest: applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest,
         catalogRevisionBefore: revision,
         catalogRevisionAfter: revision,
@@ -1316,7 +1852,7 @@ export class EvolutionApplicationCoordinator {
         proposal,
         committedCatalogRevision: revision,
         applicationStatus: "applied",
-        beforeTargetDigest: beforeTarget.digest,
+        beforeTargetDigest: applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest,
       };
       this.#commands.set(commandId, {
@@ -1337,7 +1873,7 @@ export class EvolutionApplicationCoordinator {
         proposal,
         committedCatalogRevision: revision,
         applicationStatus: "applied",
-        beforeTargetDigest: beforeTarget.digest,
+        beforeTargetDigest: applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest,
         deduplicated: false,
       };
@@ -1473,8 +2009,9 @@ export class EvolutionApplicationCoordinator {
             proposal.id,
             proposal.evaluation?.evidence,
             humanDecision,
+            commandId,
           )
-        : await this.#catalog.preflightRollback(proposal.id, humanDecision);
+        : await this.#catalog.preflightRollback(proposal.id, humanDecision, commandId);
     if (input.operation === "rollback-applied") {
       const restoredId = (preflight.record as RollbackRecord).restoredActiveProposalId;
       const provenPredecessorId =
@@ -1590,12 +2127,14 @@ export class EvolutionApplicationCoordinator {
           evidence,
           humanDecision,
           this.#catalogWriter,
+          commandId,
         );
       } else {
         catalogResult = await this.#catalog.rollback(
           proposal.id,
           humanDecision,
           this.#catalogWriter,
+          commandId,
         );
       }
     } catch (error) {
@@ -1847,6 +2386,132 @@ export class EvolutionApplicationCoordinator {
       present: true,
       strategyDefinition: current,
     };
+  }
+
+  async #readLivePromptText(relativePath: string, expectedDigest: string): Promise<string> {
+    return decodeUtf8(await this.#readLivePromptBytes(relativePath, expectedDigest));
+  }
+
+  async #readLivePromptBytes(relativePath: string, expectedDigest: string): Promise<Buffer> {
+    const absolute = path.resolve(this.#catalog.root, relativePath);
+    assertCanonicalInsideRoot(this.#catalog.root, absolute, "Prompt target");
+    const bytes = await this.#io.readFile(absolute);
+    if (
+      bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES ||
+      sha256Bytes(bytes) !== expectedDigest
+    ) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Prompt target '${relativePath}' changed or exceeds the review limit`,
+      );
+    }
+    try {
+      decodeUtf8(bytes);
+    } catch {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Prompt target '${relativePath}' is not valid UTF-8`,
+      );
+    }
+    return bytes;
+  }
+
+  async #resolveLegacyPredecessor(input: {
+    snapshot: EvolutionCatalogSnapshot;
+    restoredProposalId: string | null;
+    liveTarget: TargetDigestState;
+    mode: "adopt" | "apply";
+    catalogRevision: number;
+    operator: string;
+    reason: string;
+    decidedAt: string;
+    humanDecision: HumanDecision;
+    commandId: string;
+  }): Promise<{
+    application: ApplicationRecord | null;
+    completion: CompletedApplicationRecord | null;
+  }> {
+    if (input.restoredProposalId === null) {
+      return { application: null, completion: null };
+    }
+
+    const existing = this.#applications.get(input.restoredProposalId);
+    if (existing) {
+      if (
+        targetKey(existing.target) !== targetKeyFromState(input.liveTarget) ||
+        (input.mode === "apply" && !targetStatesEqual(existing.afterTarget, input.liveTarget))
+      ) {
+        throw new EvolutionApplicationError(
+          "TARGET_DRIFTED",
+          `Legacy predecessor '${existing.proposalId}' does not match the observed target`,
+        );
+      }
+      return { application: isolate(existing), completion: null };
+    }
+
+    if (input.mode === "adopt") {
+      throw new EvolutionApplicationError(
+        "RECOVERY_REQUIRED",
+        `Cannot adopt a legacy promotion whose predecessor '${input.restoredProposalId}' has no application proof`,
+      );
+    }
+
+    const predecessor = input.snapshot.proposals.find(
+      (proposal) => proposal.id === input.restoredProposalId,
+    );
+    if (!predecessor) {
+      throw new EvolutionApplicationError(
+        "RECOVERY_REQUIRED",
+        `Legacy predecessor '${input.restoredProposalId}' is missing from the catalog`,
+      );
+    }
+    const expectedTarget = await this.#plannedAfterState(predecessor, input.liveTarget);
+    if (!targetStatesEqual(expectedTarget, input.liveTarget)) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Observed target does not match legacy predecessor '${predecessor.id}'`,
+      );
+    }
+
+    const syntheticCommandId = `legacy:${sha256Canonical({
+      commandId: input.commandId,
+      proposalId: predecessor.id,
+      target: input.liveTarget,
+    })}`;
+    const candidateDigest = computeCandidateDigest(predecessor.candidate);
+    const application: ApplicationRecord = {
+      proposalId: predecessor.id,
+      candidateDigest,
+      target: targetFromCandidate(predecessor.candidate),
+      status: "adopted",
+      beforeTargetDigest: input.liveTarget.digest,
+      afterTargetDigest: input.liveTarget.digest!,
+      beforeTarget: input.liveTarget,
+      afterTarget: input.liveTarget,
+      previousApplication: null,
+      rollbackSafe: false,
+      catalogRevision: input.catalogRevision,
+      operator: input.operator,
+      reason: `Captured verified legacy predecessor while reconciling: ${input.reason}`,
+      appliedAt: input.decidedAt,
+      commandId: syntheticCommandId,
+    };
+    const completion: CompletedApplicationRecord = {
+      commandId: syntheticCommandId,
+      operation: "reconcile-promoted",
+      proposalId: predecessor.id,
+      candidateDigest,
+      status: "adopted",
+      beforeTargetDigest: input.liveTarget.digest,
+      afterTargetDigest: input.liveTarget.digest,
+      catalogRevisionBefore: input.catalogRevision,
+      catalogRevisionAfter: input.catalogRevision,
+      operator: input.operator,
+      reason: application.reason,
+      completedAt: input.decidedAt,
+      humanDecision: input.humanDecision,
+    };
+    return { application: isolate(application), completion: isolate(completion) };
   }
 
   async #plannedAfterState(
@@ -2353,6 +3018,15 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
+  #assertServerPreflightEvaluation(proposal: EvolutionProposal): void {
+    if (proposal.evaluation?.source !== "server-structural-preflight-v1") {
+      throw new EvolutionApplicationError(
+        "EVALUATION_SOURCE_UNTRUSTED",
+        `Proposal '${proposal.id}' was not evaluated by the current server preflight`,
+      );
+    }
+  }
+
   #assertPolicyAllows(proposal: EvolutionProposal): void {
     const caps = proposal.policy.capabilities;
     if (
@@ -2464,34 +3138,155 @@ export class EvolutionApplicationCoordinator {
     const activeByTarget = new Map(
       snapshot.activeProposals.map((pointer) => [targetKey(pointer.target), pointer.proposalId]),
     );
+    const promotionByProposal = new Map(
+      snapshot.auditRecords
+        .filter((record): record is PromotionRecord => record.kind === "promotion")
+        .map((record) => [record.proposalId, record]),
+    );
     const completedByCommand = new Map(
       this.#completed.map((record) => [record.commandId, record]),
     );
-    const validateApplication = (application: ApplicationRecord): void => {
+    const syntheticCompletionIds = new Set<string>();
+    const validateApplication = async (
+      application: ApplicationRecord,
+      parentCommandId: string | null = null,
+    ): Promise<void> => {
       const proposal = proposals.get(application.proposalId);
       const completion = completedByCommand.get(application.commandId);
+      const command = this.#commands.get(application.commandId);
+      const expectedAfterTarget = proposal
+        ? await this.#plannedAfterState(proposal, application.beforeTarget)
+        : null;
+      const reconcileMode = command?.previewTokenDigest.startsWith("reconcile:")
+        ? command.previewTokenDigest.slice("reconcile:".length)
+        : null;
+      const reconcileRollbackSafe = reconcileMode === "apply" ||
+        (command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null);
+      const reconcileStatusMatches =
+        (reconcileMode === "adopt" && application.status === "adopted") ||
+        (reconcileMode === "apply" && application.status === "applied");
+      const syntheticOwners: Array<{
+        commandId: string;
+        proposalId: string;
+        reason: string;
+        humanDecision: HumanDecision;
+      }> = [];
+      if (
+        parentCommandId === this.#pending?.commandId &&
+        this.#pending.operation === "reconcile-promoted"
+      ) {
+        syntheticOwners.push({
+          commandId: this.#pending.commandId,
+          proposalId: this.#pending.proposalId,
+          reason: this.#pending.reason,
+          humanDecision: this.#pending.humanDecision,
+        });
+      }
+      for (const ownerCommand of this.#commands.values()) {
+        if (
+          ownerCommand.operation !== "reconcile-promoted" ||
+          (parentCommandId !== null && ownerCommand.commandId !== parentCommandId)
+        ) {
+          continue;
+        }
+        const ownerCompletion = completedByCommand.get(ownerCommand.commandId);
+        if (!ownerCompletion) continue;
+        syntheticOwners.push({
+          commandId: ownerCommand.commandId,
+          proposalId: ownerCommand.proposalId,
+          reason: ownerCommand.reason,
+          humanDecision: ownerCompletion.humanDecision,
+        });
+      }
+      const syntheticOwner = syntheticOwners.find((owner) => {
+        const ownerPromotion = promotionByProposal.get(owner.proposalId);
+        const expectedCommandId = `legacy:${sha256Canonical({
+          commandId: owner.commandId,
+          proposalId: application.proposalId,
+          target: application.afterTarget,
+        })}`;
+        return (
+          ownerPromotion?.previousActiveProposalId === application.proposalId &&
+          expectedCommandId === application.commandId
+        );
+      });
+      const syntheticLegacyBaseline =
+        !command &&
+        syntheticOwner !== undefined &&
+        application.commandId.startsWith("legacy:") &&
+        application.status === "adopted" &&
+        application.previousApplication === null &&
+        !application.rollbackSafe &&
+        targetStatesEqual(application.beforeTarget, application.afterTarget) &&
+        application.reason ===
+          `Captured verified legacy predecessor while reconciling: ${syntheticOwner.reason}` &&
+        completion !== undefined &&
+        sha256Canonical(completion.humanDecision) ===
+          sha256Canonical(syntheticOwner.humanDecision);
+      if (syntheticLegacyBaseline) {
+        syntheticCompletionIds.add(application.commandId);
+      }
       if (
         !proposal ||
         !completion ||
         computeCandidateDigest(proposal.candidate) !== application.candidateDigest ||
         targetKey(targetFromCandidate(proposal.candidate)) !== targetKey(application.target) ||
+        !expectedAfterTarget ||
+        !targetStatesEqual(application.afterTarget, expectedAfterTarget) ||
         application.catalogRevision > revision ||
         completion.proposalId !== application.proposalId ||
         completion.candidateDigest !== application.candidateDigest ||
-        application.rollbackSafe !== (completion.operation === "promote-and-apply") ||
-        (completion.operation === "promote-and-apply" && application.status !== "applied") ||
+        completion.status !== application.status ||
+        completion.beforeTargetDigest !== application.beforeTargetDigest ||
+        completion.afterTargetDigest !== application.afterTargetDigest ||
+        completion.catalogRevisionAfter !== application.catalogRevision ||
+        completion.operator !== application.operator ||
+        completion.reason !== application.reason ||
+        completion.humanDecision.actor !== application.operator ||
+        completion.humanDecision.decidedAt !== application.appliedAt ||
+        (command
+          ? command.operator !== application.operator ||
+            command.reason !== application.reason ||
+            command.result.applicationStatus !== application.status ||
+            command.result.beforeTargetDigest !== application.beforeTargetDigest ||
+            command.result.afterTargetDigest !== application.afterTargetDigest ||
+            command.result.committedCatalogRevision !== application.catalogRevision
+          : completion.catalogRevisionBefore !== application.catalogRevision) ||
+        (completion.operation === "promote-and-apply" &&
+          (!command ||
+            command.operation !== "promote-and-apply" ||
+            !application.rollbackSafe ||
+            application.status !== "applied")) ||
         (completion.operation === "reconcile-promoted" &&
-          completion.status !== application.status)
+          (completion.status !== application.status ||
+            (command
+              ? command.operation !== "reconcile-promoted" ||
+                !reconcileStatusMatches ||
+                application.rollbackSafe !== reconcileRollbackSafe
+              : !syntheticLegacyBaseline)))
       ) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: application proof for '${application.proposalId}' does not match the catalog`,
         );
       }
-      if (application.previousApplication) validateApplication(application.previousApplication);
+      if (application.previousApplication) {
+        await validateApplication(application.previousApplication, application.commandId);
+      }
     };
     for (const application of this.#applications.values()) {
-      validateApplication(application);
-      if (activeByTarget.get(targetKey(application.target)) !== application.proposalId) {
+      await validateApplication(application);
+      const activeId = activeByTarget.get(targetKey(application.target));
+      const committedPendingRollback =
+        this.#pending?.operation === "rollback-applied" &&
+        this.#pending.proposalId === application.proposalId &&
+        revision === this.#pending.expectedCatalogRevisionAfter &&
+        this.#catalogOutcomeMatchesPending(this.#pending, snapshot, revision);
+      if (
+        activeId !== application.proposalId &&
+        (!activeId ||
+          promotionByProposal.get(activeId)?.previousActiveProposalId !== application.proposalId) &&
+        !committedPendingRollback
+      ) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: '${application.proposalId}' is not the catalog active proposal`,
         );
@@ -2512,18 +3307,59 @@ export class EvolutionApplicationCoordinator {
             : null
           : this.#pending.operation === "rollback-applied"
             ? (this.#applications.get(this.#pending.proposalId) ?? null)
-            : null;
+            : this.#pending.previousApplication;
+      let reconcileRestoredId: string | null | undefined;
+      if (this.#pending.operation === "reconcile-promoted") {
+        reconcileRestoredId = (
+          await this.#catalog.preflightRollback(
+            this.#pending.proposalId,
+            this.#pending.humanDecision,
+          )
+        ).record.restoredActiveProposalId;
+        if (this.#pending.previousApplication) {
+          await validateApplication(
+            this.#pending.previousApplication,
+            this.#pending.commandId,
+          );
+        }
+      }
+      let expectedPendingBefore: TargetDigestState | null = null;
+      let expectedPendingAfter: TargetDigestState | null = null;
+      if (proposal) {
+        if (
+          this.#pending.operation === "rollback-applied" &&
+          expectedPreviousApplication
+        ) {
+          expectedPendingBefore = expectedPreviousApplication.afterTarget;
+          expectedPendingAfter = await this.#plannedRollbackState(
+            proposal,
+            expectedPreviousApplication,
+          );
+        } else {
+          expectedPendingBefore = expectedPreviousApplication?.afterTarget ?? null;
+          expectedPendingAfter = await this.#plannedAfterState(
+            proposal,
+            this.#pending.beforeTarget,
+          );
+        }
+      }
       if (
         !proposal ||
         computeCandidateDigest(proposal.candidate) !== this.#pending.candidateDigest ||
         !pendingTarget ||
+        !expectedPendingAfter ||
+        !targetStatesEqual(this.#pending.afterTarget, expectedPendingAfter) ||
+        (expectedPendingBefore !== null &&
+          !targetStatesEqual(this.#pending.beforeTarget, expectedPendingBefore)) ||
         targetKey(pendingTarget) !== targetKeyFromState(this.#pending.beforeTarget) ||
         targetKey(pendingTarget) !== targetKeyFromState(this.#pending.afterTarget) ||
         (revision !== this.#pending.catalogRevisionBefore &&
           revision !== this.#pending.expectedCatalogRevisionAfter) ||
         (revision === this.#pending.catalogRevisionBefore && activeId !== expectedOldActive) ||
         sha256Canonical(this.#pending.previousApplication) !==
-          sha256Canonical(expectedPreviousApplication)
+          sha256Canonical(expectedPreviousApplication) ||
+        (this.#pending.operation === "reconcile-promoted" &&
+          (this.#pending.previousApplication?.proposalId ?? null) !== reconcileRestoredId)
       ) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: pending operation '${this.#pending.commandId}' does not match the catalog`,
@@ -2532,11 +3368,35 @@ export class EvolutionApplicationCoordinator {
     }
     for (const completed of this.#completed) {
       const proposal = proposals.get(completed.proposalId);
+      const expectedAuditKind =
+        completed.operation === "promote-and-apply"
+          ? "promotion"
+          : completed.operation === "rollback-applied"
+            ? "rollback"
+            : null;
+      const matchingAudit = expectedAuditKind
+        ? snapshot.auditRecords.find(
+            (record) =>
+              record.kind === expectedAuditKind &&
+              record.proposalId === completed.proposalId &&
+              record.actor === completed.humanDecision.actor &&
+              record.reason === completed.humanDecision.reason &&
+              record.at === completed.humanDecision.decidedAt &&
+              (record.applicationCommandId === completed.commandId ||
+                (record.applicationCommandId === undefined &&
+                  completed.status !== "aborted")),
+          )
+        : undefined;
+      const catalogMutationSucceeded =
+        completed.status === "applied" || completed.status === "rolled-back";
+      const command = this.#commands.get(completed.commandId);
       if (
         !proposal ||
         computeCandidateDigest(proposal.candidate) !== completed.candidateDigest ||
         completed.catalogRevisionBefore > completed.catalogRevisionAfter ||
-        completed.catalogRevisionAfter > revision
+        completed.catalogRevisionAfter > revision ||
+        (!command && !syntheticCompletionIds.has(completed.commandId)) ||
+        (expectedAuditKind !== null && catalogMutationSucceeded !== Boolean(matchingAudit))
       ) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: completed operation '${completed.commandId}' does not match the catalog`,
@@ -2545,13 +3405,33 @@ export class EvolutionApplicationCoordinator {
     }
     for (const command of this.#commands.values()) {
       const completed = completedByCommand.get(command.commandId);
+      const catalogProposal = proposals.get(command.proposalId);
       if (
         !completed ||
         completed.operation !== command.operation ||
-        completed.proposalId !== command.proposalId
+        completed.proposalId !== command.proposalId ||
+        !catalogProposal ||
+        !proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal)
       ) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: command binding '${command.commandId}' has no matching completion`,
+        );
+      }
+    }
+    for (const audit of snapshot.auditRecords) {
+      if (audit.kind === "rejection" || audit.applicationCommandId === undefined) continue;
+      const completed = completedByCommand.get(audit.applicationCommandId);
+      const pendingOwnsAudit =
+        this.#pending?.commandId === audit.applicationCommandId &&
+        this.#catalogOutcomeMatchesPending(this.#pending, snapshot, revision);
+      if (
+        !pendingOwnsAudit &&
+        (!completed ||
+          completed.proposalId !== audit.proposalId ||
+          !["applied", "rolled-back"].includes(completed.status))
+      ) {
+        throw new EvolutionPersistenceValidationError(
+          `Invalid application state: catalog audit for command '${audit.applicationCommandId}' has no successful application result`,
         );
       }
     }
@@ -2633,6 +3513,7 @@ export class EvolutionApplicationCoordinator {
               evidence,
               pending.humanDecision,
               this.#catalogWriter,
+              pending.commandId,
             );
           } else if (proposal.status !== "promoted") {
             this.#recoveryRequired = true;
@@ -2644,6 +3525,7 @@ export class EvolutionApplicationCoordinator {
               proposal.id,
               pending.humanDecision,
               this.#catalogWriter,
+              pending.commandId,
             );
           } else if (proposal.status !== "rolled-back") {
             this.#recoveryRequired = true;
@@ -2821,6 +3703,9 @@ export class EvolutionApplicationCoordinator {
       ) {
         this.#applications.delete(pending.previousActiveProposalId);
       }
+      if (pending.operation === "reconcile-promoted" && pending.previousApplication) {
+        this.#applications.delete(pending.previousApplication.proposalId);
+      }
       this.#applications.set(pending.proposalId, {
         proposalId: pending.proposalId,
         candidateDigest: pending.candidateDigest,
@@ -2831,7 +3716,7 @@ export class EvolutionApplicationCoordinator {
         beforeTarget: pending.beforeTarget,
         afterTarget: pending.afterTarget,
         previousApplication: pending.previousApplication,
-        rollbackSafe: pending.operation === "promote-and-apply",
+        rollbackSafe: true,
         catalogRevision,
         operator: pending.operator,
         reason: pending.reason,
@@ -2913,6 +3798,19 @@ export class EvolutionApplicationCoordinator {
   ): Promise<void> {
     const pending = this.#pending;
     if (!pending) return;
+    const syntheticPredecessorCommandId = pending.previousApplication?.commandId;
+    if (
+      pending.operation === "reconcile-promoted" &&
+      syntheticPredecessorCommandId?.startsWith("legacy:") &&
+      !this.#commands.has(syntheticPredecessorCommandId) &&
+      ![...this.#applications.values()].some((application) =>
+        applicationHistoryHasCommand(application, syntheticPredecessorCommandId),
+      )
+    ) {
+      this.#completed = this.#completed.filter(
+        (record) => record.commandId !== syntheticPredecessorCommandId,
+      );
+    }
     this.#completed.push({
       commandId: pending.commandId,
       operation: pending.operation,
@@ -3077,6 +3975,14 @@ export class EvolutionApplicationCoordinator {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function serverPreflightItem(
+  id: string,
+  status: "pass" | "fail",
+  summary: string,
+): { kind: "deterministic"; id: string; status: "pass" | "fail"; summary: string } {
+  return { kind: "deterministic", id, status, summary };
+}
+
 function toPublicPreview(preview: PreviewRecord): ApplicationPreview {
   const publicTarget = (
     target: TargetDigestState,
@@ -3168,12 +4074,60 @@ function sha256Bytes(value: Buffer | string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function decodeUtf8(value: Uint8Array): string {
+  return new TextDecoder("utf-8", { fatal: true }).decode(value);
+}
+
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonicalize(value)).digest("hex");
 }
 
 function targetStatesEqual(left: TargetDigestState, right: TargetDigestState): boolean {
   return sha256Canonical(left) === sha256Canonical(right);
+}
+
+function proposalSnapshotMatchesCatalog(
+  historical: EvolutionProposal,
+  current: EvolutionProposal,
+): boolean {
+  if (
+    sha256Canonical({
+      id: historical.id,
+      createdAt: historical.createdAt,
+      policy: historical.policy,
+      candidate: historical.candidate,
+      evaluation: historical.evaluation ?? null,
+    }) !==
+      sha256Canonical({
+        id: current.id,
+        createdAt: current.createdAt,
+        policy: current.policy,
+        candidate: current.candidate,
+        evaluation: current.evaluation ?? null,
+      }) ||
+    historical.transitions.length > current.transitions.length ||
+    historical.transitions.some(
+      (transition, index) =>
+        sha256Canonical(transition) !== sha256Canonical(current.transitions[index]),
+    ) ||
+    (historical.promotionRecordDigest !== undefined &&
+      historical.promotionRecordDigest !== current.promotionRecordDigest)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function applicationHistoryHasCommand(
+  application: ApplicationRecord,
+  commandId: string,
+): boolean {
+  let current: ApplicationRecord | null = application;
+  while (current) {
+    if (current.commandId === commandId) return true;
+    current = current.previousApplication;
+  }
+  return false;
 }
 
 function canonicalize(value: unknown): string {
@@ -3297,6 +4251,8 @@ function parseApplicationDocument(
     ["applications", "pending", "completed", "commands", "recoveryRequired"],
     `application state payload at ${filePath}`,
   );
+  assertJsonNestingDepth(payloadRecord, filePath);
+  assertRawApplicationHistoryDepth(payloadRecord, filePath);
   const expectedDigest = computePayloadDigest(payloadRecord);
   if (expectedDigest !== record.payloadDigest) {
     throw new EvolutionPersistenceValidationError(
@@ -3379,6 +4335,47 @@ function parseApplicationDocument(
     revision: record.revision,
     payload: isolate(parsedPayload.data) as ApplicationPayload,
   };
+}
+
+function assertJsonNestingDepth(value: unknown, filePath: string): void {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (!current.value || typeof current.value !== "object") continue;
+    if (current.depth > 256) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid application state at ${filePath}: JSON nesting is too deep`,
+      );
+    }
+    for (const child of Object.values(current.value as Record<string, unknown>)) {
+      stack.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+}
+
+function assertRawApplicationHistoryDepth(
+  payload: Record<string, unknown>,
+  filePath: string,
+): void {
+  const roots: unknown[] = Array.isArray(payload.applications)
+    ? [...payload.applications]
+    : [];
+  if (payload.pending && typeof payload.pending === "object" && !Array.isArray(payload.pending)) {
+    roots.push((payload.pending as Record<string, unknown>).previousApplication);
+  }
+  for (const root of roots) {
+    let current = root;
+    let depth = 0;
+    while (current && typeof current === "object" && !Array.isArray(current)) {
+      depth += 1;
+      if (depth > MAX_APPLICATION_HISTORY_DEPTH) {
+        throw new EvolutionPersistenceValidationError(
+          `Invalid application state at ${filePath}: application history is too deep`,
+        );
+      }
+      current = (current as Record<string, unknown>).previousApplication;
+    }
+  }
 }
 
 function assertUniqueBy<T>(

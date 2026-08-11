@@ -1,10 +1,12 @@
 import type { LoadedConfig } from "../config/load.js";
 import { listenControlServer, type ListeningControlServer } from "./http.js";
 import { startProjectRuntime } from "./project-runtime.js";
+import type { EvolutionProjectService } from "./evolution-service.js";
 import type { RunSupervisor } from "./supervisor.js";
 
 export interface RunningControlService extends ListeningControlServer {
   supervisor: RunSupervisor;
+  evolution: EvolutionProjectService;
 }
 
 export async function startControlService(
@@ -18,6 +20,7 @@ export async function startControlService(
       host: options.host ?? "127.0.0.1",
       port: options.port ?? 4317,
       strategyCatalog: runtime.strategies,
+      evolutionService: runtime.evolution,
       ...(options.sessionToken ? { sessionToken: options.sessionToken } : {}),
     });
   } catch (error) {
@@ -43,6 +46,7 @@ export async function startControlService(
   return {
     ...listening,
     supervisor: runtime.supervisor,
+    evolution: runtime.evolution,
     close: async () => await closeInOrder([() => listening.close(), () => runtime.close()]),
   };
 }
