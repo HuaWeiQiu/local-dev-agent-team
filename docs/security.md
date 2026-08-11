@@ -77,7 +77,7 @@ dependency changes before merging. Branch protection and required status checks
 should be enabled on the remote repository. The project creates draft pull
 requests by default and never auto-merges.
 
-## Bounded Evolution (Phases 1-4)
+## Bounded Evolution (Phases 1-5)
 
 The evolution domain, in-memory catalog, and Phase-2 durable wrapper are an
 additional trust boundary, not a path to unsupervised self-modification:
@@ -103,6 +103,11 @@ additional trust boundary, not a path to unsupervised self-modification:
   Evaluation persists a versioned source: legacy or library-supplied evidence
   defaults to `external` and cannot cross the Phase-4 HTTP promotion boundary as
   `server-structural-preflight-v1`.
+- The Phase-5 React/Tauri workbench is an untrusted intent client, not an
+  application authority. It never asks for target paths, digests, evidence,
+  operator identity, or apply bytes. Preview tokens and idempotency keys remain
+  in short-lived component memory and are cleared on project/target/revision
+  changes; every mutation is followed by an authoritative snapshot read.
 - Capability flags force automatic execution, automatic promotion, network
   publication, and secret storage to remain false.
 - Catalog mutations are atomic: failed validation leaves proposals, audit

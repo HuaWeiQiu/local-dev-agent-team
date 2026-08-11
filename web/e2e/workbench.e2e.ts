@@ -109,10 +109,11 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await expect(launcher.getByText("strict", { exact: true })).toBeVisible();
   await expect(launcher.getByText("MCP 继承：worker", { exact: true })).toBeVisible();
   await launcher.getByText("strict", { exact: true }).click();
-  const strictStrategy = launcher.locator(".strategy-segments label").filter({ hasText: "strict" });
+  const strictInput = launcher.locator('.strategy-segments input[value="strict"]');
+  const strictStrategy = strictInput.locator("..");
   await launcher.getByLabel("目标").focus();
   await page.keyboard.press("Tab");
-  await expect(strictStrategy.locator("input")).toBeFocused();
+  await expect(strictInput).toBeFocused();
   await expect(strictStrategy).toHaveCSS("outline-style", "solid");
   await launcher.getByRole("button", { name: "角色 Profile 覆盖" }).click();
   await expect(launcher.locator(".profile-grid select")).toHaveCount(5);

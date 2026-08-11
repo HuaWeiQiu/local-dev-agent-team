@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { stringify as stringifyYaml } from "yaml";
 import { createDefaultConfig } from "../../src/config/defaults.js";
 import { SqliteEventStore } from "../../src/events/store.js";
@@ -8,8 +10,10 @@ import type { RunState, TaskRunState } from "../../src/state/types.js";
 import { loadWorkspace } from "../../src/workspace/load.js";
 import { startWorkspaceControlService } from "../../src/workspace/service.js";
 import { compileStrategyTopology } from "../../src/strategies/topology.js";
+import { E2E_SESSION_TOKEN } from "./session.js";
 
 const root = await mkdtemp(path.join(tmpdir(), "agent-team-ui-e2e-"));
+const execFileAsync = promisify(execFile);
 const visualRoot = path.join(root, "visual");
 const serviceRoot = path.join(root, "service");
 await mkdir(visualRoot, { recursive: true });
@@ -25,6 +29,7 @@ config.profiles["claude-reviewer"] = {
   args: [],
 };
 config.roles.architect!.allowedProfiles.push("claude-reviewer");
+config.roles.worker!.promptFile = "prompts/worker.md";
 config.profiles["codex-worker"]!.externalTools = "inherit";
 config.roles.reviewer = {
   defaultProfile: "claude-reviewer",
@@ -42,6 +47,10 @@ config.strategies!.definitions.strict = {
   },
 };
 await writeFile(path.join(visualRoot, "agent-team.yaml"), stringifyYaml(config), "utf8");
+await mkdir(path.join(visualRoot, "prompts"), { recursive: true });
+await writeFile(path.join(visualRoot, "prompts", "worker.md"), "Original worker prompt\n", "utf8");
+await writeFile(path.join(visualRoot, ".gitignore"), ".agent-team/\n", "utf8");
+await initializeGitProject(visualRoot);
 await writeFile(
   path.join(serviceRoot, "agent-team.yaml"),
   stringifyYaml(createDefaultConfig("service-fixture")),
@@ -152,13 +161,24 @@ await writeFile(
   "utf8",
 );
 const workspace = await loadWorkspace(root);
-const service = await startWorkspaceControlService(workspace, { port: 4399 });
+const service = await startWorkspaceControlService(workspace, {
+  port: 4399,
+  sessionToken: E2E_SESSION_TOKEN,
+});
 process.stdout.write(`Visual fixture: ${service.url}\n`);
 await new Promise<void>((resolve) => {
   process.once("SIGINT", resolve);
   process.once("SIGTERM", resolve);
 });
 await service.close();
+
+async function initializeGitProject(projectRoot: string): Promise<void> {
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: projectRoot });
+  await execFileAsync("git", ["config", "user.name", "Agent Team E2E"], { cwd: projectRoot });
+  await execFileAsync("git", ["config", "user.email", "agent-team-e2e@example.invalid"], { cwd: projectRoot });
+  await execFileAsync("git", ["add", ".gitignore", "agent-team.yaml", "prompts/worker.md"], { cwd: projectRoot });
+  await execFileAsync("git", ["commit", "-m", "Initialize visual fixture"], { cwd: projectRoot });
+}
 
 function fixtureState(projectRoot: string): RunState {
   const now = new Date().toISOString();

@@ -404,3 +404,188 @@ export interface UsageReport {
   totals: UsageDetail;
   runs: RunUsageEntry[];
 }
+
+export type EvolutionLifecycleStatus =
+  | "proposed"
+  | "evaluating"
+  | "evaluated"
+  | "promoted"
+  | "rejected"
+  | "rolled-back";
+
+export type EvolutionCandidate =
+  | {
+      kind: "strategy-blueprint";
+      name: string;
+      definition: StrategyBlueprintDefinition;
+    }
+  | {
+      kind: "role-prompt";
+      path: string;
+      contentDigest: string;
+    };
+
+export interface EvolutionEvidenceItem {
+  kind: "deterministic" | "advisory";
+  id: string;
+  summary: string;
+  status?: "pass" | "fail";
+  verdict?: "approve" | "request_changes" | "escalate";
+}
+
+export interface EvolutionEvaluation {
+  source: "external" | "server-structural-preflight-v1";
+  evidence: {
+    proposalId: string;
+    candidateDigest: string;
+    items: EvolutionEvidenceItem[];
+  };
+  result: {
+    proposalId: string;
+    candidateDigest: string;
+    passed: boolean;
+    deterministicPassed: boolean;
+    advisoryPassed: boolean;
+    summary: string;
+    failedDeterministicIds: string[];
+    advisoryVerdicts: Array<"approve" | "request_changes" | "escalate">;
+  };
+  at: string;
+}
+
+export interface EvolutionApplication {
+  proposalId: string;
+  target:
+    | { kind: "strategy-blueprint"; name: string }
+    | { kind: "role-prompt"; path: string };
+  status: "applied" | "adopted";
+  beforeTargetDigest: string | null;
+  afterTargetDigest: string;
+  rollbackSafe: boolean;
+  catalogRevision: number;
+  operator: string;
+  reason: string;
+  appliedAt: string;
+}
+
+export interface EvolutionProposal {
+  id: string;
+  createdAt: string;
+  status: EvolutionLifecycleStatus;
+  candidate: EvolutionCandidate;
+  policy: {
+    version: 1;
+    capabilities: {
+      automaticExecution: false;
+      automaticPromotion: false;
+      networkPublication: false;
+      secretStorage: false;
+    };
+    allowedPromptPaths: string[];
+  };
+  transitions: Array<{
+    from: EvolutionLifecycleStatus;
+    to: EvolutionLifecycleStatus;
+    at: string;
+  }>;
+  evaluation?: EvolutionEvaluation;
+  application: EvolutionApplication | null;
+}
+
+export interface EvolutionAuditRecord {
+  kind: "promotion" | "rejection" | "rollback";
+  proposalId: string;
+  actor: string;
+  reason: string;
+  at: string;
+  previousActiveProposalId?: string | null;
+  restoredActiveProposalId?: string | null;
+}
+
+export interface EvolutionCompletedApplication {
+  operation: "promote-and-apply" | "rollback-applied" | "reconcile-promoted";
+  proposalId: string;
+  status: "applied" | "rolled-back" | "adopted" | "aborted" | "legacy-unreconciled";
+  beforeTargetDigest: string | null;
+  afterTargetDigest: string | null;
+  catalogRevisionBefore: number;
+  catalogRevisionAfter: number;
+  operator: string;
+  reason: string;
+  completedAt: string;
+}
+
+export interface EvolutionSnapshot {
+  catalogRevision: number;
+  applicationRevision: number;
+  recoveryRequired: boolean;
+  promptRoles: Array<{ role: string; path: string }>;
+  proposals: EvolutionProposal[];
+  activeProposals: Array<{
+    target:
+      | { kind: "strategy-blueprint"; name: string }
+      | { kind: "role-prompt"; path: string };
+    proposalId: string;
+  }>;
+  auditRecords: EvolutionAuditRecord[];
+  completedApplications: EvolutionCompletedApplication[];
+  pendingOperation: {
+    operation: "promote-and-apply" | "rollback-applied" | "reconcile-promoted";
+    proposalId: string;
+    startedAt: string;
+  } | null;
+  evidenceScope: "server-structural-preflight-not-candidate-execution";
+}
+
+export type EvolutionPreviewMaterial =
+  | {
+      kind: "role-prompt";
+      identity: string;
+      digest: string | null;
+      present: boolean;
+      content: string | null;
+    }
+  | {
+      kind: "strategy-blueprint";
+      identity: string;
+      digest: string | null;
+      present: boolean;
+      definition: StrategyBlueprintDefinition | null;
+    };
+
+export interface EvolutionApplicationPreview {
+  token: string;
+  kind: "promote-and-apply" | "rollback-applied";
+  proposalId: string;
+  candidateDigest: string;
+  catalogRevision: number;
+  activeProposalId: string | null;
+  currentTargetDigest: string | null;
+  operator: string;
+  expiresAt: string;
+  beforeTarget: {
+    kind: EvolutionCandidate["kind"];
+    identity: string;
+    digest: string | null;
+    present: boolean;
+    mode?: number;
+  };
+  afterTarget: {
+    kind: EvolutionCandidate["kind"];
+    identity: string;
+    digest: string | null;
+    present: boolean;
+    mode?: number;
+  };
+}
+
+export interface EvolutionPreviewResponse {
+  preview: EvolutionApplicationPreview;
+  description: {
+    kind: "promote-and-apply" | "rollback-applied";
+    proposalId: string;
+    before: EvolutionPreviewMaterial;
+    after: EvolutionPreviewMaterial;
+  };
+  evidenceScope?: "server-structural-preflight-not-candidate-execution";
+}

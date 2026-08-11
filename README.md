@@ -38,7 +38,7 @@
 - 返工、并发数、进程时间和 CI 修复次数都有明确上限。
 - 可以创建 GitHub 草稿 PR、等待 Actions 检查并执行一次受限修复。
 - 不自动合并代码，最终合并必须由人确认。
-- 提供受控演进后端：通过演进控制面提交的自定义策略或角色提示词候选必须经过服务端结构预检、精确材料预览和人工确认才能应用，并保留本地会话保护、幂等命令、崩溃恢复和回滚链；Web 可视化工作台将在 Phase 5 接入。
+- 提供 React/Tauri 受控演进工作台：自定义策略或角色提示词候选必须经过服务端结构预检、精确材料预览和人工确认才能应用，并保留本地会话保护、幂等命令、崩溃恢复和回滚链。
 
 当前内置以下 CLI 适配器：
 
@@ -598,7 +598,7 @@ agent-team complete <run-id>
 - 运行状态和 Agent 上下文保存在 `.agent-team/`，并默认被 Git 忽略。
 - 不执行自动合并或强制推送。
 
-## 受控演进后端（Phase 4）
+## 受控演进工作台（Phase 1-5）
 
 `agent-team serve` 会生成本地会话 token，并输出可直接打开的 bootstrap URL。演进接口
 只监听 loopback；读接口要求该本地会话，写接口还要求浏览器发送与实际监听地址完全
@@ -612,9 +612,20 @@ candidate digest；它只证明 schema、当前信任、提示词对象完整性
 评估来源以 `server-structural-preflight-v1` 持久化；升级前的外部评估会标记为 `external`，
 不能通过 Phase 4 的晋升入口冒充当前预检。
 
+启动服务并使用输出的 `Open in browser` 地址建立本地会话后，在左侧主导航进入“演进”：
+
+1. 点击“新建”，选择执行策略或角色提示词；路径、摘要、policy 和 proposal ID 均由服务端生成。
+2. 在候选详情中运行“结构预检”。界面会明确显示该结果**不代表候选已经执行**。
+3. 预检通过后点击“查看并应用”，核对服务端返回的完整当前值和应用后值，填写决定理由再确认。
+4. 已应用且具备恢复证明的候选可继续“预览回滚”；旧版本已晋升候选只提供精确匹配后的“采纳当前目标”。
+
+桌面端提供候选、详情和下一步三栏视图；手机端使用候选列表/详情单页切换。项目切换、
+目标修订变化或预览过期会销毁旧预览，所有 mutation 完成后均重新读取服务端状态，不做
+目标状态的乐观伪更新。
+
 晋升和回滚使用项目级 mutation latch，与运行启动、继续、审批和策略直改互斥；相同命令
-可安全重放。服务关闭时先封闭并排空所有演进操作，再释放项目控制锁。Phase 5 将把这些
-能力接入 React/Tauri 工作台；当前没有自动晋升、后台自循环、网络发布或秘密存储。
+可安全重放。服务关闭时先封闭并排空所有演进操作，再释放项目控制锁。React/Tauri
+工作台只调用该窄控制面；当前没有自动晋升、后台自循环、网络发布或秘密存储。
 
 升级前已经 promoted、但没有 application proof 的目标，可在 Web API 中仅以 `adopt` 模式
 登记：实时目标必须逐字节匹配候选，浏览器不能上传 apply 内容。若必须重新应用旧候选，先
@@ -634,7 +645,7 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 `--expected-revision` 使用操作员检查过的 catalog revision，并被纳入命令幂等绑定；重试时
 必须继续使用同一个值，不能偷偷跟随新的 catalog 状态。
 
-详细边界见 [受限自演进 Phase 1-4](docs/evolution-phase-1.zh-CN.md) 与
+详细边界见 [受限自演进 Phase 1-5](docs/evolution-phase-1.zh-CN.md) 与
 [ADR 0016](docs/adr/0016-evolution-control-plane.md)。
 
 ## 当前范围与限制
@@ -645,7 +656,7 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 - Codex CLI 和 Claude Code。
 - Git worktree 隔离。
 - GitHub PR 与 Actions 质量门禁。
-- 受限自演进 Phase 1-4：候选/证据/人工门禁、仓库本地持久化、受控 target apply/rollback，以及本地会话保护的 HTTP 控制面。
+- 受限自演进 Phase 1-5：候选/证据/人工门禁、仓库本地持久化、受控 target apply/rollback、本地 HTTP 控制面和 React/Tauri 可视化工作台。
 
 运行状态会持久保存。当前版本不会重新连接已经终止的 Agent CLI 进程，但可以从
 经过 Git 验证的任务检查点人工恢复；未完成波次会使用新的分支重新执行。其他
@@ -655,9 +666,9 @@ Agent CLI 需要通过适配器接口接入。
 
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
-- [安全模型](docs/security.md)（含受限自演进 Phase 1-4 信任、持久化、应用与控制面边界）
+- [安全模型](docs/security.md)（含受限自演进 Phase 1-5 信任、持久化、应用、控制面与前端边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
-- [受限自演进 Phase 1-4](docs/evolution-phase-1.zh-CN.md)（候选记录、服务端预检、人工晋升、受控应用/回滚与延期能力分界）
+- [受限自演进 Phase 1-5](docs/evolution-phase-1.zh-CN.md)（候选记录、服务端预检、人工晋升、受控应用/回滚、可视化工作台与延期能力分界）
 - [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014：演进 catalog 持久化边界](docs/adr/0014-durable-evolution-catalog.md)
 - [ADR 0015：受控演进应用事务](docs/adr/0015-controlled-evolution-application.md)
