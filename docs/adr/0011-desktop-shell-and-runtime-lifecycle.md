@@ -37,8 +37,10 @@ The Rust shell invokes executables directly with argument arrays. It never
 constructs a shell command. For development, it can use the repository build
 and the current Node runtime. Packaged builds copy the target Node executable
 as a Tauri external binary and preserve the compiled control-plane resources
-under one runtime directory. Cross-target packaging must provide a Node binary
-for that exact target rather than copying the build host runtime.
+and lockfile-resolved production dependencies under one runtime directory. The
+preparation step rejects symbolic links and target-specific native addons, then
+runs the packaged CLI before Tauri bundling. Cross-target packaging must provide
+a Node binary for that exact target rather than copying the build host runtime.
 
 The control service receives a random session token through its environment.
 The shell opens a session bootstrap URL, and the service exchanges the token

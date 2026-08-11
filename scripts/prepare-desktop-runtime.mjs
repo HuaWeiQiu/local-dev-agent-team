@@ -1,5 +1,17 @@
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -98,7 +110,97 @@ const [licenseSourceInfo, licenseDestinationInfo] = await Promise.all([
 if (!licenseDestinationInfo || licenseDestinationInfo.size !== licenseSourceInfo.size) {
   await copyFile(licenseSource, licenseDestination);
 }
-process.stdout.write(`Prepared Node v${nodeVersion} desktop runtime for ${target}\n`);
+await prepareApplicationRuntime(runtimeDirectory);
+process.stdout.write(`Prepared Node v${nodeVersion} desktop runtime and production dependencies for ${target}\n`);
+
+async function prepareApplicationRuntime(runtimeDirectory) {
+  const applicationDirectory = path.join(runtimeDirectory, "app");
+  await cleanupApplicationStagingDirectories(runtimeDirectory);
+  const stagingDirectory = await mkdtemp(path.join(runtimeDirectory, ".app-staging-"));
+  try {
+    await Promise.all([
+      copyFile(path.join(repositoryRoot, "package.json"), path.join(stagingDirectory, "package.json")),
+      copyFile(path.join(repositoryRoot, "pnpm-lock.yaml"), path.join(stagingDirectory, "pnpm-lock.yaml")),
+    ]);
+
+    const install = runPnpm([
+      "--dir",
+      stagingDirectory,
+      "install",
+      "--prod",
+      "--frozen-lockfile",
+      "--ignore-scripts",
+      "--config.node-linker=hoisted",
+    ]);
+    if (install.status !== 0) {
+      throw new Error(`Unable to install desktop production dependencies: ${install.stderr || install.stdout || "pnpm failed"}`);
+    }
+
+    await Promise.all([
+      cp(path.join(repositoryRoot, "dist"), path.join(stagingDirectory, "dist"), { recursive: true }),
+      cp(path.join(repositoryRoot, "web", "dist"), path.join(stagingDirectory, "web", "dist"), { recursive: true }),
+      cp(path.join(repositoryRoot, "prompts"), path.join(stagingDirectory, "prompts"), { recursive: true }),
+      cp(path.join(repositoryRoot, "schemas"), path.join(stagingDirectory, "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      rm(path.join(stagingDirectory, "pnpm-lock.yaml"), { force: true }),
+      rm(path.join(stagingDirectory, "node_modules", ".bin"), { recursive: true, force: true }),
+      rm(path.join(stagingDirectory, "node_modules", ".pnpm"), { recursive: true, force: true }),
+      rm(path.join(stagingDirectory, "node_modules", ".modules.yaml"), { force: true }),
+    ]);
+    await assertPortableRuntime(stagingDirectory);
+
+    const smoke = spawnSync(
+      process.execPath,
+      [path.join(stagingDirectory, "dist", "cli.js"), "--version"],
+      { cwd: stagingDirectory, encoding: "utf8" },
+    );
+    if (smoke.status !== 0) {
+      throw new Error(`Desktop production runtime smoke test failed: ${smoke.stderr || smoke.stdout || "CLI failed"}`);
+    }
+
+    await rm(applicationDirectory, { recursive: true, force: true });
+    await rename(stagingDirectory, applicationDirectory);
+  } catch (error) {
+    await rm(stagingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function cleanupApplicationStagingDirectories(runtimeDirectory) {
+  for (const entry of await readdir(runtimeDirectory, { withFileTypes: true })) {
+    if (entry.name.startsWith(".app-staging-")) {
+      await rm(path.join(runtimeDirectory, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+function runPnpm(args) {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && /\.(?:c?js|mjs)$/i.test(npmExecPath)) {
+    return spawnSync(process.execPath, [npmExecPath, ...args], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    });
+  }
+  return spawnSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", args, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  });
+}
+
+async function assertPortableRuntime(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Desktop production runtime contains a non-portable symbolic link: ${entryPath}`);
+    }
+    if (entry.isFile() && entry.name.endsWith(".node")) {
+      throw new Error(`Desktop production runtime contains a target-specific native addon: ${entryPath}`);
+    }
+    if (entry.isDirectory()) await assertPortableRuntime(entryPath);
+  }
+}
 
 function distributionFor(targetTriple) {
   const supported = {

@@ -762,8 +762,9 @@ pnpm desktop:build
 ```
 
 首次准备桌面端时会从 Node.js 官方发布站下载固定版本的 Node 24 运行时并校验
-SHA-256，安装包不依赖客户另行安装 Node。Codex、Claude Code 等 Agent CLI 仍需按
-项目配置安装并完成登录，App 会在后续环境检查中统一提示。
+SHA-256，同时按锁文件安装生产依赖并用内嵌 CLI 执行启动冒烟检查；安装包不依赖客户
+另行安装 Node 或 npm 包。Codex、Claude Code 等 Agent CLI 仍需按项目配置安装并完成
+登录，App 会在后续环境检查中统一提示。临时测试目录不会写入“上次打开的项目”。
 
 当前已实机验证 macOS arm64。运行时准备脚本支持 macOS arm64/x64、Windows x64 和
 Linux arm64/x64。每次 PR 创建或提交新 commit，GitHub Actions 都会构建
