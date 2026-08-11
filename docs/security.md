@@ -77,6 +77,40 @@ dependency changes before merging. Branch protection and required status checks
 should be enabled on the remote repository. The project creates draft pull
 requests by default and never auto-merges.
 
+## Bounded Evolution (Phase 1)
+
+The Phase-1 evolution domain and in-memory catalog are an additional trust
+boundary, not a path to unsupervised self-modification:
+
+- A trusted integration must build the trust context from configured role
+  `promptFile` paths and `allowedProfiles`, not from self-declared candidate
+  policy alone. Phase 1 only validates the role map supplied by its caller; it
+  does not load or authenticate project configuration itself.
+- Role-prompt candidates store a repository-relative path and content digest
+  only; Phase 1 does not read, write, or apply prompt or strategy files.
+- Evaluation requires deterministic evidence; any deterministic failure vetoes
+  advisory (including LLM) approval. Independent review is recommended operator
+  practice and, if recorded, must be included in the evidence passed to
+  `evaluate` (the only evidence-binding step); Phase 1 does not require or
+  automate review, and deterministic-only evidence can pass. Promotion,
+  rejection, and rollback need a non-empty `actor` and `reason`. These fields
+  are audit labels, not authenticated proof of a human identity; the calling
+  control plane must authenticate the operator and bind that identity.
+- Capability flags force automatic execution, automatic promotion, network
+  publication, and secret storage to remain false.
+- Catalog mutations are atomic: failed validation leaves proposals, audit
+  records, and active pointers unchanged. Rollback is limited to the currently
+  active promotion and uses only internal promotion provenance.
+
+Grok workers used by the default workflow remain bounded by profile and adapter
+policy (`maxTurns`, workspace-write only inside an isolated worktree,
+`externalTools: deny`, disabled memory/subagents/Web, managed MCP deny mode)
+and by strategy budgets such as strict sequential execution and
+`maxReworkAttempts: 2`. Those controls are independent of the evolution catalog.
+
+Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md) and
+[ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md).
+
 ## Reporting
 
 Do not open a public issue containing an exploitable secret or private
