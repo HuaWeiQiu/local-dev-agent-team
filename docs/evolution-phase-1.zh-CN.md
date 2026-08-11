@@ -1,0 +1,344 @@
+# 受限自演进 Phase 1
+
+本文面向普通用户与维护者，说明当前仓库中**已实现**的受限自演进（bounded evolution）Phase 1：它受 OpenRSI 一类“可演进策略/提示”思路启发，但刻意收窄为**可审计的候选记录与人工门禁**，不复制任何 OpenRSI 源码或协议文本。
+
+实现入口：
+
+| 模块 | 路径 | 职责摘要 |
+| --- | --- | --- |
+| Domain | `src/evolution/domain.ts` | schema、信任校验、摘要、证据绑定、生命周期、纯函数 guarded operations |
+| Catalog | `src/evolution/catalog.ts` | 运行期索引、审计、active 指针、内部 promotion provenance、确定性快照、事务式提交 |
+
+相关决策记录见 [ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md)。架构与安全总览见 [architecture.md](./architecture.md) 与 [security.md](./security.md)。
+
+## 1. 核心思想（受限，而非自治）
+
+Phase 1 只回答一个问题：
+
+> 在不改动真实 prompt/strategy 文件、不启动后台循环、不自动晋升的前提下，如何用可验证的数据结构记录“策略蓝图 / 角色提示”候选，并以**至少一条确定性证据 + 显式人工晋升/拒绝**作为 domain 强制门禁，同时把**独立审查**作为推荐的操作流程（而非 Phase 1 自动强制的检查）？
+
+因此：
+
+- **可以**：在受信任上下文中提出候选、绑定 SHA-256 摘要与证据、记录不可变生命周期、由人晋升/拒绝/回滚、在内存 catalog 中原子更新审计与 active 指针。
+- **不可以（本阶段明确不做）**：把候选写成磁盘上的配置、让 Agent 自动执行演进、持久化 catalog、网络发布、秘密存储、后台自运行或自动晋升。
+
+演进策略能力标志在 domain 中被强制为字面量 `false`：
+
+- `automaticExecution: false`
+- `automaticPromotion: false`
+- `networkPublication: false`
+- `secretStorage: false`
+
+## 2. Phase 1 已实现 vs 延期
+
+### 2.1 已实现能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 受信任候选 | 仅 `strategy-blueprint` 与 `role-prompt` 两类；策略 `roleProfiles` 必须落在项目 `roles.*.allowedProfiles` 内 |
+| 证据与摘要 | 候选经规范序列化后计算 **SHA-256**；评估证据必须绑定 `proposalId` + `candidateDigest` |
+| 不可变生命周期 | `proposed → evaluating → evaluated → promoted \| rejected`，以及 `promoted → rolled-back` |
+| 人工门禁 | 晋升、拒绝、回滚均需带 `actor` / `reason` / `decidedAt` 的显式人类决策 |
+| 运行期私有内存 catalog | `EvolutionCatalog` 权威状态不暴露为可写公共字段；快照深拷贝并冻结 |
+| 确定性快照 | `proposals`、`auditRecords`、`activeProposals` 使用稳定排序，适合相等比较 |
+| 原子提交 | 多字段更新先在克隆工作副本上完成，成功后整体替换；校验失败不留下半状态 |
+| 内部 promotion provenance | 晋升记录由 catalog 内部保留，调用方不能注入或替换回滚来源 |
+
+### 2.2 延期能力（未实现）
+
+下列能力**尚未实现**，路线图中可能出现，但当前代码与配置不得当作已具备：
+
+| 延期项 | 说明 |
+| --- | --- |
+| 持久化 catalog | 进程退出后内存状态不保留；无正式磁盘 catalog 格式的运行时加载 |
+| 应用 prompt/strategy 文件 | 不读取、写入或替换真实 `promptFile` / 策略定义文件 |
+| Agent 执行演进 | 无“演进 Agent”工作流阶段，也不自动调用 worker 去实现候选 |
+| 评估自动化 | 无内置自动跑门禁并把结果写入证据的编排 |
+| API/UI 集成 | 控制服务与工作台未暴露演进 catalog 的专用 API/页面 |
+| 网络发布 | 不把候选或晋升结果发布到远程 |
+| 秘密存储 | 载荷禁止 token/secret/env 等键；不提供密钥保管 |
+| 后台 / 自运行循环 | 无定时或事件驱动的自我演进循环 |
+| 自动晋升 | `automaticPromotion` 恒为 false；无无人值守晋升路径 |
+
+## 3. 端到端流程
+
+```text
+propose
+  -> beginEvaluation / evaluating
+  -> evaluate（唯一写入证据并转入 evaluated 的操作；确定性证据强制，advisory 可选）
+  -> （推荐）对不可变的 evaluated 快照做 external independent review
+  -> explicit human promote 或 reject（promote 复用评估时已记录的证据快照，不能追加新证据）
+  -> （仅当前 active）human rollback
+```
+
+要点：
+
+1. **至少一条确定性证据（强制）**。仅有 LLM/advisory “approve”、没有确定性条目时，评估不能通过。
+2. **推荐的操作顺序是评估后独立审查**。操作员先调用 `evaluate` 生成不可变的 `evaluated` 快照，再让独立审查者检查该快照，最后由人决定 `promote` 或 `reject`。这一步审查在 Phase 1 中是 catalog 外部的人工门禁，不会追加到已冻结的证据中。
+3. **若 advisory verdict 必须写入 catalog，则要在 `evaluate` 前收集**。`evaluate` / `evaluateProposal` 是**唯一**绑定证据并转入 `evaluated` 的操作；Phase 1 没有评估后追加证据的 API。`promote` 要求证据与评估快照完全一致，因此不能把评估后的外部审查再塞回该快照。
+4. **独立审查是推荐工作流，不是 Phase 1 强制规则**。`computeEvaluationResult` 在**没有** advisory 条目时仍可因确定性全部通过而 `passed: true`；domain **不**校验审查者身份或“独立性”。若提交了 advisory 条目，则其中任一条非 `approve` 会否决通过；晋升守卫同样只拒绝“已存在且未全部 approve”的 advisory 结论。
+5. **任一确定性失败否决全部咨询性批准**。确定性失败时 `advisoryPassed` 被置为 `false`，整体 `passed` 为 `false`，LLM/advisory 不能覆盖失败的确定性检查。
+6. **晋升复算证据**。`promote` 要求提交的证据与评估时记录完全一致，并再次计算评估结果；不一致或未通过则拒绝。
+7. **拒绝不改 active 指针**。只有成功的 `promote` 才会把某候选目标的 active 指到该提案。
+8. **回滚只作用于当前 active 的晋升提案**，恢复目标只能来自 catalog 内部保留的 promotion record（`previousActiveProposalId`），不能由调用方伪造。
+
+### 3.1 生命周期状态机
+
+允许的转移（含 guarded）：
+
+| 从 | 到 | 如何进入 |
+| --- | --- | --- |
+| `proposed` | `evaluating` | `transitionProposal` / `beginEvaluation` |
+| `evaluating` | `evaluated` | `evaluateProposal` / `evaluate`（必须有证据） |
+| `evaluated` | `promoted` | `promoteProposal` / `promote`（人类决策 + 通过评估） |
+| `evaluated` | `rejected` | `rejectProposal` / `reject`（人类决策） |
+| `promoted` | `rolled-back` | `rollbackProposal` / `rollback`（人类决策 + 内部 provenance） |
+
+不能用通用 `transitionProposal` 直接跳到 `promoted` / `rejected` / `rolled-back`；这些必须走 guarded API。
+
+## 4. Domain 与 Catalog 边界
+
+### 4.1 Domain 拥有
+
+- 版本化 policy / candidate / evidence / evaluation / human decision / audit record 的 **schema**
+- 从项目角色配置构建的 **`EvolutionTrustContext`**
+  - `configuredRolePromptPaths`：各角色已配置的 `promptFile`
+  - `roleAllowedProfiles`：各角色允许的 profile 名
+- **信任校验**：policy 的 `allowedPromptPaths` 必须是已配置 `promptFile` 的子集；role-prompt 候选路径须同时命中 policy allowlist 与信任集合；strategy 的 `roleProfiles` 须角色存在且 profile 被允许
+- **摘要**：`computeCandidateDigest`、promotion record digest
+- **证据绑定**与评估结果一致性
+- **生命周期合法性**与纯函数式 guarded operations（`evaluate` / `promote` / `reject` / `rollback`）
+- 路径安全：拒绝绝对路径、遍历、`src/` 等源码前缀、非 Markdown 提示路径等
+
+Domain **不**持有全局索引、不持久化、不碰文件系统、不执行 Agent。
+
+### 4.2 Catalog 拥有
+
+- 提案索引（全局唯一 `proposalId`）
+- 审计记录序列（promotion / rejection / rollback）
+- 按候选目标划分的 **active 指针**
+  - `strategy-blueprint`：按策略名
+  - `role-prompt`：按路径
+- **内部** `#promotionRecords`：回滚 provenance，调用方不可替换
+- **确定性快照** `snapshot()`
+- **事务式 `#commit`**：失败原子性；并发/重入突变被拒绝
+
+Catalog 把生命周期与校验**委托**给 domain；自己不做第二套规则。
+
+### 4.3 信任边界一句话
+
+> 信任上下文来自已加载的项目角色配置，而不是候选或 policy 文档的自我声明。
+
+重新解析已保存的提案时仍必须提供 trust context，防止仅靠自声明 allowlist 伪造路径或 profile。
+
+## 5. 候选类型与“只记录、不应用”
+
+### 5.1 `strategy-blueprint`
+
+- 字段：`kind`、`name`、与命名策略行为对齐的 `definition`
+- `definition` 可包含：`topology.mode`（`parallel-dag` | `sequential`）、`maxParallel`、`maxReworkAttempts`、`executionTimeoutSeconds`、`maxAgentInvocations`、`maxProcessOutputBytes`、`maxArtifactBytes`、`roleProfiles`、`approvalGates`、`approvalTimeoutSeconds`
+- Phase 1：**只把定义记入提案**；不会写入 `agent-team.yaml` 或策略蓝图文件，也不会让 runner 自动选用该候选
+
+### 5.2 `role-prompt`
+
+- 字段：`kind`、`path`（仓库相对 Markdown）、`contentDigest`（小写 64 位十六进制 SHA-256）
+- **不存储**提示词正文
+- Phase 1：**不读取、不写入、不替换**磁盘上的 `promptFile`
+
+### 5.3 配置中的策略与角色（以本仓库 `agent-team.yaml` 为准）
+
+```yaml
+strategies:
+  default: balanced
+  definitions:
+    balanced:
+      topology: { mode: parallel-dag }
+      maxParallel: 2
+      maxReworkAttempts: 1
+      executionTimeoutSeconds: 21600
+      maxAgentInvocations: 48
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 2147483648
+      approvalGates: [final]
+      approvalTimeoutSeconds: 172800
+      roleProfiles:
+        orchestrator: codex-orchestrator
+        architect: codex-architect
+        worker: grok-worker
+        reviewer: codex-reviewer
+        tester: codex-tester
+    strict:
+      topology: { mode: sequential }
+      maxParallel: 1
+      maxReworkAttempts: 2
+      executionTimeoutSeconds: 43200
+      maxAgentInvocations: 72
+      maxProcessOutputBytes: 1048576
+      maxArtifactBytes: 4294967296
+      approvalGates: [plan, final]
+      approvalTimeoutSeconds: 172800
+      roleProfiles:
+        orchestrator: codex-orchestrator
+        architect: codex-architect
+        worker: grok-worker
+        reviewer: codex-reviewer
+        tester: codex-tester
+```
+
+约束说明：
+
+- `strategies.definitions.*.roleProfiles` 中的每个映射必须被 `roles.<role>.allowedProfiles` 允许。
+- `roles.<role>.promptFile` 是**项目拥有**的角色提示入口（本仓库 worker 为 `prompts/grok-worker.md`）。
+- 演进 policy 的 `allowedPromptPaths` 还必须是上述已配置 `promptFile` 集合的子集。
+- `EvolutionTrustContext` 和 human decision 的 `actor` 由调用方提供。Phase 1 库只校验结构、允许范围与非空标签，不会自动读取 `agent-team.yaml`，也不会认证 `actor` 确实对应某个人；未来集成必须从已加载配置构造 trust，并在边界外完成身份认证与审计绑定。
+- 运行时 profile 解析完整链（与现有工作流一致；演进 catalog **不改变**该链）：
+  1. 本次运行的 CLI `--profile role=name` 覆盖（写入 `profileOverrides`，覆盖策略映射）；
+  2. 策略 `roleProfiles`（进入有效 `profileOverrides` 的基底）；
+  3. 架构师在计划任务上选定的 `task.profile`（仅当该角色在有效 overrides 中无映射时回退使用，见 `requestedProfileForRole`）；
+  4. 角色 `defaultProfile`。
+  因此，若某策略未给 `worker` 配置 `roleProfiles`，且运行未传 CLI 覆盖，则使用任务上的 `task.profile`（若有），否则才是角色默认 profile。所有层级仍须落在 `roles.<role>.allowedProfiles` 内。
+
+## 6. Grok Worker 边界（与演进文档相关）
+
+本仓库默认 worker 使用 `grok-worker` profile 与 `prompts/grok-worker.md`。下列数字来自当前 `agent-team.yaml` 与适配器实现，供维护者对照，**不是**演进 catalog 的运行时配置。
+
+### 6.1 Profile（`agent-team.yaml`）
+
+| 项 | 值 |
+| --- | --- |
+| adapter | `grok` |
+| model | `grok` |
+| reasoning | `high` |
+| permission | `workspace-write`（仅隔离 Git worktree 内写） |
+| externalTools | `deny` |
+| maxTurns | **16** |
+| timeoutSeconds | **3600**（单次调用） |
+
+### 6.2 适配器强制的管控开关
+
+Grok 适配器在托管调用中会：
+
+- `--no-memory`、`--no-subagents`、`--disable-web-search`
+- `externalTools: deny` 时禁用 MCP 发现/调用相关工具，并隔离用户 home 以免加载兼容 MCP
+- 工作权限映射为 Grok `workspace` sandbox；工作流仍提供**隔离 worktree**
+- 允许的内置工具集合由适配器显式给出（读/搜/改文件/运行终端），而非开放任意插件
+
+### 6.3 Strict 策略预算（控制器，不是 worker 自声明）
+
+| 项 | `strict` 值 |
+| --- | --- |
+| topology | `sequential` |
+| maxParallel | 1 |
+| maxReworkAttempts | **2**（首次尝试 + 最多两次返工 = **最多 3 次**任务尝试） |
+| executionTimeoutSeconds | 43200 |
+| maxAgentInvocations | 72 |
+| maxProcessOutputBytes | 1048576（托管 agent / quality / repair 捕获的 stdout、stderr 各自上限；Git 与 doctor 等进程不受该策略字段约束） |
+| maxArtifactBytes | 4294967296 |
+| approvalGates | `[plan, final]` |
+| approvalTimeoutSeconds | 172800 |
+
+### 6.4 Worker 提示词 vs 控制器返工预算
+
+`prompts/grok-worker.md` 要求 worker：
+
+1. 只完成**一个**已分配任务；
+2. 只修改任务声明的 `ownedPaths`；
+3. 先读实现与测试，再做最小改动；
+4. 只跑相关确定性检查；
+5. 检查通过后立即停止，不做投机性清理；
+6. 若一次纠正后检查仍失败，**停止并把失败证据交给控制器**。
+
+控制器的 `maxReworkAttempts` 是**独立**预算：worker 的“单次纠正后停止”不会消耗或扩展该预算；是否再次派工由确定性门禁、独立 reviewer/tester 与编排策略决定。LLM 不能把失败的 `pnpm test` 说成通过。
+
+## 7. 常用命令示例（经 `src/cli.ts` 核验的语法）
+
+在仓库根目录：
+
+```bash
+# 依赖与确定性门禁
+pnpm install
+pnpm check
+pnpm test
+pnpm build
+
+# 环境与 CLI 健康检查（默认不调用模型）
+agent-team doctor
+agent-team doctor --profile grok-worker
+agent-team doctor --profile grok-worker --probe-models
+
+# 使用 strict 策略启动一次运行
+agent-team run --goal "为分页接口补充边界测试" --strategy strict
+
+# 列出最近运行 / 查看单次运行
+agent-team status
+agent-team status <run-id>
+
+# 审批（plan 或 final 门）：必须同时给出 request、decision、actor、reason
+agent-team approval <run-id> \
+  --request <approval-request-id> \
+  --decision approved \
+  --actor "alice" \
+  --reason "计划范围可接受"
+
+agent-team approval <run-id> \
+  --request <approval-request-id> \
+  --decision rejected \
+  --actor "alice" \
+  --reason "任务拆分超出声明范围"
+
+# 从已验证检查点恢复中断运行
+agent-team resume <run-id> \
+  --actor "alice" \
+  --reason "控制服务重启后继续"
+```
+
+说明：
+
+- `run` 的 `--goal` 为必填；`--strategy` 选择命名策略（如 `strict`）。
+- `approval` 的 `--decision` 只能是 `approved` 或 `rejected`。
+- `resume` 需要 `--actor` 与 `--reason`。
+- 上述 CLI 驱动的是**软件开发工作流**，不是演进 catalog 的专用 CLI；Phase 1 演进 API 目前供库内调用与测试使用。
+
+## 8. 失败原子性与回滚语义
+
+- **校验失败**：domain 抛错，catalog 不提交工作副本 → 提案、审计、active 指针保持原样。
+- **多字段更新**：`promote` 同时写提案状态、审计记录、内部 promotion record、active 指针；任一步在提交前失败则全部不生效。
+- **非 active 回滚**：若目标上的 active 已指向更新的晋升提案，旧的 `promoted` 提案不能被回滚（避免破坏恢复链）。
+- **回滚结果**：active 恢复为 promotion record 中的 `previousActiveProposalId`；若为 `null` 则删除该目标的 active 指针。回滚**不**还原磁盘文件（本阶段本来也没有写文件）。
+
+## 9. 分阶段未来路线图（全部为未实现）
+
+下列阶段是规划方向，**当前均未实现**，不应在运维或集成中依赖：
+
+1. **Phase 2 — 持久化与重开**
+
+   版本化磁盘 catalog、信任上下文下的 reopen 校验、进程崩溃后的可恢复索引。（domain 已为 reopen 预留部分纯校验辅助，但无运行时持久化。）
+
+2. **Phase 3 — 受控应用**
+
+   在人工批准后，有界地应用 role-prompt 文件或策略蓝图到项目拥有路径，并保留可回滚的文件级审计。
+
+3. **Phase 4 — 评估与工作流集成**
+
+   将确定性门禁与（仍为可选的）独立审查证据自动写入；可选工作台/API 展示提案；仍禁止自动晋升。
+
+4. **Phase 5 — 更强隔离下的自动化（可选）**
+
+   仅在显式策略与多重人工门禁下，考虑有限的半自动晋升建议；网络发布与秘密存储仍默认关闭。
+
+## 10. 维护者快速核对清单
+
+- [ ] 是否只修改了文档声明路径，而没有“顺手”改 `src/` 冒充已应用候选？
+- [ ] 文档中的 Grok / strict 数字是否仍与 `agent-team.yaml` 一致？
+- [ ] 是否把“记录候选”误写成“已能改 prompt 文件”？
+- [ ] 是否声称 LLM 批准可以覆盖失败的确定性命令？（不可以）
+- [ ] ADR 0013 与本文对 domain/catalog 边界的描述是否一致？
+
+## 11. 相关文档
+
+- [系统架构](./architecture.md) — 控制面 / 执行面与演进模块挂载点
+- [安全模型](./security.md) — 不信任 Agent 输出、确定性否决、Grok 托管限制
+- [配置说明](./configuration.md) — profile、角色、`promptFile`、命名策略
+- [策略蓝图](./strategy-blueprints.md) — 工作台自定义策略（与演进候选不同源）
+- [ADR 0012 Grok Worker](./adr/0012-grok-headless-worker-adapter.md)
+- [ADR 0013 Domain/Catalog 边界](./adr/0013-bounded-evolution-domain-catalog-boundary.md)

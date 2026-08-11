@@ -159,3 +159,40 @@ deterministic order. The primary working tree is never used for agent edits.
 - Reviewer and tester sessions cannot approve their own implementation.
 - The worker cannot convert a failed command into a passing result.
 - GitHub publication is opt-in and never implies automatic merge.
+
+## Bounded Evolution (Phase 1)
+
+Phase 1 adds a **library-grade** bounded-evolution surface inspired by
+OpenRSI-style candidate records, without copying external sources and without
+self-running loops.
+
+| Layer | Module | Owns |
+| --- | --- | --- |
+| Domain | `src/evolution/domain.ts` | Schemas, trust context from role config, digests, evidence binding, lifecycle, pure guarded promote/reject/rollback |
+| Catalog | `src/evolution/catalog.ts` | Runtime-private in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit |
+
+Current capabilities stop at trust-aware `strategy-blueprint` / `role-prompt`
+candidates, SHA-256 digests, immutable lifecycle, explicit human
+promotion/rejection/rollback, and atomic active-pointer updates. Deferred work
+includes durable persistence, applying prompt or strategy files, agent
+execution, evaluation automation, API/UI integration, network publication,
+secrets, background loops, and automatic promotion.
+
+Operator flow: `propose → evaluate → external independent review of the
+immutable evaluated snapshot → explicit human promote/reject → human
+rollback`. `evaluate` is the only operation that attaches evidence and
+transitions to `evaluated`; advisory review must be collected before that call
+if its verdict needs to be stored in the evidence snapshot. There is no
+post-evaluation evidence append API, and `promote` rejects any evidence that
+differs from the recorded evaluation snapshot, so the recommended
+post-evaluation independent review stays external and unrecorded in Phase 1.
+At least one deterministic
+evidence item is required. Advisory/independent review is the intended
+operator workflow but is **not** enforced or automated in Phase 1: empty
+advisory evidence may still pass when deterministic checks pass, while any
+present non-approving advisory verdict fails evaluation. Any deterministic
+failure vetoes LLM or other advisory approval. Rollback applies only to the
+currently active promotion and restores only catalog-internal provenance.
+
+See [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md) and
+[ADR 0013](./adr/0013-bounded-evolution-domain-catalog-boundary.md).

@@ -607,8 +607,10 @@ Agent CLI 需要通过适配器接口接入。
 
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
-- [安全模型](docs/security.md)
-- [系统架构](docs/architecture.md)
+- [安全模型](docs/security.md)（含受限自演进 Phase 1 信任边界）
+- [系统架构](docs/architecture.md)（含 domain / catalog 分层）
+- [受限自演进 Phase 1](docs/evolution-phase-1.zh-CN.md)（候选记录、人工晋升/回滚、与延期能力分界）
+- [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [开源多 Agent 框架对照与补缺](docs/ecosystem-review.md)
 - [可视化策略蓝图](docs/strategy-blueprints.md)
 - [桌面 App 与 Android/Termux 集成方案](docs/app-runtime-plan.zh-CN.md)
