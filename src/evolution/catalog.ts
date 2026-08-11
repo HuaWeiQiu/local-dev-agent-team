@@ -1,8 +1,12 @@
 import {
+  assertPromotionRecordMatchesProposal,
+  auditRecordSchema,
   createEvolutionProposal,
   evaluateProposal,
   EvolutionDomainError,
   EvolutionValidationError,
+  parseEvolutionProposal,
+  parsePromotionRecord,
   promoteProposal,
   rejectProposal,
   rollbackProposal,
@@ -16,7 +20,7 @@ import {
   type RollbackRecord,
 } from "./domain.js";
 
-/** Phase-1 in-memory evolution catalog document version. */
+/** In-memory evolution catalog snapshot version. */
 export const EVOLUTION_CATALOG_VERSION = 1 as const;
 
 export class EvolutionCatalogError extends EvolutionDomainError {
@@ -77,8 +81,9 @@ type MutableCatalogState = {
  * Lifecycle validation and transitions are delegated exclusively to
  * {@link ./domain.js}. This catalog owns proposal indexes, audit history,
  * per-target active pointers, and internal promotion provenance used for
- * rollback. It does not persist state, mutate source files, execute agents,
- * open network connections, or auto-promote.
+ * rollback. It does not open the network, mutate source files, execute agents,
+ * or auto-promote. Filesystem durability is owned by the Phase-2 asynchronous
+ * wrapper in {@link ./persistence.js}; this class stays synchronous and pure.
  */
 export class EvolutionCatalog {
   #proposals = new Map<string, EvolutionProposal>();
@@ -91,6 +96,19 @@ export class EvolutionCatalog {
 
   constructor(trust: EvolutionTrustContext) {
     this.#trust = snapshotTrustContext(trust);
+  }
+
+  /**
+   * Build a pure catalog from durable material after independently revalidating
+   * proposal trust, terminal audit history, promotion provenance, and active pointers.
+   */
+  static restore(
+    trust: EvolutionTrustContext,
+    material: EvolutionCatalogRestoreMaterial,
+  ): EvolutionCatalog {
+    const catalog = new EvolutionCatalog(trust);
+    catalog.#restoreFromValidatedMaterial(validateRestoreMaterial(catalog.#trust, material));
+    return catalog;
   }
 
   /**
@@ -318,6 +336,135 @@ export class EvolutionCatalog {
     });
   }
 
+  /**
+   * Export the full authoritative material required for durable persistence,
+   * including append-ordered audit records and internal promotion provenance.
+   * Snapshot ordering is not used for audit history so reopen preserves order.
+   */
+  exportDurableMaterial(): EvolutionCatalogRestoreMaterial {
+    const proposals = [...this.#proposals.values()]
+      .map((proposal) => isolate(proposal))
+      .sort(compareProposals);
+
+    const auditRecords = this.#auditRecords.map((record) => isolate(record));
+
+    const activeProposals = [...this.#activeByTarget.entries()]
+      .map(([key, proposalId]) => ({
+        target: targetFromKey(key),
+        proposalId,
+      }))
+      .sort((left, right) =>
+        compareCodeUnits(
+          candidateTargetKeyFromTarget(left.target),
+          candidateTargetKeyFromTarget(right.target),
+        ),
+      );
+
+    const promotionRecords = [...this.#promotionRecords.values()]
+      .map((record) => isolate(record))
+      .sort((left, right) => compareCodeUnits(left.proposalId, right.proposalId));
+
+    return deepFreeze({
+      proposals,
+      auditRecords,
+      activeProposals,
+      promotionRecords,
+    });
+  }
+
+  /**
+   * Install material already validated by {@link validateRestoreMaterial}.
+   */
+  #restoreFromValidatedMaterial(material: EvolutionCatalogRestoreMaterial): void {
+    if (this.#proposals.size > 0 || this.#auditRecords.length > 0) {
+      throw new EvolutionCatalogError("Cannot restore into a non-empty catalog");
+    }
+
+    const proposals = new Map<string, EvolutionProposal>();
+    for (const proposal of material.proposals) {
+      if (proposals.has(proposal.id)) {
+        throw new EvolutionCatalogConflictError(
+          `Duplicate proposal id '${proposal.id}' in restore material`,
+        );
+      }
+      proposals.set(proposal.id, isolate(proposal));
+    }
+
+    const promotionRecords = new Map<string, PromotionRecord>();
+    for (const record of material.promotionRecords) {
+      if (promotionRecords.has(record.proposalId)) {
+        throw new EvolutionCatalogConflictError(
+          `Duplicate promotion record for proposal '${record.proposalId}' in restore material`,
+        );
+      }
+      const proposal = proposals.get(record.proposalId);
+      if (!proposal) {
+        throw new EvolutionCatalogError(
+          `Promotion record references missing proposal '${record.proposalId}'`,
+        );
+      }
+      if (proposal.status !== "promoted" && proposal.status !== "rolled-back") {
+        throw new EvolutionCatalogError(
+          `Promotion record for proposal '${record.proposalId}' requires promoted or rolled-back status`,
+        );
+      }
+      promotionRecords.set(record.proposalId, isolate(record));
+    }
+
+    for (const proposal of proposals.values()) {
+      if (
+        (proposal.status === "promoted" || proposal.status === "rolled-back") &&
+        !promotionRecords.has(proposal.id)
+      ) {
+        throw new EvolutionCatalogError(
+          `Proposal '${proposal.id}' is '${proposal.status}' but has no promotion provenance`,
+        );
+      }
+    }
+
+    const auditRecords: AuditRecord[] = [];
+    for (const record of material.auditRecords) {
+      if (!proposals.has(record.proposalId)) {
+        throw new EvolutionCatalogError(
+          `Audit record references missing proposal '${record.proposalId}'`,
+        );
+      }
+      auditRecords.push(isolate(record));
+    }
+
+    const activeByTarget = new Map<string, string>();
+    for (const pointer of material.activeProposals) {
+      const key = candidateTargetKeyFromTarget(pointer.target);
+      if (activeByTarget.has(key)) {
+        throw new EvolutionCatalogConflictError(
+          `Duplicate active pointer for target '${key}'`,
+        );
+      }
+      const proposal = proposals.get(pointer.proposalId);
+      if (!proposal) {
+        throw new EvolutionCatalogError(
+          `Active pointer references missing proposal '${pointer.proposalId}'`,
+        );
+      }
+      if (proposal.status !== "promoted") {
+        throw new EvolutionCatalogError(
+          `Active pointer for '${pointer.proposalId}' requires promoted status`,
+        );
+      }
+      if (candidateTargetKey(proposal.candidate) !== key) {
+        throw new EvolutionCatalogError(
+          `Active pointer target does not match proposal '${pointer.proposalId}' candidate`,
+        );
+      }
+      activeByTarget.set(key, pointer.proposalId);
+    }
+
+    this.#proposals = proposals;
+    this.#auditRecords = auditRecords;
+    this.#activeByTarget = activeByTarget;
+    this.#promotionRecords = promotionRecords;
+  }
+
   #requireProposal(proposalId: string): EvolutionProposal {
     const proposal = this.#proposals.get(proposalId);
     if (!proposal) {
@@ -365,6 +512,321 @@ export class EvolutionCatalog {
 
 export function createEvolutionCatalog(trust: EvolutionTrustContext): EvolutionCatalog {
   return new EvolutionCatalog(trust);
+}
+
+/**
+ * Material used to rebuild a pure in-memory catalog. The public restore entry
+ * point revalidates every field against current trust before installing it.
+ */
+export type EvolutionCatalogRestoreMaterial = {
+  readonly proposals: readonly EvolutionProposal[];
+  /** Append-ordered audit history as retained at commit time. */
+  readonly auditRecords: readonly AuditRecord[];
+  readonly activeProposals: readonly EvolutionActiveProposalPointer[];
+  /** Internally retained promotion provenance required for rollback. */
+  readonly promotionRecords: readonly PromotionRecord[];
+};
+
+/**
+ * Build a pure catalog from durable material. The restore entry point repeats
+ * trust and provenance validation, so callers cannot bypass the catalog boundary.
+ */
+export function restoreEvolutionCatalog(
+  trust: EvolutionTrustContext,
+  material: EvolutionCatalogRestoreMaterial,
+): EvolutionCatalog {
+  return EvolutionCatalog.restore(trust, material);
+}
+
+function validateRestoreMaterial(
+  trust: EvolutionTrustContext,
+  material: EvolutionCatalogRestoreMaterial,
+): EvolutionCatalogRestoreMaterial {
+  if (!material || typeof material !== "object" || Array.isArray(material)) {
+    throw new EvolutionValidationError("restore material must be an object");
+  }
+  assertExactRestoreKeys(
+    material as unknown as Record<string, unknown>,
+    ["proposals", "auditRecords", "activeProposals", "promotionRecords"],
+    "restore material",
+  );
+  if (
+    !Array.isArray(material.proposals) ||
+    !Array.isArray(material.auditRecords) ||
+    !Array.isArray(material.activeProposals) ||
+    !Array.isArray(material.promotionRecords)
+  ) {
+    throw new EvolutionValidationError("restore material fields must be arrays");
+  }
+
+  const proposals: EvolutionProposal[] = [];
+  const proposalById = new Map<string, EvolutionProposal>();
+  for (const raw of material.proposals) {
+    const proposal = parseEvolutionProposal(raw, trust);
+    if (proposalById.has(proposal.id)) {
+      throw new EvolutionCatalogConflictError(
+        `Duplicate proposal id '${proposal.id}' in restore material`,
+      );
+    }
+    proposalById.set(proposal.id, proposal);
+    proposals.push(proposal);
+  }
+
+  const promotionRecords: PromotionRecord[] = [];
+  const storedPromotionById = new Map<string, PromotionRecord>();
+  for (const raw of material.promotionRecords) {
+    const promotion = parsePromotionRecord(raw);
+    if (storedPromotionById.has(promotion.proposalId)) {
+      throw new EvolutionCatalogConflictError(
+        `Duplicate promotion record for proposal '${promotion.proposalId}' in restore material`,
+      );
+    }
+    const proposal = proposalById.get(promotion.proposalId);
+    if (!proposal) {
+      throw new EvolutionCatalogError(
+        `Promotion record references missing proposal '${promotion.proposalId}'`,
+      );
+    }
+    assertPromotionRecordMatchesProposal(promotion, proposal);
+    storedPromotionById.set(promotion.proposalId, promotion);
+    promotionRecords.push(promotion);
+  }
+
+  const auditRecords: AuditRecord[] = [];
+  for (const raw of material.auditRecords) {
+    const parsed = auditRecordSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new EvolutionValidationError("restore material contains a malformed audit record");
+    }
+    auditRecords.push(parsed.data);
+  }
+
+  const replayed = replayRestoreAudit(auditRecords, proposalById);
+  if (storedPromotionById.size !== replayed.promotionByProposal.size) {
+    throw new EvolutionCatalogError("Promotion provenance does not match restore audit history");
+  }
+  for (const [proposalId, promotion] of replayed.promotionByProposal) {
+    if (!deepEqual(storedPromotionById.get(proposalId), promotion)) {
+      throw new EvolutionCatalogError(
+        `Promotion provenance for '${proposalId}' does not match restore audit history`,
+      );
+    }
+  }
+
+  const activeProposals = material.activeProposals.map((raw, index) =>
+    parseRestoreActivePointer(raw, index),
+  );
+  const activeByTarget = new Map<string, string>();
+  for (const pointer of activeProposals) {
+    const targetKey = candidateTargetKeyFromTarget(pointer.target);
+    if (activeByTarget.has(targetKey)) {
+      throw new EvolutionCatalogConflictError(
+        `Duplicate active pointer for target '${targetKey}' in restore material`,
+      );
+    }
+    const proposal = proposalById.get(pointer.proposalId);
+    if (
+      !proposal ||
+      proposal.status !== "promoted" ||
+      candidateTargetKey(proposal.candidate) !== targetKey
+    ) {
+      throw new EvolutionCatalogError(
+        `Active pointer '${pointer.proposalId}' is not a promoted proposal for '${targetKey}'`,
+      );
+    }
+    activeByTarget.set(targetKey, pointer.proposalId);
+  }
+  if (activeByTarget.size !== replayed.activeByTarget.size) {
+    throw new EvolutionCatalogError("Active pointers do not match restore audit history");
+  }
+  for (const [targetKey, proposalId] of replayed.activeByTarget) {
+    if (activeByTarget.get(targetKey) !== proposalId) {
+      throw new EvolutionCatalogError(
+        `Active pointer for '${targetKey}' does not match replayed proposal '${proposalId}'`,
+      );
+    }
+  }
+
+  return deepFreeze({ proposals, auditRecords, activeProposals, promotionRecords });
+}
+
+function replayRestoreAudit(
+  auditRecords: readonly AuditRecord[],
+  proposalById: ReadonlyMap<string, EvolutionProposal>,
+): {
+  promotionByProposal: Map<string, PromotionRecord>;
+  activeByTarget: Map<string, string>;
+} {
+  const promotionByProposal = new Map<string, PromotionRecord>();
+  const activeByTarget = new Map<string, string>();
+  const counts = new Map<string, { promotion: number; rejection: number; rollback: number }>();
+
+  for (const audit of auditRecords) {
+    const proposal = proposalById.get(audit.proposalId);
+    if (!proposal) {
+      throw new EvolutionCatalogError(
+        `Audit record references missing proposal '${audit.proposalId}'`,
+      );
+    }
+    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
+    count[audit.kind] += 1;
+    counts.set(proposal.id, count);
+    const targetKey = candidateTargetKey(proposal.candidate);
+
+    if (audit.kind === "promotion") {
+      if (count.promotion !== 1) {
+        throw new EvolutionCatalogError(`Duplicate promotion audit for '${proposal.id}'`);
+      }
+      assertPromotionRecordMatchesProposal(audit, proposal);
+      assertRestoreTransitionAt(proposal, "evaluated", "promoted", audit.at);
+      const previousActive = activeByTarget.get(targetKey) ?? null;
+      if (audit.previousActiveProposalId !== previousActive) {
+        throw new EvolutionCatalogError(
+          `Promotion previous active for '${proposal.id}' does not match replay history`,
+        );
+      }
+      if (previousActive !== null) {
+        const previous = proposalById.get(previousActive);
+        if (
+          !previous ||
+          candidateTargetKey(previous.candidate) !== targetKey ||
+          !promotionByProposal.has(previous.id)
+        ) {
+          throw new EvolutionCatalogError(
+            `Promotion previous active '${previousActive}' is not a prior promotion for the same target`,
+          );
+        }
+      }
+      promotionByProposal.set(proposal.id, audit);
+      activeByTarget.set(targetKey, proposal.id);
+      continue;
+    }
+
+    if (audit.kind === "rollback") {
+      if (count.rollback !== 1) {
+        throw new EvolutionCatalogError(`Duplicate rollback audit for '${proposal.id}'`);
+      }
+      const promotion = promotionByProposal.get(proposal.id);
+      if (!promotion || activeByTarget.get(targetKey) !== proposal.id) {
+        throw new EvolutionCatalogError(`Rollback audit for '${proposal.id}' is out of order`);
+      }
+      assertRestoreTransitionAt(proposal, "promoted", "rolled-back", audit.at);
+      if (audit.restoredActiveProposalId !== promotion.previousActiveProposalId) {
+        throw new EvolutionCatalogError(
+          `Rollback restoration for '${proposal.id}' does not match promotion provenance`,
+        );
+      }
+      if (audit.restoredActiveProposalId === null) {
+        activeByTarget.delete(targetKey);
+      } else {
+        const restored = proposalById.get(audit.restoredActiveProposalId);
+        if (
+          !restored ||
+          candidateTargetKey(restored.candidate) !== targetKey ||
+          !promotionByProposal.has(restored.id)
+        ) {
+          throw new EvolutionCatalogError(
+            `Rollback target '${audit.restoredActiveProposalId}' is not a prior promotion for the same target`,
+          );
+        }
+        activeByTarget.set(targetKey, restored.id);
+      }
+      continue;
+    }
+
+    if (count.rejection !== 1) {
+      throw new EvolutionCatalogError(`Duplicate rejection audit for '${proposal.id}'`);
+    }
+    assertRestoreTransitionAt(proposal, "evaluated", "rejected", audit.at);
+    if (!proposal.evaluation || !deepEqual(audit.evaluation, proposal.evaluation.result)) {
+      throw new EvolutionCatalogError(
+        `Rejection evaluation for '${proposal.id}' does not match proposal evidence`,
+      );
+    }
+  }
+
+  for (const proposal of proposalById.values()) {
+    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
+    const expected =
+      proposal.status === "rejected"
+        ? { promotion: 0, rejection: 1, rollback: 0 }
+        : proposal.status === "promoted"
+          ? { promotion: 1, rejection: 0, rollback: 0 }
+          : proposal.status === "rolled-back"
+            ? { promotion: 1, rejection: 0, rollback: 1 }
+            : { promotion: 0, rejection: 0, rollback: 0 };
+    if (!deepEqual(count, expected)) {
+      throw new EvolutionCatalogError(
+        `Terminal audit cardinality for '${proposal.id}' does not match '${proposal.status}'`,
+      );
+    }
+  }
+
+  return { promotionByProposal, activeByTarget };
+}
+
+function assertRestoreTransitionAt(
+  proposal: EvolutionProposal,
+  from: EvolutionProposal["status"],
+  to: EvolutionProposal["status"],
+  at: string,
+): void {
+  const matches = proposal.transitions.filter(
+    (transition) => transition.from === from && transition.to === to,
+  );
+  if (matches.length !== 1 || matches[0]!.at !== at) {
+    throw new EvolutionCatalogError(
+      `Audit timestamp for '${proposal.id}' does not match '${from}' -> '${to}' transition`,
+    );
+  }
+}
+
+function parseRestoreActivePointer(
+  raw: unknown,
+  index: number,
+): EvolutionActiveProposalPointer {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new EvolutionValidationError(`activeProposals[${index}] must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  assertExactRestoreKeys(record, ["target", "proposalId"], `activeProposals[${index}]`);
+  if (typeof record.proposalId !== "string" || !record.proposalId.trim()) {
+    throw new EvolutionValidationError(`activeProposals[${index}].proposalId is required`);
+  }
+  if (!record.target || typeof record.target !== "object" || Array.isArray(record.target)) {
+    throw new EvolutionValidationError(`activeProposals[${index}].target is required`);
+  }
+  const target = record.target as Record<string, unknown>;
+  if (target.kind === "strategy-blueprint") {
+    assertExactRestoreKeys(target, ["kind", "name"], `activeProposals[${index}].target`);
+    if (typeof target.name !== "string" || !target.name.trim()) {
+      throw new EvolutionValidationError(`activeProposals[${index}].target.name is required`);
+    }
+    return { target: { kind: "strategy-blueprint", name: target.name }, proposalId: record.proposalId };
+  }
+  if (target.kind === "role-prompt") {
+    assertExactRestoreKeys(target, ["kind", "path"], `activeProposals[${index}].target`);
+    if (typeof target.path !== "string" || !target.path.trim()) {
+      throw new EvolutionValidationError(`activeProposals[${index}].target.path is required`);
+    }
+    return { target: { kind: "role-prompt", path: target.path }, proposalId: record.proposalId };
+  }
+  throw new EvolutionValidationError(`activeProposals[${index}].target.kind is unsupported`);
+}
+
+function assertExactRestoreKeys(
+  record: Record<string, unknown>,
+  expectedKeys: readonly string[],
+  label: string,
+): void {
+  const expected = new Set(expectedKeys);
+  if (
+    Object.keys(record).length !== expected.size ||
+    Object.keys(record).some((key) => !expected.has(key)) ||
+    expectedKeys.some((key) => !Object.hasOwn(record, key))
+  ) {
+    throw new EvolutionValidationError(`${label} contains missing or unexpected fields`);
+  }
 }
 
 function snapshotTrustContext(trust: EvolutionTrustContext): EvolutionTrustContext {
@@ -465,6 +927,22 @@ function deepFreeze<T>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value as Record<string, unknown>)) {
     deepFreeze(child);
+  }
+  return value;
+}
+
+function deepEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(sortObjectKeys(left)) === JSON.stringify(sortObjectKeys(right));
+}
+
+function sortObjectKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortObjectKeys);
+  if (value && typeof value === "object") {
+    const sorted = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = sortObjectKeys((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
   }
   return value;
 }

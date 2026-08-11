@@ -6,6 +6,7 @@ import {
   EvolutionCatalogError,
   EvolutionCatalogNotFoundError,
   EVOLUTION_CATALOG_VERSION,
+  restoreEvolutionCatalog,
   type EvolutionCatalogSnapshot,
 } from "../src/evolution/catalog.js";
 import {
@@ -1104,6 +1105,73 @@ describe("EvolutionCatalog authoritative runtime boundary", () => {
       "prompt-a",
     );
     expect(catalog.getProposal("prompt-a")?.status).toBe("promoted");
+  });
+});
+
+describe("EvolutionCatalog trusted restore", () => {
+  it("revalidates trust and terminal provenance instead of accepting caller claims", () => {
+    const catalog = createCatalog();
+    propose(catalog, { id: "prop-restore" });
+    const evaluated = toEvaluated(catalog, "prop-restore");
+    catalog.promote("prop-restore", boundEvidence(evaluated), humanDecision());
+    const material = catalog.exportDurableMaterial();
+
+    const restored = restoreEvolutionCatalog(defaultTrust, material);
+    expect(restored.snapshot()).toEqual(catalog.snapshot());
+
+    const missingAudit = { ...material, auditRecords: [] };
+    expect(() => restoreEvolutionCatalog(defaultTrust, missingAudit)).toThrow(/audit/i);
+
+    const forgedPromotion = structuredClone(material);
+    Reflect.set(forgedPromotion.promotionRecords[0]!, "actor", "attacker");
+    expect(() => restoreEvolutionCatalog(defaultTrust, forgedPromotion)).toThrow(
+      /immutable promotion digest/i,
+    );
+
+    const forgedActive = structuredClone(material);
+    Reflect.set(forgedActive.activeProposals[0]!, "proposalId", "missing-proposal");
+    expect(() => restoreEvolutionCatalog(defaultTrust, forgedActive)).toThrow(/active pointer/i);
+
+    const promptCatalog = createCatalog();
+    propose(promptCatalog, { id: "prompt-forge", candidate: validPromptCandidate() });
+    const forged = structuredClone(promptCatalog.exportDurableMaterial());
+    const proposal = forged.proposals[0]!;
+    Reflect.set(proposal.policy, "allowedPromptPaths", ["prompts/not-configured.md"]);
+    if (proposal.candidate.kind !== "role-prompt") throw new Error("expected prompt candidate");
+    Reflect.set(proposal.candidate, "path", "prompts/not-configured.md");
+    expect(() => restoreEvolutionCatalog(defaultTrust, forged)).toThrow(EvolutionValidationError);
+
+    const historyCatalog = createCatalog();
+    propose(historyCatalog, { id: "history-old" });
+    const oldEvaluated = toEvaluated(historyCatalog, "history-old");
+    historyCatalog.promote(
+      "history-old",
+      boundEvidence(oldEvaluated),
+      humanDecision({ decidedAt: "2026-08-11T01:03:00.000Z" }),
+    );
+    propose(historyCatalog, {
+      id: "history-new",
+      createdAt: "2026-08-11T02:00:00.000Z",
+    });
+    const newEvaluated = toEvaluated(historyCatalog, "history-new");
+    historyCatalog.promote(
+      "history-new",
+      boundEvidence(newEvaluated),
+      humanDecision({ decidedAt: "2026-08-11T02:03:00.000Z" }),
+    );
+    historyCatalog.rollback(
+      "history-new",
+      humanDecision({
+        reason: "Restore the previous proposal",
+        decidedAt: "2026-08-11T02:04:00.000Z",
+      }),
+    );
+    const history = historyCatalog.exportDurableMaterial();
+    const reorderedAudit = {
+      ...history,
+      auditRecords: [history.auditRecords[2]!, history.auditRecords[0]!, history.auditRecords[1]!],
+    };
+    expect(() => restoreEvolutionCatalog(defaultTrust, reorderedAudit)).toThrow(/out of order/i);
   });
 });
 
