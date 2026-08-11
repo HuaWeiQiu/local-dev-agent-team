@@ -1,0 +1,98 @@
+name: Desktop PR Release
+
+on:
+  workflow_run:
+    workflows: [Desktop PR Build]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: desktop-pr-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.pull_requests[0].number != null
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RELEASE_TAG: pr-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.head_sha }}
+      RELEASE_TITLE: Agent Team PR #${{ github.event.workflow_run.pull_requests[0].number }} (${{ github.event.workflow_run.head_sha }})
+      RELEASE_NOTES: |
+        Automated unsigned desktop build for PR #${{ github.event.workflow_run.pull_requests[0].number }}.
+        Commit: ${{ github.event.workflow_run.head_sha }}
+        Windows SmartScreen and macOS Gatekeeper may show an unknown-developer warning.
+
+    steps:
+      - name: Download exact build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: desktop-artifacts
+          pattern: pr-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.head_sha }}-*
+          merge-multiple: true
+
+      - name: Validate complete unsigned bundle set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find desktop-artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) -print0)
+          if (( ${#assets[@]} < 3 )); then
+            echo "Expected both macOS architectures and a Windows installer" >&2
+            exit 1
+          fi
+
+          has_macos_arm64=false
+          has_macos_x64=false
+          has_windows=false
+          for asset in "${assets[@]}"; do
+            if [[ "$asset" == *$'\n'* || "$asset" == *$'\r'* ]]; then
+              echo "Release asset contains a forbidden newline" >&2
+              exit 1
+            fi
+            name=${asset##*/}
+            case "$name" in
+              *aarch64*.dmg) has_macos_arm64=true ;;
+              *x64*.dmg|*x86_64*.dmg) has_macos_x64=true ;;
+              *.msi|*.exe) has_windows=true ;;
+            esac
+          done
+          if [[ "$has_macos_arm64" != true || "$has_macos_x64" != true || "$has_windows" != true ]]; then
+            echo "Release artifacts are missing a required platform or architecture" >&2
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}" > "$RUNNER_TEMP/desktop-release-assets.txt"
+
+      - name: Create or update unsigned prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_endpoint="repos/$GH_REPO/git/ref/tags/$RELEASE_TAG"
+          if gh api "$tag_endpoint" >/dev/null 2>&1; then
+            tag_type=$(gh api "$tag_endpoint" --jq '.object.type')
+            tag_sha=$(gh api "$tag_endpoint" --jq '.object.sha')
+            if [[ "$tag_type" != commit || "$tag_sha" != "$HEAD_SHA" ]]; then
+              echo "Existing release tag does not point directly to the requested PR commit" >&2
+              exit 1
+            fi
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --prerelease
+          else
+            gh release create "$RELEASE_TAG" --target "$HEAD_SHA" --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES" --prerelease
+          fi
+          while IFS= read -r asset; do
+            gh release upload "$RELEASE_TAG" "$asset" --clobber
+          done < "$RUNNER_TEMP/desktop-release-assets.txt"
