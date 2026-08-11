@@ -204,7 +204,7 @@ fn open_project_sync(app: &AppHandle, runtime: &DesktopRuntime, root: PathBuf) -
             }
             status
         }
-        Err(detail) => error_status("这个项目暂时无法打开", Some(project_name), detail),
+        Err(detail) => service_start_error_status(project_name, detail),
     }
 }
 
@@ -642,6 +642,19 @@ fn error_status(
     }
 }
 
+fn service_start_error_status(project_name: String, detail: String) -> DesktopStatus {
+    if detail.contains("Another control service is already running with PID") {
+        eprintln!("Agent Team desktop project busy: {detail}");
+        return DesktopStatus {
+            state: "busy",
+            message: "这个项目已由另一个 Agent Team 进程管理，正在运行的任务不会受到影响".into(),
+            project_name: Some(project_name),
+            technical_detail: Some(detail),
+        };
+    }
+    error_status("这个项目暂时无法打开", Some(project_name), detail)
+}
+
 fn project_name(root: &Path) -> String {
     root.file_name()
         .and_then(|name| name.to_str())
@@ -830,6 +843,17 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|character| character.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn presents_an_existing_control_service_as_a_busy_project() {
+        let status = service_start_error_status(
+            "fixture".into(),
+            "Error: Another control service is already running with PID 42".into(),
+        );
+        assert_eq!(status.state, "busy");
+        assert_eq!(status.project_name.as_deref(), Some("fixture"));
+        assert!(status.message.contains("正在运行的任务不会受到影响"));
     }
 
     #[test]

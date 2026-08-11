@@ -30,8 +30,8 @@ createRoot(document.getElementById("root")!).render(
 );
 
 function desktopPreviewState(value: string | null) {
-  return ["needsProject", "needsSetup", "starting", "ready", "error"].includes(value ?? "")
-    ? (value as "needsProject" | "needsSetup" | "starting" | "ready" | "error")
+  return ["needsProject", "needsSetup", "starting", "ready", "busy", "error"].includes(value ?? "")
+    ? (value as "needsProject" | "needsSetup" | "starting" | "ready" | "busy" | "error")
     : undefined;
 }
 
