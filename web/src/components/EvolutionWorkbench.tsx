@@ -442,6 +442,9 @@ function AutomationBar({ automation, requestedCycles, busy, startIntentPending, 
           <span>完成 <strong>{automation.completedCycles}/{automation.requestedMaxCycles ?? requestedCycles}</strong> 轮</span>
           <span>连续无提升 <strong>{automation.consecutiveNoImprovement}/{automation.maxConsecutiveNoImprovement}</strong></span>
           <span>每个策略 <strong>{automation.evaluationRepeats}</strong> 次评测</span>
+          {automation.roleBindingSource && (
+            <span>角色绑定 <strong>{automation.roleBindingSource === "global-cli-defaults" ? "全局 CLI 默认" : "项目 yaml"}</strong></span>
+          )}
           {latest && <span className={latest.improved ? "is-improved" : "is-rejected"}>最近 Δ <strong>{formatScoreDelta(latest.scoreDelta)}</strong></span>}
         </div>
       )}

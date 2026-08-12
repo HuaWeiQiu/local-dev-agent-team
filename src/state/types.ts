@@ -133,6 +133,14 @@ export interface RunSummary {
   error?: string;
 }
 
+export interface RunRoleBinding {
+  cli: "codex" | "grok" | "kimi" | "claude";
+  model?: string;
+  reasoning?: string;
+  /** Ephemeral profile materialized for this run. */
+  profileName: string;
+}
+
 export interface RunState {
   id: string;
   traceId?: string;
@@ -147,6 +155,8 @@ export interface RunState {
   createdAt: string;
   updatedAt: string;
   profileOverrides: Record<string, string>;
+  /** CLI/model/reasoning actually bound per role (global picker or evolution defaults). */
+  roleBindings?: Record<string, RunRoleBinding>;
   strategy: ResolvedStrategy;
   supervisorId?: string;
   parentRunId?: string;

@@ -112,13 +112,23 @@ function RunDetail({ run }: { run: RunState }) {
       <section className="detail-section">
         <h4><CheckCircle2 size={15} />角色分配</h4>
         <dl className="detail-list">
-          {Object.entries({ ...run.strategy.roleProfiles, ...run.profileOverrides }).map(([role, profile]) => (
-            <div key={role}><dt>{agentRoleLabel(role)}</dt><dd title={profile}>{profileDisplayName(profile)}</dd></div>
-          ))}
+          {Object.entries({ ...run.strategy.roleProfiles, ...run.profileOverrides }).map(([role, profile]) => {
+            const binding = run.roleBindings?.[role];
+            return (
+              <div key={role}><dt>{agentRoleLabel(role)}</dt><dd title={profile}>
+                {binding
+                  ? `${binding.cli} · ${binding.model ?? "默认模型"}${binding.reasoning ? ` · ${binding.reasoning}` : ""}`
+                  : profileDisplayName(profile)}
+              </dd></div>
+            );
+          })}
           {Object.keys(run.strategy.roleProfiles).length === 0 && Object.keys(run.profileOverrides).length === 0 && (
             <div><dt>配置</dt><dd>使用角色默认值</dd></div>
           )}
         </dl>
+        {run.roleBindings && Object.keys(run.roleBindings).length > 0 && (
+          <small className="detail-hint">CLI 绑定：本次运行按全局/选型配置使用了上述 CLI 与模型</small>
+        )}
       </section>
       {run.approvals && run.approvals.length > 0 && (
         <section className="detail-section">

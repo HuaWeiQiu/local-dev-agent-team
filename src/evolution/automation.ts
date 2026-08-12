@@ -91,6 +91,8 @@ export interface AutomaticEvolutionSnapshot {
   error: string | null;
   /** Stable provider failure code when status is paused for infrastructure issues. */
   failureCode: string | null;
+  /** Which role-binding source evaluation runs use: desktop global CLI defaults or project yaml. */
+  roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
   cycles: AutomaticEvolutionCycle[];

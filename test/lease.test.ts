@@ -38,7 +38,7 @@ describe("project control lease", () => {
     await expect(readFile(lockPath, "utf8")).resolves.toBe(contents);
   });
 
-  it("requires manual recovery for a well-formed stale owner", async () => {
+  it("reclaims a well-formed stale owner whose PID is dead", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-stale-"));
     const lockPath = path.join(root, "control.lock");
     const stale = `${JSON.stringify({
@@ -46,7 +46,12 @@ describe("project control lease", () => {
       token: "00000000-0000-4000-8000-000000000000",
     })}\n`;
     await writeFile(lockPath, stale, "utf8");
-    await expect(acquireControlLease(root)).rejects.toThrow("remove");
-    await expect(readFile(lockPath, "utf8")).resolves.toBe(stale);
+    const lease = await acquireControlLease(root);
+    const owner = JSON.parse(await readFile(lockPath, "utf8")) as {
+      pid: number;
+      token: string;
+    };
+    expect(owner).toMatchObject({ pid: process.pid, token: expect.any(String) });
+    await lease.release();
   });
 });

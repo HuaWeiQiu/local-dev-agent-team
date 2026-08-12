@@ -305,6 +305,12 @@ export interface RunState {
     };
   };
   profileOverrides: Record<string, string>;
+  roleBindings?: Record<string, {
+    cli: "codex" | "grok" | "kimi" | "claude";
+    model?: string;
+    reasoning?: string;
+    profileName: string;
+  }>;
   parentRunId?: string;
   createdAt: string;
   updatedAt: string;
@@ -664,6 +670,7 @@ export interface AutomaticEvolutionSnapshot {
   stopReason: string | null;
   error: string | null;
   failureCode: string | null;
+  roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
   cycles: AutomaticEvolutionCycle[];

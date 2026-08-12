@@ -133,6 +133,39 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
+  it("persists CLI role bindings with their materialized profile names", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-bindings-workflow-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Agent Team Test"]);
+    await git(root, ["config", "user.email", "agent-team@example.com"]);
+    const config = createDefaultConfig("bindings-fixture");
+    config.quality.commands = [
+      { command: process.execPath, args: ["-e", "process.exit(0)"] },
+    ];
+    await writeFile(path.join(root, ".gitignore"), ".agent-team/\n");
+    await writeFile(path.join(root, "README.md"), "# Fixture\n");
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial"]);
+
+    const loaded = await loadConfig(root);
+    const profileName = "runtime/reviewer/grok/grok-4/medium";
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    }).run({
+      goal: "Create alpha and beta files",
+      profileOverrides: { reviewer: profileName },
+      roleBindings: { reviewer: { cli: "grok", model: "grok-4", reasoning: "medium" } },
+    });
+
+    expect(state.roleBindings).toEqual({
+      reviewer: { cli: "grok", model: "grok-4", reasoning: "medium", profileName },
+    });
+    const store = new RunStateStore(path.join(root, ".agent-team", "runs"));
+    const reloaded = await store.load(state.id);
+    expect(reloaded?.roleBindings).toEqual(state.roleBindings);
+  }, 30_000);
+
   it("completes an isolated evolution evaluation after local gates without publication approval", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-evaluation-workflow-"));
     await git(root, ["init", "-b", "main"]);

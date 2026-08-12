@@ -354,10 +354,23 @@ export class RunSupervisor {
       if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
         throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
       }
+      const roleBindings = source.roleBindings
+        ? Object.fromEntries(
+            Object.entries(source.roleBindings).map(([role, binding]) => [
+              role,
+              {
+                cli: binding.cli,
+                ...(binding.model ? { model: binding.model } : {}),
+                ...(binding.reasoning ? { reasoning: binding.reasoning } : {}),
+              },
+            ]),
+          )
+        : undefined;
       return this.start(
         {
           goal: source.goal,
           profileOverrides: source.profileOverrides,
+          ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
           ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
           parentRunId: source.id,
         },

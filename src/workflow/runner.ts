@@ -38,6 +38,7 @@ import type {
   CheckpointStage,
   RecoveryRecord,
   RunCheckpoint,
+  RunRoleBinding,
   RunState,
   RunStatus,
   TaskRunState,
@@ -56,6 +57,10 @@ import { ExperienceService } from "../experience/service.js";
 export interface WorkflowRunOptions {
   goal: string;
   profileOverrides?: Record<string, string>;
+  roleBindings?: Record<
+    string,
+    { cli: RunRoleBinding["cli"]; model?: string | undefined; reasoning?: string | undefined }
+  >;
   strategyName?: string;
   runId?: string;
   signal?: AbortSignal;
@@ -110,6 +115,21 @@ export class LocalWorkflowRunner {
     const integrationBranch = `agent-team/${branchSegment(runId)}/integration`;
     const integrationWorktree = path.join(this.worktreesDirectory, runId, "integration");
     const now = new Date().toISOString();
+    const persistedBindings = options.roleBindings
+      ? Object.fromEntries(
+          Object.entries(options.roleBindings).flatMap(([role, binding]) => {
+            const profileName = profileOverrides[role];
+            if (!profileName) return [];
+            const entry: RunRoleBinding = {
+              cli: binding.cli,
+              ...(binding.model ? { model: binding.model } : {}),
+              ...(binding.reasoning ? { reasoning: binding.reasoning } : {}),
+              profileName,
+            };
+            return [[role, entry]];
+          }),
+        )
+      : undefined;
     const state: RunState = {
       id: runId,
       traceId: traceIdForRun(runId),
@@ -124,6 +144,9 @@ export class LocalWorkflowRunner {
       createdAt: now,
       updatedAt: now,
       profileOverrides,
+      ...(persistedBindings && Object.keys(persistedBindings).length > 0
+        ? { roleBindings: persistedBindings }
+        : {}),
       strategy,
       ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),

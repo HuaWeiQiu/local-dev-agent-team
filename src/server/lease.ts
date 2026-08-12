@@ -38,12 +38,16 @@ export async function acquireControlLease(stateRoot: string): Promise<ControlLea
       }
       const current = await readLock(lockPath);
       if (!current) continue;
-      if (current && processIsAlive(current.pid)) {
+      if (processIsAlive(current.pid)) {
         throw new Error(`Another control service is already running with PID ${current.pid}`);
       }
-      throw new Error(
-        `A stale control lease exists for PID ${current.pid}; verify no service is running, then remove '${lockPath}' manually`,
-      );
+      // PID 已死：lease 是残留的，可以安全回收。unlink 前再校验一次 token，
+      // 避免删掉并发 claim 者刚写入的新锁。
+      const confirm = await readLock(lockPath);
+      if (confirm && confirm.token === current.token) {
+        await unlink(lockPath).catch(ignoreMissing);
+      }
+      continue;
     } finally {
       await unlink(candidatePath).catch(ignoreMissing);
     }

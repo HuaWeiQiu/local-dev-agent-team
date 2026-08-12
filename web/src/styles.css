@@ -1309,6 +1309,13 @@ code {
   font-size: var(--text-11);
 }
 
+.detail-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
 .code-list {
   display: flex;
   flex-wrap: wrap;

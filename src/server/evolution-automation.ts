@@ -562,6 +562,8 @@ export class AutomaticEvolutionController {
       : undefined;
     const effectiveBindings =
       roleBindings && Object.keys(roleBindings).length > 0 ? roleBindings : undefined;
+    this.state.roleBindingSource = effectiveBindings ? "global-cli-defaults" : "project-yaml";
+    this.touch();
 
     for (const task of suite.tasks) {
       for (let repeat = 1; repeat <= suite.repeats; repeat += 1) {
@@ -780,6 +782,7 @@ export class AutomaticEvolutionController {
       stopReason: null,
       error: null,
       failureCode: null,
+      roleBindingSource: null,
       startedAt: null,
       updatedAt: this.timestamp(),
       cycles: [],

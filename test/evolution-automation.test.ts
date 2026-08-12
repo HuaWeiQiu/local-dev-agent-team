@@ -494,6 +494,7 @@ describe("automatic evolution controller", () => {
     const snapshot = await controller.wait();
 
     expect(snapshot.status).toBe("completed");
+    expect(snapshot.roleBindingSource).toBe("global-cli-defaults");
     expect(seenBindings.length).toBeGreaterThan(0);
     for (const bindings of seenBindings) {
       expect(bindings).toMatchObject({
