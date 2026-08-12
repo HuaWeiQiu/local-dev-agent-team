@@ -49,12 +49,7 @@ profiles:
     reasoning: xhigh
     permission: read-only
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
+    maxTurns: 20
     timeoutSeconds: 1800
 
   # —— 审查（只读）——
@@ -67,18 +62,13 @@ profiles:
     maxTurns: 16
     timeoutSeconds: 1800
 
-  codex-reviewer:
-    adapter: codex
-    model: gpt-5.6-sol
-    reasoning: xhigh
-    permission: read-only
+  grok-worker-fast:
+    adapter: grok
+    model: grok
+    reasoning: medium
+    permission: workspace-write
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
+    maxTurns: 12
     timeoutSeconds: 1800
 
   # —— 测试（只读）——
@@ -95,15 +85,10 @@ profiles:
     adapter: codex
     model: gpt-5.6-sol
     reasoning: high
-    permission: read-only
+    permission: workspace-write
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
-    timeoutSeconds: 1200
+    maxTurns: 32
+    timeoutSeconds: 5400
 
   # —— 执行者（可写）：默认 / 轻量 / 重任务 / Codex ——
   grok-worker:
