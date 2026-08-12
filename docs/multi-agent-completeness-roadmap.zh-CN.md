@@ -59,6 +59,10 @@ Local Dev Agent Team 不需要替换为另一个 Python 或 .NET Agent 框架。
 
 已有更细的设计来源记录见[开源多 Agent 框架对照与补缺](ecosystem-review.md)。
 
+与 **Kimi Code CLI** 的 explore / plan / coder 分离及 AgentSwarm 批任务对照，见设计草案：
+[Kimi explore/plan/coder + Swarm → Agent Team 映射](kimi-explore-plan-coder-swarm-mapping.zh-CN.md)
+（草案未实现；保留 worktree、质量门禁、多 Profile 与控制面权威）。
+
 ## 4. 能力差距与优先级
 
 ### P0：模型故障治理

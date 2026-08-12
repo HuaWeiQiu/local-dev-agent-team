@@ -57,4 +57,45 @@ describe("task plans", () => {
     expect(pathsMayOverlap(["src/**"], ["src/api/**"])).toBe(true);
     expect(pathsMayOverlap(["src/web/**"], ["src/api/**"])).toBe(false);
   });
+
+  it("prefers packing the same batchKey before mixing other batches", () => {
+    const fixture: TaskPlan = {
+      summary: "batch affinity",
+      tasks: [
+        {
+          id: "a1",
+          title: "A1",
+          description: "batch a",
+          dependsOn: [],
+          ownedPaths: ["src/a1.ts"],
+          acceptanceCommands: [],
+          profile: null,
+          batchKey: "batch-a",
+        },
+        {
+          id: "b1",
+          title: "B1",
+          description: "batch b",
+          dependsOn: [],
+          ownedPaths: ["src/b1.ts"],
+          acceptanceCommands: [],
+          profile: null,
+          batchKey: "batch-b",
+        },
+        {
+          id: "a2",
+          title: "A2",
+          description: "batch a",
+          dependsOn: [],
+          ownedPaths: ["src/a2.ts"],
+          acceptanceCommands: [],
+          profile: null,
+          batchKey: "batch-a",
+        },
+      ],
+    };
+    validateTaskPlan(fixture);
+    const wave = selectTaskWave(fixture, new Set(), new Set(), 2);
+    expect(wave.map((task) => task.id)).toEqual(["a1", "a2"]);
+  });
 });

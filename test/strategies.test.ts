@@ -18,6 +18,12 @@ describe("strategy resolution", () => {
       roleProfiles: {},
       approvalGates: ["final"],
       approvalTimeoutSeconds: 86_400,
+      swarmMaxConcurrency: 2,
+      explore: {
+        enabled: false,
+        maxInjectedChars: 4_000,
+        failOpen: true,
+      },
       topology: expect.objectContaining({
         version: 1,
         mode: "parallel-dag",
@@ -71,6 +77,22 @@ describe("strategy resolution", () => {
       label: "串行执行",
       roles: ["worker", "reviewer", "tester"],
     });
+  });
+
+  it("enables explore stage and caps swarm concurrency", () => {
+    const config = createDefaultConfig("fixture");
+    config.strategies!.definitions.balanced = {
+      maxParallel: 4,
+      roleProfiles: {},
+      taskMorphology: {
+        explore: { enabled: true, maxInjectedChars: 2_000, failOpen: true },
+        implement: { role: "worker", swarm: { maxConcurrency: 2 } },
+      },
+    };
+    const resolved = resolveStrategy(config, "balanced");
+    expect(resolved.swarmMaxConcurrency).toBe(2);
+    expect(resolved.explore.enabled).toBe(true);
+    expect(resolved.topology.stages.map((stage) => stage.id)).toContain("explore");
   });
 
   it("rejects an unknown requested strategy", () => {

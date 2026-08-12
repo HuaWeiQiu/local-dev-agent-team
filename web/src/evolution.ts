@@ -1,3 +1,4 @@
+import { agentRoleLabel, strategyDisplayName } from "./presentation";
 import type {
   EvolutionLifecycleStatus,
   EvolutionProposal,
@@ -82,15 +83,21 @@ export function proposalProgress(proposal: EvolutionProposal): {
 }
 
 export function proposalTitle(proposal: EvolutionProposal): string {
-  return proposal.candidate.kind === "strategy-blueprint"
-    ? proposal.candidate.name
-    : proposal.candidate.path.split("/").at(-1) ?? proposal.candidate.path;
+  if (proposal.candidate.kind === "strategy-blueprint") {
+    return strategyDisplayName(proposal.candidate.name);
+  }
+  const file = proposal.candidate.path.split("/").at(-1) ?? proposal.candidate.path;
+  const role = file.replace(/\.[^.]+$/, "");
+  return agentRoleLabel(role);
 }
 
 export function proposalTarget(proposal: EvolutionProposal): string {
-  return proposal.candidate.kind === "strategy-blueprint"
-    ? `策略 · ${proposal.candidate.name}`
-    : `提示词 · ${proposal.candidate.path}`;
+  if (proposal.candidate.kind === "strategy-blueprint") {
+    return `策略 · ${strategyDisplayName(proposal.candidate.name)}`;
+  }
+  const file = proposal.candidate.path.split("/").at(-1) ?? proposal.candidate.path;
+  const role = file.replace(/\.[^.]+$/, "");
+  return `提示词 · ${agentRoleLabel(role)}`;
 }
 
 export function visibleEvolutionProposals(

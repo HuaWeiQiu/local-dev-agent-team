@@ -5,22 +5,26 @@ import type { CommandSpec } from "../config/schema.js";
 import type { RoleAgentService } from "../agents/service.js";
 import { ProfiledAgentService } from "../agents/service.js";
 import {
+  exploreSummarySchema,
   finalDecisionSchema,
   goalIntakeSchema,
   reviewVerdictSchema,
   taskPlanSchema,
   testVerdictSchema,
+  type ExploreSummary,
   type ReviewVerdict,
   type Task,
   type TestVerdict,
 } from "../domain/contracts.js";
 import {
+  exploreSummaryJsonSchema,
   finalDecisionJsonSchema,
   goalIntakeJsonSchema,
   reviewVerdictJsonSchema,
   taskPlanJsonSchema,
   testVerdictJsonSchema,
 } from "../domain/json-schemas.js";
+import { mkdir, writeFile } from "node:fs/promises";
 import { selectTaskWave, validateTaskPlan } from "../domain/plan.js";
 import { GitManager } from "../git/manager.js";
 import {
@@ -163,7 +167,16 @@ export class LocalWorkflowRunner {
       state.intake = intake.value;
       await store.save(state);
 
-      await store.transition(state, "architecting", "Architect is producing a task DAG");
+      const exploreSummary = await this.maybeExplore(
+        state,
+        store,
+        agent,
+        options.goal,
+        baseCommit,
+        verifiedExperiences,
+      );
+
+      await store.transition(state, "architecting", "架构正在拆分任务 DAG（plan）");
       const workerRole = this.loaded.config.roles.worker;
       if (!workerRole) {
         throw new Error("Required worker role is missing");
@@ -179,6 +192,7 @@ export class LocalWorkflowRunner {
           baseCommit,
           roleProfiles: workerRole.allowedProfiles,
           ...(verifiedExperiences ? { verifiedExperiences } : {}),
+          ...(exploreSummary ? { exploreSummary } : {}),
         },
         schema: taskPlanSchema,
         jsonSchema: taskPlanJsonSchema,
@@ -544,11 +558,12 @@ export class LocalWorkflowRunner {
 
     while (completed.size < state.plan.tasks.length) {
       signal?.throwIfAborted();
+      const concurrency = state.strategy.swarmMaxConcurrency ?? state.strategy.maxParallel;
       const wave = selectTaskWave(
         state.plan,
         completed,
         started,
-        state.strategy.maxParallel,
+        concurrency,
       );
       if (wave.length === 0) {
         throw new Error("No dependency-ready tasks remain");
@@ -556,10 +571,21 @@ export class LocalWorkflowRunner {
       for (const task of wave) {
         started.add(task.id);
       }
+      const waveTaskIds = wave.map((task) => task.id);
+      const batchKeys = [
+        ...new Set(wave.map((task) => task.batchKey).filter((key): key is string => Boolean(key))),
+      ];
+      store.emit(state.id, "run.wave.started", {
+        taskIds: waveTaskIds,
+        concurrency: wave.length,
+        maxParallel: state.strategy.maxParallel,
+        swarmMaxConcurrency: concurrency,
+        batchKeys,
+      });
       await store.transition(
         state,
         "implementing",
-        `Starting worker wave: ${wave.map((task) => task.id).join(", ")}`,
+        `启动执行波次（Swarm）：${waveTaskIds.join(", ")} · 并发 ${wave.length}/${concurrency}`,
       );
 
       const integrationCommit = await git.currentCommit(state.integrationWorktree);
@@ -582,10 +608,16 @@ export class LocalWorkflowRunner {
 
       const blocked = taskStates.find((task) => task.status === "blocked");
       if (blocked) {
+        store.emit(state.id, "run.wave.completed", {
+          taskIds: waveTaskIds,
+          concurrency: wave.length,
+          status: "blocked",
+          blockedTaskId: blocked.task.id,
+        });
         throw new Error(`Task '${blocked.task.id}' blocked: ${blocked.error ?? "unknown error"}`);
       }
 
-      await store.transition(state, "integrating", "Merging the passing worker wave");
+      await store.transition(state, "integrating", "合并本波次通过的任务");
       for (const taskState of taskStates.sort((left, right) => left.task.id.localeCompare(right.task.id))) {
         if (!taskState.branch || !taskState.worktree) {
           throw new Error(`Task '${taskState.task.id}' has no branch/worktree metadata`);
@@ -600,7 +632,96 @@ export class LocalWorkflowRunner {
         await git.removeWorktree(taskState.worktree);
         await store.save(state);
       }
+      store.emit(state.id, "run.wave.completed", {
+        taskIds: waveTaskIds,
+        concurrency: wave.length,
+        status: "merged",
+        batchKeys,
+      });
       await this.recordCheckpoint(state, store, git, "task-wave-integrated");
+    }
+  }
+
+  private async maybeExplore(
+    state: RunState,
+    store: RunStateStore,
+    agent: RoleAgentService,
+    goal: string,
+    baseCommit: string,
+    verifiedExperiences: unknown,
+  ): Promise<ExploreSummary | undefined> {
+    const explore = state.strategy.explore;
+    if (!explore?.enabled) {
+      return undefined;
+    }
+
+    await store.transition(state, "exploring", "只读探索代码库（explore）");
+    store.emit(state.id, "run.explore.started", {
+      profile: explore.profile ?? state.strategy.roleProfiles.architect ?? null,
+      maxInjectedChars: explore.maxInjectedChars,
+      failOpen: explore.failOpen,
+    });
+
+    try {
+      const result = await agent.runStructured({
+        role: "architect",
+        runId: state.id,
+        artifactKey: "explore",
+        ...(explore.profile ? { profileName: explore.profile } : {}),
+        context: {
+          mode: "explore-only",
+          goal,
+          intake: state.intake,
+          project: this.loaded.config.project,
+          baseCommit,
+          instructions: [
+            "Read-only repository exploration before task planning.",
+            "Do not propose file edits or commits.",
+            "Return a structured summary of modules, risks, and constraints.",
+          ],
+          ...(verifiedExperiences ? { verifiedExperiences } : {}),
+        },
+        schema: exploreSummarySchema,
+        jsonSchema: exploreSummaryJsonSchema,
+      });
+
+      const summary = result.value;
+      const artifactDir = store.artifactDirectory(state.id, "explore");
+      await mkdir(artifactDir, { recursive: true });
+      await writeFile(
+        path.join(artifactDir, "summary.json"),
+        `${JSON.stringify(summary, null, 2)}\n`,
+        "utf8",
+      );
+
+      const injected = truncateExploreSummary(summary, explore.maxInjectedChars);
+      store.emit(state.id, "run.explore.completed", {
+        success: true,
+        profile: result.profileName,
+        injectedChars: JSON.stringify(injected).length,
+      });
+      await store.transition(
+        state,
+        "exploring",
+        `探索完成：${summary.summary.slice(0, 120)}${summary.summary.length > 120 ? "…" : ""}`,
+      );
+      return injected;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      store.emit(state.id, "run.explore.completed", {
+        success: false,
+        error: message,
+        failOpen: explore.failOpen,
+      });
+      if (explore.failOpen) {
+        await store.transition(
+          state,
+          "exploring",
+          `探索失败已跳过（failOpen）：${message.slice(0, 160)}`,
+        );
+        return undefined;
+      }
+      throw error;
     }
   }
 
@@ -964,6 +1085,58 @@ function latestCheckpoint(state: RunState): RunCheckpoint {
     throw new Error(`Run '${state.id}' has no durable checkpoint`);
   }
   return checkpoint;
+}
+
+function truncateExploreSummary(summary: ExploreSummary, maxChars: number): ExploreSummary {
+  if (maxChars <= 0) {
+    return {
+      summary: summary.summary.slice(0, 200),
+      modules: [],
+      riskPaths: [],
+      suggestedAcceptanceCommands: [],
+      forbiddenPaths: [],
+      notes: [],
+    };
+  }
+  const clone: ExploreSummary = {
+    summary: summary.summary,
+    modules: [...summary.modules],
+    riskPaths: [...summary.riskPaths],
+    suggestedAcceptanceCommands: [...summary.suggestedAcceptanceCommands],
+    forbiddenPaths: [...summary.forbiddenPaths],
+    notes: [...summary.notes],
+  };
+  const encoded = () => JSON.stringify(clone);
+  if (encoded().length <= maxChars) {
+    return clone;
+  }
+  // Shrink arrays first, then summary text.
+  while (encoded().length > maxChars) {
+    if (clone.notes.length > 0) {
+      clone.notes.pop();
+      continue;
+    }
+    if (clone.suggestedAcceptanceCommands.length > 0) {
+      clone.suggestedAcceptanceCommands.pop();
+      continue;
+    }
+    if (clone.modules.length > 0) {
+      clone.modules.pop();
+      continue;
+    }
+    if (clone.riskPaths.length > 0) {
+      clone.riskPaths.pop();
+      continue;
+    }
+    if (clone.forbiddenPaths.length > 0) {
+      clone.forbiddenPaths.pop();
+      continue;
+    }
+    const budget = Math.max(80, maxChars - 40);
+    clone.summary = `${clone.summary.slice(0, budget)}…`;
+    break;
+  }
+  return clone;
 }
 
 function latestApproval(

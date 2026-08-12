@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { buildTaskGraph } from "../web/src/graph.js";
 import {
+  agentRoleLabel,
   canvasEmptyCopy,
   formatExperienceCondition,
   formatExperienceTag,
   humanizeFailure,
+  morphologySummary,
   preferredMonitorPanel,
+  profileDisplayName,
   runListSubtitle,
   runStatusLabel,
   statusTone,
+  strategyDisplayName,
   summarizeGoal,
+  topologyDisplayName,
 } from "../web/src/presentation.js";
 import type { TaskRunState } from "../web/src/types.js";
 
@@ -36,8 +41,48 @@ describe("web workbench projections", () => {
 
   it("maps execution states to stable labels and semantic tones", () => {
     expect(runStatusLabel("reviewing-testing")).toBe("审查测试");
+    expect(runStatusLabel("exploring")).toBe("代码探索");
+    expect(runStatusLabel("implementing")).toBe("执行波次");
     expect(statusTone("blocked")).toBe("danger");
     expect(statusTone("merged")).toBe("success");
+    expect(morphologySummary({
+      maxParallel: 3,
+      taskMorphology: {
+        explore: { enabled: true },
+        implement: { swarm: { maxConcurrency: 2 } },
+      },
+    })).toContain("探索开");
+    expect(morphologySummary({
+      maxParallel: 3,
+      taskMorphology: {
+        explore: { enabled: true },
+        implement: { swarm: { maxConcurrency: 2 } },
+      },
+    })).toContain("Swarm ≤2");
+  });
+
+  it("maps strategy, topology and role ids to Chinese operator labels", () => {
+    expect(strategyDisplayName("balanced")).toBe("均衡");
+    expect(strategyDisplayName("strict")).toBe("严格");
+    expect(strategyDisplayName("auto-evolved")).toBe("自动演进");
+    expect(strategyDisplayName("my-custom-blueprint")).toBe("my-custom-blueprint");
+    expect(topologyDisplayName("parallel-dag")).toBe("依赖并行");
+    expect(topologyDisplayName("sequential")).toBe("顺序执行");
+    expect(agentRoleLabel("orchestrator")).toBe("总控");
+    expect(agentRoleLabel("worker")).toBe("执行");
+    expect(agentRoleLabel("reviewer")).toBe("审查");
+    expect(profileDisplayName("codex-orchestrator")).toBe("Codex · 总控");
+    expect(profileDisplayName("grok-worker-fast")).toBe("Grok · 执行（轻量）");
+    expect(profileDisplayName("custom-x", { adapter: "codex", model: "gpt-5.6-sol" })).toContain("Codex");
+    expect(
+      runListSubtitle({
+        status: "implementing",
+        taskCounts: { working: 1, merged: 1 },
+        strategy: "balanced",
+      }),
+    ).toContain("均衡");
+    expect(formatExperienceCondition("strategy=strict")).toBe("策略：严格");
+    expect(formatExperienceTag("strategy:auto-evolved")).toBe("策略:自动演进");
   });
 
   it("shortens goals and humanizes operator-facing failures", () => {

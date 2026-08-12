@@ -55,6 +55,43 @@ export const strategyTopologySchema = z.object({
   mode: strategyTopologyModeSchema.default("parallel-dag"),
 });
 
+/** Optional explore / plan / implement morphology (Kimi explore-plan-coder mapping). */
+export const exploreMorphologySchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Optional profile override; must be read-only and allowed for architect when set. */
+    profile: z.string().min(1).optional(),
+    maxInjectedChars: z.number().int().min(0).max(50_000).default(4_000),
+    failOpen: z.boolean().default(true),
+  })
+  .strict();
+
+export const swarmMorphologySchema = z
+  .object({
+    /** Wave concurrency cap; effective value is min(this, maxParallel). */
+    maxConcurrency: z.number().int().min(1).max(32).optional(),
+  })
+  .strict();
+
+export const taskMorphologySchema = z
+  .object({
+    explore: exploreMorphologySchema.optional(),
+    plan: z
+      .object({
+        role: z.literal("architect").default("architect"),
+      })
+      .strict()
+      .optional(),
+    implement: z
+      .object({
+        role: z.literal("worker").default("worker"),
+        swarm: swarmMorphologySchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 export const namedStrategySchema = z
   .object({
     topology: strategyTopologySchema.default({ mode: "parallel-dag" }),
@@ -67,6 +104,7 @@ export const namedStrategySchema = z
     roleProfiles: z.record(z.string().min(1), z.string().min(1)).default({}),
     approvalGates: z.array(approvalGateSchema).min(1).max(2).optional(),
     approvalTimeoutSeconds: z.number().int().min(60).max(604_800).optional(),
+    taskMorphology: taskMorphologySchema.optional(),
   })
   .superRefine((strategy, context) => {
     if (strategy.approvalGates && !strategy.approvalGates.includes("final")) {
@@ -95,6 +133,18 @@ export const namedStrategySchema = z
         code: "custom",
         path: ["maxParallel"],
         message: "Sequential strategies require maxParallel to be 1",
+      });
+    }
+    const swarmCap = strategy.taskMorphology?.implement?.swarm?.maxConcurrency;
+    if (
+      swarmCap !== undefined &&
+      strategy.maxParallel !== undefined &&
+      swarmCap > strategy.maxParallel
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["taskMorphology", "implement", "swarm", "maxConcurrency"],
+        message: "swarm.maxConcurrency cannot exceed maxParallel",
       });
     }
   });
@@ -341,6 +391,30 @@ export const configSchema = z
               code: "custom",
               path: ["strategies", "definitions", strategyName, "roleProfiles", roleName],
               message: `Profile '${profileName}' is not allowed for role '${roleName}'`,
+            });
+          }
+        }
+        const exploreProfile = strategy.taskMorphology?.explore?.profile;
+        if (exploreProfile) {
+          const profile = config.profiles[exploreProfile];
+          const architectRole = config.roles.architect;
+          if (!profile) {
+            context.addIssue({
+              code: "custom",
+              path: ["strategies", "definitions", strategyName, "taskMorphology", "explore", "profile"],
+              message: `Explore profile '${exploreProfile}' is not defined`,
+            });
+          } else if (profile.permission !== "read-only") {
+            context.addIssue({
+              code: "custom",
+              path: ["strategies", "definitions", strategyName, "taskMorphology", "explore", "profile"],
+              message: `Explore profile '${exploreProfile}' must be read-only`,
+            });
+          } else if (architectRole && !architectRole.allowedProfiles.includes(exploreProfile)) {
+            context.addIssue({
+              code: "custom",
+              path: ["strategies", "definitions", strategyName, "taskMorphology", "explore", "profile"],
+              message: `Explore profile '${exploreProfile}' is not allowed for architect`,
             });
           }
         }

@@ -249,6 +249,17 @@ code {
   white-space: nowrap;
 }
 
+.project-add-button {
+  height: 32px;
+  padding: 0 10px;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.project-add-button span {
+  font-size: var(--text-12);
+}
+
 .project-registry-panel {
   grid-column: 1 / -1;
   margin: 0 0 10px;
@@ -3212,6 +3223,20 @@ button.palette-item:disabled {
   gap: 6px;
   color: var(--muted);
   font-size: var(--text-11);
+}
+
+.profile-grid label > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.profile-option-count {
+  color: var(--muted);
+  font-size: var(--text-10);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .profile-grid select {

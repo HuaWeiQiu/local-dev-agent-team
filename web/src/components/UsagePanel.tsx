@@ -1,6 +1,6 @@
 import { CircleDashed, Gauge, RefreshCw } from "lucide-react";
 import { memo } from "react";
-import { formatBytes, formatTimestamp, shortRunId } from "../presentation";
+import { formatBytes, formatTimestamp, shortRunId, strategyDisplayName } from "../presentation";
 import type { UsageReport } from "../types";
 import { RunStatusBadge } from "./StatusBadge";
 
@@ -77,7 +77,7 @@ export const UsagePanel = memo(function UsagePanel({ report, loading, selectedRu
                 <tr key={entry.runId} className={entry.runId === selectedRunId ? "is-selected" : ""}>
                   <td className="usage-run-cell">
                     <strong>{entry.goal}</strong>
-                    <small>{shortRunId(entry.runId)} · {entry.strategy}</small>
+                    <small title={entry.strategy}>{shortRunId(entry.runId)} · {strategyDisplayName(entry.strategy)}</small>
                   </td>
                   <td><RunStatusBadge status={entry.status} /></td>
                   <td className="num">{entry.usage.agentInvocations.toLocaleString()}</td>

@@ -17,7 +17,7 @@ import {
   TASK_NODE_GRID_COMPACT,
   type TaskNodeData,
 } from "../graph";
-import { canvasEmptyCopy, humanizeFailure, statusTone, summarizeGoal } from "../presentation";
+import { canvasEmptyCopy, humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type { RunState, TaskRunState } from "../types";
 import { TaskStatusBadge } from "./StatusBadge";
@@ -64,7 +64,12 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
         {run && (
           <div className="canvas-meta">
             <span>{completedTasks}/{run.tasks.length} 任务完成</span>
-            <span className="strategy-chip">{run.strategy.name} · 并行 {run.strategy.maxParallel}</span>
+            <span className="strategy-chip" title={run.strategy.name}>
+              {strategyDisplayName(run.strategy.name)}
+              {" · "}并行 {run.strategy.maxParallel}
+              {" · "}Swarm {run.strategy.swarmMaxConcurrency ?? run.strategy.maxParallel}
+              {run.strategy.explore?.enabled ? " · 探索" : ""}
+            </span>
           </div>
         )}
       </div>

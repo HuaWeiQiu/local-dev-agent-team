@@ -1,6 +1,7 @@
 export type RunStatus =
   | "created"
   | "orchestrating"
+  | "exploring"
   | "architecting"
   | "planned"
   | "implementing"
@@ -82,6 +83,24 @@ export interface CompiledStrategyTopology {
   edges: Array<{ source: string; target: string }>;
 }
 
+export interface TaskMorphology {
+  explore?: {
+    enabled?: boolean;
+    profile?: string;
+    maxInjectedChars?: number;
+    failOpen?: boolean;
+  };
+  plan?: {
+    role?: "architect";
+  };
+  implement?: {
+    role?: "worker";
+    swarm?: {
+      maxConcurrency?: number;
+    };
+  };
+}
+
 export interface StrategyDefinition {
   topology?: { mode: StrategyTopologyMode };
   compiledTopology: CompiledStrategyTopology;
@@ -95,6 +114,7 @@ export interface StrategyDefinition {
   roleProfiles: Record<string, string>;
   approvalGates?: Array<"plan" | "final">;
   approvalTimeoutSeconds?: number;
+  taskMorphology?: TaskMorphology;
 }
 
 export type StrategyBlueprintDefinition = Omit<
@@ -218,6 +238,7 @@ export interface Task {
   ownedPaths: string[];
   acceptanceCommands: Array<{ command: string; args: string[] }>;
   profile: string | null;
+  batchKey?: string | null;
 }
 
 export interface Finding {
@@ -275,6 +296,13 @@ export interface RunState {
     approvalGates: Array<"plan" | "final">;
     approvalTimeoutSeconds: number;
     topology?: CompiledStrategyTopology;
+    swarmMaxConcurrency?: number;
+    explore?: {
+      enabled: boolean;
+      profile?: string;
+      maxInjectedChars: number;
+      failOpen: boolean;
+    };
   };
   profileOverrides: Record<string, string>;
   parentRunId?: string;

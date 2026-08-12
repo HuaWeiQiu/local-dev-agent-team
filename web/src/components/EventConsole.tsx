@@ -6,7 +6,7 @@ import {
   deriveAgentActivity,
   type AgentDisplayStatus,
 } from "../agent-activity";
-import { formatTimestamp } from "../presentation";
+import { formatTimestamp, runStatusLabel } from "../presentation";
 import type { RunEvent, RunState } from "../types";
 
 interface EventConsoleProps {
@@ -103,8 +103,8 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
                 ))}
               </div>
             ))}
-            {run && agentActivity.length === 0 && <span className="console-empty">等待 Agent 启动</span>}
-            {!run && <span className="console-empty">选择运行后显示 Agent</span>}
+            {run && agentActivity.length === 0 && <span className="console-empty">等待角色启动</span>}
+            {!run && <span className="console-empty">选择运行后显示角色</span>}
           </div>
         ) : tab === "activity" ? (
           <div className="activity-list">
@@ -112,14 +112,14 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
               <div key={`${item.at}-${index}`}>
                 <time>{formatTimestamp(item.at)}</time>
                 <span className="activity-dot" />
-                <strong>{item.status}</strong>
+                <strong>{runStatusLabel(item.status)}</strong>
                 <p>{item.message}</p>
               </div>
             ))}
             {!run && <span className="console-empty">选择运行后显示活动</span>}
           </div>
         ) : (
-          <pre className="output-log">{outputEvents.length > 0 ? outputText : "等待 Agent 输出…"}</pre>
+          <pre className="output-log">{outputEvents.length > 0 ? outputText : "等待角色输出…"}</pre>
         )}
       </div>
     </section>
@@ -129,7 +129,7 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
 function formatOutput(event: RunEvent): string {
   const payload = event.payload as { role?: unknown; profile?: unknown; chunk?: unknown };
   const stream = event.type === "agent.stderr" ? "stderr" : "stdout";
-  const role = typeof payload.role === "string" ? payload.role : "agent";
+  const role = agentRoleLabel(typeof payload.role === "string" ? payload.role : "agent");
   const profile = typeof payload.profile === "string" ? `/${payload.profile}` : "";
   const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
   return `[${formatTimestamp(event.occurredAt)}] ${role}${profile} ${stream}\n${chunk}`;
