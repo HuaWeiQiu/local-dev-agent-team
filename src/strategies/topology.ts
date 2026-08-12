@@ -33,16 +33,20 @@ export interface CompiledStrategyTopology {
 export function compileStrategyTopology(
   mode: StrategyTopologyMode,
   approvalGates: ApprovalGate[],
+  options?: { exploreEnabled?: boolean },
 ): CompiledStrategyTopology {
   const stages: CompiledStrategyStage[] = [
     stage("intake", "agent", "目标分析", ["orchestrator"]),
-    stage("architecture", "agent", "任务规划", ["architect"]),
   ];
+  if (options?.exploreEnabled) {
+    stages.push(stage("explore", "agent", "代码探索", ["architect"]));
+  }
+  stages.push(stage("architecture", "agent", "任务规划", ["architect"]));
   if (approvalGates.includes("plan")) {
     stages.push(stage("plan-approval", "human-approval", "计划审批"));
   }
   stages.push(
-    stage("task-execution", "worker-pool", mode === "sequential" ? "串行执行" : "并行执行", [
+    stage("task-execution", "worker-pool", mode === "sequential" ? "串行执行" : "并行执行（Swarm 波次）", [
       "worker",
       "reviewer",
       "tester",

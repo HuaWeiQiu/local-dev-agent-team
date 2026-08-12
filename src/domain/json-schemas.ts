@@ -49,9 +49,24 @@ export const taskPlanJsonSchema: Record<string, unknown> = {
           ownedPaths: { type: "array", minItems: 1, items: { type: "string" } },
           acceptanceCommands: { type: "array", items: commandJsonSchema },
           profile: { type: ["string", "null"] },
+          batchKey: { type: ["string", "null"] },
         },
       },
     },
+  },
+};
+
+export const exploreSummaryJsonSchema: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "modules", "riskPaths", "suggestedAcceptanceCommands", "forbiddenPaths", "notes"],
+  properties: {
+    summary: { type: "string" },
+    modules: { type: "array", items: { type: "string" } },
+    riskPaths: { type: "array", items: { type: "string" } },
+    suggestedAcceptanceCommands: { type: "array", items: { type: "string" } },
+    forbiddenPaths: { type: "array", items: { type: "string" } },
+    notes: { type: "array", items: { type: "string" } },
   },
 };
 

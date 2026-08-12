@@ -3,9 +3,10 @@ import type { RunStatus, TaskStatus } from "./types";
 const runLabels: Record<RunStatus, string> = {
   created: "已创建",
   orchestrating: "目标分析",
+  exploring: "代码探索",
   architecting: "任务规划",
   planned: "已规划",
-  implementing: "执行中",
+  implementing: "执行波次",
   "reviewing-testing": "审查测试",
   reworking: "返工中",
   integrating: "集成中",
@@ -31,12 +32,96 @@ const taskLabels: Record<TaskStatus, string> = {
   blocked: "阻塞",
 };
 
-export function runStatusLabel(status: RunStatus): string {
-  return runLabels[status];
+export function runStatusLabel(status: RunStatus | string): string {
+  return runLabels[status as RunStatus] ?? status;
 }
 
 export function taskStatusLabel(status: TaskStatus): string {
   return taskLabels[status];
+}
+
+/** Built-in strategy ids → Chinese UI labels. Custom blueprint names stay as-is. */
+const strategyLabels: Record<string, string> = {
+  balanced: "均衡",
+  strict: "严格",
+  sequential: "顺序",
+  legacy: "兼容默认",
+  default: "默认",
+  "auto-evolved": "自动演进",
+  "mock-slice": "模拟切片",
+};
+
+/** Strategy id for API/config; Chinese label for operators. */
+export function strategyDisplayName(name: string | undefined | null): string {
+  if (!name?.trim()) return "未指定";
+  return strategyLabels[name] ?? name;
+}
+
+/** Topology mode ids → Chinese UI labels. */
+export function topologyDisplayName(mode: string | undefined | null): string {
+  if (!mode) return "未指定";
+  if (mode === "parallel-dag") return "依赖并行";
+  if (mode === "sequential") return "顺序执行";
+  return mode;
+}
+
+const roleLabels: Record<string, string> = {
+  orchestrator: "总控",
+  architect: "架构",
+  worker: "执行",
+  reviewer: "审查",
+  tester: "测试",
+  "orchestrator-final": "最终判定",
+};
+
+/** Role id for config; Chinese label for operators. */
+export function agentRoleLabel(role: string | undefined | null): string {
+  if (!role?.trim()) return "角色";
+  return roleLabels[role] ?? role;
+}
+
+/** Built-in profile ids → operator-facing Chinese labels. */
+const profileLabels: Record<string, string> = {
+  "codex-orchestrator": "Codex · 总控",
+  "grok-orchestrator": "Grok · 总控",
+  "codex-architect": "Codex · 架构",
+  "grok-architect": "Grok · 架构",
+  "codex-reviewer": "Codex · 审查",
+  "grok-reviewer": "Grok · 审查",
+  "codex-tester": "Codex · 测试",
+  "grok-tester": "Grok · 测试",
+  "codex-worker": "Codex · 执行",
+  "grok-worker": "Grok · 执行",
+  "grok-worker-fast": "Grok · 执行（轻量）",
+  "grok-worker-heavy": "Grok · 执行（重任务）",
+  "codex-planner": "Codex · 规划",
+};
+
+export interface ProfileLabelHint {
+  adapter?: string;
+  model?: string;
+  permission?: string;
+  externalTools?: string;
+}
+
+/** Profile id for config; Chinese/readable label for operators. */
+export function profileDisplayName(
+  name: string | undefined | null,
+  hint?: ProfileLabelHint,
+): string {
+  if (!name?.trim()) return "未指定";
+  if (profileLabels[name]) return profileLabels[name];
+  if (hint?.adapter) {
+    const adapter =
+      hint.adapter === "codex" ? "Codex"
+        : hint.adapter === "grok" ? "Grok"
+          : hint.adapter;
+    const model = hint.model && hint.model !== "inherit" && hint.model !== "grok"
+      ? ` · ${hint.model}`
+      : "";
+    return `${adapter}${model} · ${name}`;
+  }
+  return name;
 }
 
 export function statusTone(status: RunStatus | TaskStatus): string {
@@ -118,7 +203,7 @@ export function humanizeFailure(message: string | undefined | null): string {
   if (/All profiles failed for role/i.test(text)) {
     const role = text.match(/role '([^']+)'/i)?.[1];
     return role
-      ? `角色「${role}」的所有模型配置均失败`
+      ? `角色「${agentRoleLabel(role)}」的所有模型配置均失败`
       : "所有备用模型配置均失败";
   }
   if (/not valid JSON|invalid structured/i.test(text)) {
@@ -141,11 +226,30 @@ export function runListSubtitle(run: {
     (run.taskCounts.merged ?? 0) + (run.taskCounts.passed ?? 0);
   if (total === 0) {
     if (run.status === "orchestrating") return "总控正在分析目标";
+    if (run.status === "exploring") return "正在只读探索代码库";
     if (run.status === "architecting") return "架构正在拆分任务";
     if (run.status === "blocked") return "在任务规划前失败";
     return "尚未拆分任务";
   }
-  return `${done}/${total} 个任务 · ${run.strategy}`;
+  return `${done}/${total} 个任务 · ${strategyDisplayName(run.strategy)}`;
+}
+
+/** Operator-facing morphology summary for strategy cards. */
+export function morphologySummary(definition: {
+  maxParallel?: number;
+  taskMorphology?: {
+    explore?: { enabled?: boolean };
+    implement?: { swarm?: { maxConcurrency?: number } };
+  };
+} | undefined, projectMaxParallel?: number): string {
+  if (!definition) return "";
+  const exploreOn = definition.taskMorphology?.explore?.enabled === true;
+  const maxParallel = definition.maxParallel ?? projectMaxParallel ?? 1;
+  const swarm = definition.taskMorphology?.implement?.swarm?.maxConcurrency;
+  const swarmLabel = swarm !== undefined
+    ? `Swarm ≤${Math.min(swarm, maxParallel)}`
+    : `Swarm ≤${maxParallel}`;
+  return `${exploreOn ? "探索开" : "探索关"} · ${swarmLabel}`;
 }
 
 export function canvasEmptyCopy(run: {
@@ -164,10 +268,17 @@ export function canvasEmptyCopy(run: {
         detail: failure || "任务规划尚未完成，因此没有任务图可显示",
       };
     }
-    if (run.status === "orchestrating" || run.status === "architecting" || run.status === "created") {
+    if (
+      run.status === "orchestrating"
+      || run.status === "exploring"
+      || run.status === "architecting"
+      || run.status === "created"
+    ) {
       return {
         title: "正在规划任务",
-        detail: "总控与架构完成后，任务依赖图会实时出现在这里",
+        detail: run.status === "exploring"
+          ? "只读探索完成后，架构会拆分任务依赖图"
+          : "总控与架构完成后，任务依赖图会实时出现在这里",
       };
     }
     return {
@@ -181,6 +292,7 @@ export function canvasEmptyCopy(run: {
 export const activeRunStatuses: ReadonlySet<string> = new Set([
   "created",
   "orchestrating",
+  "exploring",
   "architecting",
   "planned",
   "implementing",
@@ -206,6 +318,7 @@ export function preferredMonitorPanel(run: {
   if (run.tasks.length > 0) return "graph";
   if (
     run.status === "orchestrating" ||
+    run.status === "exploring" ||
     run.status === "architecting" ||
     run.status === "created" ||
     run.status === "blocked" ||
@@ -247,27 +360,15 @@ export function formatExperienceCondition(condition: string): string {
   if (map[text]) return map[text];
 
   const strategy = text.match(/^strategy=(.+)$/i);
-  if (strategy) return `策略：${strategy[1]}`;
+  if (strategy) return `策略：${strategyDisplayName(strategy[1]!)}`;
   const topology = text.match(/^topology=(.+)$/i);
-  if (topology) {
-    const value = topology[1] === "parallel-dag" ? "依赖并行" : topology[1] === "sequential" ? "顺序执行" : topology[1];
-    return `拓扑：${value}`;
-  }
+  if (topology) return `拓扑：${topologyDisplayName(topology[1]!)}`;
   const status = text.match(/^status=(.+)$/i);
-  if (status) return `状态：${runStatusLabelSafe(status[1]!)}`;
+  if (status) return `状态：${runStatusLabel(status[1]!)}`;
   const tasks = text.match(/^tasks>=(\d+)$/i);
   if (tasks) return `任务数≥${tasks[1]}`;
   const role = text.match(/^role=(.+)$/i);
-  if (role) {
-    const labels: Record<string, string> = {
-      orchestrator: "总控",
-      architect: "架构",
-      worker: "执行",
-      reviewer: "审查",
-      tester: "测试",
-    };
-    return `角色：${labels[role[1]!] ?? role[1]}`;
-  }
+  if (role) return `角色：${agentRoleLabel(role[1]!)}`;
   return text;
 }
 
@@ -283,24 +384,8 @@ export function formatExperienceTag(tag: string): string {
   };
   if (map[tag]) return map[tag];
   const strategy = tag.match(/^strategy:(.+)$/i);
-  if (strategy) return `策略:${strategy[1]}`;
+  if (strategy) return `策略:${strategyDisplayName(strategy[1]!)}`;
   const topology = tag.match(/^topology:(.+)$/i);
-  if (topology) {
-    const value =
-      topology[1] === "parallel-dag"
-        ? "依赖并行"
-        : topology[1] === "sequential"
-          ? "顺序执行"
-          : topology[1];
-    return `拓扑:${value}`;
-  }
+  if (topology) return `拓扑:${topologyDisplayName(topology[1]!)}`;
   return tag;
-}
-
-function runStatusLabelSafe(status: string): string {
-  try {
-    return runStatusLabel(status as RunStatus);
-  } catch {
-    return status;
-  }
 }

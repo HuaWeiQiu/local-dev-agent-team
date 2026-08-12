@@ -1,4 +1,6 @@
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -37,7 +39,7 @@ import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { TaskInspector } from "./components/TaskInspector";
 import { UsagePanel } from "./components/UsagePanel";
-import { activeRunStatuses, errorMessage, humanizeFailure, preferredMonitorPanel, summarizeGoal } from "./presentation";
+import { activeRunStatuses, errorMessage, humanizeFailure, preferredMonitorPanel, strategyDisplayName, summarizeGoal } from "./presentation";
 import { applyTheme, getInitialTheme, nextThemeMode, themeModeLabel, type ThemeMode } from "./theme";
 import type {
   ProjectScope,
@@ -58,6 +60,13 @@ import type {
 } from "./types";
 
 const retryableStatuses = new Set(["blocked", "cancelled", "interrupted"]);
+
+interface DesktopShellStatus {
+  state: string;
+  message: string;
+  projectName?: string;
+  technicalDetail?: string;
+}
 
 export default function App() {
   const [workspace, setWorkspace] = useState<WorkspaceInfo>();
@@ -88,6 +97,13 @@ export default function App() {
   const [usageReport, setUsageReport] = useState<UsageReport>();
   const [usageLoading, setUsageLoading] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
+  const [desktopShell] = useState(() => {
+    try {
+      return isTauri();
+    } catch {
+      return false;
+    }
+  });
   const refreshTimer = useRef<number | undefined>(undefined);
   const eventBuffer = useRef<RunEvent[]>([]);
   const eventFlushTimer = useRef<number | undefined>(undefined);
@@ -350,6 +366,53 @@ export default function App() {
     setLauncherOpen(true);
   }, []);
 
+  /** Desktop only: pick a local folder and register it into the multi-project workspace. */
+  const addDesktopProject = useCallback(async () => {
+    if (!desktopShell) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "选择要接入的代码项目",
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      let status = await invoke<DesktopShellStatus>("desktop_open_project", {
+        projectPath: selected,
+      });
+      if (status.state === "needsSetup") {
+        const ok = window.confirm(
+          `${status.message}\n\n路径：${selected}\n\n是否现在初始化 agent-team.yaml 并接入？`,
+        );
+        if (!ok) {
+          // Restore previous multi-project workspace after a cancelled setup.
+          await invoke<DesktopShellStatus>("desktop_retry");
+          return;
+        }
+        status = await invoke<DesktopShellStatus>("desktop_initialize_project");
+      }
+      if (status.state === "error" || status.state === "busy") {
+        setError(
+          [status.message, status.technicalDetail].filter(Boolean).join("\n"),
+        );
+        return;
+      }
+      // ready/starting: native shell navigates to the new control session.
+    } catch (requestError) {
+      const detail = errorMessage(requestError);
+      setError(
+        /not found|Command .* not found/i.test(detail)
+          ? "当前桌面端权限未覆盖工作台页面，无法添加项目。请安装最新桌面构建后重试。"
+          : detail,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [desktopShell]);
+
   const openCleanup = useCallback(() => {
     setCleanupPreview(undefined);
     setCleanupError(undefined);
@@ -575,7 +638,7 @@ export default function App() {
             title={
               workspace.projects.length > 1
                 ? "切换当前查看的项目"
-                : "当前工作区只有 1 个已接入项目；未接入项目见下方说明"
+                : "当前工作区只有 1 个已接入项目；可用「添加项目」接入更多本地仓库"
             }
           >
             <span className="project-switcher-label">
@@ -606,6 +669,23 @@ export default function App() {
               ))}
             </select>
           </label>
+          {desktopShell ? (
+            <button
+              type="button"
+              className="button secondary project-add-button"
+              onClick={() => void addDesktopProject()}
+              disabled={busy}
+              title="选择本地文件夹，接入为新项目"
+              aria-label="添加项目"
+            >
+              <FolderPlus size={15} />
+              <span>添加项目</span>
+            </button>
+          ) : (
+            <span className="project-switcher-hint" title="网页模式请用 CLI：agent-team serve --workspace ...">
+              网页模式请用工作区配置接入
+            </span>
+          )}
           <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
         </div>
         <div className="topbar-run">
@@ -717,7 +797,7 @@ export default function App() {
                     <h1 title={run?.goal}>{run ? summarizeGoal(run.goal, 72) : "选择一个运行"}</h1>
                     {run && (
                       <span>
-                        {run.strategy.name} · {completedTasks}/{run.tasks.length} 任务完成
+                        {strategyDisplayName(run.strategy.name)} · {completedTasks}/{run.tasks.length} 任务完成
                         {run.error ? ` · ${humanizeFailure(run.error)}` : ""}
                       </span>
                     )}

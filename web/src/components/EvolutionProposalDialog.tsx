@@ -1,6 +1,7 @@
 import { Braces, FileText, Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toBlueprintDefinition, utf8ByteLength } from "../evolution";
+import { agentRoleLabel, strategyDisplayName } from "../presentation";
 import { useModalKeyboard } from "../useModalKeyboard";
 import type { EvolutionSnapshot, PublicConfig, StrategyBlueprintDefinition } from "../types";
 
@@ -109,7 +110,7 @@ export function EvolutionProposalDialog({
           </div>
           {kind === "strategy" ? (
             <div className="evolution-form-grid">
-              <label><span>基于已有策略</span><select aria-label="基于已有策略" value={sourceName} disabled={busy || submitted} onChange={(event) => changeSource(event.target.value)}>{strategyNames.map((name) => <option value={name} key={name}>{name}</option>)}</select></label>
+              <label><span>基于已有策略</span><select aria-label="基于已有策略" value={sourceName} disabled={busy || submitted} onChange={(event) => changeSource(event.target.value)}>{strategyNames.map((name) => <option value={name} key={name}>{strategyDisplayName(name)}</option>)}</select></label>
               <label><span>候选策略名称</span><input aria-label="候选策略名称" value={targetName} maxLength={64} disabled={busy || submitted} onChange={(event) => setTargetName(event.target.value)} autoFocus /></label>
               {!targetNameValid && targetName.length > 0 && <p className="evolution-field-error">名称需以字母或数字开头，只能包含字母、数字、点、下划线和连字符。</p>}
               <label><span>执行拓扑</span><select aria-label="执行拓扑" value={topology} disabled={busy || submitted} onChange={(event) => setTopology(event.target.value as typeof topology)}><option value="parallel-dag">依赖并行</option><option value="sequential">顺序执行</option></select></label>
@@ -118,7 +119,7 @@ export function EvolutionProposalDialog({
             </div>
           ) : (
             <div className="evolution-prompt-form">
-              <label><span>角色</span><select aria-label="提示词角色" value={role} disabled={busy || submitted} onChange={(event) => setRole(event.target.value)}>{snapshot.promptRoles.map((item) => <option value={item.role} key={item.role}>{item.role}</option>)}</select></label>
+              <label><span>角色</span><select aria-label="提示词角色" value={role} disabled={busy || submitted} onChange={(event) => setRole(event.target.value)}>{snapshot.promptRoles.map((item) => <option value={item.role} key={item.role}>{agentRoleLabel(item.role)}</option>)}</select></label>
               <label><span>提示词内容</span><textarea aria-label="提示词内容" rows={13} value={content} disabled={busy || submitted} onChange={(event) => setContent(event.target.value)} autoFocus spellCheck={false} /></label>
               <span className={byteLength > 262_144 ? "byte-count is-over" : "byte-count"}>{byteLength.toLocaleString("zh-CN")} / 262,144 字节</span>
             </div>

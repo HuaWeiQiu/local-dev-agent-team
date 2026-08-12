@@ -62,7 +62,10 @@ describe("desktop PR release", () => {
       "utf8",
     );
     const workflow = parse(source) as {
-      on: { pull_request: { types: string[] } };
+      on: {
+        pull_request: { types: string[] };
+        workflow_dispatch?: Record<string, unknown> | null;
+      };
       permissions: Record<string, string>;
       jobs: {
         "build-desktop": {
@@ -78,7 +81,13 @@ describe("desktop PR release", () => {
     };
     const job = workflow.jobs["build-desktop"];
 
-    expect(workflow.on.pull_request.types).toEqual(["opened", "synchronize"]);
+    expect(workflow.on.pull_request.types).toEqual([
+      "opened",
+      "synchronize",
+      "reopened",
+      "ready_for_review",
+    ]);
+    expect(workflow.on.workflow_dispatch).toBeDefined();
     expect(workflow.permissions).toEqual({ contents: "read" });
     expect(job.permissions).toBeUndefined();
     expect(job.strategy.matrix.include).toEqual([

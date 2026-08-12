@@ -65,6 +65,10 @@ export function pathsMayOverlap(left: string[], right: string[]): boolean {
   );
 }
 
+/**
+ * Select a dependency-ready worker wave.
+ * Prefers packing tasks that share the same batchKey (swarm affinity), then by id.
+ */
 export function selectTaskWave(
   plan: TaskPlan,
   completed: Set<string>,
@@ -76,17 +80,53 @@ export function selectTaskWave(
       (task) =>
         !started.has(task.id) && task.dependsOn.every((dependency) => completed.has(dependency)),
     )
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort((left, right) => {
+      const leftKey = left.batchKey ?? "";
+      const rightKey = right.batchKey ?? "";
+      // Non-empty batch keys first, grouped together, then id.
+      if (leftKey && !rightKey) return -1;
+      if (!leftKey && rightKey) return 1;
+      if (leftKey !== rightKey) return leftKey.localeCompare(rightKey);
+      return left.id.localeCompare(right.id);
+    });
 
   const wave: TaskPlan["tasks"] = [];
+  let preferredBatch: string | undefined;
+
   for (const candidate of ready) {
     if (wave.length >= maxParallel) {
       break;
     }
+    const candidateBatch = candidate.batchKey ?? undefined;
+    if (
+      preferredBatch !== undefined
+      && candidateBatch !== undefined
+      && candidateBatch !== preferredBatch
+      && wave.length > 0
+    ) {
+      // Prefer finishing one batch wave before mixing another keyed batch.
+      // Still allow unkeyed tasks after a keyed seed.
+      continue;
+    }
     if (wave.every((selected) => !pathsMayOverlap(selected.ownedPaths, candidate.ownedPaths))) {
       wave.push(candidate);
+      if (preferredBatch === undefined && candidateBatch) {
+        preferredBatch = candidateBatch;
+      }
     }
   }
+
+  // Second pass: fill remaining slots with any non-overlapping ready tasks (including other batches).
+  if (wave.length < maxParallel) {
+    for (const candidate of ready) {
+      if (wave.length >= maxParallel) break;
+      if (wave.some((selected) => selected.id === candidate.id)) continue;
+      if (wave.every((selected) => !pathsMayOverlap(selected.ownedPaths, candidate.ownedPaths))) {
+        wave.push(candidate);
+      }
+    }
+  }
+
   if (wave.length === 0 && ready.length > 0) {
     return [ready[0]!];
   }

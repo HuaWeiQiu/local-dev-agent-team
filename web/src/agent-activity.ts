@@ -35,6 +35,7 @@ export interface AgentInvocationActivity {
 const activeRunStatuses = new Set<RunStatus>([
   "created",
   "orchestrating",
+  "exploring",
   "architecting",
   "planned",
   "implementing",
@@ -178,16 +179,7 @@ export function agentStatusLabel(status: AgentDisplayStatus): string {
   }[status];
 }
 
-export function agentRoleLabel(role: string): string {
-  return {
-    orchestrator: "总控",
-    architect: "架构",
-    worker: "执行",
-    reviewer: "审查",
-    tester: "测试",
-    "orchestrator-final": "最终判定",
-  }[role] ?? role;
-}
+export { agentRoleLabel } from "./presentation";
 
 function childActivities(value: unknown, updatedAt: string): ChildAgentActivity[] {
   if (!Array.isArray(value)) return [];

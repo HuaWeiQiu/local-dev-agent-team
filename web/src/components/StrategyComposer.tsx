@@ -30,6 +30,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useFlowPalette } from "../flow-theme";
 import { STRATEGY_STAGE_GRID } from "../graph";
+import { agentRoleLabel, profileDisplayName, strategyDisplayName, topologyDisplayName } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type {
   CompiledStrategyStage,
@@ -50,6 +51,8 @@ interface StrategyDraft {
   maxReworkAttempts: number;
   maxAgentInvocations: number;
   planApproval: boolean;
+  exploreEnabled: boolean;
+  swarmMaxConcurrency: number;
   roleProfiles: Record<string, string>;
 }
 
@@ -206,7 +209,9 @@ export function StrategyComposer({
                 onChange={(event) => selectStrategy(event.target.value)}
                 disabled={submitting}
               >
-                {strategyNames.map((name) => <option key={name}>{name}</option>)}
+                {strategyNames.map((name) => (
+                  <option key={name} value={name}>{strategyDisplayName(name)}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -256,6 +261,8 @@ export function StrategyComposer({
             <span><strong>{topology.stages.length}</strong> 阶段</span>
             <span><strong>{topologyModeLabel(draft.mode)}</strong> 拓扑</span>
             <span><strong>{draft.mode === "sequential" ? 1 : draft.maxParallel}</strong> 并行上限</span>
+            <span><strong>{draft.mode === "sequential" ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel)}</strong> Swarm 并发</span>
+            <span className={draft.exploreEnabled ? "is-enabled" : ""}><strong>{draft.exploreEnabled ? "已启用" : "未启用"}</strong> 探索</span>
             <span className={draft.planApproval ? "is-enabled" : ""}><strong>{draft.planApproval ? "已启用" : "未启用"}</strong> 计划审批</span>
           </div>
         </div>
@@ -270,8 +277,8 @@ export function StrategyComposer({
           {strategyNames.map((name) => {
             const item = config.strategies.definitions[name]!;
             return (
-              <button key={name} className={name === selectedName ? "is-selected" : ""} onClick={() => selectStrategy(name)} disabled={submitting}>
-                <span><Network size={16} /><strong>{name}</strong></span>
+              <button key={name} className={name === selectedName ? "is-selected" : ""} onClick={() => selectStrategy(name)} disabled={submitting} title={name}>
+                <span><Network size={16} /><strong>{strategyDisplayName(name)}</strong></span>
                 <small>{topologyModeLabel(item.topology?.mode ?? item.compiledTopology.mode)} · {item.source === "custom" ? "自定义蓝图" : "项目配置"}</small>
               </button>
             );
@@ -280,8 +287,8 @@ export function StrategyComposer({
         <div className="composer-palette">
           <span className="section-kicker">阶段</span>
           <h3>执行阶段</h3>
-          <PaletteItem icon={<Bot size={16} />} label="Agent 阶段" locked />
-          <PaletteItem icon={<Users size={16} />} label="Worker Pool" locked />
+          <PaletteItem icon={<Bot size={16} />} label="角色阶段" locked />
+          <PaletteItem icon={<Users size={16} />} label="执行池" locked />
           <PaletteItem icon={<ShieldCheck size={16} />} label="质量门禁" locked />
           <button className={`palette-item ${draft.planApproval ? "is-active" : ""}`} onClick={() => updateDraft((current) => ({ ...current, planApproval: !current.planApproval }))} aria-pressed={draft.planApproval} disabled={submitting}>
             <span><Check size={16} />计划审批</span><small>{draft.planApproval ? "已启用" : "可添加"}</small>
@@ -366,7 +373,22 @@ export function StrategyComposer({
               min={1}
               max={32}
               disabled={submitting || draft.mode === "sequential"}
-              onChange={(value) => updateNumber("maxParallel", value)}
+              onChange={(value) => updateDraft((current) => ({
+                ...current,
+                maxParallel: value,
+                swarmMaxConcurrency: Math.min(current.swarmMaxConcurrency, value),
+              }))}
+            />
+            <NumberField
+              label="Swarm 并发"
+              value={draft.mode === "sequential" ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel)}
+              min={1}
+              max={32}
+              disabled={submitting || draft.mode === "sequential"}
+              onChange={(value) => updateDraft((current) => ({
+                ...current,
+                swarmMaxConcurrency: Math.min(value, current.maxParallel),
+              }))}
             />
             <NumberField
               label="返工上限"
@@ -377,7 +399,7 @@ export function StrategyComposer({
               onChange={(value) => updateNumber("maxReworkAttempts", value)}
             />
             <NumberField
-              label="Agent 调用"
+              label="角色调用"
               value={draft.maxAgentInvocations}
               min={1}
               max={1000}
@@ -387,7 +409,16 @@ export function StrategyComposer({
           </section>
           <section className="composer-form-section">
             <label className="policy-toggle">
-              <span><strong>计划审批</strong><small>Worker 执行前暂停</small></span>
+              <span><strong>代码探索</strong><small>架构前只读 explore（Kimi 形态）</small></span>
+              <input
+                type="checkbox"
+                checked={draft.exploreEnabled}
+                onChange={(event) => updateDraft((current) => ({ ...current, exploreEnabled: event.target.checked }))}
+                disabled={submitting}
+              />
+            </label>
+            <label className="policy-toggle">
+              <span><strong>计划审批</strong><small>执行波次前暂停</small></span>
               <input
                 type="checkbox"
                 checked={draft.planApproval}
@@ -397,13 +428,13 @@ export function StrategyComposer({
             </label>
           </section>
           <section className="composer-form-section role-policy-list">
-            <h3>角色 Profile</h3>
+            <h3>角色配置</h3>
             {roleOrder.map((role) => {
               const policy = config.roles[role];
               if (!policy) return null;
               return (
                 <label key={role}>
-                  <span>{role}</span>
+                  <span>{agentRoleLabel(role)}</span>
                   <select
                     value={draft.roleProfiles[role] ?? ""}
                     disabled={submitting}
@@ -414,8 +445,12 @@ export function StrategyComposer({
                       return { ...current, roleProfiles };
                     })}
                   >
-                    <option value="">策略默认 ({policy.defaultProfile})</option>
-                    {policy.allowedProfiles.map((profile) => <option key={profile}>{profile}</option>)}
+                    <option value="">策略默认（{profileDisplayName(policy.defaultProfile, config.profiles[policy.defaultProfile])}）</option>
+                    {policy.allowedProfiles.map((profile) => (
+                      <option key={profile} value={profile}>
+                        {profileDisplayName(profile, config.profiles[profile])}
+                      </option>
+                    ))}
                   </select>
                 </label>
               );
@@ -485,7 +520,7 @@ function StrategyStageNode({ data, selected }: NodeProps) {
       <span>
         <small>{stageKindLabel(stage.kind)}</small>
         <strong>{stage.label}</strong>
-        {stage.roles.length > 0 && <code>{stage.roles.join(" + ")}</code>}
+        {stage.roles.length > 0 && <code>{stage.roles.map(agentRoleLabel).join(" + ")}</code>}
       </span>
       <Handle type="source" position={sourcePosition} />
     </div>
@@ -493,12 +528,16 @@ function StrategyStageNode({ data, selected }: NodeProps) {
 }
 
 function createDraft(definition: StrategyDefinition, config: PublicConfig): StrategyDraft {
+  const maxParallel = definition.maxParallel ?? config.project.maxParallel;
+  const swarm = definition.taskMorphology?.implement?.swarm?.maxConcurrency ?? maxParallel;
   return {
     mode: definition.topology?.mode ?? definition.compiledTopology.mode,
-    maxParallel: definition.maxParallel ?? config.project.maxParallel,
+    maxParallel,
     maxReworkAttempts: definition.maxReworkAttempts ?? 0,
     maxAgentInvocations: definition.maxAgentInvocations ?? 64,
     planApproval: definition.approvalGates?.includes("plan") ?? false,
+    exploreEnabled: definition.taskMorphology?.explore?.enabled === true,
+    swarmMaxConcurrency: Math.min(swarm, maxParallel),
     roleProfiles: { ...(definition.roleProfiles ?? {}) },
   };
 }
@@ -508,14 +547,33 @@ function buildBlueprintDefinition(
   draft: StrategyDraft,
 ): StrategyBlueprintDefinition {
   const { compiledTopology: _compiledTopology, source: _source, ...persisted } = definition;
+  const maxParallel = draft.mode === "sequential" ? 1 : draft.maxParallel;
+  const swarmMaxConcurrency = draft.mode === "sequential"
+    ? 1
+    : Math.min(draft.swarmMaxConcurrency, maxParallel);
   return {
     ...persisted,
     topology: { mode: draft.mode },
-    maxParallel: draft.mode === "sequential" ? 1 : draft.maxParallel,
+    maxParallel,
     maxReworkAttempts: draft.maxReworkAttempts,
     maxAgentInvocations: draft.maxAgentInvocations,
     roleProfiles: { ...draft.roleProfiles },
     approvalGates: draft.planApproval ? ["plan", "final"] : ["final"],
+    taskMorphology: {
+      explore: {
+        enabled: draft.exploreEnabled,
+        maxInjectedChars: definition.taskMorphology?.explore?.maxInjectedChars ?? 4_000,
+        failOpen: definition.taskMorphology?.explore?.failOpen ?? true,
+        ...(definition.taskMorphology?.explore?.profile
+          ? { profile: definition.taskMorphology.explore.profile }
+          : {}),
+      },
+      plan: { role: "architect" },
+      implement: {
+        role: "worker",
+        swarm: { maxConcurrency: swarmMaxConcurrency },
+      },
+    },
   };
 }
 
@@ -529,7 +587,9 @@ function sameDraft(left: StrategyDraft, right: StrategyDraft): boolean {
     left.maxParallel !== right.maxParallel ||
     left.maxReworkAttempts !== right.maxReworkAttempts ||
     left.maxAgentInvocations !== right.maxAgentInvocations ||
-    left.planApproval !== right.planApproval
+    left.planApproval !== right.planApproval ||
+    left.exploreEnabled !== right.exploreEnabled ||
+    left.swarmMaxConcurrency !== right.swarmMaxConcurrency
   ) {
     return false;
   }
@@ -544,7 +604,17 @@ function buildPreviewTopology(
   compiled: CompiledStrategyTopology,
   draft: StrategyDraft,
 ): CompiledStrategyTopology {
-  let stages = compiled.stages.filter((stage) => stage.id !== "plan-approval");
+  let stages = compiled.stages.filter(
+    (stage) => stage.id !== "plan-approval" && stage.id !== "explore",
+  );
+  const intakeIndex = stages.findIndex((stage) => stage.id === "intake");
+  if (draft.exploreEnabled && intakeIndex >= 0) {
+    stages = [
+      ...stages.slice(0, intakeIndex + 1),
+      { id: "explore", kind: "agent", label: "代码探索", roles: ["architect"] },
+      ...stages.slice(intakeIndex + 1),
+    ];
+  }
   if (draft.planApproval) {
     const architectureIndex = stages.findIndex((stage) => stage.id === "architecture");
     stages = [
@@ -554,7 +624,7 @@ function buildPreviewTopology(
     ];
   }
   stages = stages.map((stage) => stage.id === "task-execution"
-    ? { ...stage, label: draft.mode === "sequential" ? "串行执行" : "并行执行" }
+    ? { ...stage, label: draft.mode === "sequential" ? "串行执行" : "并行执行（Swarm 波次）" }
     : stage);
   return {
     version: 1,
@@ -604,15 +674,15 @@ function buildStrategyGraph(
 }
 
 function topologyModeLabel(mode: StrategyTopologyMode): string {
-  return mode === "sequential" ? "串行" : "并行 DAG";
+  return topologyDisplayName(mode);
 }
 
 function stageKindLabel(kind: CompiledStrategyStage["kind"]): string {
   return {
-    agent: "AGENT",
-    "worker-pool": "WORKER POOL",
-    "quality-gate": "QUALITY GATE",
-    "human-approval": "HUMAN GATE",
-    publication: "PUBLISH",
+    agent: "角色阶段",
+    "worker-pool": "执行池",
+    "quality-gate": "质量门禁",
+    "human-approval": "人工审批",
+    publication: "发布",
   }[kind];
 }

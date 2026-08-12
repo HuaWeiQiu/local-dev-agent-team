@@ -1,5 +1,6 @@
 import { ChevronDown, Play, ShieldAlert, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
+import { agentRoleLabel, morphologySummary, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { PublicConfig, StartRunInput } from "../types";
 
 interface RunLauncherProps {
@@ -15,7 +16,7 @@ interface RunLauncherProps {
 export function RunLauncher({ open, config, initialStrategy, busy, error, onClose, onSubmit }: RunLauncherProps) {
   const [goal, setGoal] = useState("");
   const [strategy, setStrategy] = useState(config.strategies.default);
-  const [advanced, setAdvanced] = useState(false);
+  const [advanced, setAdvanced] = useState(true);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -25,8 +26,11 @@ export function RunLauncher({ open, config, initialStrategy, busy, error, onClos
           ? initialStrategy
           : config.strategies.default,
       );
+      // 角色都有多种配置可选时，默认展开，避免藏在折叠里
+      const multiProfile = Object.values(config.roles).some((policy) => policy.allowedProfiles.length > 1);
+      setAdvanced(multiProfile);
     }
-  }, [config.strategies.default, config.strategies.definitions, initialStrategy, open]);
+  }, [config.roles, config.strategies.default, config.strategies.definitions, initialStrategy, open]);
 
   if (!open) {
     return null;
@@ -98,13 +102,16 @@ export function RunLauncher({ open, config, initialStrategy, busy, error, onClos
                   />
                   <span className="strategy-name">
                     <span className="strategy-radio" />
-                    <strong>{name}</strong>
+                    <strong title={name}>{strategyDisplayName(name)}</strong>
                   </span>
                   <span>
                     并行 {definition.maxParallel ?? config.project.maxParallel} · 调用 ≤{definition.maxAgentInvocations ?? 64} · {formatDuration(definition.executionTimeoutSeconds ?? 14_400)}
                   </span>
                   <span>
                     返工 {definition.maxReworkAttempts ?? 0} · 审批 {definition.approvalGates?.includes("plan") ? "计划+交付" : "交付"}
+                  </span>
+                  <span>
+                    {morphologySummary(definition, config.project.maxParallel)}
                   </span>
                 </label>
               ))}
@@ -114,34 +121,43 @@ export function RunLauncher({ open, config, initialStrategy, busy, error, onClos
           {inheritedMcpRoles.length > 0 && (
             <p className="policy-notice">
               <ShieldAlert size={14} />
-              MCP 继承：{inheritedMcpRoles.join("、")}
+              MCP 继承：{inheritedMcpRoles.map(agentRoleLabel).join("、")}
             </p>
           )}
 
           <button type="button" className="disclosure-button" onClick={() => setAdvanced((value) => !value)} aria-expanded={advanced}>
             <ChevronDown size={16} className={advanced ? "is-open" : ""} />
-            角色 Profile 覆盖
+            角色对象（每个角色可切换多种配置）
           </button>
           {advanced && (
             <div className="profile-grid">
-              {Object.entries(config.roles).map(([role, policy]) => (
-                <label key={role}>
-                  <span>{role}</span>
-                  <select
-                    value={overrides[role] ?? ""}
-                    onChange={(event) => setOverrides((current) => ({ ...current, [role]: event.target.value }))}
-                  >
-                    <option value="">
-                      策略默认 ({strategyProfile(role, policy.defaultProfile)})
-                    </option>
-                    {policy.allowedProfiles.map((profile) => (
-                      <option key={profile} value={profile}>
-                        {profile}{config.profiles[profile]?.externalTools === "inherit" ? " · MCP" : ""}
+              {Object.entries(config.roles).map(([role, policy]) => {
+                const defaultName = strategyProfile(role, policy.defaultProfile);
+                return (
+                  <label key={role}>
+                    <span>
+                      {agentRoleLabel(role)}
+                      <small className="profile-option-count">{policy.allowedProfiles.length} 个可选</small>
+                    </span>
+                    <select
+                      value={overrides[role] ?? ""}
+                      onChange={(event) => setOverrides((current) => ({ ...current, [role]: event.target.value }))}
+                      aria-label={`${agentRoleLabel(role)}配置`}
+                    >
+                      <option value="">
+                        策略默认（{profileDisplayName(defaultName, config.profiles[defaultName])}）
                       </option>
-                    ))}
-                  </select>
-                </label>
-              ))}
+                      {policy.allowedProfiles.map((profile) => (
+                        <option key={profile} value={profile}>
+                          {profileDisplayName(profile, config.profiles[profile])}
+                          {config.profiles[profile]?.externalTools === "inherit" ? " · MCP" : ""}
+                          {profile === policy.defaultProfile ? " · 默认" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                );
+              })}
             </div>
           )}
           {error && <p className="form-error" role="alert">{error}</p>}

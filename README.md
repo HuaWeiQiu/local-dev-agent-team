@@ -843,10 +843,22 @@ SHA-256，同时按锁文件安装生产依赖并用内嵌 CLI 执行启动冒�
 登录。临时测试目录不会写入“上次打开的项目”。
 
 当前已实机验证 macOS arm64。运行时准备脚本支持 macOS arm64/x64、Windows x64 和
-Linux arm64/x64。每次 PR 创建或提交新 commit，GitHub Actions 都会构建
-Windows x64、macOS Apple Silicon 和 macOS Intel 安装包。同仓库 PR 会按
-`pr-<编号>-<commit SHA>` 创建对应的 GitHub Pre-release；外部 fork PR 只保留 Actions
-artifacts，不向不受信任代码授予 Release 写权限。
+Linux arm64/x64。
+
+**每次 PR（含后续每个 commit）都必须走桌面客户端 CI 产物**，不能只靠本机
+`pnpm build` / 热更新 `web/dist` 验收：
+
+1. **CI**（`ci.yml`）：`pnpm check` / test / build  
+2. **Desktop PR Build**（`desktop-pr-build.yml`）：构建未签名安装包  
+   - Windows x64  
+   - macOS Apple Silicon  
+   - macOS Intel  
+3. **Desktop PR Release**（`desktop-pr-release.yml`）：构建成功后，同仓库 PR 按  
+   `pr-<编号>-<commit SHA>` 创建/更新 GitHub Pre-release 并上传 `.dmg` / Windows 安装包  
+
+合并前请确认上述检查对**当前 HEAD commit**为绿，并用对应 Pre-release 安装验证。
+外部 fork PR 只保留 Actions artifacts，不向不受信任代码授予 Release 写权限。
+也可在 Actions 里对 `Desktop PR Build` 使用 `workflow_dispatch` 手动重跑。
 
 这些自动产物不签名、不公证，也不需要仓库配置证书 secret。Windows SmartScreen 与
 macOS Gatekeeper 可能显示未知开发者提示，适合当前开源自用和测试分发范围。

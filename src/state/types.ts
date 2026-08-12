@@ -13,6 +13,7 @@ import type { ApprovalGate } from "../config/schema.js";
 export type RunStatus =
   | "created"
   | "orchestrating"
+  | "exploring"
   | "architecting"
   | "planned"
   | "implementing"

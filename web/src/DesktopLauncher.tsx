@@ -280,6 +280,19 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
                 </button>
               </>
             )}
+            {/* 已有项目列表时始终提供添加入口，避免只能切换不能新增 */}
+            {status.projects && status.projects.length > 0
+              && status.state !== "needsProject"
+              && status.state !== "ready"
+              && status.state !== "starting"
+              && !needsSetup
+              && !(isError || isBusy) && (
+              <button className="launcher-primary" onClick={() => void chooseProject()} disabled={busy}>
+                <FolderOpen size={18} />
+                添加项目文件夹
+                <ChevronRight size={17} />
+              </button>
+            )}
             {(status.state === "starting" || status.state === "ready") && (
               <div className="launcher-busy">
                 <LoaderCircle size={18} className="launcher-spinner" />

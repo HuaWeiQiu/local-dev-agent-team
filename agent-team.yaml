@@ -7,7 +7,7 @@ project:
   maxParallel: 3
 
 profiles:
-  # 总控：Codex gpt-5.6-sol
+  # —— 总控（只读）——
   codex-orchestrator:
     adapter: codex
     model: gpt-5.6-sol
@@ -22,7 +22,16 @@ profiles:
       supportsWebSockets: false
     timeoutSeconds: 1800
 
-  # 架构 / 审查 / 测试：Grok read-only
+  grok-orchestrator:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 20
+    timeoutSeconds: 1800
+
+  # —— 架构（只读）——
   grok-architect:
     adapter: grok
     model: grok
@@ -32,6 +41,21 @@ profiles:
     maxTurns: 20
     timeoutSeconds: 1800
 
+  codex-architect:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 1800
+
+  # —— 审查（只读）——
   grok-reviewer:
     adapter: grok
     model: grok
@@ -41,6 +65,21 @@ profiles:
     maxTurns: 16
     timeoutSeconds: 1800
 
+  codex-reviewer:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
+    externalTools: deny
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 1800
+
+  # —— 测试（只读）——
   grok-tester:
     adapter: grok
     model: grok
@@ -50,7 +89,21 @@ profiles:
     maxTurns: 16
     timeoutSeconds: 1800
 
-  # 多执行者：默认 / 轻量 / 重任务
+  codex-tester:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 1200
+
+  # —— 执行者（可写）——
   grok-worker:
     adapter: grok
     model: grok
@@ -78,27 +131,47 @@ profiles:
     maxTurns: 32
     timeoutSeconds: 5400
 
+  codex-worker:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: high
+    permission: workspace-write
+    externalTools: deny
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 3600
+
 roles:
+  # 每个角色可在「角色配置覆盖」里切换；默认仍是：总控 Codex，其余 Grok
   orchestrator:
     defaultProfile: codex-orchestrator
-    allowedProfiles: [codex-orchestrator]
+    allowedProfiles: [codex-orchestrator, grok-orchestrator]
+    fallbackProfiles: [grok-orchestrator]
 
   architect:
     defaultProfile: grok-architect
-    allowedProfiles: [grok-architect]
+    allowedProfiles: [grok-architect, codex-architect]
+    fallbackProfiles: [codex-architect]
 
   worker:
     defaultProfile: grok-worker
-    allowedProfiles: [grok-worker, grok-worker-fast, grok-worker-heavy]
+    allowedProfiles: [grok-worker, grok-worker-fast, grok-worker-heavy, codex-worker]
+    fallbackProfiles: [grok-worker-fast, codex-worker]
     promptFile: prompts/grok-worker.md
 
   reviewer:
     defaultProfile: grok-reviewer
-    allowedProfiles: [grok-reviewer]
+    allowedProfiles: [grok-reviewer, codex-reviewer]
+    fallbackProfiles: [codex-reviewer]
 
   tester:
     defaultProfile: grok-tester
-    allowedProfiles: [grok-tester]
+    allowedProfiles: [grok-tester, codex-tester]
+    fallbackProfiles: [codex-tester]
 
 strategies:
   default: balanced
@@ -114,6 +187,18 @@ strategies:
       maxArtifactBytes: 2147483648
       approvalGates: [final]
       approvalTimeoutSeconds: 172800
+      # explore / plan / coder swarm 形态（Kimi 映射）
+      taskMorphology:
+        explore:
+          enabled: false
+          maxInjectedChars: 4000
+          failOpen: true
+        plan:
+          role: architect
+        implement:
+          role: worker
+          swarm:
+            maxConcurrency: 3
       roleProfiles:
         orchestrator: codex-orchestrator
         architect: grok-architect
@@ -132,6 +217,17 @@ strategies:
       maxArtifactBytes: 4294967296
       approvalGates: [plan, final]
       approvalTimeoutSeconds: 172800
+      taskMorphology:
+        explore:
+          enabled: true
+          maxInjectedChars: 4000
+          failOpen: false
+        plan:
+          role: architect
+        implement:
+          role: worker
+          swarm:
+            maxConcurrency: 1
       roleProfiles:
         orchestrator: codex-orchestrator
         architect: grok-architect

@@ -7,6 +7,7 @@ project:
   maxParallel: 2
 
 profiles:
+  # 每个角色至少配 2 个对象（Codex / Grok 或不同规格），便于 UI 切换与失败回退
   codex-orchestrator:
     adapter: codex
     model: gpt-5.6-sol
@@ -15,12 +16,30 @@ profiles:
     externalTools: deny
     timeoutSeconds: 1800
 
+  grok-orchestrator:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 20
+    timeoutSeconds: 1800
+
   codex-architect:
     adapter: codex
     model: gpt-5.6-sol
     reasoning: xhigh
     permission: read-only
     externalTools: deny
+    timeoutSeconds: 1800
+
+  grok-architect:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 20
     timeoutSeconds: 1800
 
   grok-worker:
@@ -32,12 +51,38 @@ profiles:
     maxTurns: 16
     timeoutSeconds: 3600
 
+  grok-worker-fast:
+    adapter: grok
+    model: grok
+    reasoning: medium
+    permission: workspace-write
+    externalTools: deny
+    maxTurns: 12
+    timeoutSeconds: 1800
+
+  codex-worker:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: high
+    permission: workspace-write
+    externalTools: deny
+    timeoutSeconds: 3600
+
   codex-reviewer:
     adapter: codex
     model: gpt-5.6-sol
     reasoning: xhigh
     permission: read-only
     externalTools: deny
+    timeoutSeconds: 1800
+
+  grok-reviewer:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 16
     timeoutSeconds: 1800
 
   codex-tester:
@@ -48,27 +93,41 @@ profiles:
     externalTools: deny
     timeoutSeconds: 1200
 
+  grok-tester:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 1200
+
 roles:
   orchestrator:
     defaultProfile: codex-orchestrator
-    allowedProfiles: [codex-orchestrator]
+    allowedProfiles: [codex-orchestrator, grok-orchestrator]
+    fallbackProfiles: [grok-orchestrator]
 
   architect:
-    defaultProfile: codex-architect
-    allowedProfiles: [codex-architect]
+    defaultProfile: grok-architect
+    allowedProfiles: [grok-architect, codex-architect]
+    fallbackProfiles: [codex-architect]
 
   worker:
     defaultProfile: grok-worker
-    allowedProfiles: [grok-worker]
+    allowedProfiles: [grok-worker, grok-worker-fast, codex-worker]
+    fallbackProfiles: [grok-worker-fast, codex-worker]
     promptFile: prompts/grok-worker.md
 
   reviewer:
-    defaultProfile: codex-reviewer
-    allowedProfiles: [codex-reviewer]
+    defaultProfile: grok-reviewer
+    allowedProfiles: [grok-reviewer, codex-reviewer]
+    fallbackProfiles: [codex-reviewer]
 
   tester:
-    defaultProfile: codex-tester
-    allowedProfiles: [codex-tester]
+    defaultProfile: grok-tester
+    allowedProfiles: [grok-tester, codex-tester]
+    fallbackProfiles: [codex-tester]
 
 strategies:
   default: balanced
@@ -84,6 +143,15 @@ strategies:
       maxArtifactBytes: 1073741824
       approvalGates: [final]
       approvalTimeoutSeconds: 86400
+      taskMorphology:
+        explore:
+          enabled: false
+          maxInjectedChars: 4000
+          failOpen: true
+        implement:
+          role: worker
+          swarm:
+            maxConcurrency: 2
       roleProfiles: {}
 
     strict:
@@ -97,6 +165,15 @@ strategies:
       maxArtifactBytes: 2147483648
       approvalGates: [plan, final]
       approvalTimeoutSeconds: 172800
+      taskMorphology:
+        explore:
+          enabled: true
+          maxInjectedChars: 4000
+          failOpen: false
+        implement:
+          role: worker
+          swarm:
+            maxConcurrency: 1
       roleProfiles:
         orchestrator: codex-orchestrator
         architect: codex-architect

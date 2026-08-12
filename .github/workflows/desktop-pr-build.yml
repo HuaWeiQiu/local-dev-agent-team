@@ -2,7 +2,9 @@ name: Desktop PR Build
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Allow re-running desktop artifacts for a branch without a new PR push.
+  workflow_dispatch:
 
 permissions:
   contents: read

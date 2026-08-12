@@ -1,6 +1,6 @@
 import { CheckCircle2, Clock3, FileCode2, Gauge, GitBranch, History, ShieldAlert, TerminalSquare, UserRound } from "lucide-react";
 import { memo } from "react";
-import { formatBytes } from "../presentation";
+import { agentRoleLabel, formatBytes, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
 
@@ -35,7 +35,8 @@ function TaskDetail({ task }: { task: TaskRunState }) {
       <section className="detail-section">
         <h4><GitBranch size={15} />执行</h4>
         <dl className="detail-list">
-          <div><dt>Profile</dt><dd>{task.profile ?? task.task.profile ?? "策略分配"}</dd></div>
+          <div><dt>配置</dt><dd title={task.profile ?? task.task.profile ?? undefined}>{profileDisplayName(task.profile ?? task.task.profile ?? "策略分配")}</dd></div>
+          {task.task.batchKey ? <div><dt>批次</dt><dd><code>{task.task.batchKey}</code></dd></div> : null}
           <div><dt>尝试次数</dt><dd>{task.attempts}</dd></div>
           {task.branch && <div><dt>分支</dt><dd><code>{task.branch}</code></dd></div>}
           {task.commit && <div><dt>提交</dt><dd><code>{task.commit.slice(0, 10)}</code></dd></div>}
@@ -100,8 +101,10 @@ function RunDetail({ run }: { run: RunState }) {
       <section className="detail-section">
         <h4><GitBranch size={15} />策略</h4>
         <dl className="detail-list">
-          <div><dt>名称</dt><dd>{run.strategy.name}</dd></div>
+          <div><dt>名称</dt><dd title={run.strategy.name}>{strategyDisplayName(run.strategy.name)}</dd></div>
           <div><dt>并行上限</dt><dd>{run.strategy.maxParallel}</dd></div>
+          <div><dt>Swarm 并发</dt><dd>{run.strategy.swarmMaxConcurrency ?? run.strategy.maxParallel}</dd></div>
+          <div><dt>代码探索</dt><dd>{run.strategy.explore?.enabled ? "已启用" : "关闭"}</dd></div>
           <div><dt>返工上限</dt><dd>{run.strategy.maxReworkAttempts}</dd></div>
           {run.parentRunId && <div><dt>来源运行</dt><dd><code>{run.parentRunId}</code></dd></div>}
         </dl>
@@ -110,10 +113,10 @@ function RunDetail({ run }: { run: RunState }) {
         <h4><CheckCircle2 size={15} />角色分配</h4>
         <dl className="detail-list">
           {Object.entries({ ...run.strategy.roleProfiles, ...run.profileOverrides }).map(([role, profile]) => (
-            <div key={role}><dt>{role}</dt><dd>{profile}</dd></div>
+            <div key={role}><dt>{agentRoleLabel(role)}</dt><dd title={profile}>{profileDisplayName(profile)}</dd></div>
           ))}
           {Object.keys(run.strategy.roleProfiles).length === 0 && Object.keys(run.profileOverrides).length === 0 && (
-            <div><dt>Profile</dt><dd>使用角色默认值</dd></div>
+            <div><dt>配置</dt><dd>使用角色默认值</dd></div>
           )}
         </dl>
       </section>
@@ -152,8 +155,8 @@ function RunDetail({ run }: { run: RunState }) {
       <section className="detail-section">
         <h4><Gauge size={15} />资源与追踪</h4>
         <dl className="detail-list">
-          <div><dt>Agent 调用</dt><dd>{run.usage?.agentInvocations ?? 0} / {run.strategy.maxAgentInvocations ?? 64}</dd></div>
-          <div><dt>Agent 耗时</dt><dd>{formatDuration(run.usage?.agentDurationMs ?? 0)}</dd></div>
+          <div><dt>角色调用</dt><dd>{run.usage?.agentInvocations ?? 0} / {run.strategy.maxAgentInvocations ?? 64}</dd></div>
+          <div><dt>角色耗时</dt><dd>{formatDuration(run.usage?.agentDurationMs ?? 0)}</dd></div>
           <div><dt>输出捕获</dt><dd>{formatBytes(run.usage?.processOutputBytes ?? 0)}</dd></div>
           <div><dt>运行产物</dt><dd>{formatBytes(run.usage?.artifactBytes ?? 0)} / {formatBytes(run.strategy.maxArtifactBytes ?? 1_073_741_824)}</dd></div>
           <div><dt>截断流</dt><dd>{run.usage?.truncatedStreams ?? 0}</dd></div>

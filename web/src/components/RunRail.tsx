@@ -5,6 +5,7 @@ import {
   formatTimestamp,
   runListSubtitle,
   shortRunId,
+  strategyDisplayName,
   summarizeGoal,
 } from "../presentation";
 import type { RunStatus, RunSummary } from "../types";
@@ -36,7 +37,13 @@ export const RunRail = memo(function RunRail({
   const visibleRuns = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return runs.filter((run) => {
-      const matchesQuery = !normalized || [run.goal, run.strategy, run.id, run.error ?? ""].some((value) => value.toLocaleLowerCase().includes(normalized));
+      const matchesQuery = !normalized || [
+        run.goal,
+        run.strategy,
+        strategyDisplayName(run.strategy),
+        run.id,
+        run.error ?? "",
+      ].some((value) => value.toLocaleLowerCase().includes(normalized));
       const matchesFilter = filter === "all" || (filter === "active" && activeRunStatuses.has(run.status)) || (filter === "attention" && attentionStatuses.has(run.status)) || (filter === "finished" && finishedStatuses.has(run.status));
       return matchesQuery && matchesFilter;
     });
@@ -76,7 +83,7 @@ export const RunRail = memo(function RunRail({
                 </span>
                 <span className="run-item-meta">
                   <code title={run.id}>{shortRunId(run.id)}</code>
-                  <span>{run.strategy}</span>
+                  <span title={run.strategy}>{strategyDisplayName(run.strategy)}</span>
                 </span>
                 <span className="run-progress">
                   <span>{total === 0 ? "尚无任务" : `${completed} / ${total} 个任务`}</span>

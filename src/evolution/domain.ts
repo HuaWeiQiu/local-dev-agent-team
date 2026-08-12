@@ -253,6 +253,39 @@ const evolutionStrategyDefinitionObjectSchema = z
     roleProfiles: z.record(z.string().min(1), z.string().min(1)).default({}),
     approvalGates: z.array(approvalGateSchema).min(1).max(2).optional(),
     approvalTimeoutSeconds: z.number().int().min(60).max(604_800).optional(),
+    // Keep parity with namedStrategySchema optional morphology fields.
+    taskMorphology: z
+      .object({
+        explore: z
+          .object({
+            enabled: z.boolean().default(false),
+            profile: z.string().min(1).optional(),
+            maxInjectedChars: z.number().int().min(0).max(50_000).default(4_000),
+            failOpen: z.boolean().default(true),
+          })
+          .strict()
+          .optional(),
+        plan: z
+          .object({
+            role: z.literal("architect").default("architect"),
+          })
+          .strict()
+          .optional(),
+        implement: z
+          .object({
+            role: z.literal("worker").default("worker"),
+            swarm: z
+              .object({
+                maxConcurrency: z.number().int().min(1).max(32).optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

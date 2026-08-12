@@ -16,6 +16,17 @@ export const taskSchema = z.object({
   ownedPaths: z.array(z.string().min(1)).min(1),
   acceptanceCommands: z.array(commandSchema),
   profile: z.string().nullable(),
+  /** Optional batch affinity for swarm wave packing (same key preferred together). */
+  batchKey: z.string().min(1).max(64).nullable().optional(),
+});
+
+export const exploreSummarySchema = z.object({
+  summary: z.string().min(1),
+  modules: z.array(z.string()).default([]),
+  riskPaths: z.array(z.string()).default([]),
+  suggestedAcceptanceCommands: z.array(z.string()).default([]),
+  forbiddenPaths: z.array(z.string()).default([]),
+  notes: z.array(z.string()).default([]),
 });
 
 export const taskPlanSchema = z.object({
@@ -51,6 +62,7 @@ export const finalDecisionSchema = z.object({
 export type GoalIntake = z.infer<typeof goalIntakeSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type TaskPlan = z.infer<typeof taskPlanSchema>;
+export type ExploreSummary = z.infer<typeof exploreSummarySchema>;
 export type Finding = z.infer<typeof findingSchema>;
 export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>;
 export type TestVerdict = z.infer<typeof testVerdictSchema>;
