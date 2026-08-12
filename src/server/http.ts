@@ -46,12 +46,20 @@ import {
   evolutionReconcileRequestSchema,
   evolutionReasonRequestSchema,
   evolutionStrategyProposalRequestSchema,
+  desktopSettingsUpdateSchema,
   experienceReasonRequestSchema,
   resumeRunRequestSchema,
   startRunRequestSchema,
   strategyBlueprintPreflightRequestSchema,
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
+import { getInventory } from "../desktop/settings.js";
+import {
+  loadDesktopSettings,
+  mergeRoleDefaults,
+  saveDesktopSettings,
+  suggestDefaultsFromInventory,
+} from "../desktop/settings.js";
 import { ExperienceService } from "../experience/service.js";
 import { EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
 import { AutomaticEvolutionError } from "./evolution-automation.js";
@@ -286,6 +294,9 @@ async function handleSingleProjectRequest(
     sendJson(response, 200, workspaceProjection("single", [context]));
     return;
   }
+  if (await dispatchDesktopApi(request, response, url, method, serverOrigin, sessionOperator)) {
+    return;
+  }
   if (
     await dispatchProjectApi(
       context,
@@ -331,6 +342,9 @@ async function handleWorkspaceRequest(
       mode: "workspace",
       projectCount: projects.length,
     });
+    return;
+  }
+  if (await dispatchDesktopApi(request, response, url, method, serverOrigin, sessionOperator)) {
     return;
   }
   const match = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/|$)/);
@@ -1281,6 +1295,92 @@ function requireEvolutionSession(sessionOperator: string | undefined): string {
     throw new HttpError(401, "A local control session is required", "SESSION_REQUIRED");
   }
   return sessionOperator;
+}
+
+async function dispatchDesktopApi(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  method: string,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
+): Promise<boolean> {
+  if (!url.pathname.startsWith("/api/desktop")) {
+    return false;
+  }
+  // Desktop session is required only when the control service was started with a session token.
+  // Plain `agent-team serve` (no token) may use these local routes for development.
+  if (sessionOperator === undefined) {
+    // allow through for non-desktop local serve
+  } else {
+    requireEvolutionSession(sessionOperator);
+  }
+
+  if (method === "GET" && url.pathname === "/api/desktop/cli-inventory") {
+    const refresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
+    const { inventory, fromCache } = await getInventory({ refresh });
+    sendJson(response, 200, { inventory, fromCache });
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/desktop/cli-inventory/scan") {
+    requireDesktopMutation(request, serverOrigin, sessionOperator);
+    const { inventory, fromCache } = await getInventory({ refresh: true });
+    sendJson(response, 200, { inventory, fromCache });
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/desktop/settings") {
+    const settings = await loadDesktopSettings();
+    const { inventory, fromCache } = await getInventory({ refresh: false });
+    const roleDefaults = mergeRoleDefaults(settings, inventory);
+    sendJson(response, 200, {
+      settings: {
+        version: settings.version,
+        defaults: { roles: roleDefaults },
+        ui: settings.ui,
+        inventoryCachedAt: settings.inventoryCachedAt ?? null,
+      },
+      inventory,
+      fromCache,
+      suggestedDefaults: suggestDefaultsFromInventory(inventory),
+    });
+    return true;
+  }
+
+  if (method === "PUT" && url.pathname === "/api/desktop/settings") {
+    requireDesktopMutation(request, serverOrigin, sessionOperator);
+    const body = desktopSettingsUpdateSchema.parse(await readJson(request));
+    const current = await loadDesktopSettings();
+    const saved = await saveDesktopSettings({
+      version: 1,
+      inventoryCache: current.inventoryCache,
+      inventoryCachedAt: current.inventoryCachedAt,
+      defaults: body.defaults,
+      ui: body.ui,
+    });
+    sendJson(response, 200, { settings: saved });
+    return true;
+  }
+
+  throw new HttpError(404, "Desktop route not found");
+}
+
+function requireDesktopMutation(
+  request: IncomingMessage,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
+): string {
+  // When the server has a desktop session token, require cookie-backed operator + exact origin.
+  // Local serve without a session token only checks Origin when the browser sends one.
+  if (sessionOperator) {
+    requireEvolutionSession(sessionOperator);
+  }
+  const origin = singleHeader(request.headers.origin);
+  if (origin && origin !== serverOrigin) {
+    throw new HttpError(403, "Desktop mutations require the exact local origin", "ORIGIN_DENIED");
+  }
+  return sessionOperator ?? "local-dev";
 }
 
 function requireIdempotencyKey(request: IncomingMessage): string {

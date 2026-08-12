@@ -6,10 +6,13 @@ import type {
   ExperienceStatus,
   ProjectScope,
   PublicConfig,
+  DesktopSettingsResponse,
+  DesktopSettingsView,
   EvidenceFilePreview,
   EvolutionPreviewResponse,
   EvolutionProposal,
   EvolutionSnapshot,
+  RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
   RunEvidence,
@@ -20,6 +23,7 @@ import type {
   StrategyBlueprintResult,
   UsageReport,
   WorkspaceInfo,
+  CliInventory,
 } from "./types";
 
 export class ApiError extends Error {
@@ -34,6 +38,27 @@ export class ApiError extends Error {
 
 export async function getWorkspace(): Promise<WorkspaceInfo> {
   return await request<WorkspaceInfo>("/api/workspace");
+}
+
+export async function getDesktopSettings(): Promise<DesktopSettingsResponse> {
+  return await request<DesktopSettingsResponse>("/api/desktop/settings");
+}
+
+export async function scanCliInventory(): Promise<{ inventory: CliInventory; fromCache: boolean }> {
+  return await request<{ inventory: CliInventory; fromCache: boolean }>(
+    "/api/desktop/cli-inventory/scan",
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function saveDesktopSettings(input: {
+  defaults: { roles: Record<string, RoleBindingInput> };
+  ui: DesktopSettingsView["ui"];
+}): Promise<{ settings: unknown }> {
+  return await request<{ settings: unknown }>("/api/desktop/settings", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {

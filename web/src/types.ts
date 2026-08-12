@@ -411,10 +411,60 @@ export interface RunCleanupResult {
   reclaimedBytes: number;
 }
 
+export type CliId = "codex" | "grok" | "kimi" | "claude";
+
+export interface RoleBindingInput {
+  cli: CliId;
+  model?: string;
+  reasoning?: string;
+}
+
 export interface StartRunInput {
   goal: string;
   strategy?: string;
   profileOverrides: Record<string, string>;
+  roleBindings?: Record<string, RoleBindingInput>;
+}
+
+export interface CliModelInfo {
+  id: string;
+  label: string;
+  provider?: string;
+  reasoningOptions?: string[];
+}
+
+export interface CliProbeResult {
+  id: CliId;
+  binary?: string;
+  installed: boolean;
+  version?: string;
+  auth: { status: "unknown" | "present" | "missing" | "invalid"; detail?: string };
+  configPaths: string[];
+  models: CliModelInfo[];
+  defaultModel?: string;
+  defaultReasoning?: string;
+  providers?: Array<{ id: string; baseUrl?: string; wireApi?: string }>;
+  runtimeSupported: boolean;
+}
+
+export interface CliInventory {
+  scannedAt: string;
+  home: string;
+  clis: CliProbeResult[];
+}
+
+export interface DesktopSettingsView {
+  version: 1;
+  defaults: { roles: Record<string, RoleBindingInput> };
+  ui: { showCliPickerInRunLauncher: boolean };
+  inventoryCachedAt: string | null;
+}
+
+export interface DesktopSettingsResponse {
+  settings: DesktopSettingsView;
+  inventory: CliInventory;
+  fromCache: boolean;
+  suggestedDefaults: Record<string, RoleBindingInput>;
 }
 
 export interface UsageDetail {

@@ -12,6 +12,7 @@ import type {
 } from "../evidence/types.js";
 import { SqliteEventStore } from "../events/store.js";
 import { GitManager } from "../git/manager.js";
+import { materializeRoleBindings } from "../desktop/role-bindings.js";
 import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
 import type {
@@ -201,8 +202,21 @@ export class RunSupervisor {
     purpose?: "evolution-evaluation",
   ): StartRunResult {
     resolveStrategy(this.loaded.config, request.strategy);
-    for (const [role, profile] of Object.entries(request.profileOverrides)) {
-      resolveProfile(this.loaded.config, role, profile);
+
+    let runConfig = this.loaded.config;
+    let profileOverrides = { ...request.profileOverrides };
+    if (request.roleBindings && Object.keys(request.roleBindings).length > 0) {
+      const material = materializeRoleBindings(this.loaded.config, request.roleBindings);
+      runConfig = material.config;
+      // roleBindings win over legacy profileOverrides for the same role
+      profileOverrides = {
+        ...request.profileOverrides,
+        ...material.profileOverrides,
+      };
+    }
+
+    for (const [role, profile] of Object.entries(profileOverrides)) {
+      resolveProfile(runConfig, role, profile);
     }
 
     const runId = createRunId(request.goal);
@@ -230,17 +244,24 @@ export class RunSupervisor {
         goal: request.goal,
         strategy: request.strategy ?? this.loaded.config.strategies?.default ?? "legacy",
         ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+        ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
       });
+      const loadedForRun = runConfig === this.loaded.config
+        ? this.loaded
+        : { ...this.loaded, config: runConfig };
       workflow = this.dependencies.runWorkflow
-        ? this.dependencies.runWorkflow(request, {
-            runId,
-            signal: controller.signal,
-            supervisorId: this.id,
-            ...(purpose ? { purpose } : {}),
-          })
-        : new LocalWorkflowRunner(this.loaded, { eventSink: this.events }).run({
+        ? this.dependencies.runWorkflow(
+            { ...request, profileOverrides },
+            {
+              runId,
+              signal: controller.signal,
+              supervisorId: this.id,
+              ...(purpose ? { purpose } : {}),
+            },
+          )
+        : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events }).run({
             goal: request.goal,
-            profileOverrides: request.profileOverrides,
+            profileOverrides,
             ...(request.strategy ? { strategyName: request.strategy } : {}),
             runId,
             signal: controller.signal,
@@ -1059,6 +1080,13 @@ function requestHash(request: StartRunRequest): string {
         left.localeCompare(right),
       ),
     ),
+    roleBindings: request.roleBindings
+      ? Object.fromEntries(
+          Object.entries(request.roleBindings).sort(([left], [right]) =>
+            left.localeCompare(right),
+          ),
+        )
+      : null,
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }

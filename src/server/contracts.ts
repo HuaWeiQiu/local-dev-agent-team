@@ -2,14 +2,32 @@ import { z } from "zod";
 import { namedStrategySchema } from "../config/schema.js";
 import { strategyBlueprintNameSchema } from "../strategies/catalog.js";
 
+export const roleBindingSchema = z.object({
+  cli: z.enum(["codex", "grok", "kimi", "claude"]),
+  model: z.string().trim().min(1).max(200).optional(),
+  reasoning: z.string().trim().min(1).max(64).optional(),
+});
+
 export const startRunRequestSchema = z.object({
   goal: z.string().trim().min(1).max(20_000),
   strategy: z.string().trim().min(1).optional(),
   profileOverrides: z.record(z.string().min(1), z.string().min(1)).default({}),
+  /** Global CLI picker: per-role CLI / model / reasoning for this run. */
+  roleBindings: z.record(z.string().min(1), roleBindingSchema).optional(),
   parentRunId: z.string().min(1).optional(),
 });
 
 export type StartRunRequest = z.infer<typeof startRunRequestSchema>;
+export type RoleBindingRequest = z.infer<typeof roleBindingSchema>;
+
+export const desktopSettingsUpdateSchema = z.object({
+  defaults: z.object({
+    roles: z.record(z.string().min(1), roleBindingSchema).default({}),
+  }).default({ roles: {} }),
+  ui: z.object({
+    showCliPickerInRunLauncher: z.boolean().default(true),
+  }).default({ showCliPickerInRunLauncher: true }),
+});
 
 export const strategyBlueprintRequestSchema = z.object({
   definition: namedStrategySchema,

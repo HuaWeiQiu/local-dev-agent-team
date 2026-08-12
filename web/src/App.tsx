@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -10,6 +10,7 @@ import {
   deleteStrategyBlueprint,
   downloadRunEvents,
   eventStreamUrl,
+  getDesktopSettings,
   getEvidenceFile,
   getConfig,
   getRun,
@@ -35,6 +36,7 @@ import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunActionDialog } from "./components/RunActionDialog";
 import { RunRail } from "./components/RunRail";
+import { SettingsWorkbench } from "./components/SettingsWorkbench";
 import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { TaskInspector } from "./components/TaskInspector";
@@ -44,8 +46,10 @@ import { applyTheme, getInitialTheme, nextThemeMode, themeModeLabel, type ThemeM
 import type {
   ProjectScope,
   ApprovalRequest,
+  CliInventory,
   EvidenceFilePreview,
   PublicConfig,
+  RoleBindingInput,
   RunEvent,
   RunCleanupPreview,
   RunEvidence,
@@ -91,12 +95,14 @@ export default function App() {
   const [cleanupPreview, setCleanupPreview] = useState<RunCleanupPreview>();
   const [cleanupError, setCleanupError] = useState<string>();
   const [error, setError] = useState<string>();
-  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience">("monitor");
+  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience" | "settings">("monitor");
   const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence" | "usage">("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
   const [usageReport, setUsageReport] = useState<UsageReport>();
   const [usageLoading, setUsageLoading] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
+  const [roleDefaults, setRoleDefaults] = useState<Record<string, RoleBindingInput>>({});
+  const [cliInventory, setCliInventory] = useState<CliInventory>();
   const [desktopShell] = useState(() => {
     try {
       return isTauri();
@@ -360,11 +366,26 @@ export default function App() {
     await refreshConfig();
   };
 
+  const refreshDesktopSettings = useCallback(async () => {
+    try {
+      const response = await getDesktopSettings();
+      setRoleDefaults(response.settings.defaults.roles);
+      setCliInventory(response.inventory);
+    } catch {
+      // Settings require desktop session; plain browser serve may 401 — ignore.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDesktopSettings();
+  }, [refreshDesktopSettings]);
+
   const openLauncher = useCallback((strategy?: string) => {
     setError(undefined);
     setLauncherStrategy(strategy);
     setLauncherOpen(true);
-  }, []);
+    void refreshDesktopSettings();
+  }, [refreshDesktopSettings]);
 
   /** Desktop only: pick a local folder and register it into the multi-project workspace. */
   const addDesktopProject = useCallback(async () => {
@@ -623,6 +644,14 @@ export default function App() {
           >
             <BookMarked size={20} /><span>经验</span>
           </button>
+          <button
+            className={workspaceMode === "settings" ? "is-active" : ""}
+            onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }}
+            aria-label="全局设置"
+            title="全局设置 · CLI 与角色默认"
+          >
+            <Settings2 size={20} /><span>设置</span>
+          </button>
         </nav>
         <span className={`navigation-stream ${connected ? "is-connected" : ""}`} title={connected ? "事件流已连接" : "事件流未连接"}>
           <Radio size={18} />
@@ -767,7 +796,9 @@ export default function App() {
       </nav>
 
       <div className="workspace-shell">
-        {workspaceMode === "evolution" && config && scope ? (
+        {workspaceMode === "settings" ? (
+          <SettingsWorkbench />
+        ) : workspaceMode === "evolution" && config && scope ? (
           <EvolutionWorkbench key={scopeKey} scope={scope} config={config} />
         ) : workspaceMode === "experience" && scope ? (
           <ExperienceWorkbench key={`experience:${scopeKey}`} scope={scope} />
@@ -836,7 +867,19 @@ export default function App() {
         )}
       </div>
       {error && !launcherOpen && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="关闭错误">×</button></div>}
-      {config && <RunLauncher open={launcherOpen} config={config} {...(launcherStrategy ? { initialStrategy: launcherStrategy } : {})} busy={busy} error={error} onClose={() => { setLauncherOpen(false); setLauncherStrategy(undefined); }} onSubmit={create} />}
+      {config && (
+        <RunLauncher
+          open={launcherOpen}
+          config={config}
+          {...(launcherStrategy ? { initialStrategy: launcherStrategy } : {})}
+          busy={busy}
+          error={error}
+          roleDefaults={roleDefaults}
+          {...(cliInventory ? { inventory: cliInventory } : {})}
+          onClose={() => { setLauncherOpen(false); setLauncherStrategy(undefined); }}
+          onSubmit={create}
+        />
+      )}
       <RunActionDialog
         mode={runAction?.mode}
         {...(runAction?.approval ? { approval: runAction.approval } : {})}

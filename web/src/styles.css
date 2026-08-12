@@ -5657,3 +5657,252 @@ button.palette-item:disabled {
   color: var(--muted);
   font-size: var(--text-12);
 }
+
+/* ===== Global settings + role CLI picker ===== */
+.settings-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  height: 100%;
+  padding: 18px 20px 28px;
+  overflow: auto;
+}
+
+.settings-loading {
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.settings-hero {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 16px;
+  align-items: start;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, var(--surface-1), var(--surface-0));
+}
+
+.settings-hero-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.settings-hero h1 {
+  margin: 4px 0 8px;
+  font-size: var(--text-22);
+}
+
+.settings-hero p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: var(--text-13);
+  line-height: 1.5;
+}
+
+.settings-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-13);
+}
+
+.settings-banner.is-error {
+  color: var(--danger, #c44);
+  background: color-mix(in srgb, var(--danger, #c44) 12%, transparent);
+}
+
+.settings-banner.is-ok {
+  color: var(--success, #2a7);
+  background: color-mix(in srgb, var(--success, #2a7) 12%, transparent);
+}
+
+.settings-panel {
+  padding: 16px 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+}
+
+.settings-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.settings-panel-head h2 {
+  margin: 0 0 2px;
+  font-size: var(--text-16);
+}
+
+.settings-panel-head small {
+  color: var(--muted);
+  font-size: var(--text-12);
+}
+
+.cli-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.cli-card {
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+}
+
+.cli-card.is-missing {
+  opacity: 0.72;
+}
+
+.cli-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.cli-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: var(--text-11);
+  font-weight: 600;
+}
+
+.cli-badge.is-present {
+  color: var(--success, #2a7);
+  background: color-mix(in srgb, var(--success, #2a7) 14%, transparent);
+}
+
+.cli-badge.is-missing,
+.cli-badge.is-invalid {
+  color: var(--danger, #c44);
+  background: color-mix(in srgb, var(--danger, #c44) 12%, transparent);
+}
+
+.cli-badge.is-unknown {
+  color: var(--muted);
+  background: var(--surface-2, var(--surface-1));
+}
+
+.cli-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.cli-card dl div {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  font-size: var(--text-12);
+}
+
+.cli-card dt {
+  color: var(--muted);
+}
+
+.cli-card dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-card .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-11);
+}
+
+.cli-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.cli-models code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-1);
+  font-size: var(--text-11);
+}
+
+.role-default-grid,
+.role-binding-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.role-default-card,
+.role-binding-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+}
+
+.role-default-card label,
+.role-binding-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.role-default-card select,
+.role-binding-card select {
+  height: 34px;
+  padding: 0 8px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: var(--text-12);
+}
+
+.role-binding-fallback {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+@media (max-width: 800px) {
+  .settings-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-hero-actions {
+    width: 100%;
+  }
+
+  .settings-hero-actions .button {
+    flex: 1;
+  }
+}
