@@ -79,4 +79,7 @@
 ## 6. 优先级建议
 
 - 归入路线图偏产品体验的一档（可与「编排与模板 / 向导」同阶段或紧随其后）。
-- **暂不排期实现**；需要时从本文件拆任务：探测 → 用户模板 → init 套用 → 桌面向导。
+- **推荐演进方向**（2026-08-13）：全局 CLI 检索 + 全局默认设置 + 新建运行按角色选 CLI/模型/思考深度。  
+  详见 **[global-cli-inventory-and-role-picker.zh-CN.md](global-cli-inventory-and-role-picker.zh-CN.md)**。  
+  该方案把「本机能力」与「项目策略」拆开，避免每个项目每次手选。
+- 在上述方案落地前：项目 `agent-team.yaml` 的 `defaultProfile` 仍是「一次配置、多次使用」的正确做法。
