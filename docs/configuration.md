@@ -156,8 +156,10 @@ Optional first-class role:
 
 - **`researcher`（技术研究员）**: read-only technical research used by the optional
   explore stage before architect planning (`taskMorphology.explore.enabled`).
-  When the role is absent, explore falls back to `architect` so older project
-  configs keep loading. New defaults and `agent-team.example.yaml` include it.
+  When the role is absent from the yaml, `loadConfig` backfills it by mirroring
+  `architect`'s profile chain (built-in `prompts/researcher.md`), so every project
+  shows it in the run launcher and CLI picker without editing the file. New
+  defaults and `agent-team.example.yaml` include it explicitly.
 
 Other notes:
 

@@ -74,6 +74,17 @@ export async function loadConfig(
     );
   }
 
+  // 可选角色缺省补齐：老项目 yaml 没有 researcher 时，镜像 architect（同为只读角色）
+  // 的 profile 链，prompt 走内置 prompts/researcher.md，无需改项目文件。
+  if (!result.data.roles.researcher) {
+    const architect = result.data.roles.architect!;
+    result.data.roles.researcher = {
+      defaultProfile: architect.defaultProfile,
+      allowedProfiles: [...architect.allowedProfiles],
+      fallbackProfiles: [...architect.fallbackProfiles],
+    };
+  }
+
   if (result.data.evaluation?.suite !== undefined) {
     try {
       result.data.evaluation.suite = parseEvaluationSuite(result.data.evaluation.suite);

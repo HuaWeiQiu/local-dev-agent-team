@@ -72,15 +72,19 @@ describe("configuration", () => {
     );
   });
 
-  it("allows projects without optional researcher role", async () => {
+  it("backfills optional researcher role from architect when absent", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
     const config = createDefaultConfig("fixture");
     delete (config.roles as Record<string, unknown>).researcher;
     await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
 
     const loaded = await loadConfig(root);
-    expect(loaded.config.roles.researcher).toBeUndefined();
-    expect(loaded.config.roles.architect).toBeTruthy();
+    const architect = loaded.config.roles.architect!;
+    expect(loaded.config.roles.researcher).toEqual({
+      defaultProfile: architect.defaultProfile,
+      allowedProfiles: architect.allowedProfiles,
+      fallbackProfiles: architect.fallbackProfiles,
+    });
   });
 
   it("rejects workspace-write profiles for optional researcher role", async () => {

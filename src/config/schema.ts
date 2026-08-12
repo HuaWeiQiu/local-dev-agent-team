@@ -12,7 +12,9 @@ export const requiredWorkflowRoles = [
 /**
  * Optional roles that projects may define.
  * - researcher（技术研究员）: read-only explore / technical research before planning.
- *   When absent, explore falls back to architect.
+ *   When absent from the yaml, loadConfig backfills it by mirroring architect's
+ *   profile chain (built-in prompts/researcher.md); programmatic configs built
+ *   without loadConfig still fall back to architect at the explore stage.
  */
 export const optionalWorkflowRoles = ["researcher"] as const;
 
