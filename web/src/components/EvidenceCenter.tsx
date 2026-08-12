@@ -94,7 +94,7 @@ export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, load
 
         <main className="evidence-preview">
           <header>
-            <div><span className="section-kicker">{file ? "ARTIFACT" : "INTEGRATION DIFF"}</span><h2>{previewTitle}</h2></div>
+            <div><span className="section-kicker">{file ? "交付物" : "集成差异"}</span><h2>{previewTitle}</h2></div>
             {!file && evidence.diff.targetCommit && <code>{evidence.diff.baseCommit.slice(0, 8)}..{evidence.diff.targetCommit.slice(0, 8)}</code>}
             {file && <small>{formatBytes(file.size)}{file.truncated ? " · 已截断" : ""}</small>}
           </header>
@@ -107,7 +107,7 @@ export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, load
       </div>
 
       <section className="task-evidence">
-        <header><div><span className="section-kicker">TASK EVIDENCE</span><h2>任务交付矩阵</h2></div><small>{evidence.tasks.length} 个任务</small></header>
+        <header><div><span className="section-kicker">任务证据</span><h2>任务交付矩阵</h2></div><small>{evidence.tasks.length} 个任务</small></header>
         <div className="task-evidence-table" role="table" aria-label="任务交付矩阵">
           <div className="task-evidence-row table-heading" role="row"><span>任务</span><span>质量</span><span>审查</span><span>测试</span><span>提交</span></div>
           {evidence.tasks.map((task) => (

@@ -198,7 +198,7 @@ export function StrategyComposer({
               <PanelLeftOpen size={16} /><span>策略库</span>
             </button>
             <div className="composer-title">
-              <span className="section-kicker">STRATEGY GRAPH</span>
+              <span className="section-kicker">策略图</span>
               <select
                 className="composer-strategy-select"
                 aria-label="策略模板"
@@ -263,7 +263,7 @@ export function StrategyComposer({
 
       <aside className="composer-library" aria-hidden={!libraryOpen} inert={!libraryOpen}>
         <header className="drawer-header">
-          <div><span className="section-kicker">LIBRARY</span><h2>策略与阶段</h2></div>
+          <div><span className="section-kicker">策略库</span><h2>策略与阶段</h2></div>
           <button className="icon-button" onClick={() => setLibraryOpen(false)} title="关闭策略库" aria-label="关闭策略库"><X size={17} /></button>
         </header>
         <div className="composer-strategy-list">
@@ -278,7 +278,7 @@ export function StrategyComposer({
           })}
         </div>
         <div className="composer-palette">
-          <span className="section-kicker">STAGES</span>
+          <span className="section-kicker">阶段</span>
           <h3>执行阶段</h3>
           <PaletteItem icon={<Bot size={16} />} label="Agent 阶段" locked />
           <PaletteItem icon={<Users size={16} />} label="Worker Pool" locked />
@@ -293,7 +293,7 @@ export function StrategyComposer({
       <aside className="composer-inspector" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
         <header className="section-heading composer-inspector-header">
           <div>
-            <span className="section-kicker">POLICY</span>
+            <span className="section-kicker">策略</span>
             <h2>策略属性</h2>
           </div>
           <div className="composer-inspector-tools">

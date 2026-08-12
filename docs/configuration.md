@@ -323,6 +323,11 @@ Quality commands execute directly, without a shell. Put each argument in
 Task-specific acceptance commands are combined with these project commands.
 Any nonzero exit code vetoes the task regardless of an agent verdict.
 
+Optional external CLIs (for example Alibaba `ocr review`) may be listed the
+same way. Prefer install-and-call over embedding another review engine. See
+[可选外部集成](integrations-optional.zh-CN.md). `agent-team doctor` reports
+whether each configured quality command is available on `PATH`.
+
 `maxParallel` limits one dependency-ready scheduling wave. Parallel tasks must
 declare disjoint `ownedPaths`, and the plan is rejected when ownership overlaps.
 

@@ -33,7 +33,8 @@ export const resumeRunRequestSchema = z.object({
 });
 
 export const cleanupPreviewRequestSchema = z.object({
-  olderThanDays: z.number().int().min(1).max(3_650),
+  /** 0 = all eligible terminal runs regardless of age. */
+  olderThanDays: z.number().int().min(0).max(3_650),
 });
 
 export const cleanupRunRequestSchema = z.object({
@@ -81,6 +82,20 @@ export const evolutionReconcileRequestSchema = z
   .object({
     expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
     reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+
+export const experienceReasonRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2_000),
+    actor: z.string().trim().min(1).max(200).optional(),
+    /** SHA-256 of evaluation suite that validated this experience. */
+    suiteDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/, "suiteDigest must be a 64-char hex SHA-256")
+      .optional(),
+    /** Bypass suite requirement when experience.requireSuiteForPromote is true. */
+    forceWithoutSuite: z.boolean().optional(),
   })
   .strict();
 

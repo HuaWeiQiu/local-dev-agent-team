@@ -1,6 +1,7 @@
 import type { LoadedConfig } from "./config/load.js";
 import type { DoctorCheck } from "./adapters/types.js";
 import { AdapterRegistry } from "./adapters/registry.js";
+import { qualityCommandAvailability } from "./quality/optional-tools.js";
 
 export async function runDoctor(
   loaded: LoadedConfig,
@@ -26,5 +27,21 @@ export async function runDoctor(
       })),
     );
   }
+
+  // Optional quality CLIs (e.g. ocr) — fail when configured but missing.
+  const quality = await qualityCommandAvailability(loaded.config.quality.commands);
+  for (const item of quality) {
+    checks.push({
+      profile: "quality",
+      adapter: item.command,
+      check: "quality-command",
+      status: item.available ? "pass" : "fail",
+      detail: item.available
+        ? `Quality command '${item.command}' is available on PATH`
+        : item.hint ??
+          `Quality command '${item.command}' was not found on PATH; runs that execute it will fail`,
+    });
+  }
+
   return checks;
 }

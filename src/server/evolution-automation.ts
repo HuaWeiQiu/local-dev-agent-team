@@ -6,7 +6,6 @@ import { ProfiledAgentService } from "../agents/service.js";
 import type { AutomaticEvolutionConfig, NamedStrategy } from "../config/schema.js";
 import type { LoadedConfig } from "../config/load.js";
 import {
-  aggregateRunOutcomes,
   automaticCandidateImproved,
   automaticRunEvidenceItems,
   automaticStrategyCandidateSchema,
@@ -32,6 +31,20 @@ import { resolveStrategy, type ResolvedStrategy } from "../strategies/resolve.js
 import { createRunId } from "../workflow/id.js";
 import { GitManager } from "../git/manager.js";
 import type { EvolutionAutomationSession, RunSupervisor } from "./supervisor.js";
+import {
+  classifyError,
+  ProviderFailureError,
+  RoleProfileChainError,
+  type ProviderFailureClassification,
+} from "../providers/failure.js";
+import {
+  computeSuiteDigest,
+  scoreEvaluationSuite,
+} from "../evaluation/domain.js";
+import {
+  requireEvaluationSuite,
+  resolveEvaluationSuite,
+} from "../evaluation/resolve.js";
 
 export type AutomaticEvolutionErrorCode =
   | "AUTOMATION_DISABLED"
@@ -225,7 +238,16 @@ export class AutomaticEvolutionController {
           this.finish("stopped", this.state.stopReason ?? "Automatic evolution was stopped");
           return;
         }
+        const infrastructure = infrastructureFailureFrom(error);
         this.state.error = error instanceof Error ? error.message : String(error);
+        if (infrastructure) {
+          this.state.failureCode = infrastructure.code;
+          this.finish(
+            "paused",
+            `Paused for provider infrastructure failure ${infrastructure.code}: ${infrastructure.summary}`,
+          );
+          return;
+        }
         this.finish("failed", "Automatic evolution failed closed");
       })
       .finally(() => {
@@ -361,6 +383,10 @@ export class AutomaticEvolutionController {
         this.state.phase = "deciding";
         this.touch();
         await this.coordinator.beginEvaluation(proposalId);
+        const suite = requireEvaluationSuite(
+          await resolveEvaluationSuite(this.loaded.config, this.loaded.root),
+          "Automatic evolution evaluation evidence",
+        );
         const evaluated = await this.coordinator.evaluateAutomaticRun(proposalId, {
           proposalId,
           candidateDigest: computeCandidateDigest(candidate),
@@ -368,6 +394,10 @@ export class AutomaticEvolutionController {
             incumbentOutcome,
             candidateOutcome,
             this.config.minimumScoreDelta,
+            {
+              suiteName: suite.name,
+              suiteDigest: computeSuiteDigest(suite),
+            },
           ),
         });
         signal.throwIfAborted();
@@ -504,36 +534,86 @@ export class AutomaticEvolutionController {
     intentKey: string,
     signal: AbortSignal,
   ): Promise<AutomaticOutcomeAggregate> {
-    const outcomes = [];
-    for (let repeat = 1; repeat <= this.config.evaluationRepeats; repeat += 1) {
-      signal.throwIfAborted();
-      const result = session.start(
-        {
-          goal: this.config.evaluationGoal,
-          strategy,
-          profileOverrides: {},
-        },
-        `automatic-evolution:${intentKey}:${repeat}`,
-      );
-      this.state.activeRunId = result.runId;
-      this.touch();
-      const state = await this.supervisor.wait(result.runId) ?? await this.supervisor.get(result.runId);
-      this.state.activeRunId = null;
-      this.touch();
-      if (!state) throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
-      if (
-        state.id !== result.runId ||
-        state.goal !== this.config.evaluationGoal ||
-        state.strategy.name !== strategy ||
-        state.purpose !== "evolution-evaluation"
-      ) {
-        throw new Error(
-          `Automatic evaluation run '${result.runId}' does not match its server-owned evaluation request`,
+    const suite = requireEvaluationSuite(
+      await resolveEvaluationSuite(this.loaded.config, this.loaded.root),
+      "Automatic evolution evaluation",
+    );
+    const suiteDigest = computeSuiteDigest(suite);
+    const pairings: Array<{ taskId: string; state: RunState }> = [];
+
+    for (const task of suite.tasks) {
+      for (let repeat = 1; repeat <= suite.repeats; repeat += 1) {
+        signal.throwIfAborted();
+        const result = session.start(
+          {
+            goal: task.goal,
+            strategy,
+            profileOverrides: {},
+          },
+          `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
         );
+        this.state.activeRunId = result.runId;
+        this.touch();
+        const state =
+          (await this.supervisor.wait(result.runId)) ??
+          (await this.supervisor.get(result.runId));
+        this.state.activeRunId = null;
+        this.touch();
+        if (!state) {
+          throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
+        }
+        if (
+          state.id !== result.runId ||
+          state.goal !== task.goal ||
+          state.strategy.name !== strategy ||
+          state.purpose !== "evolution-evaluation"
+        ) {
+          throw new Error(
+            `Automatic evaluation run '${result.runId}' does not match its server-owned evaluation request`,
+          );
+        }
+        const infrastructure = infrastructureFailureFromRun(state);
+        if (infrastructure) {
+          throw new ProviderFailureError(
+            `Automatic evaluation run '${result.runId}' hit provider infrastructure failure ${infrastructure.code}`,
+            infrastructure,
+          );
+        }
+        pairings.push({ taskId: task.id, state });
       }
-      outcomes.push(projectRunOutcome(state));
     }
-    return aggregateRunOutcomes(outcomes);
+
+    const suiteAggregate = scoreEvaluationSuite(suite, pairings);
+    // Preserve AutomaticOutcomeAggregate contract while ranking by suite worst-score.
+    const outcomes = suiteAggregate.scores.map((score) => {
+      const state = pairings.find(
+        (entry) => entry.taskId === score.taskId && entry.state.id === score.runId,
+      )?.state;
+      const projected = state ? projectRunOutcome(state) : undefined;
+      return {
+        runId: score.runId,
+        passed: score.passed,
+        score: score.score,
+        status: score.status,
+        qualityPassed: projected?.qualityPassed ?? score.passed,
+        finalDecision: projected?.finalDecision ?? null,
+        commandsPassed: projected?.commandsPassed ?? 0,
+        commandsTotal: projected?.commandsTotal ?? 0,
+        tasksMerged: score.tasksMerged,
+        tasksTotal: score.tasksTotal,
+        totalAttempts: score.totalAttempts,
+        agentInvocations: score.agentInvocations,
+      };
+    });
+
+    // Attach suite identity on the aggregate via run evidence path consumers use score/passed/runIds.
+    void suiteDigest;
+    return {
+      runIds: outcomes.map((outcome) => outcome.runId),
+      passed: suiteAggregate.passed,
+      score: suiteAggregate.score,
+      outcomes,
+    };
   }
 
   private async generateCandidate(
@@ -648,6 +728,7 @@ export class AutomaticEvolutionController {
       incumbentStrategy: null,
       stopReason: null,
       error: null,
+      failureCode: null,
       startedAt: null,
       updatedAt: this.timestamp(),
       cycles: [],
@@ -655,7 +736,7 @@ export class AutomaticEvolutionController {
   }
 
   private finish(
-    status: "completed" | "stopped" | "failed",
+    status: "completed" | "stopped" | "paused" | "failed",
     reason: string,
   ): void {
     this.state.status = status;
@@ -781,4 +862,34 @@ function proposerBudgetStrategy(
 function boundedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length <= 2_000 ? message : `${message.slice(0, 2_000)} [truncated]`;
+}
+
+function infrastructureFailureFrom(
+  error: unknown,
+): ProviderFailureClassification | undefined {
+  if (error instanceof ProviderFailureError) {
+    return error.classification.pauseEvolution || error.classification.infrastructure
+      ? error.classification
+      : undefined;
+  }
+  if (error instanceof RoleProfileChainError) {
+    return error.attempts.find((attempt) => attempt.classification.pauseEvolution)
+      ?.classification;
+  }
+  const classification = classifyError(error);
+  return classification.pauseEvolution ? classification : undefined;
+}
+
+function infrastructureFailureFromRun(
+  state: RunState,
+): ProviderFailureClassification | undefined {
+  if (state.status !== "blocked" && state.status !== "interrupted") return undefined;
+  const message = state.error ?? state.history.at(-1)?.message;
+  if (!message) return undefined;
+  const classification = classifyProviderFailureMessage(message);
+  return classification.pauseEvolution ? classification : undefined;
+}
+
+function classifyProviderFailureMessage(message: string): ProviderFailureClassification {
+  return classifyError(new Error(message));
 }

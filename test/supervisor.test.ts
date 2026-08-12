@@ -455,19 +455,26 @@ describe("run supervisor", () => {
     const supervisor = new RunSupervisor(loaded, events);
 
     const preview = await supervisor.previewCleanup(30);
-    expect(preview.candidates).toEqual([
-      expect.objectContaining({ id: completed.id, status: "completed" }),
-    ]);
+    expect(preview.candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: completed.id, status: "completed" }),
+        expect.objectContaining({ id: interrupted.id, status: "interrupted" }),
+      ]),
+    );
+    expect(preview.candidates).toHaveLength(2);
     await expect(supervisor.cleanup(preview.token)).resolves.toEqual({
-      deletedRunIds: [completed.id],
+      deletedRunIds: expect.arrayContaining([completed.id, interrupted.id]),
       reclaimedBytes: expect.any(Number),
     });
     await expect(supervisor.get(completed.id)).resolves.toBeUndefined();
-    await expect(supervisor.get(interrupted.id)).resolves.toMatchObject({ status: "interrupted" });
+    await expect(supervisor.get(interrupted.id)).resolves.toBeUndefined();
     await expect(supervisor.get(retryParent.id)).resolves.toMatchObject({ status: "blocked" });
     expect(events.listAfter(0, completed.id)).toEqual([]);
-    expect(events.listAfter(0, interrupted.id)).toHaveLength(2);
+    expect(events.listAfter(0, interrupted.id)).toEqual([]);
     await expect(supervisor.cleanup(preview.token)).rejects.toThrow("missing or expired");
+
+    // single-run delete for a blocked parent still protected by child until child is gone
+    await expect(supervisor.deleteRun(retryParent.id)).rejects.toThrow(/parent/i);
 
     const stale = fakeState("stale-preview", "Changed after preview", "cancelled");
     await states.save(stale);

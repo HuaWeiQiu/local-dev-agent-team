@@ -9,6 +9,14 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import type { AgentRunResult } from "../adapters/types.js";
 import type { RunStateStore } from "../state/store.js";
 import { assertRoleProfilePermission } from "../security/permissions.js";
+import {
+  classificationForCode,
+  classifyError,
+  defaultProviderHealthRegistry,
+  type ProviderFailureAttempt,
+  type ProviderHealthRegistry,
+  RoleProfileChainError,
+} from "../providers/failure.js";
 
 export interface RoleInvocationOptions<T> {
   role: string;
@@ -82,6 +90,7 @@ export class ProfiledAgentService implements RoleAgentService {
     private readonly signal?: AbortSignal,
     private readonly observer?: AgentInvocationObserver,
     private readonly registry = new AdapterRegistry(),
+    private readonly health: ProviderHealthRegistry = defaultProviderHealthRegistry,
   ) {}
 
   async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
@@ -131,7 +140,7 @@ export class ProfiledAgentService implements RoleAgentService {
       options.promptKey ?? options.role,
       options.context,
     );
-    const errors: string[] = [];
+    const attempts: ProviderFailureAttempt[] = [];
 
     for (const candidate of candidates) {
       assertRoleProfilePermission(
@@ -139,6 +148,41 @@ export class ProfiledAgentService implements RoleAgentService {
         candidate.name,
         candidate.profile.permission,
       );
+      const gate = this.health.allowAttempt(
+        candidate.name,
+        candidate.profile.adapter,
+        candidate.profile.model,
+      );
+      if (!gate.allowed) {
+        const classification = gate.snapshot.lastCode
+          ? classificationForCode(gate.snapshot.lastCode, ["circuit-open"])
+          : classifyError(
+              new Error(
+                gate.snapshot.lastSummary ??
+                  `Profile '${candidate.name}' circuit is open (${gate.reason ?? "cooldown"})`,
+              ),
+            );
+        const attempt: ProviderFailureAttempt = {
+          profile: candidate.name,
+          adapter: candidate.profile.adapter,
+          model: candidate.profile.model,
+          classification,
+          message: gate.reason ?? "circuit open",
+          at: new Date().toISOString(),
+        };
+        attempts.push(attempt);
+        this.store.emit(options.runId, "agent.profile.skipped", {
+          role: options.role,
+          profile: candidate.name,
+          adapter: candidate.profile.adapter,
+          model: candidate.profile.model,
+          artifactKey: options.artifactKey,
+          reason: gate.reason,
+          health: gate.snapshot,
+          failure: attempt.classification,
+        });
+        continue;
+      }
       const artifactDirectory = this.store.artifactDirectory(
         options.runId,
         options.artifactKey,
@@ -220,6 +264,11 @@ export class ProfiledAgentService implements RoleAgentService {
         } finally {
           batcher.flushAll();
         }
+        this.health.recordSuccess(
+          candidate.name,
+          candidate.profile.adapter,
+          candidate.profile.model,
+        );
         if (invocationId) {
           observed = true;
           try {
@@ -273,12 +322,43 @@ export class ProfiledAgentService implements RoleAgentService {
         }
         this.signal?.throwIfAborted();
         if (observationFailed || isBudgetExceeded(failure)) throw failure;
-        errors.push(
-          `${candidate.name}: ${failure instanceof Error ? failure.message : String(failure)}`,
+
+        const classification =
+          failure instanceof AgentInvocationError
+            ? failure.classification
+            : classifyError(failure);
+        const message = failure instanceof Error ? failure.message : String(failure);
+        const attempt: ProviderFailureAttempt = {
+          profile: candidate.name,
+          adapter: candidate.profile.adapter,
+          model: candidate.profile.model,
+          classification,
+          message,
+          at: new Date().toISOString(),
+        };
+        attempts.push(attempt);
+        const health = this.health.recordFailure(
+          candidate.name,
+          candidate.profile.adapter,
+          candidate.profile.model,
+          classification,
         );
+        this.store.emit(options.runId, "agent.profile.failed", {
+          role: options.role,
+          profile: candidate.name,
+          adapter: candidate.profile.adapter,
+          model: candidate.profile.model,
+          artifactKey: options.artifactKey,
+          usedFallback: candidate.usedFallback,
+          failure: classification,
+          health,
+          message,
+          nextProfile:
+            candidates[candidates.indexOf(candidate) + 1]?.name ?? null,
+        });
       }
     }
-    throw new Error(`All profiles failed for role '${options.role}':\n${errors.join("\n")}`);
+    throw new RoleProfileChainError(options.role, attempts);
   }
 
   private async renderPrompt(role: string, promptKey: string, context: unknown): Promise<string> {

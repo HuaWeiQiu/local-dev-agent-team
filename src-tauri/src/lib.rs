@@ -1,5 +1,6 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -38,12 +39,47 @@ struct DesktopStatus {
     message: String,
     project_name: Option<String>,
     technical_detail: Option<String>,
+    /// Registered projects for the multi-project dock (MRU order).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projects: Option<Vec<DesktopProjectEntry>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopProjectEntry {
+    id: String,
+    name: String,
+    path: String,
+    has_config: bool,
+    /// Another Agent Team process currently holds this project's control lock.
+    #[serde(default)]
+    busy: bool,
+    /// PID that holds control.lock (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_pid: Option<u32>,
+    /// Short process command for the lease owner (visual diagnosis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_command: Option<String>,
+    /// True when project run snapshots look active (implementing/reworking/...).
+    #[serde(default)]
+    has_active_run: bool,
+    /// Human label: free | ours | foreign | stale | active-run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    occupancy: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct DesktopSettings {
-    project_root: PathBuf,
+    /// Most-recently-used project roots (canonical paths).
+    #[serde(default)]
+    project_roots: Vec<PathBuf>,
+    /// Last focused project root.
+    #[serde(default)]
+    active_project_root: Option<PathBuf>,
+    /// Legacy single-project field (migrated on load).
+    #[serde(default)]
+    project_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +147,106 @@ async fn desktop_retry(
         .map_err(|error| format!("项目重试任务失败：{error}"))
 }
 
+#[tauri::command]
+async fn desktop_list_projects(
+    app: AppHandle,
+) -> Result<Vec<DesktopProjectEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = load_settings(&app)?.unwrap_or_default();
+        Ok(project_entries_from_settings(&settings))
+    })
+    .await
+    .map_err(|error| format!("读取项目列表失败：{error}"))?
+}
+
+#[tauri::command]
+async fn desktop_remove_project(
+    app: AppHandle,
+    runtime: tauri::State<'_, DesktopRuntime>,
+    project_path: String,
+) -> Result<DesktopStatus, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = canonical_project_root(Path::new(&project_path))?;
+        let mut settings = load_settings(&app)?.unwrap_or_default();
+        settings.project_roots.retain(|path| path != &root);
+        if settings.active_project_root.as_ref() == Some(&root) {
+            settings.active_project_root = settings.project_roots.first().cloned();
+        }
+        save_settings_document(&app, &settings)?;
+        if let Some(active) = settings.active_project_root.clone() {
+            open_registered_workspace_sync(&app, &runtime, Some(active))
+        } else {
+            let mut state = lock_runtime(&runtime);
+            stop_service(&mut state.service);
+            drop(state);
+            Ok(with_projects(needs_project_status(), &settings))
+        }
+    })
+    .await
+    .map_err(|error| format!("移除项目失败：{error}"))?
+}
+
+/// Inspect occupancy for one project (for the visual release dialog).
+#[tauri::command]
+async fn desktop_inspect_project_lease(project_path: String) -> Result<DesktopProjectEntry, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = canonical_project_root(Path::new(&project_path))?;
+        let mut used = HashSet::new();
+        Ok(project_entry_for_root(&root, &mut used))
+    })
+    .await
+    .map_err(|error| format!("检查占用失败：{error}"))?
+}
+
+/// Release a foreign/stale control lease after explicit user confirmation.
+/// - stale (dead pid): only removes control.lock
+/// - foreign live pid without active run: SIGTERM then remove lock
+/// - active run: refused unless force=true
+#[tauri::command]
+async fn desktop_release_project_lease(
+    app: AppHandle,
+    runtime: tauri::State<'_, DesktopRuntime>,
+    project_path: String,
+    force: bool,
+) -> Result<DesktopStatus, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = canonical_project_root(Path::new(&project_path))?;
+        let inspection = {
+            let mut used = HashSet::new();
+            project_entry_for_root(&root, &mut used)
+        };
+        if inspection.occupancy.as_deref() == Some("ours") {
+            return Err("该项目正由当前 Agent Team 窗口管理，请直接使用工作台，无需释放".into());
+        }
+        if inspection.occupancy.as_deref() == Some("free") {
+            let settings = load_settings(&app)?.unwrap_or_default();
+            return Ok(with_projects(
+                DesktopStatus {
+                    state: "needsProject",
+                    message: "该项目当前没有被占用".into(),
+                    project_name: Some(inspection.name.clone()),
+                    technical_detail: None,
+                    projects: None,
+                },
+                &settings,
+            ));
+        }
+        if inspection.has_active_run && !force {
+            return Err(format!(
+                "项目 {} 似乎仍有进行中的 multi-agent 任务。若确定要中断，请在界面选择「强制释放」",
+                inspection.name
+            ));
+        }
+        release_project_lease(&root, force)?;
+        // Re-open workspace so the freed project can join the multi-project dock.
+        open_registered_workspace_sync(&app, &runtime, Some(root))
+    })
+    .await
+    .map_err(|error| format!("释放占用失败：{error}"))?
+}
+
 fn boot_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
     {
         let mut state = lock_runtime(runtime);
@@ -146,12 +282,17 @@ fn boot_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
     }
 
     match load_settings(app) {
-        Ok(Some(root)) => match canonical_project_root(&root) {
-            Ok(root) if should_remember_project(&root) => open_project_sync(app, runtime, root),
-            Ok(_) => needs_project_status(),
-            Err(detail) => error_status("上次打开的项目已经不可用", None, detail),
-        },
-        Ok(None) => needs_project_status(),
+        Ok(Some(settings)) if !settings.project_roots.is_empty() => {
+            open_registered_workspace_sync(app, runtime, settings.active_project_root.clone())
+                .unwrap_or_else(|detail| {
+                    let status = error_status("无法打开已保存的项目列表", None, detail);
+                    with_projects(status, &settings)
+                })
+        }
+        Ok(_) => with_projects(
+            needs_project_status(),
+            &load_settings(app).ok().flatten().unwrap_or_default(),
+        ),
         Err(detail) => error_status("无法读取上次的项目", None, detail),
     }
 }
@@ -166,45 +307,100 @@ fn retry_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
 
 fn open_project_sync(app: &AppHandle, runtime: &DesktopRuntime, root: PathBuf) -> DesktopStatus {
     let project_name = project_name(&root);
-    let Some(config) = discover_config(&root) else {
+    if discover_project_config(&root).is_none() && discover_config(&root).is_none() {
         let mut state = lock_runtime(runtime);
         stop_service(&mut state.service);
-        state.pending_project = Some(root);
-        return DesktopStatus {
-            state: "needsSetup",
-            message: "这个项目还没有 Agent Team 配置".into(),
-            project_name: Some(project_name),
-            technical_detail: Some("未找到 agent-team.yaml".into()),
-        };
-    };
+        state.pending_project = Some(root.clone());
+        let settings = remember_project(app, &root).unwrap_or_default();
+        return with_projects(
+            DesktopStatus {
+                state: "needsSetup",
+                message: "这个项目还没有 Agent Team 配置".into(),
+                project_name: Some(project_name),
+                technical_detail: Some("未找到 agent-team.yaml".into()),
+                projects: None,
+            },
+            &settings,
+        );
+    }
+
+    match remember_project(app, &root) {
+        Ok(_) => {}
+        Err(detail) => {
+            return error_status("无法记住这个项目", Some(project_name), detail);
+        }
+    }
+    open_registered_workspace_sync(app, runtime, Some(root))
+        .unwrap_or_else(|detail| service_start_error_status(project_name, detail))
+}
+
+/// Start (or restart) the control service for every registered project via a
+/// generated workspace manifest so the workbench can switch projects on one port.
+fn open_registered_workspace_sync(
+    app: &AppHandle,
+    runtime: &DesktopRuntime,
+    focus: Option<PathBuf>,
+) -> Result<DesktopStatus, String> {
+    let mut settings = load_settings(app)?.unwrap_or_default();
+    if let Some(focus) = focus.as_ref() {
+        settings = remember_project_in_memory(settings, focus);
+        save_settings_document(app, &settings)?;
+    }
+    if settings.project_roots.is_empty() {
+        let mut state = lock_runtime(runtime);
+        stop_service(&mut state.service);
+        return Ok(with_projects(needs_project_status(), &settings));
+    }
+
+    let workspace_bundle = write_desktop_workspace_manifest(app, &settings.project_roots)?;
+    let focus_root = focus
+        .or_else(|| settings.active_project_root.clone())
+        .or_else(|| settings.project_roots.first().cloned())
+        .ok_or_else(|| "没有可打开的项目".to_string())?;
+    let focus_name = project_name(&focus_root);
 
     let mut state = lock_runtime(runtime);
     stop_service(&mut state.service);
-    state.pending_project = Some(root.clone());
-    let paths = match resolve_runtime_paths(app) {
-        Ok(paths) => paths,
-        Err(detail) => return error_status("桌面运行环境尚未准备好", Some(project_name), detail),
+    state.pending_project = Some(focus_root.clone());
+    let paths = resolve_runtime_paths(app)
+        .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
+    let config = SelectedConfig {
+        path: workspace_bundle.workspace_path,
+        kind: ConfigKind::Workspace,
     };
-    match start_service(&paths, &root, &config) {
-        Ok(service) => {
-            let status = ready_status(&service);
+    // Workspace serve cwd is the app config dir so relative paths in the manifest stay stable.
+    let service_root = settings_path(app)?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位桌面配置目录".to_string())?;
+    match start_service(
+        &paths,
+        &service_root,
+        &config,
+        Some(&workspace_bundle.registry_path),
+    ) {
+        Ok(mut service) => {
+            service.project_root = focus_root.clone();
+            service.project_name = if settings.project_roots.len() > 1 {
+                format!("{} · {} 个项目", focus_name, settings.project_roots.len())
+            } else {
+                focus_name.clone()
+            };
+            let status = with_projects(ready_status(&service), &settings);
             let bootstrap_url = service.bootstrap_url.clone();
             state.service = Some(service);
             state.pending_project = None;
             drop(state);
-            if let Err(detail) = save_settings(app, &root) {
-                return error_status("项目已打开，但无法记住本次选择", Some(project_name), detail);
-            }
-            if let Err(detail) = navigate_to(app, &bootstrap_url) {
-                return error_status(
-                    "工作台已启动，但页面暂时无法打开",
-                    Some(project_name),
-                    detail,
-                );
-            }
-            status
+            navigate_to(app, &bootstrap_url)?;
+            Ok(status)
         }
-        Err(detail) => service_start_error_status(project_name, detail),
+        Err(detail) => {
+            drop(state);
+            Ok(with_projects(
+                service_start_error_status(focus_name, detail),
+                &settings,
+            ))
+        }
     }
 }
 
@@ -247,6 +443,7 @@ fn start_service(
     paths: &RuntimePaths,
     root: &Path,
     config: &SelectedConfig,
+    registry_path: Option<&Path>,
 ) -> Result<ManagedService, String> {
     let token = random_session_token();
     let mut command = Command::new(&paths.node);
@@ -264,9 +461,18 @@ fn start_service(
         .arg(&config.path)
         .current_dir(root)
         .env("AGENT_TEAM_SESSION_TOKEN", &token)
+        // GUI apps on macOS often inherit a tiny PATH without Homebrew.
+        // Ensure codex/grok CLIs remain resolvable for multi-agent workers.
+        .env("PATH", desktop_path_env())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(registry_path) = registry_path {
+        command.env(
+            "AGENT_TEAM_PROJECT_REGISTRY",
+            registry_path.to_string_lossy().as_ref(),
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -555,7 +761,7 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn load_settings(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+fn load_settings(app: &AppHandle) -> Result<Option<DesktopSettings>, String> {
     let path = settings_path(app)?;
     let contents = match fs::read(&path) {
         Ok(contents) => contents,
@@ -564,22 +770,448 @@ fn load_settings(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     };
     let settings: DesktopSettings =
         serde_json::from_slice(&contents).map_err(|error| error.to_string())?;
-    Ok(Some(settings.project_root))
+    Ok(Some(normalize_settings(settings)))
 }
 
-fn save_settings(app: &AppHandle, root: &Path) -> Result<(), String> {
-    if !should_remember_project(root) {
-        return Ok(());
-    }
+fn save_settings_document(app: &AppHandle, settings: &DesktopSettings) -> Result<(), String> {
     let path = settings_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let settings = DesktopSettings {
-        project_root: root.to_path_buf(),
-    };
-    let contents = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    let contents =
+        serde_json::to_vec_pretty(&normalize_settings(settings.clone())).map_err(|error| error.to_string())?;
     fs::write(path, contents).map_err(|error| error.to_string())
+}
+
+fn normalize_settings(mut settings: DesktopSettings) -> DesktopSettings {
+    if settings.project_roots.is_empty() {
+        if let Some(root) = settings.project_root.take() {
+            settings.project_roots.push(root.clone());
+            settings.active_project_root = Some(root);
+        }
+    }
+    settings.project_root = None;
+    if settings.active_project_root.is_none() {
+        settings.active_project_root = settings.project_roots.first().cloned();
+    }
+    settings
+}
+
+fn remember_project(app: &AppHandle, root: &Path) -> Result<DesktopSettings, String> {
+    let mut settings = load_settings(app)?.unwrap_or_default();
+    settings = remember_project_in_memory(settings, root);
+    if should_remember_project(root) {
+        save_settings_document(app, &settings)?;
+    }
+    Ok(settings)
+}
+
+fn remember_project_in_memory(mut settings: DesktopSettings, root: &Path) -> DesktopSettings {
+    settings.project_roots.retain(|path| path != root);
+    if should_remember_project(root) {
+        settings.project_roots.insert(0, root.to_path_buf());
+    }
+    settings.active_project_root = Some(root.to_path_buf());
+    // Cap registry size so the dock stays usable.
+    if settings.project_roots.len() > 32 {
+        settings.project_roots.truncate(32);
+    }
+    settings
+}
+
+fn project_entries_from_settings(settings: &DesktopSettings) -> Vec<DesktopProjectEntry> {
+    let mut used_ids = HashSet::new();
+    settings
+        .project_roots
+        .iter()
+        .map(|root| project_entry_for_root(root, &mut used_ids))
+        .collect()
+}
+
+fn project_entry_for_root(root: &Path, used_ids: &mut HashSet<String>) -> DesktopProjectEntry {
+    let id = unique_project_id(root, used_ids);
+    let lease = read_control_lease(root);
+    let lease_alive = lease
+        .as_ref()
+        .map(|entry| process_is_alive(entry.pid))
+        .unwrap_or(false);
+    let ours = lease
+        .as_ref()
+        .map(|entry| is_our_control_pid(entry.pid))
+        .unwrap_or(false);
+    let has_active_run = project_has_active_run(root);
+    let (busy, occupancy) = match (&lease, lease_alive, ours) {
+        (None, _, _) => (false, "free"),
+        (Some(_), false, _) => (true, "stale"),
+        (Some(_), true, true) => (false, "ours"),
+        (Some(_), true, false) if has_active_run => (true, "active-run"),
+        (Some(_), true, false) => (true, "foreign"),
+    };
+    DesktopProjectEntry {
+        id,
+        name: project_name(root),
+        path: root.to_string_lossy().into_owned(),
+        has_config: discover_project_config(root).is_some() || discover_config(root).is_some(),
+        busy,
+        lease_pid: lease.as_ref().map(|entry| entry.pid),
+        lease_command: lease
+            .as_ref()
+            .filter(|_| lease_alive)
+            .and_then(|entry| process_command(entry.pid)),
+        has_active_run,
+        occupancy: Some(occupancy.into()),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ControlLeaseInfo {
+    pid: u32,
+    token: String,
+}
+
+fn read_control_lease(root: &Path) -> Option<ControlLeaseInfo> {
+    let lock_path = root.join(".agent-team").join("control.lock");
+    let text = fs::read_to_string(lock_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let pid = value.get("pid")?.as_u64()?;
+    let token = value.get("token")?.as_str()?.to_string();
+    if pid == 0 || pid > u64::from(u32::MAX) {
+        return None;
+    }
+    Some(ControlLeaseInfo {
+        pid: pid as u32,
+        token,
+    })
+}
+
+fn is_our_control_pid(pid: u32) -> bool {
+    // Current desktop process or any of its descendants (workspace serve child).
+    let self_pid = std::process::id();
+    if pid == self_pid {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        descendant_pids(self_pid as libc::pid_t).contains(&(pid as libc::pid_t))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn process_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command.chars().take(180).collect())
+    }
+}
+
+fn project_has_active_run(root: &Path) -> bool {
+    let runs = root.join(".agent-team").join("runs");
+    let Ok(entries) = fs::read_dir(runs) else {
+        return false;
+    };
+    let active = [
+        "created",
+        "orchestrating",
+        "architecting",
+        "planned",
+        "implementing",
+        "reviewing-testing",
+        "reworking",
+        "integrating",
+        "final-checks",
+        "awaiting-human",
+        "publishing",
+        "waiting-ci",
+        "repairing",
+    ];
+    for entry in entries.flatten() {
+        let state_path = entry.path().join("state.json");
+        let Ok(text) = fs::read_to_string(state_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(status) = value.get("status").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if active.contains(&status) {
+            return true;
+        }
+    }
+    false
+}
+
+fn release_project_lease(root: &Path, force: bool) -> Result<(), String> {
+    let lock_path = root.join(".agent-team").join("control.lock");
+    let Some(lease) = read_control_lease(root) else {
+        let _ = fs::remove_file(&lock_path);
+        return Ok(());
+    };
+    if is_our_control_pid(lease.pid) {
+        return Err("不能释放当前窗口自己持有的控制权".into());
+    }
+    if process_is_alive(lease.pid) {
+        if project_has_active_run(root) && !force {
+            return Err("仍有进行中的任务，已拒绝释放".into());
+        }
+        terminate_pid(lease.pid);
+        // Wait briefly for exit.
+        for _ in 0..20 {
+            if !process_is_alive(lease.pid) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if process_is_alive(lease.pid) {
+            force_kill_pid(lease.pid);
+            thread::sleep(Duration::from_millis(200));
+        }
+        if process_is_alive(lease.pid) {
+            return Err(format!("无法结束占用进程 PID {}", lease.pid));
+        }
+    }
+    // Only remove lock if it still points at the same token/pid we inspected.
+    if let Some(current) = read_control_lease(root) {
+        if current.pid == lease.pid && current.token == lease.token {
+            fs::remove_file(&lock_path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn terminate_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn force_kill_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn with_projects(mut status: DesktopStatus, settings: &DesktopSettings) -> DesktopStatus {
+    status.projects = Some(project_entries_from_settings(settings));
+    status
+}
+
+fn discover_project_config(root: &Path) -> Option<PathBuf> {
+    ["agent-team.yaml", "agent-team.yml"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
+fn unique_project_id(root: &Path, used: &mut HashSet<String>) -> String {
+    let base = slugify_project_id(&project_name(root));
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
+fn slugify_project_id(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for character in name.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "project".into()
+    } else {
+        slug.chars().take(48).collect()
+    }
+}
+
+struct DesktopWorkspaceBundle {
+    workspace_path: PathBuf,
+    registry_path: PathBuf,
+}
+
+fn write_desktop_workspace_manifest(
+    app: &AppHandle,
+    roots: &[PathBuf],
+) -> Result<DesktopWorkspaceBundle, String> {
+    let directory = settings_path(app)?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位桌面工作区清单路径".to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("desktop-workspace.yaml");
+    let registry_path = directory.join("desktop-project-registry.json");
+
+    let mut used_ids = HashSet::new();
+    let mut projects = Vec::new();
+    let mut skipped = Vec::new();
+    let mut registry_entries = Vec::new();
+    for root in roots {
+        let id = unique_project_id(root, &mut used_ids);
+        let name = project_name(root);
+        let lease = read_control_lease(root);
+        let lease_alive = lease
+            .as_ref()
+            .map(|entry| process_is_alive(entry.pid))
+            .unwrap_or(false);
+        let foreign = lease_alive
+            && lease
+                .as_ref()
+                .map(|entry| !is_our_control_pid(entry.pid))
+                .unwrap_or(false);
+        if foreign {
+            skipped.push(name.clone());
+            registry_entries.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "path": root.to_string_lossy(),
+                "connected": false,
+                "occupancy": if project_has_active_run(root) { "active-run" } else { "foreign" },
+                "reason": lease.as_ref().map(|entry| format!("其他进程占用 PID {}", entry.pid)).unwrap_or_else(|| "其他窗口占用".into()),
+            }));
+            continue;
+        }
+        let Some(config) = discover_project_config(root) else {
+            skipped.push(format!("{name}(无配置)"));
+            registry_entries.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "path": root.to_string_lossy(),
+                "connected": false,
+                "occupancy": "unconfigured",
+                "reason": "缺少 agent-team.yaml",
+            }));
+            continue;
+        };
+        projects.push(format!(
+            "  - id: {id}\n    config: {}\n",
+            yaml_quote(&config.to_string_lossy())
+        ));
+        registry_entries.push(serde_json::json!({
+            "id": id,
+            "name": name,
+            "path": root.to_string_lossy(),
+            "connected": true,
+            "occupancy": "ours",
+            "reason": "已接入当前工作区",
+        }));
+    }
+    if projects.is_empty() {
+        if skipped.is_empty() {
+            return Err("没有可加入工作区的已配置项目".into());
+        }
+        return Err(format!(
+            "没有可启动的空闲项目（已跳过：{}）。请在启动页对占用项目点「释放占用」",
+            skipped.join("、")
+        ));
+    }
+    let mut body = format!("version: 1\nprojects:\n{}", projects.join(""));
+    if !skipped.is_empty() {
+        body.push_str(&format!(
+            "# skipped busy or unconfigured: {}\n",
+            skipped.join(", ")
+        ));
+    }
+    fs::write(&path, body).map_err(|error| error.to_string())?;
+    let registry_body = serde_json::to_vec_pretty(&serde_json::json!({
+        "generatedAt": chrono_like_now(),
+        "projects": registry_entries,
+    }))
+    .map_err(|error| error.to_string())?;
+    fs::write(&registry_path, registry_body).map_err(|error| error.to_string())?;
+    Ok(DesktopWorkspaceBundle {
+        workspace_path: path,
+        registry_path,
+    })
+}
+
+fn chrono_like_now() -> String {
+    // Avoid extra chrono dependency; ISO-ish local stamp is enough for registry metadata.
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}", duration.as_secs())
+}
+
+/// True when another live process already owns this project's control.lock.
+fn project_has_foreign_control_lease(root: &Path) -> bool {
+    let Some(lease) = read_control_lease(root) else {
+        return false;
+    };
+    process_is_alive(lease.pid) && !is_our_control_pid(lease.pid)
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn desktop_path_env() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for candidate in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        if Path::new(candidate).is_dir() {
+            parts.push(candidate.to_string());
+        }
+    }
+    if let Ok(existing) = std::env::var("PATH") {
+        for part in existing.split(':') {
+            if !part.is_empty() && !parts.iter().any(|value| value == part) {
+                parts.push(part.to_string());
+            }
+        }
+    }
+    parts.join(":")
 }
 
 fn should_remember_project(root: &Path) -> bool {
@@ -615,15 +1247,17 @@ fn ready_status(service: &ManagedService) -> DesktopStatus {
             service.project_root.to_string_lossy(),
             service.url
         )),
+        projects: None,
     }
 }
 
 fn needs_project_status() -> DesktopStatus {
     DesktopStatus {
         state: "needsProject",
-        message: "选择一个代码项目开始".into(),
+        message: "选择一个代码项目开始，可添加多个项目并在工作台切换".into(),
         project_name: None,
         technical_detail: None,
+        projects: None,
     }
 }
 
@@ -639,6 +1273,7 @@ fn error_status(
         message: message.into(),
         project_name,
         technical_detail: Some(detail),
+        projects: None,
     }
 }
 
@@ -650,6 +1285,7 @@ fn service_start_error_status(project_name: String, detail: String) -> DesktopSt
             message: "这个项目已由另一个 Agent Team 进程管理，正在运行的任务不会受到影响".into(),
             project_name: Some(project_name),
             technical_detail: Some(detail),
+            projects: None,
         };
     }
     error_status("这个项目暂时无法打开", Some(project_name), detail)
@@ -780,7 +1416,11 @@ pub fn run() {
             desktop_boot,
             desktop_open_project,
             desktop_initialize_project,
-            desktop_retry
+            desktop_retry,
+            desktop_list_projects,
+            desktop_remove_project,
+            desktop_inspect_project_lease,
+            desktop_release_project_lease
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Agent Team desktop application");
@@ -878,6 +1518,31 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_single_project_settings() {
+        let settings = normalize_settings(DesktopSettings {
+            project_root: Some(PathBuf::from("/Users/tanye/demo")),
+            ..DesktopSettings::default()
+        });
+        assert_eq!(settings.project_roots, vec![PathBuf::from("/Users/tanye/demo")]);
+        assert_eq!(
+            settings.active_project_root,
+            Some(PathBuf::from("/Users/tanye/demo"))
+        );
+        assert!(settings.project_root.is_none());
+    }
+
+    #[test]
+    fn slugifies_stable_project_ids() {
+        assert_eq!(slugify_project_id("Local Dev Agent Team"), "local-dev-agent-team");
+        assert_eq!(slugify_project_id("!!!"), "project");
+        let mut used = HashSet::new();
+        let first = unique_project_id(Path::new("/tmp/cinevfx"), &mut used);
+        let second = unique_project_id(Path::new("/other/cinevfx"), &mut used);
+        assert_eq!(first, "cinevfx");
+        assert_eq!(second, "cinevfx-2");
+    }
+
+    #[test]
     fn starts_authenticated_control_service_and_stops_it() {
         let root = tempdir().unwrap();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -897,7 +1562,7 @@ mod tests {
             process_output_detail(&init.stdout, &init.stderr)
         );
         let config = discover_config(root.path()).unwrap();
-        let mut service = start_service(&paths, root.path(), &config).unwrap();
+        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
 
         let unauthorized = http_get(&service.url, "/api/health", None);
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
@@ -948,7 +1613,7 @@ mod tests {
             path: root.path().join("agent-team.yaml"),
             kind: ConfigKind::Project,
         };
-        let mut service = start_service(&paths, root.path(), &config).unwrap();
+        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
 
         // start_service 用 process_group(0) 让服务独立成组。
         let pid = service.child.id() as libc::pid_t;

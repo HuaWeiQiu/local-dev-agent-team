@@ -5,6 +5,10 @@ import { finished } from "node:stream/promises";
 import path from "node:path";
 import type { AgentProfile } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
+import {
+  classifyProviderFailure,
+  type ProviderFailureClassification,
+} from "../providers/failure.js";
 import type { AgentActivitySnapshot, AgentAdapter, AgentRunResult } from "./types.js";
 import { AdapterRegistry } from "./registry.js";
 import { assertAdapterProfile, assertInvocationContract } from "./conformance.js";
@@ -25,13 +29,25 @@ export interface InvokeOptions {
 
 export class AgentInvocationError extends Error {
   override readonly name = "AgentInvocationError";
+  readonly classification: ProviderFailureClassification;
 
   constructor(
     message: string,
     readonly result: AgentRunResult,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { classification?: ProviderFailureClassification },
   ) {
     super(message, options);
+    this.classification =
+      options?.classification ??
+      classifyProviderFailure({
+        message,
+        stdout: result.process.stdout,
+        stderr: result.process.stderr,
+        exitCode: result.process.exitCode,
+        timedOut: result.process.timedOut,
+        signal: result.process.signal,
+        cause: options?.cause,
+      });
   }
 }
 
@@ -127,17 +143,36 @@ async function invokePreparedAgent(
   try {
     result = await adapter.parseResult(invocation, process);
   } catch (error) {
+    const message = `${options.adapterName} output could not be parsed: ${errorMessage(error)}`;
     throw new AgentInvocationError(
-      `${options.adapterName} output could not be parsed: ${errorMessage(error)}`,
+      message,
       { text: process.stdout, process },
-      { cause: error },
+      {
+        cause: error,
+        classification: classifyProviderFailure({
+          message,
+          stdout: process.stdout,
+          stderr: process.stderr,
+          exitCode: process.exitCode,
+          timedOut: process.timedOut,
+          signal: process.signal,
+          cause: error,
+        }),
+      },
     );
   }
   if (process.exitCode !== 0) {
-    throw new AgentInvocationError(
-      `${options.adapterName} exited with ${process.exitCode}: ${process.stderr.trim() || result.text}`,
-      result,
-    );
+    const message = `${options.adapterName} exited with ${process.exitCode}: ${process.stderr.trim() || result.text}`;
+    throw new AgentInvocationError(message, result, {
+      classification: classifyProviderFailure({
+        message,
+        stdout: result.process.stdout,
+        stderr: result.process.stderr,
+        exitCode: result.process.exitCode,
+        timedOut: result.process.timedOut,
+        signal: result.process.signal,
+      }),
+    });
   }
   return result;
 }

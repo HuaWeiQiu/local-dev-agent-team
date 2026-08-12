@@ -20,6 +20,7 @@ export type AutomaticEvolutionStatus =
   | "stopping"
   | "completed"
   | "stopped"
+  | "paused"
   | "failed";
 
 export type AutomaticEvolutionPhase =
@@ -88,6 +89,8 @@ export interface AutomaticEvolutionSnapshot {
   incumbentStrategy: string | null;
   stopReason: string | null;
   error: string | null;
+  /** Stable provider failure code when status is paused for infrastructure issues. */
+  failureCode: string | null;
   startedAt: string | null;
   updatedAt: string;
   cycles: AutomaticEvolutionCycle[];
@@ -161,6 +164,7 @@ export function automaticRunEvidenceItems(
   incumbent: AutomaticOutcomeAggregate,
   candidate: AutomaticOutcomeAggregate,
   minimumScoreDelta: number,
+  options: { suiteDigest?: string; suiteName?: string } = {},
 ): Array<{ kind: "deterministic"; id: string; status: "pass" | "fail"; summary: string }> {
   const improved = automaticCandidateImproved(incumbent, candidate, minimumScoreDelta);
   return [
@@ -170,6 +174,16 @@ export function automaticRunEvidenceItems(
       status: "pass",
       summary: "Candidate passed the current strategy schema, topology, profile, and catalog preflight",
     },
+    ...(options.suiteDigest
+      ? [
+          {
+            kind: "deterministic" as const,
+            id: "automatic-evaluation-suite-identity-v1",
+            status: "pass" as const,
+            summary: `Evaluation suite ${options.suiteName ?? "configured"} digest ${options.suiteDigest}`,
+          },
+        ]
+      : []),
     ...incumbent.outcomes.map((outcome, index) => ({
       kind: "deterministic" as const,
       id: `automatic-incumbent-run-${index + 1}`,

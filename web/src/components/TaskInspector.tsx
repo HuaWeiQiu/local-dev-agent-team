@@ -14,7 +14,7 @@ export const TaskInspector = memo(function TaskInspector({ run, task }: TaskInsp
     <aside className="task-inspector" aria-label="任务详情">
       <div className="section-heading inspector-heading">
         <div>
-          <span className="section-kicker">INSPECTOR</span>
+          <span className="section-kicker">详情</span>
           <h2>{task ? "任务详情" : "运行详情"}</h2>
         </div>
         {task ? <TaskStatusBadge status={task.status} /> : run ? <RunStatusBadge status={run.status} /> : null}

@@ -65,13 +65,170 @@
 }
 
 .launcher-content {
-  width: min(100%, 520px);
+  width: min(100%, 560px);
   padding: 34px 30px 26px;
   text-align: center;
   border: 1px solid var(--line);
   border-radius: var(--radius-xl);
   background: var(--surface-1);
   box-shadow: var(--shadow-2), var(--edge-highlight);
+}
+
+.launcher-project-dock {
+  margin: 0 0 18px;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2, var(--surface-1));
+}
+
+.launcher-project-dock-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+
+.launcher-project-dock-header strong {
+  font-size: var(--text-13);
+}
+
+.launcher-project-dock-header span {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.launcher-project-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.launcher-project-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.launcher-project-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.launcher-project-lease {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-project-release {
+  padding: 0 10px;
+  min-height: 30px;
+  color: var(--warning, #9a6700);
+  border: 1px solid color-mix(in srgb, var(--warning, #9a6700) 45%, var(--line));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning, #9a6700) 10%, transparent);
+  cursor: pointer;
+  font-size: var(--text-11);
+  font-weight: var(--weight-semibold);
+}
+
+.launcher-project-release:hover:not(:disabled) {
+  color: var(--danger, #cf222e);
+  border-color: var(--danger, #cf222e);
+}
+
+.launcher-project-open {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px;
+  text-align: left;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  cursor: pointer;
+}
+
+.launcher-project-open:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.launcher-project-name {
+  font-size: var(--text-13);
+  font-weight: var(--weight-semibold);
+}
+
+.launcher-project-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-11);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-project-badge {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+}
+
+.launcher-project-badge.is-ready {
+  color: var(--success, #1a7f37);
+  background: color-mix(in srgb, var(--success, #1a7f37) 12%, transparent);
+}
+
+.launcher-project-badge.is-setup {
+  color: var(--warning, #9a6700);
+  background: color-mix(in srgb, var(--warning, #9a6700) 12%, transparent);
+}
+
+.launcher-project-badge.is-busy {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+}
+
+.launcher-project-badge.is-stale {
+  color: var(--warning, #9a6700);
+  background: color-mix(in srgb, var(--warning, #9a6700) 14%, transparent);
+}
+
+.launcher-project-badge.is-active-run {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.launcher-project-badge.is-ours {
+  color: var(--success, #1a7f37);
+  background: color-mix(in srgb, var(--success, #1a7f37) 12%, transparent);
+}
+
+.launcher-project-remove {
+  padding: 0 10px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--text-11);
+}
+
+.launcher-project-remove:hover:not(:disabled) {
+  color: var(--danger, #cf222e);
+  border-color: var(--danger, #cf222e);
 }
 
 .launcher-hero-icon {

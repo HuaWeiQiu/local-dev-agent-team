@@ -69,7 +69,7 @@ export interface AgentActivityParser {
 export interface DoctorCheck {
   profile: string;
   adapter: string;
-  check: "executable" | "authentication" | "model" | "capability";
+  check: "executable" | "authentication" | "model" | "capability" | "quality-command";
   status: "pass" | "fail" | "skip";
   detail: string;
 }

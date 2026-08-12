@@ -130,13 +130,6 @@ export const automaticEvolutionSchema = z
   })
   .strict()
   .superRefine((automation, context) => {
-    if (automation.enabled && !automation.evaluationGoal) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluationGoal"],
-        message: "Enabled automatic evolution requires a fixed evaluationGoal",
-      });
-    }
     if (automation.maxConsecutiveNoImprovement > automation.maxCycles) {
       context.addIssue({
         code: "custom",
@@ -160,6 +153,61 @@ export const evolutionConfigSchema = z.object({
   }),
 });
 
+export const evaluationConfigSchema = z
+  .object({
+    /**
+     * Inline authored suite document. Validated with EvaluationSuite schema at
+     * load time to avoid a config↔evaluation import cycle.
+     */
+    suite: z.unknown().optional(),
+    /** Path relative to the project root for a YAML/JSON suite file. */
+    suiteFile: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((evaluation, context) => {
+    if (evaluation.suite && evaluation.suiteFile) {
+      context.addIssue({
+        code: "custom",
+        path: ["suiteFile"],
+        message: "Configure either evaluation.suite or evaluation.suiteFile, not both",
+      });
+    }
+  });
+
+export const experienceConfigSchema = z
+  .object({
+    /** Master switch for experience extract / retrieve / inject. */
+    enabled: z.boolean().default(true),
+    /** Inject verified experiences into orchestrator/architect planning context. */
+    injectIntoPlanning: z.boolean().default(true),
+    /** Inject verified failure experiences into worker rework attempts. */
+    injectIntoRework: z.boolean().default(true),
+    /** Extract candidate experiences when a run reaches a terminal status. */
+    extractOnTerminal: z.boolean().default(true),
+    /** Max verified experiences injected into a planning prompt. */
+    maxInjected: z.number().int().min(0).max(32).default(8),
+    /**
+     * When true, promote requires suiteDigest or forceWithoutSuite.
+     * Default false; enable when you want evaluation-gated promotion.
+     */
+    requireSuiteForPromote: z.boolean().default(false),
+    /**
+     * When a completed run can resolve an evaluation suite digest, auto-promote
+     * extracted low-sensitivity success candidates with that digest.
+     */
+    autoPromoteWithSuite: z.boolean().default(true),
+    /** Record attempt cards during rework for same-run / similar-failure memory. */
+    recordAttemptCards: z.boolean().default(true),
+    /** Write strategy hints when promoting success/rework experiences. */
+    writeStrategyHints: z.boolean().default(true),
+    /**
+     * Optional override for the shared catalog directory (contains catalog.json).
+     * Default: ~/.agent-team/experience/shared
+     */
+    sharedDirectory: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     version: z.literal(1),
@@ -173,6 +221,18 @@ export const configSchema = z
     roles: z.record(z.string().min(1), roleSchema),
     strategies: strategiesSchema.optional(),
     observability: observabilitySchema.default({ maxEventsPerRun: 50_000 }),
+    evaluation: evaluationConfigSchema.optional(),
+    experience: experienceConfigSchema.default({
+      enabled: true,
+      injectIntoPlanning: true,
+      injectIntoRework: true,
+      extractOnTerminal: true,
+      maxInjected: 8,
+      requireSuiteForPromote: false,
+      autoPromoteWithSuite: true,
+      recordAttemptCards: true,
+      writeStrategyHints: true,
+    }),
     evolution: evolutionConfigSchema.default({
       automatic: {
         enabled: false,
@@ -202,6 +262,19 @@ export const configSchema = z
     }),
   })
   .superRefine((config, context) => {
+    const automation = config.evolution.automatic;
+    if (automation.enabled) {
+      const hasGoal = Boolean(automation.evaluationGoal?.trim());
+      const hasSuite = Boolean(config.evaluation?.suite || config.evaluation?.suiteFile);
+      if (!hasGoal && !hasSuite) {
+        context.addIssue({
+          code: "custom",
+          path: ["evolution", "automatic", "evaluationGoal"],
+          message:
+            "Enabled automatic evolution requires evaluationGoal or evaluation.suite / evaluation.suiteFile",
+        });
+      }
+    }
     if (Object.keys(config.profiles).length === 0) {
       context.addIssue({
         code: "custom",
@@ -274,7 +347,6 @@ export const configSchema = z
       }
     }
 
-    const automation = config.evolution.automatic;
     if (automation.enabled) {
       if (config.quality.commands.length === 0) {
         context.addIssue({
@@ -399,3 +471,4 @@ export type StrategyTopologyMode = z.infer<typeof strategyTopologyModeSchema>;
 export type StrategyTopology = z.infer<typeof strategyTopologySchema>;
 export type ObservabilityConfig = z.infer<typeof observabilitySchema>;
 export type AutomaticEvolutionConfig = z.infer<typeof automaticEvolutionSchema>;
+export type EvaluationConfig = z.infer<typeof evaluationConfigSchema>;

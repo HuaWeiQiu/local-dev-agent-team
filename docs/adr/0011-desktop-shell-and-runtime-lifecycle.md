@@ -48,6 +48,16 @@ for an HttpOnly, SameSite cookie before redirecting to the workbench. API and
 event-stream requests require that cookie when desktop session protection is
 enabled. The token is never written to project or application settings.
 
+## Multi-project dock (extension)
+
+The shell keeps a most-recently-used list of project roots in desktop settings
+and materializes an app-local `desktop-workspace.yaml`. Opening any registered
+project starts (or restarts) one workspace control service that includes every
+configured root. The existing React workbench project switcher then selects the
+active repository; run details remain project-scoped under
+`/api/projects/:id`. Projects that are already leased by another process still
+fail closed with the busy state.
+
 ## Consequences
 
 - Desktop and browser clients continue to use the same HTTP/SSE contracts.
@@ -59,3 +69,5 @@ enabled. The token is never written to project or application settings.
   depend on a customer-managed Node installation.
 - Mobile work can later replace only the execution backend while retaining the
   same strategy and control-plane boundaries.
+- One desktop window can host multiple projects; concurrent runs require each
+  project to be free of an external control lease.

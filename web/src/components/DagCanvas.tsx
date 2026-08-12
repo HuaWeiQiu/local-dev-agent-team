@@ -17,7 +17,7 @@ import {
   TASK_NODE_GRID_COMPACT,
   type TaskNodeData,
 } from "../graph";
-import { statusTone } from "../presentation";
+import { canvasEmptyCopy, humanizeFailure, statusTone, summarizeGoal } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type { RunState, TaskRunState } from "../types";
 import { TaskStatusBadge } from "./StatusBadge";
@@ -53,13 +53,13 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
     [compactLayout, graph, selectedTaskId],
   );
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
+  const emptyCopy = canvasEmptyCopy(run);
 
   return (
     <main className="workspace-canvas" aria-label="任务依赖图">
       <div className="canvas-heading">
         <div>
-          <span className="section-kicker">TASK GRAPH</span>
-          <h2>{run?.plan?.summary ?? run?.goal ?? "任务编排"}</h2>
+          <h2 title={run?.goal}>{run?.plan?.summary ?? (run ? summarizeGoal(run.goal, 64) : "任务编排")}</h2>
         </div>
         {run && (
           <div className="canvas-meta">
@@ -68,6 +68,12 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
           </div>
         )}
       </div>
+      {run?.error ? (
+        <div className="canvas-failure-banner" role="status">
+          <strong>失败原因</strong>
+          <span>{humanizeFailure(run.error)}</span>
+        </div>
+      ) : null}
       {nodes.length > 0 ? (
         <div className="flow-stage">
           <ReactFlow
@@ -96,8 +102,8 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
       ) : (
         <div className="canvas-empty">
           <Network size={30} />
-          <strong>{run ? "等待任务规划" : "选择一个运行"}</strong>
-          <span>{run ? "Architect 生成计划后会在此显示依赖图" : ""}</span>
+          <strong>{emptyCopy.title}</strong>
+          <span>{emptyCopy.detail}</span>
         </div>
       )}
     </main>

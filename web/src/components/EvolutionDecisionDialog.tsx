@@ -20,10 +20,10 @@ interface EvolutionDecisionDialogProps {
 }
 
 const dialogCopy = {
-  promote: { kicker: "HUMAN GATE", title: "确认应用候选", action: "确认应用" },
-  rollback: { kicker: "ROLLBACK", title: "确认回滚目标", action: "确认回滚" },
-  reject: { kicker: "HUMAN DECISION", title: "拒绝候选", action: "确认拒绝" },
-  adopt: { kicker: "LEGACY RECOVERY", title: "采纳当前目标", action: "确认采纳" },
+  promote: { kicker: "人工确认", title: "确认应用候选", action: "确认应用" },
+  rollback: { kicker: "回滚", title: "确认回滚目标", action: "确认回滚" },
+  reject: { kicker: "人工决定", title: "拒绝候选", action: "确认拒绝" },
+  adopt: { kicker: "遗留恢复", title: "采纳当前目标", action: "确认采纳" },
 } as const;
 
 export function EvolutionDecisionDialog({ decision, busy, error, onClose, onSubmit }: EvolutionDecisionDialogProps) {

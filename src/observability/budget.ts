@@ -15,6 +15,8 @@ import {
   legacyMaxArtifactBytes,
   legacyMaxProcessOutputBytes,
 } from "../strategies/defaults.js";
+import { classifyError } from "../providers/failure.js";
+import { AgentInvocationError } from "../adapters/invoke.js";
 
 export class RunBudgetExceededError extends Error {
   readonly code = "RUN_BUDGET_EXCEEDED";
@@ -89,6 +91,12 @@ export class RunBudgetTracker implements AgentInvocationObserver {
     await this.refreshArtifactBytes();
     await this.store.save(this.state);
     const overArtifactBudget = usage.artifactBytes > this.state.strategy.maxArtifactBytes;
+    const failure =
+      observation.error === undefined
+        ? undefined
+        : observation.error instanceof AgentInvocationError
+          ? observation.error.classification
+          : classifyError(observation.error);
     this.store.emit(this.state.id, "agent.invocation.completed", {
       invocationId: observation.invocationId,
       role: observation.role,
@@ -106,6 +114,14 @@ export class RunBudgetTracker implements AgentInvocationObserver {
       ...(process?.stderrTruncated ? { stderrTruncated: true } : {}),
       ...(observation.result?.usage ? { usage: observation.result.usage } : {}),
       ...(observation.error ? { error: errorMessage(observation.error) } : {}),
+      ...(failure
+        ? {
+            failureCode: failure.code,
+            failureCategory: failure.category,
+            infrastructureFailure: failure.infrastructure,
+            pauseEvolution: failure.pauseEvolution,
+          }
+        : {}),
       ...(overArtifactBudget
         ? { error: `Artifact budget of ${this.state.strategy.maxArtifactBytes} bytes exceeded` }
         : {}),

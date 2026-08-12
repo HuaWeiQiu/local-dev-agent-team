@@ -1,5 +1,9 @@
 import type {
   AutomaticEvolutionSnapshot,
+  ExperienceEntry,
+  ExperiencePlanningBundle,
+  ExperienceSnapshot,
+  ExperienceStatus,
   ProjectScope,
   PublicConfig,
   EvidenceFilePreview,
@@ -142,6 +146,16 @@ export async function retryRun(scope: ProjectScope, runId: string): Promise<stri
   return response.runId;
 }
 
+export async function deleteRun(
+  scope: ProjectScope,
+  runId: string,
+): Promise<RunCleanupResult> {
+  return await request<RunCleanupResult>(
+    `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/delete`,
+    { method: "POST" },
+  );
+}
+
 export async function respondApproval(
   scope: ProjectScope,
   runId: string,
@@ -179,6 +193,82 @@ export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
 
 export async function getEvolution(scope: ProjectScope): Promise<EvolutionSnapshot> {
   return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution`, { cache: "no-store" });
+}
+
+export async function getExperience(
+  scope: ProjectScope,
+  status?: ExperienceStatus,
+): Promise<ExperienceSnapshot> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  return await request<ExperienceSnapshot>(`${apiRoot(scope)}/experience${query}`, {
+    cache: "no-store",
+  });
+}
+
+export async function retrieveExperience(
+  scope: ProjectScope,
+  query = "",
+): Promise<ExperiencePlanningBundle> {
+  const suffix = query.trim()
+    ? `?q=${encodeURIComponent(query.trim())}`
+    : "";
+  return await request<ExperiencePlanningBundle>(`${apiRoot(scope)}/experience/retrieve${suffix}`, {
+    cache: "no-store",
+  });
+}
+
+export async function promoteExperience(
+  scope: ProjectScope,
+  experienceId: string,
+  reason: string,
+  options: {
+    actor?: string;
+    suiteDigest?: string;
+    forceWithoutSuite?: boolean;
+  } = {},
+): Promise<ExperienceEntry> {
+  return await request<ExperienceEntry>(
+    `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/promote`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        reason,
+        ...(options.actor ? { actor: options.actor } : {}),
+        ...(options.suiteDigest ? { suiteDigest: options.suiteDigest } : {}),
+        ...(options.forceWithoutSuite ? { forceWithoutSuite: true } : {}),
+      }),
+    },
+  );
+}
+
+export async function rejectExperience(
+  scope: ProjectScope,
+  experienceId: string,
+  reason: string,
+  actor?: string,
+): Promise<ExperienceEntry> {
+  return await request<ExperienceEntry>(
+    `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),
+    },
+  );
+}
+
+export async function shareExperience(
+  scope: ProjectScope,
+  experienceId: string,
+  reason: string,
+  actor?: string,
+): Promise<ExperienceEntry> {
+  return await request<ExperienceEntry>(
+    `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/share`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),
+    },
+  );
 }
 
 export async function startAutomaticEvolution(

@@ -26,7 +26,7 @@ export const UsagePanel = memo(function UsagePanel({ report, loading, selectedRu
     <section className="usage-panel" aria-label="用量与成本">
       <header className="usage-panel-header">
         <div>
-          <span className="section-kicker">USAGE</span>
+          <span className="section-kicker">用量</span>
           <h2>用量与成本</h2>
         </div>
         <div className="usage-panel-tools">

@@ -1,9 +1,10 @@
-import { Activity, Ban, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   cancelRun,
   cleanupRuns,
+  deleteRun,
   deleteStrategyBlueprint,
   downloadRunEvents,
   eventStreamUrl,
@@ -27,6 +28,7 @@ import { EventConsole } from "./components/EventConsole";
 import { retainAgentMonitorEvents } from "./agent-activity";
 import { EvidenceCenter } from "./components/EvidenceCenter";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
+import { ExperienceWorkbench } from "./components/ExperienceWorkbench";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunActionDialog } from "./components/RunActionDialog";
@@ -35,7 +37,7 @@ import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { TaskInspector } from "./components/TaskInspector";
 import { UsagePanel } from "./components/UsagePanel";
-import { activeRunStatuses, errorMessage } from "./presentation";
+import { activeRunStatuses, errorMessage, humanizeFailure, preferredMonitorPanel, summarizeGoal } from "./presentation";
 import { applyTheme, getInitialTheme, nextThemeMode, themeModeLabel, type ThemeMode } from "./theme";
 import type {
   ProjectScope,
@@ -80,9 +82,9 @@ export default function App() {
   const [cleanupPreview, setCleanupPreview] = useState<RunCleanupPreview>();
   const [cleanupError, setCleanupError] = useState<string>();
   const [error, setError] = useState<string>();
-  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution">("monitor");
+  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience">("monitor");
   const [monitorPanel, setMonitorPanel] = useState<"graph" | "activity" | "evidence" | "usage">("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
   const [usageReport, setUsageReport] = useState<UsageReport>();
   const [usageLoading, setUsageLoading] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
@@ -307,7 +309,9 @@ export default function App() {
       setLauncherOpen(false);
       setLauncherStrategy(undefined);
       setSelectedRunId(runId);
-      setMobileView("flow");
+      setMonitorPanel("activity");
+      setMobileView("logs");
+      setWorkspaceMode("monitor");
       await refreshRuns();
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -352,11 +356,46 @@ export default function App() {
     setCleanupOpen(true);
   }, []);
 
+  const handleDeleteRun = useCallback(async (runId: string) => {
+    if (!scope) return;
+    const target = runs.find((item) => item.id === runId);
+    const label = target ? summarizeGoal(target.goal, 40) : runId;
+    if (!window.confirm(`确定删除运行「${label}」？本地记录与证据将永久删除。`)) {
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      await deleteRun(scope, runId);
+      if (selectedRunId === runId) {
+        setRun(undefined);
+        setEvidence(undefined);
+        setSelectedRunId(undefined);
+        setEvents([]);
+      }
+      await refreshRuns();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshRuns, runs, scope, selectedRunId]);
+
   const handleSelectRun = useCallback((runId: string) => {
+    const summary = runs.find((item) => item.id === runId);
+    const panel = preferredMonitorPanel(
+      summary
+        ? {
+            status: summary.status,
+            tasks: Object.values(summary.taskCounts).some((count) => count > 0) ? [{}] : [],
+            ...(summary.error ? { error: summary.error } : {}),
+          }
+        : undefined,
+    );
     setSelectedRunId(runId);
-    setMonitorPanel("graph");
-    setMobileView("flow");
-  }, []);
+    setMonitorPanel(panel);
+    setMobileView(panel === "activity" ? "logs" : "flow");
+  }, [runs]);
 
   const handleSelectTask = useCallback((task: TaskRunState) => {
     setSelectedTaskId(task.task.id);
@@ -383,6 +422,8 @@ export default function App() {
     try {
       const runId = await retryRun(scope, selectedRunId);
       setSelectedRunId(runId);
+      setMonitorPanel("activity");
+      setMobileView("logs");
       await refreshRuns();
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -510,6 +551,15 @@ export default function App() {
           >
             <Sparkles size={20} /><span>演进</span>
           </button>
+          <button
+            className={workspaceMode === "experience" ? "is-active" : ""}
+            onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }}
+            aria-label="经验库"
+            title="经验库"
+            disabled={!config}
+          >
+            <BookMarked size={20} /><span>经验</span>
+          </button>
         </nav>
         <span className={`navigation-stream ${connected ? "is-connected" : ""}`} title={connected ? "事件流已连接" : "事件流未连接"}>
           <Radio size={18} />
@@ -520,11 +570,24 @@ export default function App() {
         <div className="project-context">
           <span className="topbar-product">Agent Team</span>
           <span className="context-divider" />
-          {workspace.projects.length > 1 ? (
+          <label
+            className="project-switcher"
+            title={
+              workspace.projects.length > 1
+                ? "切换当前查看的项目"
+                : "当前工作区只有 1 个已接入项目；未接入项目见下方说明"
+            }
+          >
+            <span className="project-switcher-label">
+              项目 {workspace.connectedCount ?? workspace.projects.length}
+              {workspace.registeredCount && workspace.registeredCount !== workspace.projects.length
+                ? `/${workspace.registeredCount} 已接入`
+                : " 已接入"}
+            </span>
             <select
               aria-label="当前项目"
               value={selectedProjectId}
-              disabled={busy}
+              disabled={busy || workspace.projects.length <= 1}
               onChange={(event) => {
                 setLauncherOpen(false);
                 setLauncherStrategy(undefined);
@@ -537,16 +600,16 @@ export default function App() {
               }}
             >
               {workspace.projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.name}</option>
+                <option key={project.id} value={project.id}>
+                  {project.name} ({project.defaultBranch})
+                </option>
               ))}
             </select>
-          ) : (
-            <span className="project-name">{selectedProject?.name}</span>
-          )}
+          </label>
           <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
         </div>
         <div className="topbar-run">
-          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : run ? (
+          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : workspaceMode === "experience" ? <><span className="topbar-context-label">经验库</span><strong>候选晋升与跨项目共享</strong></> : run ? (
             <>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
@@ -554,7 +617,12 @@ export default function App() {
           ) : <span>本地 Agent 控制台</span>}
         </div>
         <div className="topbar-actions">
-          {workspaceMode !== "evolution" && <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} disabled={!config} aria-label="演进工作台" title="演进工作台"><Sparkles size={17} /><span>演进</span></button>}
+          {workspaceMode !== "evolution" && workspaceMode !== "experience" && (
+            <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} disabled={!config} aria-label="演进工作台" title="演进工作台"><Sparkles size={17} /><span>演进</span></button>
+          )}
+          {workspaceMode !== "experience" && (
+            <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} disabled={!config} aria-label="经验库" title="经验库"><BookMarked size={17} /><span>经验</span></button>
+          )}
           {workspaceMode === "monitor" && pendingApproval && (
             <button
               className="button secondary"
@@ -567,19 +635,27 @@ export default function App() {
           )}
           {workspaceMode === "monitor" && run?.status === "interrupted" && run.checkpoints?.length ? (
             <button
-              className="button secondary"
+              className="button primary"
               onClick={() => setRunAction({ mode: "resume" })}
               disabled={busy}
-              title="从检查点恢复"
+              title="从最近任务边界检查点继续（推荐）"
             >
-              <History size={16} /><span>恢复</span>
+              <History size={16} /><span>从检查点继续</span>
             </button>
           ) : null}
           {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
             <button className="button danger-quiet" onClick={() => void cancel()} disabled={busy} title="取消运行"><Ban size={16} /><span>取消</span></button>
           )}
           {workspaceMode === "monitor" && run && retryableStatuses.has(run.status) && (
-            <button className="button secondary" onClick={() => void retry()} disabled={busy} title="重试为新运行"><RotateCcw size={16} /><span>重试</span></button>
+            <button
+              className="button secondary"
+              onClick={() => void retry()}
+              disabled={busy}
+              title={run.status === "interrupted" ? "放弃检查点，用同一目标新开一条 run" : "以同一目标新开一条关联 run"}
+            >
+              <RotateCcw size={16} />
+              <span>{run.status === "interrupted" ? "重新开始" : "重试为新运行"}</span>
+            </button>
           )}
           <button
             className="icon-button"
@@ -594,10 +670,11 @@ export default function App() {
       </header>
 
       <nav className="mobile-nav" aria-label="移动端视图">
-        {workspaceMode === "evolution" ? <>
+        {workspaceMode === "evolution" || workspaceMode === "experience" ? <>
           <MobileTab active={false} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Activity size={16} />} label="运行" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
-          <MobileTab active onClick={() => setMobileView("evolution")} icon={<Sparkles size={16} />} label="演进" />
+          <MobileTab active={workspaceMode === "evolution"} onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} icon={<Sparkles size={16} />} label="演进" />
+          <MobileTab active={workspaceMode === "experience"} onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} icon={<BookMarked size={16} />} label="经验" />
         </> : <>
           <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
           <MobileTab active={workspaceMode === "design"} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
@@ -612,6 +689,8 @@ export default function App() {
       <div className="workspace-shell">
         {workspaceMode === "evolution" && config && scope ? (
           <EvolutionWorkbench key={scopeKey} scope={scope} config={config} />
+        ) : workspaceMode === "experience" && scope ? (
+          <ExperienceWorkbench key={`experience:${scopeKey}`} scope={scope} />
         ) : workspaceMode === "design" && config ? (
           <StrategyComposer
             config={config}
@@ -622,14 +701,26 @@ export default function App() {
           />
         ) : (
           <section className="monitor-workbench" aria-label="运行工作台">
-            <RunRail runs={runs} selectedRunId={selectedRunId} onSelect={handleSelectRun} onCreate={openLauncher} onCleanup={openCleanup} />
+            <RunRail
+              runs={runs}
+              selectedRunId={selectedRunId}
+              busy={busy}
+              onSelect={handleSelectRun}
+              onCreate={openLauncher}
+              onCleanup={openCleanup}
+              onDelete={(runId) => void handleDeleteRun(runId)}
+            />
             <section className="run-workspace">
               <header className="run-workspace-header">
                 <div className="run-workspace-title">
-                  <span className="section-kicker">EXECUTION</span>
                   <div>
-                    <h1>{run?.goal ?? "选择一个运行"}</h1>
-                    {run && <span>{run.strategy.name} · {completedTasks}/{run.tasks.length} 任务完成</span>}
+                    <h1 title={run?.goal}>{run ? summarizeGoal(run.goal, 72) : "选择一个运行"}</h1>
+                    {run && (
+                      <span>
+                        {run.strategy.name} · {completedTasks}/{run.tasks.length} 任务完成
+                        {run.error ? ` · ${humanizeFailure(run.error)}` : ""}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="run-view-tabs" role="tablist" aria-label="运行视图">

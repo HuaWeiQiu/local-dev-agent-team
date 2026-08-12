@@ -5,6 +5,10 @@ service and React workbench. It is a boundary document, not a plan to replace
 the repository's TypeScript workflow with another framework. Sources were
 reviewed on 2026-08-09.
 
+For the Chinese product-level comparison, prioritized capability gaps, bounded
+self-evolution target architecture, and proposed release sequence, see
+[Multi-Agent Team Capability Roadmap](multi-agent-completeness-roadmap.zh-CN.md).
+
 ## Relevant Projects
 
 | Project | Useful design | Decision here |

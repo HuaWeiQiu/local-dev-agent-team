@@ -4,9 +4,10 @@ project:
   name: local-dev-agent-team
   defaultBranch: main
   stateDirectory: .agent-team
-  maxParallel: 2
+  maxParallel: 3
 
 profiles:
+  # 总控：Codex gpt-5.6-sol
   codex-orchestrator:
     adapter: codex
     model: gpt-5.6-sol
@@ -21,56 +22,61 @@ profiles:
       supportsWebSockets: false
     timeoutSeconds: 1800
 
-  codex-architect:
-    adapter: codex
-    model: gpt-5.6-sol
-    reasoning: xhigh
+  # 架构 / 审查 / 测试：Grok read-only
+  grok-architect:
+    adapter: grok
+    model: grok
+    reasoning: high
     permission: read-only
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
+    maxTurns: 20
     timeoutSeconds: 1800
 
+  grok-reviewer:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 1800
+
+  grok-tester:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 16
+    timeoutSeconds: 1800
+
+  # 多执行者：默认 / 轻量 / 重任务
   grok-worker:
     adapter: grok
     model: grok
     reasoning: high
     permission: workspace-write
     externalTools: deny
-    maxTurns: 16
+    maxTurns: 24
     timeoutSeconds: 3600
 
-  codex-reviewer:
-    adapter: codex
-    model: gpt-5.6-sol
-    reasoning: xhigh
-    permission: read-only
+  grok-worker-fast:
+    adapter: grok
+    model: grok
+    reasoning: medium
+    permission: workspace-write
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
+    maxTurns: 12
     timeoutSeconds: 1800
 
-  codex-tester:
-    adapter: codex
-    model: gpt-5.6-sol
+  grok-worker-heavy:
+    adapter: grok
+    model: grok
     reasoning: high
-    permission: read-only
+    permission: workspace-write
     externalTools: deny
-    codexProvider:
-      id: sub2api
-      baseUrl: https://sub2api.ktyun.cc
-      wireApi: responses
-      requiresOpenAIAuth: true
-      supportsWebSockets: false
-    timeoutSeconds: 1200
+    maxTurns: 32
+    timeoutSeconds: 5400
 
 roles:
   orchestrator:
@@ -78,21 +84,21 @@ roles:
     allowedProfiles: [codex-orchestrator]
 
   architect:
-    defaultProfile: codex-architect
-    allowedProfiles: [codex-architect]
+    defaultProfile: grok-architect
+    allowedProfiles: [grok-architect]
 
   worker:
     defaultProfile: grok-worker
-    allowedProfiles: [grok-worker]
+    allowedProfiles: [grok-worker, grok-worker-fast, grok-worker-heavy]
     promptFile: prompts/grok-worker.md
 
   reviewer:
-    defaultProfile: codex-reviewer
-    allowedProfiles: [codex-reviewer]
+    defaultProfile: grok-reviewer
+    allowedProfiles: [grok-reviewer]
 
   tester:
-    defaultProfile: codex-tester
-    allowedProfiles: [codex-tester]
+    defaultProfile: grok-tester
+    allowedProfiles: [grok-tester]
 
 strategies:
   default: balanced
@@ -100,20 +106,20 @@ strategies:
     balanced:
       topology:
         mode: parallel-dag
-      maxParallel: 2
+      maxParallel: 3
       maxReworkAttempts: 1
       executionTimeoutSeconds: 21600
-      maxAgentInvocations: 48
+      maxAgentInvocations: 64
       maxProcessOutputBytes: 1048576
       maxArtifactBytes: 2147483648
       approvalGates: [final]
       approvalTimeoutSeconds: 172800
       roleProfiles:
         orchestrator: codex-orchestrator
-        architect: codex-architect
+        architect: grok-architect
         worker: grok-worker
-        reviewer: codex-reviewer
-        tester: codex-tester
+        reviewer: grok-reviewer
+        tester: grok-tester
 
     strict:
       topology:
@@ -128,13 +134,16 @@ strategies:
       approvalTimeoutSeconds: 172800
       roleProfiles:
         orchestrator: codex-orchestrator
-        architect: codex-architect
+        architect: grok-architect
         worker: grok-worker
-        reviewer: codex-reviewer
-        tester: codex-tester
+        reviewer: grok-reviewer
+        tester: grok-tester
 
 observability:
   maxEventsPerRun: 50000
+
+evaluation:
+  suiteFile: evaluation/suite.example.yaml
 
 evolution:
   automatic:

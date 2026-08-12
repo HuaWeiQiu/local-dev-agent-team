@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -45,11 +46,13 @@ import {
   evolutionReconcileRequestSchema,
   evolutionReasonRequestSchema,
   evolutionStrategyProposalRequestSchema,
+  experienceReasonRequestSchema,
   resumeRunRequestSchema,
   startRunRequestSchema,
   strategyBlueprintPreflightRequestSchema,
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
+import { ExperienceService } from "../experience/service.js";
 import { EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
 import { AutomaticEvolutionError } from "./evolution-automation.js";
 import {
@@ -640,6 +643,119 @@ const projectApiRoutes: ProjectApiRoute[] = [
     },
   },
   {
+    method: "GET",
+    pattern: "/experience",
+    handler: async (context, _request, response, url) => {
+      const status = url.searchParams.get("status") ?? undefined;
+      if (
+        status &&
+        !["candidate", "verified", "rejected", "retired"].includes(status)
+      ) {
+        throw new HttpError(400, "Invalid experience status filter");
+      }
+      const service = ExperienceService.forLoaded(context.loaded);
+      sendJson(
+        response,
+        200,
+        await service.snapshot(
+          status as "candidate" | "verified" | "rejected" | "retired" | undefined,
+        ),
+      );
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/experience/retrieve",
+    handler: async (context, _request, response, url) => {
+      const service = ExperienceService.forLoaded(context.loaded);
+      const query = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
+      const bundle = await service.retrieveForPlanning(query || context.loaded.config.project.name);
+      sendJson(response, 200, bundle ?? { note: "无已验证经验", items: [] });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/experience/:experienceId/actions/promote",
+    handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
+      const parsed = experienceReasonRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const actor =
+        parsed.data.actor ??
+        sessionOperator ??
+        singleHeader(request.headers["x-agent-team-operator"]) ??
+        "operator";
+      try {
+        const service = ExperienceService.forLoaded(context.loaded);
+        const entry = await service.promote(
+          decodePathSegment(params.experienceId!),
+          actor,
+          parsed.data.reason,
+          {
+            ...(parsed.data.suiteDigest ? { suiteDigest: parsed.data.suiteDigest } : {}),
+            ...(parsed.data.forceWithoutSuite ? { forceWithoutSuite: true } : {}),
+          },
+        );
+        sendJson(response, 200, entry);
+      } catch (error) {
+        throw experienceHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/experience/:experienceId/actions/reject",
+    handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
+      const parsed = experienceReasonRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const actor =
+        parsed.data.actor ??
+        sessionOperator ??
+        singleHeader(request.headers["x-agent-team-operator"]) ??
+        "operator";
+      try {
+        const service = ExperienceService.forLoaded(context.loaded);
+        const entry = await service.reject(
+          decodePathSegment(params.experienceId!),
+          actor,
+          parsed.data.reason,
+        );
+        sendJson(response, 200, entry);
+      } catch (error) {
+        throw experienceHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/experience/:experienceId/actions/share",
+    handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
+      const parsed = experienceReasonRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const actor =
+        parsed.data.actor ??
+        sessionOperator ??
+        singleHeader(request.headers["x-agent-team-operator"]) ??
+        "operator";
+      try {
+        const service = ExperienceService.forLoaded(context.loaded);
+        const entry = await service.share(
+          decodePathSegment(params.experienceId!),
+          actor,
+          parsed.data.reason,
+        );
+        sendJson(response, 200, entry);
+      } catch (error) {
+        throw experienceHttpError(error);
+      }
+    },
+  },
+  {
     method: "POST",
     pattern: "/strategies/preflight",
     handler: async (context, request, response) => {
@@ -870,6 +986,21 @@ const projectApiRoutes: ProjectApiRoute[] = [
       try {
         const result = await context.supervisor.retry(runId, idempotency);
         sendJson(response, result.deduplicated ? 200 : 202, result);
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/delete",
+    handler: async (context, _request, response, _url, params) => {
+      try {
+        sendJson(
+          response,
+          200,
+          await context.supervisor.deleteRun(decodePathSegment(params.runId!)),
+        );
       } catch (error) {
         throw runActionHttpError(error);
       }
@@ -1267,19 +1398,76 @@ function strategyHttpError(error: unknown): HttpError {
   return new HttpError(400, message);
 }
 
+function experienceHttpError(error: unknown): HttpError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/Unknown .* experience id/i.test(message)) {
+    return new HttpError(404, message, "EXPERIENCE_NOT_FOUND");
+  }
+  if (/suiteDigest|forceWithoutSuite|requireSuiteForPromote/i.test(message)) {
+    return new HttpError(409, message, "EXPERIENCE_SUITE_REQUIRED");
+  }
+  if (/cannot be promoted|cannot be rejected|Only verified|Only low-sensitivity|project-bound/i.test(message)) {
+    return new HttpError(409, message, "EXPERIENCE_STATE");
+  }
+  return new HttpError(400, message, "EXPERIENCE_ERROR");
+}
+
 function workspaceProjection(
   mode: "single" | "workspace",
   projects: ProjectHttpContext[],
 ): unknown {
+  const connected = projects.map((project) => ({
+    id: project.id,
+    name: project.loaded.config.project.name,
+    defaultBranch: project.loaded.config.project.defaultBranch,
+    connected: true as const,
+  }));
+  const registry = readDesktopProjectRegistry(connected);
   return {
     mode,
     defaultProjectId: projects[0]!.id,
-    projects: projects.map((project) => ({
-      id: project.id,
-      name: project.loaded.config.project.name,
-      defaultBranch: project.loaded.config.project.defaultBranch,
-    })),
+    projects: connected.map(({ id, name, defaultBranch }) => ({ id, name, defaultBranch })),
+    connectedCount: connected.length,
+    registeredCount: registry?.length ?? connected.length,
+    registry,
   };
+}
+
+interface DesktopRegistryEntry {
+  id: string;
+  name: string;
+  path: string;
+  connected: boolean;
+  occupancy?: string;
+  reason?: string;
+}
+
+function readDesktopProjectRegistry(
+  connected: Array<{ id: string; name: string; defaultBranch: string; connected: true }>,
+): DesktopRegistryEntry[] | undefined {
+  const registryPath = process.env.AGENT_TEAM_PROJECT_REGISTRY?.trim();
+  if (!registryPath) {
+    return connected.map((project) => ({
+      id: project.id,
+      name: project.name,
+      path: "",
+      connected: true,
+      occupancy: "ours",
+    }));
+  }
+  try {
+    const raw = JSON.parse(readFileSync(registryPath, "utf8")) as {
+      projects?: DesktopRegistryEntry[];
+    };
+    if (!Array.isArray(raw.projects) || raw.projects.length === 0) return undefined;
+    const connectedIds = new Set(connected.map((project) => project.id));
+    return raw.projects.map((entry) => ({
+      ...entry,
+      connected: connectedIds.has(entry.id),
+    }));
+  } catch {
+    return undefined;
+  }
 }
 
 function decodePathSegment(value: string): string {

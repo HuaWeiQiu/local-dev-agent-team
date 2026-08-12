@@ -547,11 +547,15 @@ export class RunSupervisor {
   }
 
   async previewCleanup(olderThanDays: number): Promise<RunCleanupPreview> {
-    if (!Number.isInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3_650) {
-      throw new Error("Cleanup age must be an integer from 1 to 3650 days");
+    if (!Number.isInteger(olderThanDays) || olderThanDays < 0 || olderThanDays > 3_650) {
+      throw new Error("Cleanup age must be an integer from 0 to 3650 days");
     }
     this.expireCleanupPreviews();
-    const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+    // 0 = all eligible terminal runs (updatedAt < now + 1s effectively all past)
+    const cutoff =
+      olderThanDays === 0
+        ? new Date(Date.now() + 1_000).toISOString()
+        : new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
     const allStates = await this.stateStore.list();
     const protectedParents = new Set(allStates.map((state) => state.parentRunId).filter((id): id is string => Boolean(id)));
     const states = allStates.filter(
@@ -619,6 +623,44 @@ export class RunSupervisor {
         reclaimedBytes += candidate.bytes;
       }
       return { deletedRunIds, reclaimedBytes };
+    });
+  }
+
+  /**
+   * Delete one terminal run immediately (blocked/cancelled/completed/interrupted).
+   * Active runs, parents of retained children, and non-terminal statuses are rejected.
+   */
+  async deleteRun(runId: string): Promise<RunCleanupResult> {
+    return await this.serializeActions([runId], async () => {
+      const state = await this.requireRun(runId);
+      if (this.active.has(runId)) {
+        throw new Error(`Run '${runId}' is still active; cancel it first`);
+      }
+      if (!cleanupStatuses.has(state.status)) {
+        throw new Error(
+          `Run '${runId}' status '${state.status}' cannot be deleted; only completed, cancelled, blocked, or interrupted runs`,
+        );
+      }
+      if (this.hasActiveChild(runId)) {
+        throw new Error(`Run '${runId}' still has an active child run`);
+      }
+      const allStates = await this.stateStore.list();
+      const protectedParents = new Set(
+        allStates.map((item) => item.parentRunId).filter((id): id is string => Boolean(id)),
+      );
+      if (protectedParents.has(runId)) {
+        throw new Error(`Run '${runId}' is still referenced as a parent of another retained run`);
+      }
+      const bytes = await this.evidenceStore.runBytes(runId);
+      const quarantined = await this.stateStore.quarantine(runId);
+      try {
+        this.events.deleteRun(runId);
+      } catch (error) {
+        await this.stateStore.restoreQuarantined(quarantined);
+        throw error;
+      }
+      await this.stateStore.removeQuarantined(quarantined);
+      return { deletedRunIds: [runId], reclaimedBytes: bytes };
     });
   }
 
@@ -972,7 +1014,12 @@ interface CleanupPreviewSnapshot {
 }
 
 const cleanupPreviewTtlMs = 5 * 60_000;
-const cleanupStatuses = new Set<RunState["status"]>(["completed", "cancelled", "blocked"]);
+const cleanupStatuses = new Set<RunState["status"]>([
+  "completed",
+  "cancelled",
+  "blocked",
+  "interrupted",
+]);
 
 function requiredApprovalGate(
   state: RunState,

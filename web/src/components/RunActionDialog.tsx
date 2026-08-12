@@ -53,7 +53,7 @@ export function RunActionDialog({
       <section className="run-action-dialog" role="dialog" aria-modal="true" aria-labelledby="run-action-title">
         <header>
           <div>
-            <span className="section-kicker">{mode === "approval" ? "HUMAN GATE" : "CHECKPOINT"}</span>
+            <span className="section-kicker">{mode === "approval" ? "人工门禁" : "检查点"}</span>
             <h2 id="run-action-title">
               {mode === "approval" ? (approval?.gate === "plan" ? "审批执行计划" : "审批交付结果") : "恢复运行"}
             </h2>
