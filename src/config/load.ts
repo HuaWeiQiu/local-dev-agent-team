@@ -4,6 +4,7 @@ import { parse as parseYaml } from "yaml";
 import { configSchema, type AgentTeamConfig } from "./schema.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { assertAdapterProfile } from "../adapters/conformance.js";
+import { parseEvaluationSuite } from "../evaluation/domain.js";
 
 const configNames = ["agent-team.yaml", "agent-team.yml"];
 
@@ -71,6 +72,18 @@ export async function loadConfig(
       `Invalid configuration at ${configPath}:\nevolution.automatic.targetStrategy: ` +
       "Automatic evolution target cannot replace a configured strategy",
     );
+  }
+
+  if (result.data.evaluation?.suite !== undefined) {
+    try {
+      result.data.evaluation.suite = parseEvaluationSuite(result.data.evaluation.suite);
+    } catch (error) {
+      throw new Error(
+        `Invalid configuration at ${configPath}:\nevaluation.suite: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   for (const [profileName, profile] of Object.entries(result.data.profiles)) {

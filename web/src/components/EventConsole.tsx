@@ -50,7 +50,7 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
       <header>
         <div className="console-tabs" role="tablist">
           <button className={tab === "agents" ? "is-active" : ""} onClick={() => setTab("agents")} role="tab" aria-selected={tab === "agents"}>
-            <Bot size={15} />Agent
+            <Bot size={15} />角色
             {agentActivity.length > 0 && <span>{activeAgents || agentActivity.length}</span>}
           </button>
           <button className={tab === "activity" ? "is-active" : ""} onClick={() => setTab("activity")} role="tab" aria-selected={tab === "activity"}>

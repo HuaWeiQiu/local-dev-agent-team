@@ -35,6 +35,7 @@ import type {
   RecoveryRecord,
   RunCheckpoint,
   RunState,
+  RunStatus,
   TaskRunState,
 } from "../state/types.js";
 import { branchSegment, createRunId } from "./id.js";
@@ -46,6 +47,7 @@ import {
   createExecutionDeadline,
   RunBudgetTracker,
 } from "../observability/budget.js";
+import { ExperienceService } from "../experience/service.js";
 
 export interface WorkflowRunOptions {
   goal: string;
@@ -143,6 +145,7 @@ export class LocalWorkflowRunner {
     try {
       workflowSignal.throwIfAborted();
       await git.createWorktree(integrationBranch, baseCommit, integrationWorktree);
+      const verifiedExperiences = await this.loadPlanningExperiences(options.goal, store, runId);
       await store.transition(state, "orchestrating", "Supervising agent is analyzing the goal");
       const intake = await agent.runStructured({
         role: "orchestrator",
@@ -152,6 +155,7 @@ export class LocalWorkflowRunner {
           goal: options.goal,
           project: this.loaded.config.project,
           baseCommit,
+          ...(verifiedExperiences ? { verifiedExperiences } : {}),
         },
         schema: goalIntakeSchema,
         jsonSchema: goalIntakeJsonSchema,
@@ -174,6 +178,7 @@ export class LocalWorkflowRunner {
           project: this.loaded.config.project,
           baseCommit,
           roleProfiles: workerRole.allowedProfiles,
+          ...(verifiedExperiences ? { verifiedExperiences } : {}),
         },
         schema: taskPlanSchema,
         jsonSchema: taskPlanJsonSchema,
@@ -213,9 +218,10 @@ export class LocalWorkflowRunner {
       state.error = error instanceof Error ? error.message : String(error);
       await store.transition(
         state,
-        options.signal?.aborted ? "cancelled" : "blocked",
+        terminalStatusAfterFailure(error, options.signal),
         state.error,
       );
+      await this.recordExperienceFromRun(state, store);
       return state;
     } finally {
       deadline.dispose();
@@ -282,9 +288,10 @@ export class LocalWorkflowRunner {
       state.error = error instanceof Error ? error.message : String(error);
       await store.transition(
         state,
-        options.signal?.aborted ? "cancelled" : "blocked",
+        terminalStatusAfterFailure(error, options.signal),
         state.error,
       );
+      await this.recordExperienceFromRun(state, store);
       return state;
     } finally {
       deadline.dispose();
@@ -372,6 +379,7 @@ export class LocalWorkflowRunner {
         "completed",
         "Automatic evolution evaluation completed without publication",
       );
+      await this.recordExperienceFromRun(state, store);
       return state;
     }
     await this.requestApproval(
@@ -610,6 +618,7 @@ export class LocalWorkflowRunner {
     }
     const maxAttempts = state.strategy.maxReworkAttempts + 1;
     let feedback = "";
+    let lastReworkExperienceIds: string[] = [];
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
@@ -617,6 +626,15 @@ export class LocalWorkflowRunner {
       taskState.status = attempt === 1 ? "working" : "reworking";
       await store.save(state);
       try {
+        const reworkExperiences =
+          attempt > 1 && feedback
+            ? await this.loadReworkExperiences(state, store, {
+                feedback,
+                taskId: taskState.task.id,
+                taskTitle: taskState.task.title,
+              })
+            : undefined;
+        lastReworkExperienceIds = reworkExperiences?.items.map((item) => item.id) ?? [];
         const worker = await agent.runText({
           role: "worker",
           cwd: taskState.worktree,
@@ -629,6 +647,7 @@ export class LocalWorkflowRunner {
             task: taskState.task,
             attempt,
             feedback,
+            ...(reworkExperiences ? { verifiedFailureExperiences: reworkExperiences } : {}),
           },
         });
         taskState.profile = worker.profileName;
@@ -647,12 +666,14 @@ export class LocalWorkflowRunner {
         const files = await git.changedFiles(taskState.worktree);
         if (files.length === 0) {
           feedback = "No repository changes were produced. Implement the assigned task.";
+          await this.recordAttemptCard(state, store, taskState, attempt, feedback);
           continue;
         }
         try {
           git.assertOwnedPaths(files, taskState.task.ownedPaths);
         } catch (error) {
           feedback = error instanceof Error ? error.message : String(error);
+          await this.recordAttemptCard(state, store, taskState, attempt, feedback);
           continue;
         }
         const diff = await git.stagedDiff(taskState.worktree);
@@ -674,10 +695,14 @@ export class LocalWorkflowRunner {
           );
         }
         if (passesTaskGates(quality, review, test)) {
+          if (attempt > 1 && lastReworkExperienceIds.length > 0) {
+            await this.recordExperienceSuccess(state, store, lastReworkExperienceIds);
+          }
           await this.commitPassedTask(state, taskState, taskState.worktree, store, git);
           return;
         }
         feedback = buildReworkFeedback(quality, review, test);
+        await this.recordAttemptCard(state, store, taskState, attempt, feedback);
         await store.transition(
           state,
           "reworking",
@@ -685,6 +710,7 @@ export class LocalWorkflowRunner {
         );
       } catch (error) {
         feedback = error instanceof Error ? error.message : String(error);
+        await this.recordAttemptCard(state, store, taskState, attempt, feedback);
         if (feedback.startsWith("Specialist escalated")) {
           taskState.status = "blocked";
           taskState.error = feedback;
@@ -799,6 +825,137 @@ export class LocalWorkflowRunner {
     taskState.status = "passed";
     await store.save(state);
   }
+
+  private async loadPlanningExperiences(
+    goal: string,
+    store: RunStateStore,
+    runId: string,
+  ): Promise<Awaited<ReturnType<ExperienceService["retrieveForPlanning"]>>> {
+    try {
+      const service = ExperienceService.forLoaded(this.loaded);
+      const bundle = await service.retrieveForPlanning(goal);
+      if (bundle) {
+        store.emit(runId, "experience.retrieved", {
+          purpose: "planning",
+          count: bundle.items.length,
+          scopes: {
+            shared: bundle.items.filter((item) => item.scope === "shared").length,
+            project: bundle.items.filter((item) => item.scope === "project").length,
+          },
+        });
+      }
+      return bundle;
+    } catch (error) {
+      store.emit(runId, "experience.retrieve-failed", {
+        purpose: "planning",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  private async loadReworkExperiences(
+    state: RunState,
+    store: RunStateStore,
+    input: { feedback: string; taskId: string; taskTitle: string },
+  ): Promise<Awaited<ReturnType<ExperienceService["retrieveForRework"]>>> {
+    try {
+      const service = ExperienceService.forLoaded(this.loaded);
+      const bundle = await service.retrieveForRework({
+        feedback: input.feedback,
+        taskId: input.taskId,
+        taskTitle: input.taskTitle,
+        limit: 5,
+      });
+      if (bundle) {
+        store.emit(state.id, "experience.retrieved", {
+          purpose: "rework",
+          taskId: input.taskId,
+          count: bundle.items.length,
+        });
+      }
+      return bundle;
+    } catch (error) {
+      store.emit(state.id, "experience.retrieve-failed", {
+        purpose: "rework",
+        taskId: input.taskId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  private async recordExperienceFromRun(
+    state: RunState,
+    store: RunStateStore,
+  ): Promise<void> {
+    try {
+      const service = ExperienceService.forLoaded(this.loaded);
+      const { created, autoPromoted } = await service.extractFromRun(state);
+      if (created.length > 0) {
+        store.emit(state.id, "experience.extracted", {
+          count: created.length,
+          ids: created.map((entry) => entry.id),
+          autoPromoted: autoPromoted.map((entry) => entry.id),
+        });
+      }
+    } catch (error) {
+      store.emit(state.id, "experience.extract-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async recordAttemptCard(
+    state: RunState,
+    store: RunStateStore,
+    taskState: TaskRunState,
+    attempt: number,
+    feedback: string,
+  ): Promise<void> {
+    try {
+      const service = ExperienceService.forLoaded(this.loaded);
+      const card = await service.recordAttempt({
+        runId: state.id,
+        taskId: taskState.task.id,
+        taskTitle: taskState.task.title,
+        attempt,
+        feedback,
+      });
+      if (card) {
+        store.emit(state.id, "experience.attempt-recorded", {
+          taskId: card.taskId,
+          attempt: card.attempt,
+          signature: card.signature,
+        });
+      }
+    } catch (error) {
+      store.emit(state.id, "experience.attempt-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async recordExperienceSuccess(
+    state: RunState,
+    store: RunStateStore,
+    experienceIds: string[],
+  ): Promise<void> {
+    try {
+      const service = ExperienceService.forLoaded(this.loaded);
+      const updated = await service.recordSuccess(experienceIds);
+      if (updated > 0) {
+        store.emit(state.id, "experience.success-recorded", {
+          count: updated,
+          ids: experienceIds,
+        });
+      }
+    } catch (error) {
+      store.emit(state.id, "experience.success-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 function latestCheckpoint(state: RunState): RunCheckpoint {
@@ -894,4 +1051,21 @@ function compactQuality(report: QualityReport): unknown {
       stderr: command.stderr.slice(-20_000),
     })),
   };
+}
+
+/**
+ * Map workflow failure to a terminal status.
+ * Explicit user cancel → cancelled; control-plane shutdown / other aborts → interrupted
+ * so the UI can offer checkpoint resume instead of a full restart.
+ */
+export function terminalStatusAfterFailure(
+  error: unknown,
+  signal?: AbortSignal,
+): Extract<RunStatus, "cancelled" | "interrupted" | "blocked"> {
+  if (!signal?.aborted) return "blocked";
+  const message = error instanceof Error ? error.message : String(error);
+  if (/cancelled by user/i.test(message) || /^Run cancelled\b/i.test(message)) {
+    return "cancelled";
+  }
+  return "interrupted";
 }

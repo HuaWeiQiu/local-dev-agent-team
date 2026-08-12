@@ -59,14 +59,22 @@ describe("multi-project workspace", () => {
     const discovery = await fetch(`${service.url}/api/workspace`).then(
       async (response) => await response.json() as { mode: string; projects: Array<{ id: string }> },
     );
-    expect(discovery).toEqual({
+    expect(discovery).toMatchObject({
       mode: "workspace",
       defaultProjectId: "alpha",
+      connectedCount: 2,
+      registeredCount: 2,
       projects: [
         { id: "alpha", name: "Alpha", defaultBranch: "main" },
         { id: "beta", name: "Beta", defaultBranch: "main" },
       ],
     });
+    expect(discovery.registry).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "alpha", connected: true }),
+        expect.objectContaining({ id: "beta", connected: true }),
+      ]),
+    );
     expect(await listRunIds(service.url, "alpha")).toEqual(["alpha-run"]);
     expect(await listRunIds(service.url, "beta")).toEqual(["beta-run"]);
     expect((await fetch(`${service.url}/api/projects/missing/runs`)).status).toBe(404);

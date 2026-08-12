@@ -65,7 +65,7 @@ export function RunLauncher({ open, config, initialStrategy, busy, error, onClos
       <section className="run-launcher" role="dialog" aria-modal="true" aria-labelledby="run-launcher-title">
         <header>
           <div>
-            <span className="section-kicker">NEW RUN</span>
+            <span className="section-kicker">新建运行</span>
             <h2 id="run-launcher-title">启动 Agent 团队</h2>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭">

@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { buildTaskGraph } from "../web/src/graph.js";
-import { runStatusLabel, statusTone } from "../web/src/presentation.js";
+import {
+  canvasEmptyCopy,
+  formatExperienceCondition,
+  formatExperienceTag,
+  humanizeFailure,
+  preferredMonitorPanel,
+  runListSubtitle,
+  runStatusLabel,
+  statusTone,
+  summarizeGoal,
+} from "../web/src/presentation.js";
 import type { TaskRunState } from "../web/src/types.js";
 
 // buildTaskGraph reads flow palette colors from page CSS tokens; vitest runs in a
@@ -28,6 +38,29 @@ describe("web workbench projections", () => {
     expect(runStatusLabel("reviewing-testing")).toBe("审查测试");
     expect(statusTone("blocked")).toBe("danger");
     expect(statusTone("merged")).toBe("success");
+  });
+
+  it("shortens goals and humanizes operator-facing failures", () => {
+    expect(summarizeGoal("第一行目标\n第二行补充", 20)).toBe("第一行目标");
+    expect(humanizeFailure("spawn codex ENOENT")).toContain("找不到 Codex");
+    expect(humanizeFailure("Control service is shutting down")).toContain("检查点");
+    expect(
+      runListSubtitle({
+        status: "blocked",
+        error: "spawn codex ENOENT",
+        taskCounts: {},
+        strategy: "default",
+      }),
+    ).toContain("找不到 Codex");
+    expect(canvasEmptyCopy({ status: "blocked", error: "boom", tasks: [] }).title).toBe("运行已阻塞");
+    expect(canvasEmptyCopy({ status: "orchestrating", tasks: [] }).title).toBe("正在规划任务");
+    expect(formatExperienceCondition("status=blocked")).toBe("状态：已阻塞");
+    expect(formatExperienceCondition("topology=parallel-dag")).toBe("拓扑：依赖并行");
+    expect(formatExperienceTag("failure")).toBe("失败");
+    expect(formatExperienceTag("tooling")).toBe("工具");
+    expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("activity");
+    expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("activity");
+    expect(preferredMonitorPanel({ status: "implementing", tasks: [{}] })).toBe("graph");
   });
 });
 

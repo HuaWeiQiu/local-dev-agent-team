@@ -76,6 +76,17 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
     observability: {
       maxEventsPerRun: 50_000,
     },
+    experience: {
+      enabled: true,
+      injectIntoPlanning: true,
+      injectIntoRework: true,
+      extractOnTerminal: true,
+      maxInjected: 8,
+      requireSuiteForPromote: false,
+      autoPromoteWithSuite: true,
+      recordAttemptCards: true,
+      writeStrategyHints: true,
+    },
     evolution: {
       automatic: {
         enabled: false,

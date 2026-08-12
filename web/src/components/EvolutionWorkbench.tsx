@@ -353,7 +353,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
       )}
       <aside className="evolution-rail">
         <header>
-          <div><span className="section-kicker">CONTROLLED EVOLUTION</span><h1>演进候选</h1></div>
+          <div><span className="section-kicker">受控演进</span><h1>演进候选</h1></div>
           <button className="button primary" onClick={() => { setCreating(true); setDialogError(undefined); }} disabled={locked} title="新建候选"><Plus size={16} /><span>新建</span></button>
         </header>
         <div className="evolution-rail-tools">
@@ -381,7 +381,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
             <header className="evolution-detail-header">
               <button className="icon-button evolution-mobile-back" onClick={() => setSelectedId(undefined)} aria-label="返回候选列表"><ArrowLeft size={18} /></button>
               <span className={`evolution-candidate-icon kind-${selected.candidate.kind}`}>{selected.candidate.kind === "strategy-blueprint" ? <Braces size={18} /> : <FileText size={18} />}</span>
-              <div><span className="section-kicker">{selected.candidate.kind === "strategy-blueprint" ? "STRATEGY" : "ROLE PROMPT"}</span><h1>{proposalTitle(selected)}</h1><small>{proposalTarget(selected)}</small></div>
+              <div><span className="section-kicker">{selected.candidate.kind === "strategy-blueprint" ? "执行策略" : "角色提示词"}</span><h1>{proposalTitle(selected)}</h1><small>{proposalTarget(selected)}</small></div>
               <span className={`status-badge tone-${proposalStatusTone(selected)}`}>{proposalStatusLabel(selected)}</span>
             </header>
             <ProposalProgress proposal={selected} />
@@ -403,7 +403,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
       </main>
 
       <aside className="evolution-inspector">
-        <header><span className="section-kicker">NEXT STEP</span><h2>下一步</h2><button className="icon-button" onClick={() => void refresh().catch(() => undefined)} disabled={loading || busy} aria-label="刷新演进状态" title="刷新"><RefreshCw size={16} className={loading ? "is-spinning" : ""} /></button></header>
+        <header><span className="section-kicker">操作</span><h2>下一步</h2><button className="icon-button" onClick={() => void refresh().catch(() => undefined)} disabled={loading || busy} aria-label="刷新演进状态" title="刷新"><RefreshCw size={16} className={loading ? "is-spinning" : ""} /></button></header>
         {selected ? (
           <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} />
         ) : <div className="evolution-inspector-empty">选择候选后显示可执行操作</div>}
@@ -453,7 +453,12 @@ function AutomationBar({ automation, requestedCycles, busy, startIntentPending, 
           </>
         ) : <button className="button danger-quiet" onClick={onStop} disabled={busy || automation.status === "stopping"}><Square size={14} />{automation.status === "stopping" ? "正在停止" : "停止"}</button>}
       </div>
-      {(automation.error || (!active && automation.stopReason)) && <p className={automation.error ? "is-error" : ""}>{automation.error ?? automation.stopReason}</p>}
+      {(automation.error || (!active && automation.stopReason)) && (
+        <p className={automation.error || automation.status === "paused" ? "is-error" : ""}>
+          {automation.failureCode ? `[${automation.failureCode}] ` : ""}
+          {automation.error ?? automation.stopReason}
+        </p>
+      )}
     </section>
   );
 }
@@ -491,7 +496,7 @@ function ProposalProgress({ proposal }: { proposal: EvolutionProposal }) {
 
 function Overview({ proposal }: { proposal: EvolutionProposal }) {
   return <>
-    <section className="evolution-section"><span className="section-kicker">CHANGE TARGET</span><h2>{proposalTarget(proposal)}</h2><p>{proposal.candidate.kind === "strategy-blueprint" ? "候选将更新一个本地自定义执行策略。应用前会再次比较目标摘要。" : "候选指向项目已配置的角色提示词。内容只在精确预览和本地对象存储中使用。"}</p></section>
+    <section className="evolution-section"><span className="section-kicker">变更目标</span><h2>{proposalTarget(proposal)}</h2><p>{proposal.candidate.kind === "strategy-blueprint" ? "候选将更新一个本地自定义执行策略。应用前会再次比较目标摘要。" : "候选指向项目已配置的角色提示词。内容只在精确预览和本地对象存储中使用。"}</p></section>
     {proposal.candidate.kind === "strategy-blueprint" ? <section className="evolution-section"><h3>执行参数</h3><dl className="evolution-definition-grid"><div><dt>拓扑</dt><dd>{proposal.candidate.definition.topology?.mode === "sequential" ? "顺序执行" : "依赖并行"}</dd></div><div><dt>最大并行</dt><dd>{proposal.candidate.definition.maxParallel ?? "默认"}</dd></div><div><dt>最多返工</dt><dd>{proposal.candidate.definition.maxReworkAttempts ?? "默认"}</dd></div><div><dt>Agent 调用上限</dt><dd>{proposal.candidate.definition.maxAgentInvocations ?? "默认"}</dd></div><div><dt>执行超时</dt><dd>{proposal.candidate.definition.executionTimeoutSeconds ? `${proposal.candidate.definition.executionTimeoutSeconds} 秒` : "默认"}</dd></div><div><dt>人工门禁</dt><dd>{proposal.candidate.definition.approvalGates?.join("、") || "沿用默认"}</dd></div></dl></section> : <section className="evolution-section"><h3>材料摘要</h3><dl className="detail-list"><div><dt>仓库路径</dt><dd><code>{proposal.candidate.path}</code></dd></div><div><dt>SHA-256</dt><dd><code>{proposal.candidate.contentDigest}</code></dd></div></dl></section>}
     <section className="evolution-section"><h3>候选权限</h3><div className="evolution-capabilities"><span><LockKeyhole size={14} />不能自行执行</span><span><LockKeyhole size={14} />不能自行晋升</span><span><LockKeyhole size={14} />不网络发布</span><span><LockKeyhole size={14} />不存储秘密</span></div>{proposal.evaluation?.source === "server-automatic-run-evaluation-v1" && <p>自动演进由项目级受限控制器授权，候选策略本身始终没有执行或晋升权限。</p>}</section>
   </>;
@@ -557,6 +562,7 @@ function automationStatusLabel(status: AutomaticEvolutionSnapshot["status"]): st
   if (status === "stopping") return "停止中";
   if (status === "completed") return "已完成";
   if (status === "stopped") return "已停止";
+  if (status === "paused") return "已暂停（基础设施）";
   if (status === "failed") return "失败封闭";
   return "待启动";
 }
@@ -564,6 +570,7 @@ function automationStatusLabel(status: AutomaticEvolutionSnapshot["status"]): st
 function automationTone(status: AutomaticEvolutionSnapshot["status"]): string {
   if (status === "running" || status === "stopping") return "active";
   if (status === "completed") return "success";
+  if (status === "paused") return "warning";
   if (status === "failed") return "danger";
   return "neutral";
 }

@@ -99,7 +99,7 @@ export function EvolutionProposalDialog({
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
       <section ref={dialogRef} className="evolution-proposal-dialog" role="dialog" aria-modal="true" aria-labelledby="evolution-proposal-title" tabIndex={-1}>
         <header>
-          <div><span className="section-kicker">NEW CANDIDATE</span><h2 id="evolution-proposal-title">新建演进候选</h2></div>
+          <div><span className="section-kicker">新建候选</span><h2 id="evolution-proposal-title">新建演进候选</h2></div>
           <button className="icon-button" onClick={onClose} disabled={busy} aria-label="关闭"><X size={17} /></button>
         </header>
         <form onSubmit={submit}>

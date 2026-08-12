@@ -39,11 +39,15 @@
 - 可以创建 GitHub 草稿 PR、等待 Actions 检查并执行一次受限修复。
 - 不自动合并代码，最终合并必须由人确认。
 - 提供 React/Tauri 演进工作台：人工候选保留结构预检与精确确认；可选的项目级自动策略循环会在固定目标上隔离评测、按确定性分数自动应用更优策略，并受轮数、连续无提升和手动停止硬限制。
+- **经验库**：运行终态抽取候选 → 人工/评测晋升为已验证 → 可共享到本机公共目录；规划与返工会注入已验证经验（默认不注入候选）。
+- **运行历史清理**：支持单条删除终态运行，以及按保留天数批量清理。
+- **可选外挂质量门**：可把已安装的 CLI（例如阿里 `ocr review`）写进 `quality.commands`，不内嵌第二套评审引擎。
 
 当前内置以下 CLI 适配器：
 
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - Claude Code
+- Grok CLI
 
 适配器边界是开放的，后续可以增加其他支持非交互调用的 Agent CLI。
 
@@ -129,9 +133,11 @@ agent-team serve
 
 服务默认只监听 `http://127.0.0.1:4317`。在浏览器打开这个地址即可使用 React
 工作台：可视化预检和保存执行策略、选择角色 profile、启动或取消运行、查看任务
-DAG、交付证据、审查结果、质量命令和实时 Agent 状态/输出；活动日志中的 `Agent`
-页会直接列出总控、架构、执行、审查、测试等受控调用及其完成状态，阻塞、取消或中断的运行可以作为新的
-关联运行重试。界面保存的策略位于项目状态目录，不会改写 `agent-team.yaml`，并且
+DAG、交付证据、审查结果、质量命令和实时角色状态/输出；活动日志中的「角色」
+页会直接列出总控、架构、执行、审查、测试等受控调用及其完成状态。新建运行或
+规划阶段默认打开活动日志，便于观察过程。阻塞、取消或中断的运行可以删除、从
+检查点继续，或作为新的关联运行重试。侧栏「经验」可晋升/拒绝/共享经验条目。
+界面保存的策略位于项目状态目录，不会改写 `agent-team.yaml`，并且
 可以通过工作台或 `agent-team run --strategy <name>` 执行。
 
 同一个服务还提供 REST 命令和带游标的 SSE 事件流。运行元数据和幂等命令保存在
@@ -220,11 +226,12 @@ pnpm check、pnpm test、pnpm build 必须全部通过。
 
 | 区域 | 用途 |
 | --- | --- |
-| 左侧运行列表 | 搜索、按状态筛选、切换历史运行，查看状态、策略和任务进度 |
-| 任务图 | 查看任务依赖、并行分支、当前状态和尝试次数 |
-| 活动日志 | 查看状态时间线以及 Agent 的实时 stdout、stderr |
+| 左侧运行列表 | 搜索、筛选、切换历史；终态运行可单条删除；顶部可批量清理 |
+| 任务图 | 查看任务依赖、并行分支、当前状态和尝试次数；失败时显示人话原因 |
+| 活动日志 | 角色调用、活动时间线、stdout/stderr；规划/早失败时默认打开 |
 | 交付证据 | 汇总任务集成、质量门禁、最终判定、审批、集成 diff 和本地产物 |
-| 右侧检查器 | 查看运行策略、资源用量、审批记录，或所选任务的分支、提交、质量命令和审查结论 |
+| 右侧检查器 | 运行策略、用量、审批，或所选任务的分支、提交、质量命令和审查结论 |
+| 经验（侧栏） | 候选/已验证/公共经验：晋升、拒绝、共享到本机公共库 |
 
 点击任务节点会打开该任务的证据详情。任务图中的连线表示真实依赖关系；没有依赖且
 负责路径不冲突的任务，才可能并行执行。
@@ -233,11 +240,11 @@ pnpm check、pnpm test、pnpm build 必须全部通过。
 
 - “取消”：终止仍在执行的运行。
 - “处理审批”：批准或拒绝计划、交付审批，必须填写操作者和理由。
-- “恢复”：服务中断后，从最近一个经过 Git 校验的检查点继续。
-- “重试”：为阻塞、取消或中断的运行创建新的关联运行，不改写原运行证据。
+- “从检查点继续”：服务中断后，从最近一个经过 Git 校验的检查点继续。
+- “重试为新运行”：为阻塞、取消或中断的运行创建新的关联运行，不改写原运行证据。
 
-移动端底部提供“运行、编排、任务图、详情、日志、证据”六个视图。移动端 DAG 会按依赖
-层级重新排列，但不会把并行任务错误显示成串行任务。
+移动端底部提供“运行、编排、任务图、详情、日志、证据”等视图，另可进入演进与经验。
+移动端 DAG 会按依赖层级重新排列，但不会把并行任务错误显示成串行任务。
 
 ### 4. 配置执行策略
 
@@ -721,6 +728,51 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 [ADR 0016](docs/adr/0016-evolution-control-plane.md) 与
 [ADR 0017](docs/adr/0017-bounded-automatic-strategy-evolution.md)。
 
+## 经验库
+
+经验用于提高后续运行成功率，**不是**聊天记录全文入库。
+
+```text
+运行终态 → 规则抽取候选（默认不进 prompt）
+  → 人工晋升 / 评测 digest 晋升 → 已验证
+  → 可选共享到 ~/.agent-team/experience/shared
+  → 新项目规划、任务返工时注入已验证经验
+```
+
+要点：
+
+- 项目库：`<repo>/.agent-team/experience/`
+- 公共库：`~/.agent-team/experience/shared/`（可用 `AGENT_TEAM_HOME` 覆盖根目录）
+- 返工时写入 attempt 卡，并通过后回写 `successCount`
+- 可选 `requireSuiteForPromote`：晋升须带 EvaluationSuite 的 suiteDigest
+- 可选 `autoPromoteWithSuite`：完成运行且能解析评测套件时，自动晋升低敏成功/评测候选
+- 工作台侧栏「经验」：筛选、晋升、拒绝、共享
+
+配置示例见 `agent-team.example.yaml` 的 `experience` 段；边界与 OCR 外挂说明见
+[可选外部集成](docs/integrations-optional.zh-CN.md)。
+
+## 可选质量门：Open Code Review
+
+本项目**不内嵌**阿里 [open-code-review](https://github.com/alibaba/open-code-review) 规则引擎。
+若本机已安装 `ocr` CLI，可将其作为普通质量命令：
+
+```bash
+npm i -g @alibaba-group/open-code-review
+ocr config provider
+```
+
+```yaml
+quality:
+  commands:
+    - command: pnpm
+      args: [check]
+    - command: ocr
+      args: [review]
+```
+
+`agent-team doctor` 会检查配置中的 quality 命令是否在 PATH 上。未安装时不要写入
+commands，否则质量门会失败。详细说明见 [可选外部集成](docs/integrations-optional.zh-CN.md)。
+
 ## 当前范围与限制
 
 当前 `0.1` 版本专注于：
@@ -730,6 +782,7 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 - Git worktree 隔离。
 - GitHub PR 与 Actions 质量门禁。
 - 受限自演进 Phase 1-6：候选/证据/人工门禁、仓库本地持久化、受控 target apply/rollback、本地 HTTP 控制面、React/Tauri 工作台和有硬上限的自动策略循环。
+- 经验库 v1：候选/已验证/公共、规划与返工注入、attempt 卡、可选评测门禁与策略提示；不内嵌 OpenRSI 搜索种群或 OCR 行级评审 UI。
 
 运行状态会持久保存。当前版本不会重新连接已经终止的 Agent CLI 进程，但可以从
 经过 Git 验证的任务检查点人工恢复；未完成波次会使用新的分支重新执行。其他
@@ -741,6 +794,7 @@ Agent CLI 需要通过适配器接口接入。
 - [工作流说明](docs/workflow.md)
 - [安全模型](docs/security.md)（含受限自演进信任、持久化、应用、控制面与前端边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
+- [可选外部集成](docs/integrations-optional.zh-CN.md)（经验闭环、外挂 OCR、不内嵌边界）
 - [受限自演进 Phase 1-6](docs/evolution-phase-1.zh-CN.md)（人工候选、受控应用/回滚、可视化工作台与自动策略循环）
 - [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014：演进 catalog 持久化边界](docs/adr/0014-durable-evolution-catalog.md)
@@ -748,6 +802,7 @@ Agent CLI 需要通过适配器接口接入。
 - [ADR 0016：本地演进控制面](docs/adr/0016-evolution-control-plane.md)
 - [ADR 0017：有硬上限的自动策略演进](docs/adr/0017-bounded-automatic-strategy-evolution.md)
 - [开源多 Agent 框架对照与补缺](docs/ecosystem-review.md)
+- [多 Agent 团队能力对照与完善路线](docs/multi-agent-completeness-roadmap.zh-CN.md)（现状、开源参考、缺口优先级与建议版本路线）
 - [可视化策略蓝图](docs/strategy-blueprints.md)
 - [桌面 App 与 Android/Termux 集成方案](docs/app-runtime-plan.zh-CN.md)
 - [完整示例配置](agent-team.example.yaml)
@@ -761,8 +816,9 @@ Agent CLI 需要通过适配器接口接入。
 “初始化并打开”；之后会自动恢复上次成功打开的项目。
 
 不同项目分别使用独立控制进程，可以同时运行；同一项目只允许一个控制进程。若项目已在
-终端、浏览器或另一个桌面窗口中运行，桌面启动器会显示“项目正在运行”，保留现有任务并
-允许再次检查或选择其他项目，不会强制终止或接管。
+终端、浏览器或另一个桌面窗口中运行，桌面启动器会显示占用状态，可「释放占用」或选择
+其他项目，不会误杀无关进程。GUI 启动时会注入常见 Homebrew PATH，便于找到 `codex` /
+`grok` 等 CLI。
 
 本地开发：
 
@@ -771,16 +827,20 @@ pnpm install
 pnpm desktop:dev
 ```
 
-生成当前平台安装包：
+生成当前平台安装包（macOS 示例只打 `.app`）：
 
 ```bash
 pnpm desktop:build
+# 或
+pnpm exec tauri build --bundles app
+# 可选：安装到本机
+# ditto "src-tauri/target/release/bundle/macos/Agent Team.app" "/Applications/Agent Team.app"
 ```
 
 首次准备桌面端时会从 Node.js 官方发布站下载固定版本的 Node 24 运行时并校验
 SHA-256，同时按锁文件安装生产依赖并用内嵌 CLI 执行启动冒烟检查；安装包不依赖客户
-另行安装 Node 或 npm 包。Codex、Claude Code 等 Agent CLI 仍需按项目配置安装并完成
-登录，App 会在后续环境检查中统一提示。临时测试目录不会写入“上次打开的项目”。
+另行安装 Node 或 npm 包。Codex、Claude Code、Grok 等 Agent CLI 仍需按项目配置安装并完成
+登录。临时测试目录不会写入“上次打开的项目”。
 
 当前已实机验证 macOS arm64。运行时准备脚本支持 macOS arm64/x64、Windows x64 和
 Linux arm64/x64。每次 PR 创建或提交新 commit，GitHub Actions 都会构建

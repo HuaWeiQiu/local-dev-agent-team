@@ -107,6 +107,21 @@ strategies:
 observability:
   maxEventsPerRun: 50000
 
+# Cross-project experience memory (candidates stay project-local until verified + shared)
+experience:
+  enabled: true
+  injectIntoPlanning: true
+  injectIntoRework: true
+  extractOnTerminal: true
+  maxInjected: 8
+  # 为 true 时晋升须带 suiteDigest，或勾选强制晋升
+  requireSuiteForPromote: false
+  # 完成运行且能解析评测套件时，自动晋升低敏「成功/评测」候选
+  autoPromoteWithSuite: true
+  recordAttemptCards: true
+  writeStrategyHints: true
+  # sharedDirectory: /custom/path/to/experience/shared
+
 evolution:
   automatic:
     enabled: false
@@ -131,6 +146,11 @@ quality:
       args: [test]
     - command: pnpm
       args: [build]
+    # Optional external gate (Alibaba Open Code Review) — install CLI first:
+    #   npm i -g @alibaba-group/open-code-review
+    # Uncomment only when ocr is on PATH; agent-team doctor will warn if missing.
+    # - command: ocr
+    #   args: [review]
   maxReworkAttempts: 1
   commandTimeoutSeconds: 900
 

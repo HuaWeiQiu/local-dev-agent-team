@@ -57,7 +57,7 @@ export interface EvidenceFilePreview {
 export interface RunCleanupCandidate {
   id: string;
   goal: string;
-  status: "completed" | "cancelled" | "blocked";
+  status: "completed" | "cancelled" | "blocked" | "interrupted";
   updatedAt: string;
   bytes: number;
 }

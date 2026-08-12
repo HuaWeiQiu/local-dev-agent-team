@@ -11,6 +11,7 @@ import type { AgentAdapter } from "../src/adapters/types.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import type { AgentTeamConfig } from "../src/config/schema.js";
 import { RunBudgetExceededError } from "../src/observability/budget.js";
+import { ProviderHealthRegistry, RoleProfileChainError } from "../src/providers/failure.js";
 import type { RunStateStore } from "../src/state/store.js";
 
 const answerSchema = z.object({ answer: z.string() });
@@ -37,6 +38,12 @@ describe("ProfiledAgentService fallback chain", () => {
     expect(response.profileName).toBe("fallback-worker");
     expect(response.usedFallback).toBe(true);
     expect(fixture.models).toEqual(["boom", "ok"]);
+    const failed = fixture.emitted.find((event) => event.type === "agent.profile.failed");
+    expect(failed?.payload).toMatchObject({
+      profile: "primary-worker",
+      failure: { code: "MODEL_PROCESS_ERROR", infrastructure: true },
+      nextProfile: "fallback-worker",
+    });
   });
 
   it("aggregates every profile error when the whole chain fails", async () => {
@@ -51,10 +58,13 @@ describe("ProfiledAgentService fallback chain", () => {
       })
       .catch((failure: unknown) => failure);
 
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("All profiles failed for role 'worker'");
-    expect((error as Error).message).toContain("primary-worker:");
-    expect((error as Error).message).toContain("fallback-worker:");
+    expect(error).toBeInstanceOf(RoleProfileChainError);
+    expect((error as RoleProfileChainError).message).toContain(
+      "All profiles failed for role 'worker'",
+    );
+    expect((error as RoleProfileChainError).message).toContain("primary-worker:");
+    expect((error as RoleProfileChainError).message).toContain("fallback-worker:");
+    expect((error as RoleProfileChainError).codes.length).toBe(2);
     expect(fixture.models).toEqual(["boom", "boom"]);
   });
 
@@ -150,6 +160,7 @@ describe("ProfiledAgentService fallback chain", () => {
       undefined,
       observer,
       new AdapterRegistry([adapter]),
+      new ProviderHealthRegistry(),
     );
 
     await service.runText({
@@ -198,7 +209,8 @@ async function createFixture(
   const config = fallbackConfig(options.failFallback === true);
   const models: string[] = [];
   const adapter = fixtureAdapter(models);
-  const store = fakeStore(path.join(root, "artifacts"));
+  const emitted: Array<{ runId: string; type: string; payload: unknown }> = [];
+  const store = fakeStore(path.join(root, "artifacts"), emitted);
   const service = new ProfiledAgentService(
     config,
     root,
@@ -207,8 +219,9 @@ async function createFixture(
     options.signal,
     options.observer,
     new AdapterRegistry([adapter]),
+    new ProviderHealthRegistry(),
   );
-  return { service, models };
+  return { service, models, emitted };
 }
 
 function fallbackConfig(failFallback: boolean): AgentTeamConfig {
@@ -239,11 +252,16 @@ function fallbackConfig(failFallback: boolean): AgentTeamConfig {
   return config;
 }
 
-function fakeStore(artifactsRoot: string) {
+function fakeStore(
+  artifactsRoot: string,
+  emitted: Array<{ runId: string; type: string; payload: unknown }> = [],
+) {
   return {
     artifactDirectory: (runId: string, ...parts: string[]) =>
       path.join(artifactsRoot, runId, "artifacts", ...parts),
-    emit: () => {},
+    emit: (runId: string, type: string, payload: unknown) => {
+      emitted.push({ runId, type, payload });
+    },
   };
 }
 

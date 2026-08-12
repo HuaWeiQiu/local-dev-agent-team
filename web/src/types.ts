@@ -27,10 +27,24 @@ export interface WorkspaceProject {
   defaultBranch: string;
 }
 
+export interface WorkspaceRegistryEntry {
+  id: string;
+  name: string;
+  path: string;
+  connected: boolean;
+  occupancy?: string;
+  reason?: string;
+}
+
 export interface WorkspaceInfo {
   mode: "single" | "workspace";
   defaultProjectId: string;
   projects: WorkspaceProject[];
+  /** Projects currently attached to this control service. */
+  connectedCount?: number;
+  /** All desktop-registered projects when a registry file is present. */
+  registeredCount?: number;
+  registry?: WorkspaceRegistryEntry[];
 }
 
 export interface ProjectScope {
@@ -357,7 +371,7 @@ export interface RunCleanupPreview {
   candidates: Array<{
     id: string;
     goal: string;
-    status: "completed" | "cancelled" | "blocked";
+    status: "completed" | "cancelled" | "blocked" | "interrupted";
     updatedAt: string;
     bytes: number;
   }>;
@@ -535,7 +549,7 @@ export interface AutomaticEvolutionCycle {
 export interface AutomaticEvolutionSnapshot {
   enabled: boolean;
   autoStart: false;
-  status: "idle" | "running" | "stopping" | "completed" | "stopped" | "failed";
+  status: "idle" | "running" | "stopping" | "completed" | "stopped" | "paused" | "failed";
   phase:
     | "idle"
     | "baseline"
@@ -560,6 +574,7 @@ export interface AutomaticEvolutionSnapshot {
   incumbentStrategy: string | null;
   stopReason: string | null;
   error: string | null;
+  failureCode: string | null;
   startedAt: string | null;
   updatedAt: string;
   cycles: AutomaticEvolutionCycle[];
@@ -639,4 +654,61 @@ export interface EvolutionPreviewResponse {
     after: EvolutionPreviewMaterial;
   };
   evidenceScope?: "server-structural-preflight-not-candidate-execution";
+}
+
+export type ExperienceStatus = "candidate" | "verified" | "rejected" | "retired";
+export type ExperienceSensitivity = "low" | "medium" | "high";
+export type ExperienceScope = "project" | "shared";
+export type ExperiencePortability = "project-bound" | "cross-project";
+
+export interface ExperienceEntry {
+  id: string;
+  project: string;
+  status: ExperienceStatus;
+  summary: string;
+  conditions: string[];
+  sourceRunId: string;
+  suiteDigest?: string;
+  sensitivity: ExperienceSensitivity;
+  scope: ExperienceScope;
+  portability: ExperiencePortability;
+  tags: string[];
+  sourceProjectId?: string;
+  hitCount: number;
+  successCount: number;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
+}
+
+export interface ExperienceSnapshot {
+  project: string;
+  projectPath: string;
+  sharedPath: string;
+  enabled: boolean;
+  injectIntoPlanning: boolean;
+  injectIntoRework?: boolean;
+  extractOnTerminal: boolean;
+  requireSuiteForPromote?: boolean;
+  counts: {
+    project: number;
+    shared: number;
+    verified: number;
+    candidate: number;
+  };
+  entries: ExperienceEntry[];
+}
+
+export interface ExperiencePlanningBundle {
+  note: string;
+  items: Array<{
+    id: string;
+    summary: string;
+    conditions: string[];
+    tags: string[];
+    scope: ExperienceScope;
+    hitCount: number;
+  }>;
 }

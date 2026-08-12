@@ -22,6 +22,10 @@ import { RunSupervisor, type SupervisorDependencies } from "../src/server/superv
 import type { RunState } from "../src/state/types.js";
 import { StrategyBlueprintCatalog } from "../src/strategies/catalog.js";
 import { resolveStrategy } from "../src/strategies/resolve.js";
+import {
+  classificationForCode,
+  RoleProfileChainError,
+} from "../src/providers/failure.js";
 
 const candidateDefinition: NamedStrategy = {
   topology: { mode: "sequential" },
@@ -277,6 +281,45 @@ describe("automatic evolution controller", () => {
 
     expect(snapshot).toMatchObject({ status: "failed", completedCycles: 0 });
     expect(snapshot.error).toContain("cannot increase maxAgentInvocations");
+    expect((await harness.coordinator.readControlSnapshot()).catalog.proposals).toEqual([]);
+    await closeHarness(harness);
+  });
+
+  it("pauses on provider quota failures without counting no-improvement cycles", async () => {
+    const harness = await createHarness(() => 4);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "quota-session",
+        proposeCandidate: async () => {
+          throw new RoleProfileChainError("orchestrator", [
+            {
+              profile: "codex-orchestrator",
+              adapter: "codex",
+              model: "gpt",
+              classification: classificationForCode("MODEL_QUOTA_EXHAUSTED"),
+              message: "You exceeded your current quota",
+              at: "2026-08-12T00:00:00.000Z",
+            },
+          ]);
+        },
+      },
+    );
+
+    controller.start(2, "quota-command", "session:quota-owner");
+    const snapshot = await controller.wait();
+
+    expect(snapshot).toMatchObject({
+      status: "paused",
+      completedCycles: 0,
+      consecutiveNoImprovement: 0,
+      failureCode: "MODEL_QUOTA_EXHAUSTED",
+    });
+    expect(snapshot.stopReason).toContain("MODEL_QUOTA_EXHAUSTED");
+    expect(snapshot.error).toContain("quota");
     expect((await harness.coordinator.readControlSnapshot()).catalog.proposals).toEqual([]);
     await closeHarness(harness);
   });
