@@ -1,6 +1,6 @@
 # 全局 CLI 检索 + 设置默认 + 新建运行角色选型
 
-- 文档状态：**已实现 Phase 1–3**（检索 / 全局设置 / 新建运行 roleBindings → ephemeral profile；Kimi 仅展示不可调用）
+- 文档状态：**已实现 Phase 1–3 + Kimi 运行时适配器**（检索 / 全局设置 / roleBindings；Codex/Grok/Claude/Kimi 均可调用）
 - 日期：2026-08-13
 - 动机：用户不想每个项目、每次新建运行都手改 `agent-team.yaml`；希望从本机已安装的 Codex / Grok / Kimi / Claude Code **检索配置与授权状态**，在**全局设置**里选默认，在**新建运行**时按角色选 CLI、模型、思考深度。
 

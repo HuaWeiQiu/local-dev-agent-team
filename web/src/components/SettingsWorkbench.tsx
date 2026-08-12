@@ -189,7 +189,7 @@ export function SettingsWorkbench() {
                 {cli.binary && <div><dt>路径</dt><dd className="mono" title={cli.binary}>{shortPath(cli.binary)}</dd></div>}
                 <div><dt>默认模型</dt><dd>{cli.defaultModel ?? "—"}</dd></div>
                 <div><dt>思考深度</dt><dd>{cli.defaultReasoning ?? "—"}</dd></div>
-                <div><dt>运行时</dt><dd>{cli.runtimeSupported ? "可调用" : "仅展示（适配未接通）"}</dd></div>
+                <div><dt>运行时</dt><dd>{cli.runtimeSupported ? "可调用" : "仅展示"}</dd></div>
                 {cli.auth.detail && <div><dt>授权说明</dt><dd>{cli.auth.detail}</dd></div>}
               </dl>
               {cli.models.length > 0 && (

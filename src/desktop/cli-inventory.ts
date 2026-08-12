@@ -227,7 +227,7 @@ async function probeKimi(home: string): Promise<CliProbeResult> {
     models,
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultReasoning ? { defaultReasoning } : {}),
-    runtimeSupported: false, // no kimi adapter yet
+    runtimeSupported: true,
   };
 }
 

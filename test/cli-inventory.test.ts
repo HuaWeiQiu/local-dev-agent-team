@@ -56,13 +56,15 @@ describe("cli inventory and role bindings", () => {
     expect(worker?.reasoning).toBe("max");
   });
 
-  it("rejects kimi bindings until runtime adapter exists", () => {
+  it("materializes kimi roleBindings onto the kimi adapter", () => {
     const config = createDefaultConfig("fixture");
-    expect(() =>
-      materializeRoleBindings(config, {
-        orchestrator: { cli: "kimi", model: "kimi-code" },
-      }),
-    ).toThrow(/Kimi/);
+    const material = materializeRoleBindings(config, {
+      orchestrator: { cli: "kimi", model: "kimi-code", reasoning: "high" },
+    });
+    const profile = material.config.profiles[material.profileOverrides.orchestrator!];
+    expect(profile?.adapter).toBe("kimi");
+    expect(profile?.model).toBe("kimi-code");
+    expect(profile?.permission).toBe("read-only");
   });
 
   it("suggests defaults preferring installed runtime-supported clis", () => {
@@ -76,7 +78,7 @@ describe("cli inventory and role bindings", () => {
           auth: { status: "present" },
           configPaths: [],
           models: [{ id: "kimi-code", label: "kimi" }],
-          runtimeSupported: false,
+          runtimeSupported: true,
         },
         {
           id: "grok",
@@ -90,7 +92,30 @@ describe("cli inventory and role bindings", () => {
         },
       ],
     });
+    // codex not present; first preferred for orchestrator among codex/grok/claude is grok
     expect(defaults.orchestrator?.cli).toBe("grok");
     expect(defaults.worker?.cli).toBe("grok");
+  });
+});
+
+describe("kimi stream-json parser", () => {
+  it("extracts assistant JSON content from stream-json lines", async () => {
+    const { parseKimiStreamJson } = await import("../src/adapters/shared.js");
+    const result = parseKimiStreamJson({
+      command: "kimi",
+      args: [],
+      exitCode: 0,
+      stdout: [
+        `{"role":"meta","type":"system.version","version":"0.35.0"}`,
+        `{"role":"assistant","content":"{\\"answer\\":\\"ok\\"}"}`,
+        `{"role":"meta","type":"session.resume_hint","content":"resume"}`,
+      ].join("\n"),
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+      signal: null,
+    });
+    expect(result.structured).toEqual({ answer: "ok" });
+    expect(result.text).toContain("answer");
   });
 });

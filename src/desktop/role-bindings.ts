@@ -49,13 +49,7 @@ export function materializeRoleBindings(
     if (!config.roles[role]) {
       throw new Error(`Unknown role '${role}' in roleBindings`);
     }
-    if (binding.cli === "kimi") {
-      throw new Error(
-        "Kimi CLI 已检索到，但 Agent Team 运行时适配器尚未接通；请改选 Codex / Grok / Claude",
-      );
-    }
-
-    const adapter = binding.cli; // codex | grok | claude
+    const adapter = binding.cli; // codex | grok | claude | kimi
     const reasoning = normalizeReasoning(binding.cli, binding.reasoning);
     const model = binding.model?.trim() || defaultModelForCli(binding.cli);
     const permission = READ_ONLY_ROLES.has(role) ? "read-only" : "workspace-write";
@@ -124,3 +118,4 @@ function normalizeReasoning(cli: string, value?: string): Reasoning {
 function slug(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 48) || "model";
 }
+

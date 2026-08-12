@@ -98,6 +98,9 @@ const reservedArguments = new Set([
   "--json",
   "--color",
   "--ephemeral",
+  "--prompt",
+  "--output-format",
+  "--skills-dir",
   "--strict-config",
   "--skip-git-repo-check",
   "--image",
@@ -335,6 +338,66 @@ export function parseClaudeJson(process: ProcessResult): AgentRunResult {
   } catch {
     return { text, process };
   }
+}
+
+/**
+ * Parse Kimi Code CLI `--output-format stream-json` stdout.
+ * Lines are NDJSON with role/type/content fields; assistant content is concatenated.
+ */
+export function parseKimiStreamJson(process: ProcessResult): AgentRunResult {
+  const raw = process.stdout.trim();
+  if (!raw) {
+    if (process.exitCode !== 0) {
+      return { text: "", process };
+    }
+    throw new Error("Kimi returned no stream-json output");
+  }
+
+  const assistantChunks: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const event = JSON.parse(trimmed) as Record<string, unknown>;
+      if (event.role === "assistant" && typeof event.content === "string") {
+        assistantChunks.push(event.content);
+      } else if (event.type === "assistant" && typeof event.content === "string") {
+        assistantChunks.push(event.content);
+      } else if (typeof event.text === "string" && event.role !== "meta") {
+        assistantChunks.push(event.text);
+      }
+    } catch {
+      // ignore non-JSON lines
+    }
+  }
+
+  const text = assistantChunks.join("").trim() || raw;
+  let structured: unknown;
+  try {
+    structured = JSON.parse(text);
+  } catch {
+    // Try fenced or trailing JSON object
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = fence?.[1]?.trim() ?? extractTrailingJsonObject(text);
+    if (candidate) {
+      try {
+        structured = JSON.parse(candidate);
+      } catch {
+        structured = undefined;
+      }
+    }
+  }
+
+  return structured === undefined
+    ? { text, process }
+    : { text, structured, process };
+}
+
+function extractTrailingJsonObject(text: string): string | undefined {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  return text.slice(start, end + 1);
 }
 
 export function parseGrokJson(process: ProcessResult): AgentRunResult {
