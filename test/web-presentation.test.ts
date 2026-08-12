@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ApiError } from "../web/src/api.js";
 import { buildTaskGraph } from "../web/src/graph.js";
 import {
   agentRoleLabel,
@@ -7,8 +8,10 @@ import {
   formatExperienceTag,
   humanizeFailure,
   morphologySummary,
+  orderedRoles,
   preferredMonitorPanel,
   profileDisplayName,
+  runActionErrorMessage,
   runListSubtitle,
   runStatusLabel,
   statusTone,
@@ -130,6 +133,34 @@ describe("web workbench projections", () => {
     expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("activity");
     expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("activity");
     expect(preferredMonitorPanel({ status: "implementing", tasks: [{}] })).toBe("graph");
+  });
+
+  it("keeps known roles in canonical order and appends custom config roles", () => {
+    expect(orderedRoles(["tester", "orchestrator", "worker"])).toEqual(["orchestrator", "worker", "tester"]);
+    expect(orderedRoles(["security-auditor", "worker", "orchestrator"])).toEqual([
+      "orchestrator",
+      "worker",
+      "security-auditor",
+    ]);
+    expect(orderedRoles(["custom-b", "custom-a"])).toEqual(["custom-a", "custom-b"]);
+    expect(agentRoleLabel("security-auditor")).toBe("security-auditor");
+  });
+
+  it("keeps custom strategy names raw instead of mistranslating them", () => {
+    expect(strategyDisplayName("balanced")).toBe("均衡");
+    expect(strategyDisplayName("my-custom-blueprint")).toBe("my-custom-blueprint");
+  });
+
+  it("maps run action errors to actionable Chinese guidance", () => {
+    expect(runActionErrorMessage(new ApiError(404, "Run not found"))).toContain("刷新列表后重试");
+    expect(runActionErrorMessage(new ApiError(401, "Desktop session is required", "SESSION_REQUIRED"))).toContain("控制会话");
+    expect(runActionErrorMessage(new ApiError(403, "Forbidden", "ORIGIN_DENIED"))).toContain("来源");
+    expect(runActionErrorMessage(new ApiError(409, "Run is not active in this control service"))).toContain("刷新列表后重试");
+    expect(runActionErrorMessage(new Error("Run 'r1' cannot be retried from status 'completed'"))).toContain("不允许重试");
+    expect(runActionErrorMessage(new Error("Run 'r1' has no recoverable task-boundary checkpoint"))).toContain("重试为新运行");
+    expect(runActionErrorMessage(new Error("Approval request 'a1' expired at 2026-01-01"))).toContain("审批已过期");
+    expect(runActionErrorMessage(new Error("Cleanup preview is missing or expired; create a new preview"))).toContain("清理预览");
+    expect(runActionErrorMessage(new Error("something entirely unexpected"))).toBe("something entirely unexpected");
   });
 });
 

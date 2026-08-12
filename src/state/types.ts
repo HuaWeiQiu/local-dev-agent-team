@@ -143,6 +143,8 @@ export interface RunRoleBinding {
 
 export interface RunState {
   id: string;
+  /** Persisted document schema version; legacy files without it are treated as 1. */
+  version?: number;
   traceId?: string;
   goal: string;
   root: string;

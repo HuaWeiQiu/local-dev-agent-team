@@ -39,7 +39,7 @@ export interface StartRunResult {
 
 export interface EvolutionAutomationSession {
   start(request: StartRunRequest, idempotencyKey?: string): StartRunResult;
-  cancel(runId: string): boolean;
+  cancel(runId: string): Promise<boolean>;
   beginTargetMutation(): () => void;
   release(): void;
 }
@@ -115,6 +115,7 @@ interface ActiveRun {
   controller: AbortController;
   promise: Promise<RunState>;
   parentRunId?: string;
+  idempotency?: { key: string; hash: string };
 }
 
 const activeStatuses = new Set([
@@ -269,7 +270,13 @@ export class RunSupervisor {
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
             ...(purpose ? { purpose } : {}),
           });
-      this.track(runId, controller, workflow, request.parentRunId);
+      this.track(
+        runId,
+        controller,
+        workflow,
+        request.parentRunId,
+        idempotencyKey && hash ? { key: idempotencyKey, hash } : undefined,
+      );
     } catch (error) {
       if (idempotencyKey && hash) {
         this.events.releaseCommand(idempotencyKey, hash);
@@ -323,23 +330,44 @@ export class RunSupervisor {
     }
   }
 
-  cancel(runId: string): boolean {
-    return this.cancelOwned(runId);
+  async cancel(runId: string): Promise<boolean> {
+    return await this.cancelOwned(runId);
   }
 
-  private cancelOwned(runId: string, automationOwner?: symbol): boolean {
+  private async cancelOwned(runId: string, automationOwner?: symbol): Promise<boolean> {
     if (this.automationOwner && this.automationOwner !== automationOwner) {
       throw new ProjectMutationConflictError(
         "Automatic evolution owns run cancellation until its bounded loop finishes",
       );
     }
     const active = this.active.get(runId);
-    if (!active) {
+    if (active) {
+      this.events.emit(runId, "run.cancel-requested", {});
+      active.controller.abort(new Error("Run cancelled by user"));
+      return true;
+    }
+    // Runs parked at a human gate or interrupted by a previous service are not
+    // in the active map; cancel them with a direct terminal transition.
+    const state = await this.get(runId);
+    if (!state || !inactiveCancellableStatuses.has(state.status)) {
       return false;
     }
-    this.events.emit(runId, "run.cancel-requested", {});
-    active.controller.abort(new Error("Run cancelled by user"));
-    return true;
+    return await this.queueRunAction([runId], async () => {
+      const racing = this.active.get(runId);
+      if (racing) {
+        this.events.emit(runId, "run.cancel-requested", {});
+        racing.controller.abort(new Error("Run cancelled by user"));
+        return true;
+      }
+      const current = await this.get(runId);
+      if (!current || !inactiveCancellableStatuses.has(current.status)) {
+        return false;
+      }
+      this.events.emit(runId, "run.cancel-requested", {});
+      current.error = "Run cancelled by user";
+      await this.stateStore.transition(current, "cancelled", current.error);
+      return true;
+    });
   }
 
   async retry(runId: string, idempotencyKey?: string): Promise<StartRunResult> {
@@ -699,6 +727,7 @@ export class RunSupervisor {
   }
 
   async reconcileInterruptedRuns(): Promise<number> {
+    await this.discardQuarantineLeftovers();
     const states = await this.stateStore.list();
     let count = 0;
     for (const state of states) {
@@ -706,11 +735,10 @@ export class RunSupervisor {
         count += 1;
         continue;
       }
-      if (
-        state.supervisorId !== undefined &&
-        state.supervisorId !== this.id &&
-        activeStatuses.has(state.status)
-      ) {
+      // The startup lease guarantees no other live supervisor, so an active
+      // run owned by anybody else — including legacy runs persisted before
+      // supervisorId existed (undefined) — belongs to a dead service.
+      if (state.supervisorId !== this.id && activeStatuses.has(state.status)) {
         state.error = "The owning control service stopped before the run completed";
         await this.stateStore.transition(
           state,
@@ -721,6 +749,27 @@ export class RunSupervisor {
       }
     }
     return count;
+  }
+
+  /** Best-effort cleanup of `.deleting-*` directories left by interrupted cleanups. */
+  private async discardQuarantineLeftovers(): Promise<void> {
+    try {
+      const discarded = await this.stateStore.discardQuarantineLeftovers();
+      if (discarded > 0) {
+        console.warn(
+          `[agent-team] discarded ${discarded} quarantined run ${
+            discarded === 1 ? "directory" : "directories"
+          } left by an interrupted cleanup`,
+        );
+      }
+    } catch (error) {
+      // Never block startup on housekeeping.
+      console.warn(
+        `[agent-team] could not discard quarantine leftovers: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   async close(): Promise<void> {
@@ -742,18 +791,36 @@ export class RunSupervisor {
     controller: AbortController,
     workflow: Promise<RunState>,
     parentRunId?: string,
+    idempotency?: { key: string; hash: string },
   ): Promise<RunState> {
     const promise = workflow
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         this.events.emit(runId, "run.crashed", {
           error: error instanceof Error ? error.message : String(error),
         });
+        if (idempotency) {
+          // The workflow rejected before its state was ever persisted (e.g. a
+          // disk failure): the run stays invisible, so release the command
+          // claim and let an identical retry start a fresh run. A run that did
+          // persist is visible and keeps its claim — the deduplicated response
+          // is correct.
+          try {
+            await this.stateStore.load(runId);
+          } catch {
+            this.events.releaseCommand(idempotency.key, idempotency.hash);
+          }
+        }
         throw error;
       })
       .finally(() => {
         this.active.delete(runId);
       });
-    this.active.set(runId, { controller, promise, ...(parentRunId ? { parentRunId } : {}) });
+    this.active.set(runId, {
+      controller,
+      promise,
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(idempotency ? { idempotency } : {}),
+    });
     void promise.catch(() => undefined);
     return promise;
   }
@@ -1023,6 +1090,10 @@ export class RunSupervisor {
         "Project evolution is in progress; run actions are temporarily unavailable",
       );
     }
+    return await this.queueRunAction(runIds, action);
+  }
+
+  private async queueRunAction<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
     const ids = [...new Set(runIds)].sort();
     const previous = ids.map((runId) => this.actionQueues.get(runId) ?? Promise.resolve());
     const result = Promise.all(previous.map(async (queued) => await queued.catch(() => undefined)))
@@ -1048,6 +1119,11 @@ interface CleanupPreviewSnapshot {
 }
 
 const cleanupPreviewTtlMs = 5 * 60_000;
+const inactiveCancellableStatuses = new Set<RunState["status"]>([
+  "awaiting-human",
+  "interrupted",
+]);
+
 const cleanupStatuses = new Set<RunState["status"]>([
   "completed",
   "cancelled",

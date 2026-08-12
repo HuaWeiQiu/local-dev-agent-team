@@ -63,6 +63,14 @@ export class SqliteEventStore implements RunEventSink {
         created_at TEXT NOT NULL
       );
     `);
+    // Existing databases predate the run_id column; add it in place and keep
+    // the JSON fallback for rows claimed before the migration.
+    const commandColumns = this.database
+      .prepare("PRAGMA table_info(command_idempotency)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!commandColumns.some((column) => column.name === "run_id")) {
+      this.database.exec("ALTER TABLE command_idempotency ADD COLUMN run_id TEXT");
+    }
   }
 
   append(event: PendingRunEvent): RunEvent {
@@ -94,8 +102,13 @@ export class SqliteEventStore implements RunEventSink {
     for (const listener of this.listeners) {
       try {
         listener(stored);
-      } catch {
+      } catch (error) {
         this.listeners.delete(listener);
+        console.warn(
+          `[event-store] removed failing event listener after error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
     return stored;
@@ -161,10 +174,10 @@ export class SqliteEventStore implements RunEventSink {
     const result = this.database
       .prepare(`
         INSERT OR IGNORE INTO command_idempotency (
-          key, request_hash, response_json, created_at
-        ) VALUES (?, ?, ?, ?)
+          key, request_hash, response_json, created_at, run_id
+        ) VALUES (?, ?, ?, ?, ?)
       `)
-      .run(key, requestHash, responseJson, new Date().toISOString());
+      .run(key, requestHash, responseJson, new Date().toISOString(), runIdFromResponse(response));
     if (result.changes === 1) {
       return { claimed: true, response };
     }
@@ -199,8 +212,12 @@ export class SqliteEventStore implements RunEventSink {
       );
       const commands = Number(
         this.database
-          .prepare("DELETE FROM command_idempotency WHERE response_json = ?")
-          .run(JSON.stringify({ runId })).changes,
+          .prepare(`
+            DELETE FROM command_idempotency
+            WHERE run_id = ?
+               OR (run_id IS NULL AND response_json = ?)
+          `)
+          .run(runId, JSON.stringify({ runId })).changes,
       );
       this.database.exec("COMMIT");
       return { events, commands };
@@ -273,6 +290,15 @@ function decodeEvent(row: EventRow): RunEvent {
 
 export function traceIdForRun(runId: string): string {
   return createHash("sha256").update(`agent-team:trace:${runId}`).digest("hex").slice(0, 32);
+}
+
+/** Supervisor claim payloads are `{ runId }`; other shapes simply get no column value. */
+function runIdFromResponse(response: unknown): string | null {
+  if (typeof response !== "object" || response === null) {
+    return null;
+  }
+  const runId = (response as { runId?: unknown }).runId;
+  return typeof runId === "string" ? runId : null;
 }
 
 function spanIdForEvent(eventId: string): string {

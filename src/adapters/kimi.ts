@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
+import { sanitizedChildEnv } from "../process/env.js";
 import { assertAdapterProfile } from "./conformance.js";
 import {
   parseKimiStreamJson,
@@ -80,7 +81,7 @@ Do not run shell commands that modify the workspace. Prefer read/search tools on
       cwd: request.cwd,
       timeoutMs: profile.timeoutSeconds * 1_000,
       env: {
-        ...process.env,
+        ...sanitizedChildEnv(),
         // Keep Kimi home so provider keys resolve; do not rewrite HOME.
         KIMI_CODE_HOME: process.env.KIMI_CODE_HOME ?? path.join(homedir(), ".kimi-code"),
       },

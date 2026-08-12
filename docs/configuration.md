@@ -352,6 +352,31 @@ whether each configured quality command is available on `PATH`.
 `maxParallel` limits one dependency-ready scheduling wave. Parallel tasks must
 declare disjoint `ownedPaths`, and the plan is rejected when ownership overlaps.
 
+## Run Actions And Cancellation
+
+The control service cancels runs in two ways. A run owned by a live process is
+aborted through its execution controller. A run parked at `awaiting-human`
+(pending approval) or recovered as `interrupted` (previous service instance)
+has no live owner; it is still cancellable and moves directly to the terminal
+`cancelled` state. Cancellation while the automatic evolution loop owns the
+project is rejected as a conflict. See
+[architecture.md](./architecture.md#workflow-state) for the full state machine.
+
+Run action endpoints (`cancel`, `retry`, `respond-approval`, `resume`,
+`delete`, cleanup) classify failures by HTTP status and machine-readable code:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `INVALID_REQUEST` | Malformed body or unknown strategy/profile/role parameter |
+| 404 | `RUN_NOT_FOUND` | Unknown run id |
+| 409 | `RUN_STATE_CONFLICT` (or the mutation-conflict code) | Status/lifecycle conflict: wrong source status, stale approval, expired preview, concurrent project mutation, evolution automation ownership |
+| 500 | `INTERNAL_ERROR` | Unexpected failure; the detail is logged server-side and the body stays generic |
+
+Plan approval is forced whenever any planned task defines
+`acceptanceCommands`, regardless of strategy gates, so agent-produced commands
+never execute without human review of the introducing plan. See
+[workflow.md](./workflow.md) for the approval lifecycle.
+
 ## GitHub
 
 ```yaml

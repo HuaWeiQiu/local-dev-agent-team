@@ -38,9 +38,9 @@ describe("run supervisor", () => {
     expect(starts).toBe(1);
 
     const completed = supervisor.wait(first.runId);
-    expect(supervisor.cancel(first.runId)).toBe(true);
+    expect(await supervisor.cancel(first.runId)).toBe(true);
     await expect(completed).resolves.toMatchObject({ status: "cancelled" });
-    expect(supervisor.cancel(first.runId)).toBe(false);
+    expect(await supervisor.cancel(first.runId)).toBe(false);
     await supervisor.close();
     events.close();
   });
@@ -85,7 +85,7 @@ describe("run supervisor", () => {
     const retry = await supervisor.retry(source.id, "retry-source");
     expect(retry.runId).not.toBe(source.id);
     expect(retriedParent).toBe(source.id);
-    supervisor.cancel(retry.runId);
+    await supervisor.cancel(retry.runId);
     await supervisor.close();
     events.close();
   });
@@ -242,7 +242,7 @@ describe("run supervisor", () => {
     events.close();
   });
 
-  it("leaves active runs without a supervisorId untouched during reconciliation", async () => {
+  it("reconciles active runs with foreign or missing supervisor ownership", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
     const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
@@ -252,9 +252,12 @@ describe("run supervisor", () => {
     await Promise.all([states.save(cliRun), states.save(foreignRun)]);
     const supervisor = new RunSupervisor(loaded, events);
 
-    expect(await supervisor.reconcileInterruptedRuns()).toBe(1);
+    // The startup lease guarantees no other live supervisor, so both the
+    // foreign-owned run and the legacy run without a supervisorId are dead.
+    expect(await supervisor.reconcileInterruptedRuns()).toBe(2);
     await expect(supervisor.get(cliRun.id)).resolves.toMatchObject({
-      status: "implementing",
+      status: "interrupted",
+      error: "The owning control service stopped before the run completed",
     });
     await expect(supervisor.get(foreignRun.id)).resolves.toMatchObject({
       status: "interrupted",
@@ -281,7 +284,7 @@ describe("run supervisor", () => {
       "Project has an active run or run action",
     );
 
-    expect(supervisor.cancel(run.runId)).toBe(true);
+    expect(await supervisor.cancel(run.runId)).toBe(true);
     await expect(supervisor.wait(run.runId)).resolves.toMatchObject({ status: "cancelled" });
     const release = supervisor.beginEvolutionMutation();
     release();
@@ -523,7 +526,7 @@ describe("run supervisor", () => {
 
     const evaluation = automation.start({ goal: "isolated evaluation", profileOverrides: {} });
     expect(() => automation.release()).toThrow("cannot release project ownership");
-    expect(() => supervisor.cancel(evaluation.runId)).toThrow(
+    await expect(supervisor.cancel(evaluation.runId)).rejects.toThrow(
       "Automatic evolution owns run cancellation",
     );
     finishRun();

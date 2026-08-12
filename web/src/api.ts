@@ -231,8 +231,14 @@ export async function resumeRun(
   });
 }
 
-export function eventStreamUrl(scope: ProjectScope, runId: string): string {
-  return `${apiRoot(scope)}/events?runId=${encodeURIComponent(runId)}&after=0`;
+/**
+ * SSE 事件流地址。不带 after 参数：首次连接服务端从 0 重放；
+ * EventSource 自动重连时浏览器会带 Last-Event-ID，服务端据此续传，
+ * 避免每次重连都全量重放。runId 缺省时订阅项目级全量事件流。
+ */
+export function eventStreamUrl(scope: ProjectScope, runId?: string): string {
+  const query = runId ? `?runId=${encodeURIComponent(runId)}` : "";
+  return `${apiRoot(scope)}/events${query}`;
 }
 
 export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
@@ -256,10 +262,13 @@ export async function getExperience(
 export async function retrieveExperience(
   scope: ProjectScope,
   query = "",
+  options: { preview?: boolean } = {},
 ): Promise<ExperiencePlanningBundle> {
-  const suffix = query.trim()
-    ? `?q=${encodeURIComponent(query.trim())}`
-    : "";
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  // preview 只读预览：不计 hitCount、不写审计
+  if (options.preview) params.set("preview", "1");
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
   return await request<ExperiencePlanningBundle>(`${apiRoot(scope)}/experience/retrieve${suffix}`, {
     cache: "no-store",
   });
@@ -297,6 +306,21 @@ export async function rejectExperience(
 ): Promise<ExperienceEntry> {
   return await request<ExperienceEntry>(
     `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),
+    },
+  );
+}
+
+export async function retireExperience(
+  scope: ProjectScope,
+  experienceId: string,
+  reason: string,
+  actor?: string,
+): Promise<ExperienceEntry> {
+  return await request<ExperienceEntry>(
+    `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/retire`,
     {
       method: "POST",
       body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),

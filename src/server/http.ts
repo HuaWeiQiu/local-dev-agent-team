@@ -65,6 +65,7 @@ import { EvolutionProjectService, EvolutionServiceError } from "./evolution-serv
 import { AutomaticEvolutionError } from "./evolution-automation.js";
 import {
   ProjectMutationConflictError,
+  RunNotFoundError,
   type RunSupervisor,
 } from "./supervisor.js";
 
@@ -683,7 +684,12 @@ const projectApiRoutes: ProjectApiRoute[] = [
     handler: async (context, _request, response, url) => {
       const service = ExperienceService.forLoaded(context.loaded);
       const query = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
-      const bundle = await service.retrieveForPlanning(query || context.loaded.config.project.name);
+      // preview=1 keeps the lookup read-only: no hitCount/audit mutation.
+      const preview = url.searchParams.get("preview") === "1";
+      const bundle = await service.retrieveForPlanning(
+        query || context.loaded.config.project.name,
+        { preview },
+      );
       sendJson(response, 200, bundle ?? { note: "无已验证经验", items: [] });
     },
   },
@@ -733,6 +739,32 @@ const projectApiRoutes: ProjectApiRoute[] = [
       try {
         const service = ExperienceService.forLoaded(context.loaded);
         const entry = await service.reject(
+          decodePathSegment(params.experienceId!),
+          actor,
+          parsed.data.reason,
+        );
+        sendJson(response, 200, entry);
+      } catch (error) {
+        throw experienceHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/experience/:experienceId/actions/retire",
+    handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
+      const parsed = experienceReasonRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const actor =
+        parsed.data.actor ??
+        sessionOperator ??
+        singleHeader(request.headers["x-agent-team-operator"]) ??
+        "operator";
+      try {
+        const service = ExperienceService.forLoaded(context.loaded);
+        const entry = await service.retire(
           decodePathSegment(params.experienceId!),
           actor,
           parsed.data.reason,
@@ -853,7 +885,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
       if (!parsed.success) {
         throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
       }
-      const idempotency = singleHeader(request.headers["idempotency-key"]);
+      const idempotency = optionalIdempotencyKey(request);
       try {
         const result = context.supervisor.start(parsed.data, idempotency);
         sendJson(response, result.deduplicated ? 200 : 202, result);
@@ -982,7 +1014,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
     handler: async (context, _request, response, _url, params) => {
       const runId = decodePathSegment(params.runId!);
       try {
-        if (!context.supervisor.cancel(runId)) {
+        if (!(await context.supervisor.cancel(runId))) {
           throw new HttpError(409, "Run is not active in this control service");
         }
         sendJson(response, 202, { runId, status: "cancel-requested" });
@@ -996,7 +1028,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
     pattern: "/runs/:runId/actions/retry",
     handler: async (context, request, response, _url, params) => {
       const runId = decodePathSegment(params.runId!);
-      const idempotency = singleHeader(request.headers["idempotency-key"]);
+      const idempotency = optionalIdempotencyKey(request);
       try {
         const result = await context.supervisor.retry(runId, idempotency);
         sendJson(response, result.deduplicated ? 200 : 202, result);
@@ -1391,14 +1423,31 @@ function requireDesktopMutation(
   return sessionOperator ?? "local-dev";
 }
 
-function requireIdempotencyKey(request: IncomingMessage): string {
+const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function invalidIdempotencyKey(): HttpError {
+  return new HttpError(
+    400,
+    "Idempotency-Key must contain 1-128 safe identifier characters",
+    "INVALID_IDEMPOTENCY_KEY",
+  );
+}
+
+function optionalIdempotencyKey(request: IncomingMessage): string | undefined {
   const value = singleHeader(request.headers["idempotency-key"]);
-  if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) {
-    throw new HttpError(
-      400,
-      "Idempotency-Key must contain 1-128 safe identifier characters",
-      "INVALID_IDEMPOTENCY_KEY",
-    );
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!idempotencyKeyPattern.test(value)) {
+    throw invalidIdempotencyKey();
+  }
+  return value;
+}
+
+function requireIdempotencyKey(request: IncomingMessage): string {
+  const value = optionalIdempotencyKey(request);
+  if (!value) {
+    throw invalidIdempotencyKey();
   }
   return value;
 }
@@ -1488,12 +1537,30 @@ function evolutionHttpError(error: unknown): HttpError {
   return new HttpError(500, "Evolution request failed", "INTERNAL_ERROR");
 }
 
+const runNotFoundMessage = /was not found/;
+const runStateConflictMessage =
+  /from status '|is already active|is still active|cannot be deleted|active child run|referenced as a parent|changed after preview|already has a response|is not the latest request|expired at |missing or expired|already used for another request|cannot be retried directly|no recoverable task-boundary checkpoint|requires approval before worker recovery/;
+const runParameterMessage =
+  /^Unknown (?:strategy|profile|role|fallback profile) |^Profile '.+' is not allowed|must be an integer|^Invalid run ID/;
+
 function runActionHttpError(error: unknown): HttpError {
+  if (error instanceof HttpError) return error;
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof ProjectMutationConflictError) {
     return new HttpError(409, message, error.code);
   }
-  return new HttpError(409, message);
+  if (error instanceof RunNotFoundError || runNotFoundMessage.test(message)) {
+    return new HttpError(404, message, "RUN_NOT_FOUND");
+  }
+  if (runStateConflictMessage.test(message)) {
+    return new HttpError(409, message, "RUN_STATE_CONFLICT");
+  }
+  if (runParameterMessage.test(message)) {
+    return new HttpError(400, message, "INVALID_REQUEST");
+  }
+  // Unexpected failure: log the detail server-side, return a generic body.
+  console.error(`[agent-team] run action failed: ${message}`);
+  return new HttpError(500, "Run action failed", "INTERNAL_ERROR");
 }
 
 function strategyHttpError(error: unknown): HttpError {
@@ -1514,7 +1581,7 @@ function experienceHttpError(error: unknown): HttpError {
   if (/suiteDigest|forceWithoutSuite|requireSuiteForPromote/i.test(message)) {
     return new HttpError(409, message, "EXPERIENCE_SUITE_REQUIRED");
   }
-  if (/cannot be promoted|cannot be rejected|Only verified|Only low-sensitivity|project-bound/i.test(message)) {
+  if (/cannot be promoted|cannot be rejected|cannot be retired|Only verified|Only low-sensitivity|project-bound/i.test(message)) {
     return new HttpError(409, message, "EXPERIENCE_STATE");
   }
   return new HttpError(400, message, "EXPERIENCE_ERROR");

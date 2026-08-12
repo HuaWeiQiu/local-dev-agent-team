@@ -118,6 +118,7 @@ separately authenticated HTTPS gateway before that boundary can change.
 ```text
 created
   -> orchestrating
+  -> exploring (optional: read-only researcher research before planning)
   -> architecting
   -> planned
   -> implementing
@@ -127,16 +128,41 @@ created
   -> final-checks
   -> awaiting-human
   -> ready-to-merge
+  -> publishing
+  -> waiting-ci
   -> completed
+```
+
+`exploring` runs only when the strategy enables the explore stage; the
+researcher (or architect fallback) is read-only, and with `failOpen` a failed
+exploration is skipped and planning proceeds.
+
+The GitHub publication and CI-repair sub-loop is explicit-command driven:
+
+```text
+ready-to-merge
+  -> publishing (agent-team publish; requires final human approval)
+  -> waiting-ci (draft pull request created)
+publishing --publication error--> ready-to-merge (re-publishable)
+waiting-ci --checks pass--> ready-to-merge (human merge required)
+waiting-ci --checks fail--> ci-failed
+ci-failed -> repairing (agent-team repair, bounded attempts,
+                          human-confirmed push)
+repairing -> waiting-ci (repair commit pushed; new checks)
+repairing -> ci-failed (repair did not pass local gates)
+ready-to-merge -> completed (agent-team complete, after the PR merges)
 ```
 
 Any state can transition to `blocked` on a non-recoverable infrastructure or
 policy failure. State is persisted after every transition for audit and
 diagnosis.
 
-Control-service cancellation transitions a run to `cancelled`. When a new
-service instance finds a non-terminal run owned by a previous service instance,
-it records `interrupted` while preserving worktrees, branches, and artifacts.
+Control-service cancellation transitions a run to `cancelled`. Runs parked at
+`awaiting-human` or recovered as `interrupted` are not owned by an active
+process; the control service can still cancel them with a direct terminal
+transition. When a new service instance finds a non-terminal run owned by a
+previous service instance, it records `interrupted` while preserving worktrees,
+branches, and artifacts.
 Recovery is allowed only when the integration HEAD matches the latest durable
 task-boundary checkpoint. Work from a partial wave is retained as abandoned
 evidence and rerun on new branches; an interrupted agent process is never

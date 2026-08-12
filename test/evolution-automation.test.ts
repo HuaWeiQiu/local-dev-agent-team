@@ -18,6 +18,11 @@ import { SqliteEventStore } from "../src/events/store.js";
 import { GitManager } from "../src/git/manager.js";
 import { runProcess } from "../src/process/run.js";
 import { AutomaticEvolutionController } from "../src/server/evolution-automation.js";
+import { computeSuiteDigest } from "../src/evaluation/domain.js";
+import {
+  requireEvaluationSuite,
+  resolveEvaluationSuite,
+} from "../src/evaluation/resolve.js";
 import { RunSupervisor, type SupervisorDependencies } from "../src/server/supervisor.js";
 import type { RunState } from "../src/state/types.js";
 import { StrategyBlueprintCatalog } from "../src/strategies/catalog.js";
@@ -196,6 +201,41 @@ describe("automatic evolution controller", () => {
     expect(() => restoredController.start(1, "improved-command", "session:alice"))
       .toThrow("already accepted by session 'improved-session'");
     await closeHarness(reopened);
+  });
+
+  it("exposes the latest evaluation suite identity with completion time", async () => {
+    const harness = await createHarness(() => 8);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "suite-identity-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for suite identity coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+    controller.start(1, "suite-identity-command");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.status).toBe("completed");
+    const suite = requireEvaluationSuite(
+      await resolveEvaluationSuite(harness.loaded.config, harness.loaded.root),
+      "test expectation",
+    );
+    expect(snapshot.lastEvaluation).toEqual({
+      suiteName: suite.name,
+      suiteDigest: computeSuiteDigest(suite),
+      completedAt: expect.any(String),
+    });
+    expect(Number.isNaN(Date.parse(snapshot.lastEvaluation!.completedAt))).toBe(false);
+    await closeHarness(harness);
   });
 
   it("stops before the hard limit after consecutive candidates do not improve", async () => {

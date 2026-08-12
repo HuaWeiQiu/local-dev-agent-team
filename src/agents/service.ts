@@ -6,6 +6,7 @@ import type { AgentTeamConfig } from "../config/schema.js";
 import { fallbackProfiles, resolveProfile } from "../profiles/resolve.js";
 import { AgentInvocationError, invokeAgent } from "../adapters/invoke.js";
 import { AdapterRegistry } from "../adapters/registry.js";
+import { adapterRoleWarning } from "../adapters/conformance.js";
 import type { AgentRunResult } from "../adapters/types.js";
 import type { RunStateStore } from "../state/store.js";
 import { assertRoleProfilePermission } from "../security/permissions.js";
@@ -148,6 +149,10 @@ export class ProfiledAgentService implements RoleAgentService {
         candidate.name,
         candidate.profile.permission,
       );
+      const roleWarning = adapterRoleWarning(options.role, candidate.profile);
+      if (roleWarning) {
+        process.stderr.write(`Warning: ${roleWarning} (profile '${candidate.name}')\n`);
+      }
       const gate = this.health.allowAttempt(
         candidate.name,
         candidate.profile.adapter,

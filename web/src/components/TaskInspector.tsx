@@ -1,6 +1,6 @@
 import { CheckCircle2, Clock3, FileCode2, Gauge, GitBranch, History, ShieldAlert, TerminalSquare, UserRound } from "lucide-react";
 import { memo } from "react";
-import { agentRoleLabel, formatBytes, profileDisplayName, strategyDisplayName } from "../presentation";
+import { agentRoleLabel, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
 
@@ -76,7 +76,7 @@ function TaskDetail({ task }: { task: TaskRunState }) {
           ))}
         </section>
       )}
-      {task.error && <p className="inline-error">{task.error}</p>}
+      {task.error && <p className="inline-error">{humanizeFailure(task.error)}</p>}
     </div>
   );
 }
@@ -185,7 +185,7 @@ function RunDetail({ run }: { run: RunState }) {
           <Verdict label={run.finalDecision.decision} verdict={run.finalDecision.decision} summary={run.finalDecision.reason} />
         </section>
       )}
-      {run.error && <p className="inline-error">{run.error}</p>}
+      {run.error && <p className="inline-error">{humanizeFailure(run.error)}</p>}
     </div>
   );
 }

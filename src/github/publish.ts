@@ -27,45 +27,53 @@ export class GithubPublisher {
       throw new Error(`Run '${state.id}' cannot be published from status '${state.status}'`);
     }
     await this.store.transition(state, "publishing", "Publishing integration branch to GitHub");
-    await this.client.authStatus(state.integrationWorktree);
-    const repository = await this.client.repository(state.integrationWorktree);
-    const worktreesRoot = path.resolve(
-      this.loaded.root,
-      this.loaded.config.project.stateDirectory,
-      "worktrees",
-    );
-    const git = new GitManager(this.loaded.root, worktreesRoot);
-    await git.push(
-      state.integrationWorktree,
-      this.loaded.config.github.remote,
-      state.integrationBranch,
-    );
+    try {
+      await this.client.authStatus(state.integrationWorktree);
+      const repository = await this.client.repository(state.integrationWorktree);
+      const worktreesRoot = path.resolve(
+        this.loaded.root,
+        this.loaded.config.project.stateDirectory,
+        "worktrees",
+      );
+      const git = new GitManager(this.loaded.root, worktreesRoot);
+      await git.push(
+        state.integrationWorktree,
+        this.loaded.config.github.remote,
+        state.integrationBranch,
+      );
 
-    let pullRequest = await this.client.findPullRequest(
-      state.integrationWorktree,
-      repository.nameWithOwner,
-      state.integrationBranch,
-    );
-    if (!pullRequest) {
-      const artifactDirectory = this.store.artifactDirectory(state.id, "github");
-      await mkdir(artifactDirectory, { recursive: true });
-      const bodyFile = path.join(artifactDirectory, "pull-request.md");
-      await writeFile(bodyFile, renderPullRequestBody(state), "utf8");
-      pullRequest = await this.client.createPullRequest({
-        cwd: state.integrationWorktree,
-        repository: repository.nameWithOwner,
-        base: state.baseBranch,
-        head: state.integrationBranch,
-        title: `[agent-team] ${state.intake?.goalSummary ?? state.goal}`.slice(0, 120),
-        bodyFile,
-        draft: this.loaded.config.github.draftPullRequest,
-      });
+      let pullRequest = await this.client.findPullRequest(
+        state.integrationWorktree,
+        repository.nameWithOwner,
+        state.integrationBranch,
+      );
+      if (!pullRequest) {
+        const artifactDirectory = this.store.artifactDirectory(state.id, "github");
+        await mkdir(artifactDirectory, { recursive: true });
+        const bodyFile = path.join(artifactDirectory, "pull-request.md");
+        await writeFile(bodyFile, renderPullRequestBody(state), "utf8");
+        pullRequest = await this.client.createPullRequest({
+          cwd: state.integrationWorktree,
+          repository: repository.nameWithOwner,
+          base: state.baseBranch,
+          head: state.integrationBranch,
+          title: `[agent-team] ${state.intake?.goalSummary ?? state.goal}`.slice(0, 120),
+          bodyFile,
+          draft: this.loaded.config.github.draftPullRequest,
+        });
+      }
+      state.repository = repository.nameWithOwner;
+      state.pullRequestUrl = pullRequest.url;
+      state.pullRequestNumber = pullRequest.number;
+      await this.store.transition(state, "waiting-ci", `Pull request created: ${pullRequest.url}`);
+      return state;
+    } catch (error) {
+      // Never leave a run stuck in "publishing": fall back to the
+      // re-publishable state, mirroring the repair loop's ci-failed fallback.
+      state.error = error instanceof Error ? error.message : String(error);
+      await this.store.transition(state, "ready-to-merge", `Publication failed: ${state.error}`);
+      throw error;
     }
-    state.repository = repository.nameWithOwner;
-    state.pullRequestUrl = pullRequest.url;
-    state.pullRequestNumber = pullRequest.number;
-    await this.store.transition(state, "waiting-ci", `Pull request created: ${pullRequest.url}`);
-    return state;
   }
 
   async refreshChecks(state: RunState, wait: boolean): Promise<GithubCheck[]> {

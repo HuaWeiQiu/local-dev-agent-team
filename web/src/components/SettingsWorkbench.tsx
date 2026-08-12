@@ -6,6 +6,7 @@ import {
   Save,
   Settings2,
   ShieldCheck,
+  Sparkles,
   Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -15,7 +16,7 @@ import {
   scanCliInventory,
   ApiError,
 } from "../api";
-import { agentRoleLabel, errorMessage } from "../presentation";
+import { agentRoleLabel, errorMessage, orderedRoles } from "../presentation";
 import type {
   CliId,
   CliInventory,
@@ -25,14 +26,14 @@ import type {
   RoleBindingInput,
 } from "../types";
 
-const ROLE_ORDER = [
+const BUILT_IN_ROLES = [
   "orchestrator",
   "architect",
   "researcher",
   "worker",
   "reviewer",
   "tester",
-] as const;
+];
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
   grok: "Grok",
@@ -44,6 +45,7 @@ export function SettingsWorkbench() {
   const [settings, setSettings] = useState<DesktopSettingsView>();
   const [inventory, setInventory] = useState<CliInventory>();
   const [roles, setRoles] = useState<Record<string, RoleBindingInput>>({});
+  const [suggested, setSuggested] = useState<Record<string, RoleBindingInput>>({});
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -56,6 +58,7 @@ export function SettingsWorkbench() {
     setSettings(response.settings);
     setInventory(response.inventory);
     setRoles({ ...response.settings.defaults.roles });
+    setSuggested({ ...response.suggestedDefaults });
     setFromCache(response.fromCache);
     setCacheReason(response.reason);
     // Always surface config-change detections; suppress only routine cache hits / first paint noise when quiet.
@@ -121,6 +124,12 @@ export function SettingsWorkbench() {
     for (const cli of inventory?.clis ?? []) map.set(cli.id, cli);
     return map;
   }, [inventory]);
+
+  // 已知角色保持既定顺序，项目自定义角色追加在后
+  const roleNames = useMemo(() => {
+    const names = orderedRoles([...Object.keys(roles), ...Object.keys(suggested)]);
+    return names.length > 0 ? names : BUILT_IN_ROLES;
+  }, [roles, suggested]);
 
   // If inventory updates and a selected model/reasoning disappeared, snap to CLI defaults.
   useEffect(() => {
@@ -242,6 +251,18 @@ export function SettingsWorkbench() {
     });
   };
 
+  // 按本机 CLI 检索结果填充推荐默认（仅未保存的界面状态，仍需点「保存默认」）
+  const adoptSuggested = () => {
+    setRoles((current) => {
+      const next = { ...current };
+      for (const [role, binding] of Object.entries(suggested)) {
+        next[role] = { ...binding };
+      }
+      return next;
+    });
+    setMessage("已填入建议默认，确认后请点「保存默认」");
+  };
+
   if (loading) {
     return (
       <div className="settings-workbench settings-loading">
@@ -313,6 +334,18 @@ export function SettingsWorkbench() {
             <span>
               <strong>回到窗口时检测</strong>
               <small>切回 Agent Team 时检查 ~/.codex 等配置是否改过</small>
+            </span>
+          </label>
+          <label className="detect-option">
+            <input
+              type="checkbox"
+              checked={uiState.showCliPickerInRunLauncher !== false}
+              onChange={(event) => patchUi({ showCliPickerInRunLauncher: event.target.checked })}
+              disabled={saving || scanning}
+            />
+            <span>
+              <strong>新建运行时可选择 CLI</strong>
+              <small>关闭后新建运行直接使用项目 profile 默认，角色区只读展示当前绑定</small>
             </span>
           </label>
           <div className="detect-manual-row">
@@ -390,9 +423,19 @@ export function SettingsWorkbench() {
             <h2>角色默认映射</h2>
             <small>保存后，新建运行会预填这些选择（仍可在弹窗里改一次）</small>
           </div>
+          <button
+            type="button"
+            className="button secondary settings-inline-detect"
+            onClick={adoptSuggested}
+            disabled={saving || scanning || Object.keys(suggested).length === 0}
+            title="按本机 CLI 检索结果填充推荐的默认模型与思考深度"
+          >
+            <Sparkles size={14} />
+            <span>采用建议默认</span>
+          </button>
         </div>
         <div className="role-default-grid">
-          {ROLE_ORDER.map((role) => {
+          {roleNames.map((role) => {
             const binding = roles[role] ?? { cli: "grok" as CliId, reasoning: "high" };
             const cli = clisById.get(binding.cli);
             const models = cli?.models ?? [];

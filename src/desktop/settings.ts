@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -56,6 +56,9 @@ export async function loadDesktopSettings(home = homedir()): Promise<DesktopSett
   const filePath = desktopSettingsPath(home);
   try {
     const raw = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+    // The file may carry role bindings; tighten permissions of files written
+    // before mode 0600 became the default. Best-effort, never blocks loading.
+    await chmod(filePath, 0o600).catch(() => {});
     return desktopSettingsSchema.parse(raw);
   } catch {
     return desktopSettingsSchema.parse({ version: 1 });
@@ -69,7 +72,9 @@ export async function saveDesktopSettings(
   const parsed = desktopSettingsSchema.parse(settings);
   const filePath = desktopSettingsPath(home);
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+  await writeFile(filePath, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // writeFile's mode only applies at creation; enforce 0600 on rewrites too.
+  await chmod(filePath, 0o600).catch(() => {});
   return parsed;
 }
 

@@ -1,4 +1,5 @@
 import {
+  ArchiveX,
   BookMarked,
   CheckCircle2,
   ChevronDown,
@@ -12,9 +13,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  getEvolution,
   getExperience,
   promoteExperience,
   rejectExperience,
+  retireExperience,
+  retrieveExperience,
   shareExperience,
 } from "../api";
 import {
@@ -26,7 +30,9 @@ import {
   summarizeGoal,
 } from "../presentation";
 import type {
+  AutomaticEvolutionSnapshot,
   ExperienceEntry,
+  ExperiencePlanningBundle,
   ExperienceSnapshot,
   ExperienceStatus,
   ProjectScope,
@@ -37,7 +43,15 @@ interface ExperienceWorkbenchProps {
 }
 
 type ExperienceFilter = "all" | ExperienceStatus | "shared" | "project";
-type ActionMode = "promote" | "reject" | "share";
+type ActionMode = "promote" | "reject" | "share" | "retire";
+type LatestEvaluation = NonNullable<AutomaticEvolutionSnapshot["lastEvaluation"]>;
+
+const actionLabels: Record<ActionMode, string> = {
+  promote: "晋升",
+  reject: "拒绝",
+  share: "共享",
+  retire: "退役",
+};
 
 const statusLabels: Record<ExperienceStatus, string> = {
   candidate: "候选",
@@ -67,6 +81,10 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
   const [suiteDigest, setSuiteDigest] = useState("");
   const [forceWithoutSuite, setForceWithoutSuite] = useState(false);
   const [dialogError, setDialogError] = useState<string>();
+  const [latestEvaluation, setLatestEvaluation] = useState<LatestEvaluation>();
+  const [previewQuery, setPreviewQuery] = useState("");
+  const [previewResult, setPreviewResult] = useState<ExperiencePlanningBundle>();
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -91,8 +109,37 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
     setSelectedId(undefined);
     setAction(undefined);
     setError(undefined);
+    setLatestEvaluation(undefined);
     void refresh();
   }, [refresh]);
+
+  // 晋升弹窗打开时拉取最近一次评测套件身份（无评测记录时隐藏一键填入）
+  const loadLatestEvaluation = useCallback(async () => {
+    try {
+      const evolution = await getEvolution(scope);
+      setLatestEvaluation(evolution.automation.lastEvaluation ?? undefined);
+    } catch {
+      setLatestEvaluation(undefined);
+    }
+  }, [scope]);
+
+  // 检索预览：防抖只读调用（preview=1 不计命中、不写审计）
+  useEffect(() => {
+    const text = previewQuery.trim();
+    if (!text) {
+      setPreviewResult(undefined);
+      setPreviewLoading(false);
+      return;
+    }
+    setPreviewLoading(true);
+    const timer = window.setTimeout(() => {
+      retrieveExperience(scope, text, { preview: true })
+        .then((bundle) => setPreviewResult(bundle))
+        .catch(() => setPreviewResult(undefined))
+        .finally(() => setPreviewLoading(false));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [previewQuery, scope]);
 
   const entries = useMemo(() => {
     if (!snapshot) return [];
@@ -149,6 +196,8 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
         });
       } else if (action.mode === "reject") {
         await rejectExperience(scope, action.experienceId, reason.trim());
+      } else if (action.mode === "retire") {
+        await retireExperience(scope, action.experienceId, reason.trim());
       } else {
         await shareExperience(scope, action.experienceId, reason.trim());
       }
@@ -247,6 +296,7 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
             <option value="shared">公共</option>
             <option value="project">本项目</option>
             <option value="rejected">已拒绝</option>
+            <option value="retired">已退役</option>
           </select>
         </div>
         <div className="experience-list">
@@ -296,6 +346,7 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
               setSuiteDigest("");
               setForceWithoutSuite(false);
               setDialogError(undefined);
+              void loadLatestEvaluation();
             }}
             onReject={() => {
               setAction({ mode: "reject", experienceId: selected.id });
@@ -305,6 +356,11 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
             onShare={() => {
               setAction({ mode: "share", experienceId: selected.id });
               setReason("跨项目可复用");
+              setDialogError(undefined);
+            }}
+            onRetire={() => {
+              setAction({ mode: "retire", experienceId: selected.id });
+              setReason("不再适用于后续规划");
               setDialogError(undefined);
             }}
           />
@@ -323,6 +379,47 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
       </main>
 
       <aside className="experience-inspector">
+        <section className="experience-preview">
+          <h3>检索预览</h3>
+          <label className="experience-search">
+            <Search size={15} />
+            <input
+              value={previewQuery}
+              disabled={busy}
+              onChange={(event) => setPreviewQuery(event.target.value)}
+              placeholder="输入目标文本"
+              aria-label="检索预览"
+            />
+          </label>
+          {previewQuery.trim() ? (
+            previewLoading ? (
+              <p className="experience-muted">检索中…</p>
+            ) : previewResult && previewResult.items.length > 0 ? (
+              <>
+                <p className="experience-muted">
+                  规划时将注入 {previewResult.items.length} 条已验证经验
+                </p>
+                <ul className="experience-preview-list">
+                  {previewResult.items.map((item) => (
+                    <li key={item.id}>
+                      <strong title={item.summary}>{summarizeGoal(item.summary, 48)}</strong>
+                      <small>
+                        {item.scope === "shared" ? "公共" : "项目"} · 命中 {item.hitCount}
+                        {item.tags.length > 0
+                          ? ` · ${item.tags.slice(0, 3).map(formatExperienceTag).join(" / ")}`
+                          : ""}
+                      </small>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : (
+              <p className="experience-muted">无匹配的已验证经验</p>
+            )
+          ) : (
+            <p className="experience-muted">预览启动新运行时注入规划的经验</p>
+          )}
+        </section>
         <section className="experience-help experience-help-compact">
           <div>
             <CheckCircle2 size={15} />
@@ -387,19 +484,15 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
           >
             <header>
               <div>
-                <span className="section-kicker">
-                  {action.mode === "promote"
-                    ? "晋升"
-                    : action.mode === "share"
-                      ? "共享"
-                      : "拒绝"}
-                </span>
+                <span className="section-kicker">{actionLabels[action.mode]}</span>
                 <h2 id="experience-action-title">
                   {action.mode === "promote"
                     ? "晋升为已验证"
                     : action.mode === "share"
                       ? "写入公共库"
-                      : "拒绝"}
+                      : action.mode === "retire"
+                        ? "退役（不再注入规划）"
+                        : "拒绝"}
                 </h2>
               </div>
               <button
@@ -436,6 +529,21 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
                     spellCheck={false}
                   />
                 </label>
+                {latestEvaluation && (
+                  <button
+                    type="button"
+                    className="experience-suite-fill"
+                    disabled={busy}
+                    onClick={() => {
+                      setSuiteDigest(latestEvaluation.suiteDigest);
+                      setForceWithoutSuite(false);
+                      setDialogError(undefined);
+                    }}
+                  >
+                    使用最近评测：{latestEvaluation.suiteName} ·{" "}
+                    {formatTimestamp(latestEvaluation.completedAt)}
+                  </button>
+                )}
                 {snapshot.requireSuiteForPromote && (
                   <label className="experience-force-suite">
                     <input
@@ -448,6 +556,11 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
                   </label>
                 )}
               </div>
+            )}
+            {action.mode === "retire" && (
+              <p className="experience-muted experience-retire-hint">
+                退役后保留在目录中供审计，但不再注入规划或返工上下文；当前审计模型不支持恢复。
+              </p>
             )}
             {dialogError && (
               <p className="experience-inline-error" role="alert">
@@ -463,7 +576,11 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
                 取消
               </button>
               <button
-                className={action.mode === "reject" ? "button danger-quiet" : "button primary"}
+                className={
+                  action.mode === "reject" || action.mode === "retire"
+                    ? "button danger-quiet"
+                    : "button primary"
+                }
                 disabled={busy || !reason.trim()}
                 onClick={() => void submitAction()}
               >
@@ -483,12 +600,14 @@ function ExperienceDetail({
   onPromote,
   onReject,
   onShare,
+  onRetire,
 }: {
   entry: ExperienceEntry;
   busy: boolean;
   onPromote(): void;
   onReject(): void;
   onShare(): void;
+  onRetire(): void;
 }) {
   const canPromote = entry.scope === "project" && entry.status === "candidate";
   const canShare =
@@ -497,6 +616,7 @@ function ExperienceDetail({
     entry.sensitivity === "low" &&
     entry.portability === "cross-project";
   const canReject = entry.status === "candidate" || entry.status === "verified";
+  const canRetire = entry.status === "verified";
   const conditions = entry.conditions.slice(0, 5).map(formatExperienceCondition);
   const tags = entry.tags.slice(0, 6).map(formatExperienceTag);
 
@@ -532,12 +652,18 @@ function ExperienceDetail({
             共享
           </button>
         )}
+        {canRetire && (
+          <button className="button secondary" disabled={busy} onClick={onRetire}>
+            <ArchiveX size={16} />
+            退役
+          </button>
+        )}
         {canReject && (
           <button className="button danger-quiet" disabled={busy} onClick={onReject}>
             拒绝
           </button>
         )}
-        {!canPromote && !canShare && !canReject && (
+        {!canPromote && !canShare && !canReject && !canRetire && (
           <span className="experience-action-hint">只读</span>
         )}
       </div>

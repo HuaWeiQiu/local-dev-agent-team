@@ -3096,6 +3096,13 @@ button.palette-item:disabled {
   box-shadow: var(--focus-ring);
 }
 
+.run-goal-experience-preview {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: var(--text-11);
+  line-height: 1.5;
+}
+
 .strategy-fieldset {
   margin: 19px 0 14px;
   padding: 0;
@@ -3444,6 +3451,65 @@ button.palette-item:disabled {
 .evolution-automation-controls {
   justify-content: flex-end;
   gap: 8px;
+}
+
+.evolution-automation-cycles {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.evolution-automation-cycles .disclosure-button {
+  padding-left: 0;
+}
+
+.evolution-cycle-list {
+  display: grid;
+  max-height: 260px;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.evolution-cycle-list > li {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.evolution-cycle-list > li > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--text-12);
+}
+
+.evolution-cycle-list > li > header .is-improved strong {
+  color: var(--success-ink);
+}
+
+.evolution-cycle-list > li > header .is-rejected strong {
+  color: var(--danger-ink);
+}
+
+.evolution-cycle-list > li > header time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.evolution-cycle-list > li > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.evolution-cycle-list dd code + code {
+  margin-left: 6px;
 }
 
 .evolution-automation-controls label {
@@ -4742,17 +4808,14 @@ button.palette-item:disabled {
     left: 0;
     display: grid;
     height: 64px;
-    grid-template-columns: repeat(7, 1fr);
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
     padding-bottom: env(safe-area-inset-bottom);
     border-top: 1px solid var(--line);
     background: var(--surface-glass);
     box-shadow: var(--shadow-2);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
-  }
-
-  .mode-evolution .mobile-nav {
-    grid-template-columns: repeat(3, 1fr);
   }
 
   .evolution-workbench,
@@ -5616,6 +5679,66 @@ button.palette-item:disabled {
   font-size: var(--text-12);
   cursor: pointer;
   text-align: left;
+}
+
+.experience-preview {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px;
+}
+
+.experience-preview h3 {
+  margin: 0;
+  font-size: var(--text-13);
+}
+
+.experience-preview-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.experience-preview-list li {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.experience-preview-list strong {
+  font-size: var(--text-12);
+  font-weight: 600;
+}
+
+.experience-preview-list small {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.experience-suite-fill {
+  padding: 8px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-12);
+  cursor: pointer;
+  text-align: left;
+}
+
+.experience-suite-fill:hover:not(:disabled) {
+  border-color: var(--accent, #4f7cff);
+  color: var(--ink);
+}
+
+.experience-retire-hint {
+  margin: 0;
+  font-size: var(--text-12);
 }
 
 .experience-meta-compact {

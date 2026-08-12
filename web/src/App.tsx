@@ -41,7 +41,7 @@ import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { TaskInspector } from "./components/TaskInspector";
 import { UsagePanel } from "./components/UsagePanel";
-import { activeRunStatuses, errorMessage, humanizeFailure, preferredMonitorPanel, strategyDisplayName, summarizeGoal } from "./presentation";
+import { activeRunStatuses, humanizeFailure, preferredMonitorPanel, runActionErrorMessage, strategyDisplayName, summarizeGoal } from "./presentation";
 import { applyTheme, getInitialTheme, nextThemeMode, themeModeLabel, type ThemeMode } from "./theme";
 import type {
   ProjectScope,
@@ -103,6 +103,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
   const [roleDefaults, setRoleDefaults] = useState<Record<string, RoleBindingInput>>({});
   const [cliInventory, setCliInventory] = useState<CliInventory>();
+  const [showCliPicker, setShowCliPicker] = useState(true);
   const [autoDetectOnFocus, setAutoDetectOnFocus] = useState(true);
   const [desktopShell] = useState(() => {
     try {
@@ -123,6 +124,8 @@ export default function App() {
   const scopeKey = scope ? `${scope.mode}:${scope.projectId}` : undefined;
   const currentScopeKey = useRef(scopeKey);
   currentScopeKey.current = scopeKey;
+  const currentRunId = useRef(selectedRunId);
+  currentRunId.current = selectedRunId;
 
   const refreshRuns = useCallback(async () => {
     if (!scope) return;
@@ -151,18 +154,28 @@ export default function App() {
   const refreshRun = useCallback(async (runId: string) => {
     if (!scope) return;
     const requestedScope = `${scope.mode}:${scope.projectId}`;
+    const isCurrent = () => currentScopeKey.current === requestedScope && currentRunId.current === runId;
     try {
       const nextRun = await getRun(scope, runId);
-      if (currentScopeKey.current !== requestedScope) return;
+      // 切项目或切 run 后到达的陈旧响应直接丢弃，避免覆盖新选中的数据
+      if (!isCurrent()) return;
       setRun(nextRun);
       setSelectedTaskId((current) => current && nextRun.tasks.some((task) => task.task.id === current) ? current : undefined);
     } catch (requestError) {
-      if (currentScopeKey.current !== requestedScope) return;
-      if (!(requestError instanceof ApiError && requestError.status === 404)) {
-        throw requestError;
+      if (!isCurrent()) return;
+      if (requestError instanceof ApiError && requestError.status === 404) {
+        // 运行已被删除/清理：清空选择并提示，而不是滞留旧数据
+        setRun(undefined);
+        setSelectedTaskId(undefined);
+        setEvents([]);
+        setSelectedRunId(undefined);
+        setError("该运行已不存在，已从当前选择中移除。");
+        void refreshRuns().catch(() => undefined);
+        return;
       }
+      throw requestError;
     }
-  }, [scope]);
+  }, [refreshRuns, scope]);
 
   const refreshEvidence = useCallback(async (runId: string) => {
     if (!scope) return;
@@ -191,9 +204,8 @@ export default function App() {
   const scheduleRefresh = useCallback((runId: string) => {
     window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
-      void Promise.all([refreshRuns(), refreshRun(runId)]).catch((requestError: unknown) => {
-        setError(errorMessage(requestError));
-      });
+      // SSE 触发的后台刷新：瞬时失败不弹全局 toast，下一轮事件会再触发
+      void Promise.all([refreshRuns(), refreshRun(runId)]).catch(() => undefined);
     }, 80);
   }, [refreshRun, refreshRuns]);
 
@@ -230,7 +242,7 @@ export default function App() {
         setWorkspace(nextWorkspace);
         setSelectedProjectId(nextWorkspace.defaultProjectId);
       })
-      .catch((requestError: unknown) => setError(errorMessage(requestError)));
+      .catch((requestError: unknown) => setError(runActionErrorMessage(requestError)));
     return () => window.clearTimeout(refreshTimer.current);
   }, []);
 
@@ -246,7 +258,7 @@ export default function App() {
         setSelectedRunId(nextRuns[0]?.id);
       })
       .catch((requestError: unknown) => {
-        if (active) setError(errorMessage(requestError));
+        if (active) setError(runActionErrorMessage(requestError));
       });
     return () => {
       active = false;
@@ -264,10 +276,11 @@ export default function App() {
     setSelectedTaskId(undefined);
     setEvents([]);
     setEvidence(undefined);
-    void refreshRun(selectedRunId).catch((requestError: unknown) => setError(errorMessage(requestError)));
+    void refreshRun(selectedRunId).catch((requestError: unknown) => setError(runActionErrorMessage(requestError)));
 
     const source = new EventSource(eventStreamUrl(scope, selectedRunId));
     let active = true;
+    let lastSequence = 0;
     source.onopen = () => {
       if (active) setConnected(true);
     };
@@ -278,8 +291,11 @@ export default function App() {
     const flushEvents = () => {
       eventFlushTimer.current = undefined;
       if (!active || eventBuffer.current.length === 0) return;
-      const pending = eventBuffer.current;
+      // 按 sequence 去重兜底：重连续传/重放可能带重复事件，保留原有顺序
+      const pending = eventBuffer.current.filter((event) => event.sequence > lastSequence);
       eventBuffer.current = [];
+      if (pending.length === 0) return;
+      lastSequence = pending.reduce((max, event) => Math.max(max, event.sequence), lastSequence);
       setEvents((current) => retainAgentMonitorEvents([...current, ...pending]));
     };
     source.onmessage = (message) => {
@@ -305,16 +321,37 @@ export default function App() {
     };
   }, [refreshRun, scheduleRefresh, scope, selectedRunId]);
 
+  // 项目级事件流：任何 run（含未选中的）有事件都触发运行列表刷新
+  useEffect(() => {
+    if (!scope) return;
+    const source = new EventSource(eventStreamUrl(scope));
+    let active = true;
+    let listTimer: number | undefined;
+    source.onmessage = () => {
+      if (!active) return;
+      listTimer ??= window.setTimeout(() => {
+        listTimer = undefined;
+        // 后台刷新失败不打扰用户，下一条事件会再次触发
+        void refreshRuns().catch(() => undefined);
+      }, 150);
+    };
+    return () => {
+      active = false;
+      source.close();
+      window.clearTimeout(listTimer);
+    };
+  }, [refreshRuns, scope]);
+
   useEffect(() => {
     const evidenceVisible = monitorPanel === "evidence" || mobileView === "evidence";
     if (!selectedRunId || !scope || !evidenceVisible) return;
-    void refreshEvidence(selectedRunId).catch((requestError: unknown) => setError(errorMessage(requestError)));
+    void refreshEvidence(selectedRunId).catch((requestError: unknown) => setError(runActionErrorMessage(requestError)));
   }, [mobileView, monitorPanel, refreshEvidence, run?.updatedAt, scope, selectedRunId]);
 
   useEffect(() => {
     const usageVisible = monitorPanel === "usage" || mobileView === "usage";
     if (!scope || !usageVisible) return;
-    void refreshUsage().catch((requestError: unknown) => setError(errorMessage(requestError)));
+    void refreshUsage().catch((requestError: unknown) => setError(runActionErrorMessage(requestError)));
   }, [mobileView, monitorPanel, refreshUsage, scope]);
 
   const selectedTask = useMemo(
@@ -323,8 +360,8 @@ export default function App() {
   );
   const pendingApproval = latestPendingApproval(run);
 
-  const create = async (input: StartRunInput) => {
-    if (!scope) return;
+  const create = async (input: StartRunInput): Promise<boolean> => {
+    if (!scope) return false;
     setBusy(true);
     setError(undefined);
     try {
@@ -336,8 +373,11 @@ export default function App() {
       setMobileView("logs");
       setWorkspaceMode("monitor");
       await refreshRuns();
+      return true;
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      // 启动失败：保留弹窗与用户输入，由调用方决定是否清空
+      setError(runActionErrorMessage(requestError));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -373,6 +413,7 @@ export default function App() {
       const response = await getDesktopSettings();
       setRoleDefaults(response.settings.defaults.roles);
       setCliInventory(response.inventory);
+      setShowCliPicker(response.settings.ui.showCliPickerInRunLauncher !== false);
       const auto = response.settings.ui.autoDetectCliConfig !== false
         && response.settings.ui.autoDetectOnFocus !== false;
       setAutoDetectOnFocus(auto);
@@ -445,7 +486,7 @@ export default function App() {
       }
       // ready/starting: native shell navigates to the new control session.
     } catch (requestError) {
-      const detail = errorMessage(requestError);
+      const detail = runActionErrorMessage(requestError);
       setError(
         /not found|Command .* not found/i.test(detail)
           ? "当前桌面端权限未覆盖工作台页面，无法添加项目。请安装最新桌面构建后重试。"
@@ -481,7 +522,7 @@ export default function App() {
       }
       await refreshRuns();
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -515,7 +556,7 @@ export default function App() {
     try {
       await cancelRun(scope, selectedRunId);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -532,7 +573,7 @@ export default function App() {
       setMobileView("logs");
       await refreshRuns();
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -564,7 +605,7 @@ export default function App() {
       setRunAction(undefined);
       await Promise.all([refreshRuns(), refreshRun(selectedRunId)]);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -577,7 +618,7 @@ export default function App() {
     try {
       setCleanupPreview(await previewRunCleanup(scope, days));
     } catch (requestError) {
-      setCleanupError(errorMessage(requestError));
+      setCleanupError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -595,7 +636,7 @@ export default function App() {
       setEvidence(undefined);
       await refreshRuns();
     } catch (requestError) {
-      setCleanupError(errorMessage(requestError));
+      setCleanupError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -613,7 +654,7 @@ export default function App() {
     try {
       await downloadRunEvents(scope, selectedRunId);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      setError(runActionErrorMessage(requestError));
     } finally {
       setBusy(false);
     }
@@ -806,6 +847,13 @@ export default function App() {
           <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
           <MobileTab active={workspaceMode === "evolution"} onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} icon={<Sparkles size={16} />} label="演进" />
           <MobileTab active={workspaceMode === "experience"} onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} icon={<BookMarked size={16} />} label="经验" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} icon={<Settings2 size={16} />} label="设置" />
+        </> : workspaceMode === "settings" ? <>
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Activity size={16} />} label="运行" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} icon={<Sparkles size={16} />} label="演进" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} icon={<BookMarked size={16} />} label="经验" />
+          <MobileTab active icon={<Settings2 size={16} />} label="设置" onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} />
         </> : <>
           <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
           <MobileTab active={workspaceMode === "design"} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
@@ -814,6 +862,7 @@ export default function App() {
           <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
           <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
           <MobileTab active={workspaceMode === "monitor" && mobileView === "usage"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("usage"); setMobileView("usage"); }} icon={<Gauge size={16} />} label="用量" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} icon={<Settings2 size={16} />} label="设置" />
         </>}
       </nav>
 
@@ -881,7 +930,7 @@ export default function App() {
                 <EvidenceCenter run={run} evidence={evidence} loading={evidenceLoading} onReadArtifact={readEvidenceArtifact} />
               </div>
               <div className={`run-panel run-panel-usage ${monitorPanel === "usage" ? "is-active" : ""}`}>
-                <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={() => void refreshUsage().catch((requestError: unknown) => setError(errorMessage(requestError)))} />
+                <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={() => void refreshUsage().catch((requestError: unknown) => setError(runActionErrorMessage(requestError)))} />
               </div>
             </section>
             <TaskInspector run={run} task={selectedTask} />
@@ -893,10 +942,12 @@ export default function App() {
         <RunLauncher
           open={launcherOpen}
           config={config}
+          {...(scope ? { scope } : {})}
           {...(launcherStrategy ? { initialStrategy: launcherStrategy } : {})}
           busy={busy}
           error={error}
           roleDefaults={roleDefaults}
+          showCliPicker={showCliPicker}
           {...(cliInventory ? { inventory: cliInventory } : {})}
           onClose={() => { setLauncherOpen(false); setLauncherStrategy(undefined); }}
           onSubmit={create}

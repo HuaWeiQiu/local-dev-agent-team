@@ -69,6 +69,13 @@ export interface AutomaticEvolutionCycle {
   completedAt: string;
 }
 
+/** Identity of the most recent deterministic evaluation suite run by the controller. */
+export interface AutomaticEvaluationSuiteRecord {
+  suiteName: string;
+  suiteDigest: string;
+  completedAt: string;
+}
+
 export interface AutomaticEvolutionSnapshot {
   enabled: boolean;
   autoStart: boolean;
@@ -95,6 +102,8 @@ export interface AutomaticEvolutionSnapshot {
   roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
+  /** Most recent completed evaluation suite identity; null until an evaluation finishes. */
+  lastEvaluation: AutomaticEvaluationSuiteRecord | null;
   cycles: AutomaticEvolutionCycle[];
 }
 

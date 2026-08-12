@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
+import { sanitizedChildEnv } from "../process/env.js";
 import { assertAdapterProfile } from "./conformance.js";
 import {
   parseGrokJson,
@@ -93,14 +94,14 @@ export class GrokAdapter implements AgentAdapter {
       env:
         profile.externalTools === "deny"
           ? {
-              ...process.env,
+              ...sanitizedChildEnv(),
               HOME: path.dirname(request.promptFile),
               USERPROFILE: path.dirname(request.promptFile),
               GROK_HOME: process.env.GROK_HOME ?? path.join(homedir(), ".grok"),
               GROK_CLAUDE_MCPS_ENABLED: "false",
               GROK_CURSOR_MCPS_ENABLED: "false",
             }
-          : process.env,
+          : sanitizedChildEnv(),
       timeoutMs: profile.timeoutSeconds * 1_000,
     };
   }

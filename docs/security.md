@@ -43,6 +43,25 @@ a security boundary.
   security policy; it cannot load remote scripts or frame other content.
 - Managed Unix child processes use a separate process group so cancellation and
   timeout escalation reach their descendants.
+- Child processes never inherit `AGENT_TEAM_*` orchestrator variables (most
+  notably the control-service session token): `src/process/env.ts` strips them
+  by denylist before spawn while leaving PATH/HOME/proxy variables intact. Any
+  occurrence of those secret values in captured child output is replaced with
+  `[redacted]` before it can reach persisted logs or the event stream.
+- GitHub repair pushes require explicit human confirmation. `agent-team repair`
+  prints the exact remote, branch, commit message, and changed-file summary and
+  asks interactively before pushing; a non-interactive session refuses to push
+  unless `--yes` is passed explicitly.
+
+## Adapter Enforcement Caveats
+
+- Codex, Claude, and Grok enforce read-only or workspace boundaries at the
+  execution layer (sandbox, plan mode, managed tool set). The Kimi CLI has no
+  non-interactive flag that enforces read-only at the execution layer, so Kimi
+  read-only roles are constrained by prompt text only. Binding a
+  read-only-designed role (orchestrator, architect, researcher, reviewer,
+  tester) to a Kimi profile remains allowed for compatibility but is surfaced
+  as an explicit adapter warning; do not treat it as a sandbox boundary.
 
 ## Credentials
 

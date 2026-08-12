@@ -4,6 +4,7 @@ import {
   Bot,
   Braces,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
   FileCheck2,
@@ -430,6 +431,7 @@ function AutomationBar({ automation, requestedCycles, busy, startIntentPending, 
 }) {
   const active = automation.status === "running" || automation.status === "stopping";
   const latest = automation.cycles.at(-1);
+  const [cyclesOpen, setCyclesOpen] = useState(false);
   return (
     <section className={`evolution-automation tone-${automationTone(automation.status)}`} aria-label="自动演进控制">
       <div className="evolution-automation-heading">
@@ -456,6 +458,43 @@ function AutomationBar({ automation, requestedCycles, busy, startIntentPending, 
           </>
         ) : <button className="button danger-quiet" onClick={onStop} disabled={busy || automation.status === "stopping"}><Square size={14} />{automation.status === "stopping" ? "正在停止" : "停止"}</button>}
       </div>
+      {automation.cycles.length > 0 && (
+        <div className="evolution-automation-cycles">
+          <button
+            type="button"
+            className="disclosure-button"
+            onClick={() => setCyclesOpen((value) => !value)}
+            aria-expanded={cyclesOpen}
+          >
+            <ChevronDown size={16} className={cyclesOpen ? "is-open" : ""} />
+            轮次明细（{automation.cycles.length}）
+          </button>
+          {cyclesOpen && (
+            <ol className="evolution-cycle-list">
+              {[...automation.cycles].reverse().map((cycle) => (
+                <li key={cycle.cycle} className={cycle.improved ? "is-improved" : "is-rejected"}>
+                  <header>
+                    <strong>第 {cycle.cycle} 轮</strong>
+                    <span className={`status-badge tone-${cycle.improved ? "success" : "neutral"}`}>
+                      {cycle.decision === "promoted" ? "已采纳" : "未采纳"}
+                    </span>
+                    <span className={cycle.improved ? "is-improved" : "is-rejected"}>Δ <strong>{formatScoreDelta(cycle.scoreDelta)}</strong></span>
+                    <time>{formatDate(cycle.completedAt)}</time>
+                  </header>
+                  <dl className="detail-list">
+                    <div><dt>当前策略分</dt><dd>{cycle.incumbentScore}</dd></div>
+                    <div><dt>候选分</dt><dd>{cycle.candidateScore}</dd></div>
+                    {cycle.candidateRunIds.length > 0 && (
+                      <div><dt>关联运行</dt><dd>{cycle.candidateRunIds.map((runId) => <code key={runId} title={runId}>{runId.slice(0, 12)}</code>)}</dd></div>
+                    )}
+                  </dl>
+                  <p>{cycle.rationale}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
       {(automation.error || (!active && automation.stopReason)) && (
         <p className={automation.error || automation.status === "paused" ? "is-error" : ""}>
           {automation.failureCode ? `[${automation.failureCode}] ` : ""}

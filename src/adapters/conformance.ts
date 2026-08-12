@@ -16,6 +16,37 @@ const usageValues = new Set([
   "reportedCostUsd",
 ]);
 
+/** Roles designed to run read-only; only the worker may write to the workspace. */
+const readOnlyDesignedRoles = new Set([
+  "orchestrator",
+  "architect",
+  "researcher",
+  "reviewer",
+  "tester",
+]);
+
+/**
+ * Warning-level diagnostic for soft permission enforcement.
+ *
+ * Unlike the other adapters, the Kimi CLI has no non-interactive flag that
+ * enforces read-only at the execution layer; the adapter relies on prompt
+ * constraints only. Binding a read-only-designed role to a Kimi profile is
+ * allowed (existing configurations depend on it) but must be surfaced.
+ */
+export function adapterRoleWarning(role: string, profile: AgentProfile): string | undefined {
+  if (
+    profile.adapter === "kimi" &&
+    profile.permission === "read-only" &&
+    readOnlyDesignedRoles.has(role)
+  ) {
+    return (
+      `Role '${role}' runs on a Kimi profile with read-only permission: ` +
+      "kimi permission constraints are prompt-based only, with no execution-layer enforcement"
+    );
+  }
+  return undefined;
+}
+
 export function assertAdapterContract(adapter: AgentAdapter): void {
   if (!adapterNamePattern.test(adapter.name)) {
     throw new Error(`Invalid agent adapter name '${adapter.name}'`);

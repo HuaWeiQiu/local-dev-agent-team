@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommandSpec } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
+import { sanitizedChildEnv } from "../process/env.js";
 
 export interface CommandResult {
   spec: CommandSpec;
@@ -33,7 +34,7 @@ export async function runQualityCommands(
     await mkdir(artifactDirectory, { recursive: true });
   }
   // The loop below shadows `process` with a ProcessResult, so capture env first.
-  const qualityEnv = { ...process.env, CI: "true" };
+  const qualityEnv = { ...sanitizedChildEnv(), CI: "true" };
   const results: CommandResult[] = [];
   for (const [index, spec] of commands.entries()) {
     let process;

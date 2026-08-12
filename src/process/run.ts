@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { envSecretValues, redactEnvSecrets, sanitizedChildEnv } from "./env.js";
 
 export interface ProcessRequest {
   command: string;
@@ -31,10 +32,15 @@ export interface ProcessResult {
 export async function runProcess(request: ProcessRequest): Promise<ProcessResult> {
   request.signal?.throwIfAborted();
   const startedAt = Date.now();
+  // AGENT_TEAM_* secrets of this process must never appear in captured child
+  // output (event stream, stdout.log); redact exact occurrences per chunk.
+  const outputSecrets = envSecretValues();
+  const redact = (chunk: string): string =>
+    outputSecrets.length > 0 ? redactEnvSecrets(chunk, outputSecrets) : chunk;
   return await new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(request.command, request.args, {
       cwd: request.cwd,
-      env: request.env ?? process.env,
+      env: request.env ?? sanitizedChildEnv(),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -51,7 +57,8 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
+    child.stdout.on("data", (rawChunk: string) => {
+      const chunk = redact(rawChunk);
       const captured = captureOutput(chunk, stdoutBytes, request.maxOutputBytes);
       stdout += captured.text;
       stdoutBytes += captured.bytes;
@@ -62,7 +69,8 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         callbackError = error;
       }
     });
-    child.stderr.on("data", (chunk: string) => {
+    child.stderr.on("data", (rawChunk: string) => {
+      const chunk = redact(rawChunk);
       const captured = captureOutput(chunk, stderrBytes, request.maxOutputBytes);
       stderr += captured.text;
       stderrBytes += captured.bytes;

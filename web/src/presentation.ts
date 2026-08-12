@@ -1,3 +1,4 @@
+import { ApiError } from "./api";
 import type { RunStatus, TaskStatus } from "./types";
 
 const runLabels: Record<RunStatus, string> = {
@@ -74,6 +75,26 @@ const roleLabels: Record<string, string> = {
   tester: "测试",
   "orchestrator-final": "最终判定",
 };
+
+/** Canonical display order for built-in roles; custom roles append after (sorted). */
+const KNOWN_ROLE_ORDER = [
+  "orchestrator",
+  "architect",
+  "researcher",
+  "worker",
+  "reviewer",
+  "tester",
+] as const;
+
+/** Role order for pickers: known roles first in canonical order, custom config roles appended. */
+export function orderedRoles(available: Iterable<string>): string[] {
+  const set = new Set(available);
+  const known = KNOWN_ROLE_ORDER.filter((role) => set.has(role));
+  const custom = [...set]
+    .filter((role) => !(KNOWN_ROLE_ORDER as readonly string[]).includes(role))
+    .sort((left, right) => left.localeCompare(right));
+  return [...known, ...custom];
+}
 
 /** Role id for config; Chinese label for operators. */
 export function agentRoleLabel(role: string | undefined | null): string {
@@ -165,6 +186,45 @@ export function formatBytes(bytes: number): string {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Run action / control-service errors → Chinese with actionable guidance.
+ * Unrecognized errors fall back to the original message.
+ */
+export function runActionErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401 || error.code === "SESSION_REQUIRED") {
+      return "本地控制会话尚未建立，请从服务启动时输出的地址重新打开应用。";
+    }
+    if (error.code === "ORIGIN_DENIED") {
+      return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
+    }
+    if (error.status === 404) return "目标运行已不存在，请刷新列表后重试。";
+    if (error.status === 409) return "运行状态已变化或不由当前服务管理，请刷新列表后重试。";
+    if (error.code === "REQUEST_TOO_LARGE") return "请求内容过大，请精简后重试。";
+  }
+  const text = errorMessage(error);
+  if (/Run '.*' was not found/i.test(text)) return "目标运行已不存在，请刷新列表后重试。";
+  if (/cannot be retried from status/i.test(text)) return "当前状态不允许重试，请刷新列表确认最新状态。";
+  if (/cannot resume from status/i.test(text)) return "当前状态不允许继续，请刷新列表确认最新状态。";
+  if (/no recoverable task-boundary checkpoint/i.test(text)) {
+    return "没有可恢复的任务边界检查点，请改用「重试为新运行」。";
+  }
+  if (/is already active/i.test(text)) return "该运行已在执行中，无需重复操作。";
+  if (/is still active; cancel it first/i.test(text)) return "运行仍在执行中，请先取消再删除。";
+  if (/still has an active child run|still referenced as a parent/i.test(text)) {
+    return "该运行仍被其他运行引用，请先处理关联运行。";
+  }
+  if (/Approval request '.*' was not found/i.test(text)) return "审批请求已不存在，请刷新后重试。";
+  if (/already has a response/i.test(text)) return "该审批已处理过，请刷新查看最新状态。";
+  if (/expired at/i.test(text)) return "审批已过期，请刷新列表查看运行最新状态。";
+  if (/is not the latest request/i.test(text)) return "已有更新的审批请求，请刷新后处理最新一条。";
+  if (/cannot accept an approval response/i.test(text)) return "运行正在执行中，暂时不能响应审批。";
+  if (/Cleanup preview is missing or expired|changed after preview/i.test(text)) {
+    return "清理预览已过期或状态已变化，请重新生成预览后再确认。";
+  }
+  return text;
 }
 
 /** First line of goal as a short human title for lists. */

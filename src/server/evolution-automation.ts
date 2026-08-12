@@ -631,8 +631,14 @@ export class AutomaticEvolutionController {
       };
     });
 
-    // Attach suite identity on the aggregate via run evidence path consumers use score/passed/runIds.
-    void suiteDigest;
+    // Record suite identity so operators can bind experience promotions to the
+    // exact evaluation evidence that produced this aggregate.
+    this.state.lastEvaluation = {
+      suiteName: suite.name,
+      suiteDigest,
+      completedAt: this.timestamp(),
+    };
+    this.touch();
     return {
       runIds: outcomes.map((outcome) => outcome.runId),
       passed: suiteAggregate.passed,
@@ -785,6 +791,7 @@ export class AutomaticEvolutionController {
       roleBindingSource: null,
       startedAt: null,
       updatedAt: this.timestamp(),
+      lastEvaluation: null,
       cycles: [],
     };
   }

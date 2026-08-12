@@ -61,7 +61,7 @@ export const RunRail = memo(function RunRail({
         <Search size={15} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索目标、失败原因或 ID" aria-label="搜索运行" />
       </label>
-      <label className="run-filter"><Filter size={14} /><select value={filter} onChange={(event) => setFilter(event.target.value as RunFilter)} aria-label="运行状态筛选"><option value="all">全部状态</option><option value="active">执行中</option><option value="attention">需要处理</option><option value="finished">已完成</option></select></label>
+      <label className="run-filter"><Filter size={14} /><select value={filter} onChange={(event) => setFilter(event.target.value as RunFilter)} aria-label="运行状态筛选"><option value="all">全部状态</option><option value="active">执行中</option><option value="attention">需要处理（含待 CLI 合并）</option><option value="finished">已完成</option></select></label>
       <div className="run-list">
         {visibleRuns.map((run) => {
           const completed = run.taskCounts.merged + run.taskCounts.passed;

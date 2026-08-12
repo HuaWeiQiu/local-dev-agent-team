@@ -72,11 +72,18 @@ outside the workstation.
 An interrupted run can resume only from a matching checkpoint. A partial wave
 is abandoned as evidence and its incomplete tasks restart on new branches.
 Cancelled or blocked runs can still be retried as new linked runs. Neither path
-claims that a killed CLI process continued in place.
+claims that a killed CLI process continued in place. Each resume restarts the
+full execution timeout budget; the deadline is not prorated across attempts.
 
 Approval requests and responses are persisted in the run snapshot and emitted
 to the ordered event ledger. A response records decision, actor, reason, and
 time. The actor is a local audit assertion, not authenticated identity.
+
+Plan approval is required whenever the strategy gates `plan`, and also —
+regardless of strategy — whenever any planned task defines
+`acceptanceCommands`, so agent-produced commands never execute without human
+review of the plan that introduced them. The approval summary states which
+tasks triggered this forced gate.
 
 ## Publication Lifecycle
 

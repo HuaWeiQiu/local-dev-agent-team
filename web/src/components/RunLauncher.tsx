@@ -1,14 +1,19 @@
 import { ChevronDown, Play, ShieldAlert, X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { retrieveExperience } from "../api";
 import {
   agentRoleLabel,
   morphologySummary,
+  orderedRoles,
   profileDisplayName,
   strategyDisplayName,
+  summarizeGoal,
 } from "../presentation";
 import type {
   CliId,
   CliInventory,
+  ExperiencePlanningBundle,
+  ProjectScope,
   PublicConfig,
   RoleBindingInput,
   StartRunInput,
@@ -17,24 +22,21 @@ import type {
 interface RunLauncherProps {
   open: boolean;
   config: PublicConfig;
+  /** 有 scope 时目标输入区展示经验注入预览 */
+  scope?: ProjectScope;
   initialStrategy?: string;
   busy: boolean;
   error: string | undefined;
   /** Global defaults + inventory for CLI picker */
   roleDefaults?: Record<string, RoleBindingInput>;
   inventory?: CliInventory;
+  /** 「设置」中的新建运行选型开关；关闭时角色区只读展示当前绑定 */
+  showCliPicker?: boolean;
   onClose(): void;
-  onSubmit(input: StartRunInput): Promise<void>;
+  /** 返回是否启动成功；失败时保留目标文本与弹窗 */
+  onSubmit(input: StartRunInput): Promise<boolean>;
 }
 
-const ROLE_ORDER = [
-  "orchestrator",
-  "architect",
-  "researcher",
-  "worker",
-  "reviewer",
-  "tester",
-] as const;
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
   grok: "Grok",
@@ -45,11 +47,13 @@ const CLI_LABEL: Record<CliId, string> = {
 export function RunLauncher({
   open,
   config,
+  scope,
   initialStrategy,
   busy,
   error,
   roleDefaults,
   inventory,
+  showCliPicker = true,
   onClose,
   onSubmit,
 }: RunLauncherProps) {
@@ -58,34 +62,70 @@ export function RunLauncher({
   const [advanced, setAdvanced] = useState(true);
   const [bindings, setBindings] = useState<Record<string, RoleBindingInput>>({});
   const [useCliPicker, setUseCliPicker] = useState(true);
+  const [experiencePreview, setExperiencePreview] = useState<ExperiencePlanningBundle>();
+
+  const roles = useMemo(() => orderedRoles(Object.keys(config.roles)), [config.roles]);
+
+  // 目标输入防抖预览：启动时将注入规划的已验证经验（只读 preview，不计命中）
+  useEffect(() => {
+    if (!scope) return;
+    const text = goal.trim();
+    if (!text) {
+      setExperiencePreview(undefined);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      retrieveExperience(scope, text, { preview: true })
+        .then((bundle) => setExperiencePreview(bundle))
+        .catch(() => setExperiencePreview(undefined));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [goal, scope]);
 
   const clisById = useMemo(() => {
     const map = new Map((inventory?.clis ?? []).map((cli) => [cli.id, cli]));
     return map;
   }, [inventory]);
 
+  // 兜底绑定：优先第一个已安装且可调用的 CLI，避免选中「未安装」的禁用项
+  const fallbackBinding = useMemo<RoleBindingInput>(() => {
+    const usable = inventory?.clis.find((cli) => cli.installed && cli.runtimeSupported);
+    if (usable) {
+      return {
+        cli: usable.id,
+        ...(usable.defaultModel ? { model: usable.defaultModel } : {}),
+        reasoning: usable.defaultReasoning ?? "high",
+      };
+    }
+    return { cli: "grok" as CliId, model: "grok", reasoning: "high" };
+  }, [inventory]);
+
+  // 只在弹窗 open 由 false→true 时初始化一次；
+  // 之后 roleDefaults / inventory 的晚到刷新（如焦点回归检测）不得覆盖用户编辑
+  const initializedRef = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedRef.current = false;
+      return;
+    }
+    if (initializedRef.current) return;
+    initializedRef.current = true;
     setStrategy(
       initialStrategy && config.strategies.definitions[initialStrategy]
         ? initialStrategy
         : config.strategies.default,
     );
-    const multiProfile = Object.values(config.roles).some((policy) => policy.allowedProfiles.length > 1);
-    setAdvanced(true);
     const next: Record<string, RoleBindingInput> = {};
-    for (const role of ROLE_ORDER) {
-      if (!config.roles[role]) continue;
-      next[role] = roleDefaults?.[role] ?? {
-        cli: "grok",
-        model: "grok",
-        reasoning: "high",
-      };
+    for (const role of roles) {
+      next[role] = roleDefaults?.[role] ?? fallbackBinding;
     }
     setBindings(next);
-    setUseCliPicker(Boolean(inventory && inventory.clis.some((c) => c.installed && c.runtimeSupported)));
-    void multiProfile;
-  }, [config.roles, config.strategies.default, config.strategies.definitions, initialStrategy, inventory, open, roleDefaults]);
+    setUseCliPicker(
+      showCliPicker && Boolean(inventory && inventory.clis.some((c) => c.installed && c.runtimeSupported)),
+    );
+    // 仅在打开瞬间读取最新 props；deps 变化由 initializedRef 拦截
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open) {
     return null;
@@ -95,7 +135,7 @@ export function RunLauncher({
 
   const updateBinding = (role: string, patch: Partial<RoleBindingInput>) => {
     setBindings((current) => {
-      const base = current[role] ?? { cli: "grok" as CliId, reasoning: "high" };
+      const base = current[role] ?? fallbackBinding;
       const next = { ...base, ...patch };
       if (patch.cli) {
         const cli = clisById.get(patch.cli);
@@ -122,13 +162,14 @@ export function RunLauncher({
         )
       : undefined;
 
-    await onSubmit({
+    const succeeded = await onSubmit({
       goal: trimmedGoal,
-      ...(strategy !== "legacy" ? { strategy } : {}),
+      strategy,
       profileOverrides: {},
       ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
     });
-    setGoal("");
+    // 仅启动成功才清空目标文本；失败时保留输入与弹窗
+    if (succeeded) setGoal("");
   };
 
   return (
@@ -154,6 +195,16 @@ export function RunLauncher({
             autoFocus
             required
           />
+          {experiencePreview && experiencePreview.items.length > 0 && (
+            <p className="run-goal-experience-preview">
+              将注入 {experiencePreview.items.length} 条已验证经验：
+              {experiencePreview.items
+                .slice(0, 3)
+                .map((item) => summarizeGoal(item.summary, 24))
+                .join("；")}
+              {experiencePreview.items.length > 3 ? " …" : ""}
+            </p>
+          )}
 
           <fieldset className="strategy-fieldset">
             <legend>执行策略</legend>
@@ -194,12 +245,14 @@ export function RunLauncher({
               {!useCliPicker && (
                 <p className="policy-notice">
                   <ShieldAlert size={14} />
-                  未检测到可用全局 CLI 清单，将使用项目 profile 默认配置。可在「设置」中检索本机 CLI。
+                  {!showCliPicker
+                    ? "已在「设置」中关闭新建运行选型，将使用项目 profile 默认配置；以下为当前默认绑定（只读）。"
+                    : "未检测到可用全局 CLI 清单，将使用项目 profile 默认配置。可在「设置」中检索本机 CLI。"}
                 </p>
               )}
-              {ROLE_ORDER.map((role) => {
+              {roles.map((role) => {
                 if (!config.roles[role]) return null;
-                const binding = bindings[role] ?? { cli: "grok" as CliId, reasoning: "high" };
+                const binding = bindings[role] ?? fallbackBinding;
                 const cli = clisById.get(binding.cli);
                 const models = cli?.models ?? [];
                 const reasoningOptions = models.find((m) => m.id === binding.model)?.reasoningOptions

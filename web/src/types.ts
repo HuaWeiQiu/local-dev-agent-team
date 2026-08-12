@@ -673,6 +673,11 @@ export interface AutomaticEvolutionSnapshot {
   roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
+  lastEvaluation: {
+    suiteName: string;
+    suiteDigest: string;
+    completedAt: string;
+  } | null;
   cycles: AutomaticEvolutionCycle[];
 }
 
