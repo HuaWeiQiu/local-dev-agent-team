@@ -8,7 +8,6 @@ project:
 
 profiles:
   # —— 总控（只读）——
-  # 默认：Codex gpt-5.6-sol
   codex-orchestrator:
     adapter: codex
     model: gpt-5.6-sol
@@ -23,7 +22,6 @@ profiles:
       supportsWebSockets: false
     timeoutSeconds: 1800
 
-  # 备选：Grok 总控
   grok-orchestrator:
     adapter: grok
     model: grok
@@ -49,7 +47,12 @@ profiles:
     reasoning: xhigh
     permission: read-only
     externalTools: deny
-    maxTurns: 20
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
     timeoutSeconds: 1800
 
   # —— 审查（只读）——
@@ -62,13 +65,18 @@ profiles:
     maxTurns: 16
     timeoutSeconds: 1800
 
-  grok-worker-fast:
-    adapter: grok
-    model: grok
-    reasoning: medium
-    permission: workspace-write
+  codex-reviewer:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    permission: read-only
     externalTools: deny
-    maxTurns: 12
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
     timeoutSeconds: 1800
 
   # —— 测试（只读）——
@@ -85,12 +93,17 @@ profiles:
     adapter: codex
     model: gpt-5.6-sol
     reasoning: high
-    permission: workspace-write
+    permission: read-only
     externalTools: deny
-    maxTurns: 32
-    timeoutSeconds: 5400
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 1200
 
-  # —— 执行者（可写）：默认 / 轻量 / 重任务 / Codex ——
+  # —— 执行者（可写）——
   grok-worker:
     adapter: grok
     model: grok
