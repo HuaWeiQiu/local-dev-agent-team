@@ -109,9 +109,6 @@ export class LocalWorkflowRunner {
     const runId = options.runId ?? createRunId(options.goal);
     const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
     const git = new GitManager(this.loaded.root, this.worktreesDirectory);
-
-    await git.assertReady();
-    const baseCommit = await git.resolveCommit(this.loaded.config.project.defaultBranch);
     const integrationBranch = `agent-team/${branchSegment(runId)}/integration`;
     const integrationWorktree = path.join(this.worktreesDirectory, runId, "integration");
     const now = new Date().toISOString();
@@ -130,6 +127,46 @@ export class LocalWorkflowRunner {
           }),
         )
       : undefined;
+    let baseCommit: string;
+    try {
+      await git.assertReady();
+      baseCommit = await git.resolveCommit(this.loaded.config.project.defaultBranch);
+    } catch (error) {
+      // Failures before the first save (e.g. dirty primary worktree) must still
+      // persist a terminal state, otherwise the run vanishes from the run list.
+      const message = error instanceof Error ? error.message : String(error);
+      const terminal = terminalStatusAfterFailure(error, options.signal);
+      const failed: RunState = {
+        id: runId,
+        traceId: traceIdForRun(runId),
+        goal: options.goal,
+        root: this.loaded.root,
+        configPath: this.loaded.path,
+        baseBranch: this.loaded.config.project.defaultBranch,
+        baseCommit: "",
+        integrationBranch,
+        integrationWorktree,
+        status: terminal,
+        createdAt: now,
+        updatedAt: now,
+        profileOverrides,
+        ...(persistedBindings && Object.keys(persistedBindings).length > 0
+          ? { roleBindings: persistedBindings }
+          : {}),
+        strategy,
+        ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
+        ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+        ...(options.purpose ? { purpose: options.purpose } : {}),
+        tasks: [],
+        error: message,
+        history: [
+          { at: now, status: "created", message: "Run created" },
+          { at: now, status: terminal, message },
+        ],
+      };
+      await store.save(failed);
+      return failed;
+    }
     const state: RunState = {
       id: runId,
       traceId: traceIdForRun(runId),

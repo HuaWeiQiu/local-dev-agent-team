@@ -133,6 +133,36 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
+  it("persists a terminal state when startup fails on a dirty primary worktree", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-dirty-workflow-"));
+    await git(root, ["init", "-b", "main"]);
+    await git(root, ["config", "user.name", "Agent Team Test"]);
+    await git(root, ["config", "user.email", "agent-team@example.com"]);
+    const config = createDefaultConfig("dirty-fixture");
+    await writeFile(path.join(root, ".gitignore"), ".agent-team/\n");
+    await writeFile(path.join(root, "README.md"), "# Fixture\n");
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    await git(root, ["add", "."]);
+    await git(root, ["commit", "-m", "initial"]);
+    // leave the primary worktree dirty so startup must fail before the first save
+    await writeFile(path.join(root, "README.md"), "# Dirty\n");
+
+    const loaded = await loadConfig(root);
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    }).run({ goal: "Must survive startup failure" });
+
+    expect(state.status).toBe("blocked");
+    expect(state.error).toContain("must be clean");
+
+    // the run stays visible in the state store instead of vanishing
+    const store = new RunStateStore(path.join(root, config.project.stateDirectory, "runs"));
+    const persisted = await store.load(state.id);
+    expect(persisted.status).toBe("blocked");
+    expect(persisted.error).toContain("must be clean");
+    expect((await store.list()).map((entry) => entry.id)).toContain(state.id);
+  }, 30_000);
+
   it("persists CLI role bindings with their materialized profile names", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-bindings-workflow-"));
     await git(root, ["init", "-b", "main"]);
