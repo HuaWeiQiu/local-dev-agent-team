@@ -45,6 +45,12 @@ import {
   requireEvaluationSuite,
   resolveEvaluationSuite,
 } from "../evaluation/resolve.js";
+import {
+  getInventory,
+  loadDesktopSettings,
+  mergeRoleDefaults,
+  type RoleBinding,
+} from "../desktop/settings.js";
 
 export type AutomaticEvolutionErrorCode =
   | "AUTOMATION_DISABLED"
@@ -72,6 +78,8 @@ export interface AutomaticEvolutionDependencies {
   ) => Promise<AutomaticStrategyCandidate>;
   now?: () => number;
   createSessionId?: () => string;
+  /** Override home dir for desktop settings / CLI inventory lookup (tests). */
+  desktopHome?: string;
 }
 
 export interface AutomaticProposalContext {
@@ -100,11 +108,14 @@ export class AutomaticEvolutionController {
   private readonly now: () => number;
   private readonly createSessionId: () => string;
   private readonly proposeCandidate: AutomaticEvolutionDependencies["proposeCandidate"];
+  private readonly desktopHome: string | undefined;
   private readonly artifactStore: RunStateStore;
   private state: AutomaticEvolutionSnapshot;
   private loop: Promise<void> | undefined;
   private abortController: AbortController | undefined;
   private session: EvolutionAutomationSession | undefined;
+  /** Resolved once per loop; undefined = 未启用或本机无可用全局默认 */
+  private globalRoleBindings: Record<string, RoleBinding> | null | undefined;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -117,6 +128,7 @@ export class AutomaticEvolutionController {
     this.now = dependencies.now ?? Date.now;
     this.createSessionId = dependencies.createSessionId ?? randomUUID;
     this.proposeCandidate = dependencies.proposeCandidate;
+    this.desktopHome = dependencies.desktopHome;
     this.artifactStore = new RunStateStore(
       path.resolve(loaded.root, loaded.config.project.stateDirectory, "runs"),
     );
@@ -540,6 +552,16 @@ export class AutomaticEvolutionController {
     );
     const suiteDigest = computeSuiteDigest(suite);
     const pairings: Array<{ taskId: string; state: RunState }> = [];
+    const allBindings = await this.resolveGlobalRoleBindings();
+    // Strategy roleProfiles 是被评测变量，必须赢过全局 CLI 默认；全局默认只补未映射的角色。
+    const strategyRoleProfiles = resolveStrategy(this.loaded.config, strategy).roleProfiles;
+    const roleBindings = allBindings
+      ? Object.fromEntries(
+          Object.entries(allBindings).filter(([role]) => !(role in strategyRoleProfiles)),
+        )
+      : undefined;
+    const effectiveBindings =
+      roleBindings && Object.keys(roleBindings).length > 0 ? roleBindings : undefined;
 
     for (const task of suite.tasks) {
       for (let repeat = 1; repeat <= suite.repeats; repeat += 1) {
@@ -549,6 +571,7 @@ export class AutomaticEvolutionController {
             goal: task.goal,
             strategy,
             profileOverrides: {},
+            ...(effectiveBindings ? { roleBindings: effectiveBindings } : {}),
           },
           `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
         );
@@ -614,6 +637,34 @@ export class AutomaticEvolutionController {
       score: suiteAggregate.score,
       outcomes,
     };
+  }
+
+  /**
+   * 本机全局 CLI 默认（~/.agent-team/desktop-settings.json）→ roleBindings。
+   * 仅当 evolution.automatic.useGlobalCliDefaults = true 时启用。
+   * 返回值约定：undefined 未解析过 / null 不可用（退回项目 yaml 默认）。
+   */
+  private async resolveGlobalRoleBindings(): Promise<Record<string, RoleBinding> | undefined> {
+    if (!this.config.useGlobalCliDefaults) return undefined;
+    if (this.globalRoleBindings !== undefined) {
+      return this.globalRoleBindings ?? undefined;
+    }
+    try {
+      const settings = await loadDesktopSettings(this.desktopHome);
+      const { inventory } = await getInventory({
+        refresh: false,
+        ...(this.desktopHome ? { home: this.desktopHome } : {}),
+      });
+      const merged = mergeRoleDefaults(settings, inventory);
+      // 只保留本项目存在的角色
+      const filtered = Object.fromEntries(
+        Object.entries(merged).filter(([role]) => role in this.loaded.config.roles),
+      );
+      this.globalRoleBindings = Object.keys(filtered).length > 0 ? filtered : null;
+    } catch {
+      this.globalRoleBindings = null;
+    }
+    return this.globalRoleBindings ?? undefined;
   }
 
   private async generateCandidate(

@@ -150,8 +150,19 @@ allowlist, and fallbacks must be read-only. `agent-team invoke` is diagnostic
 and rejects workspace-write profiles even for the worker role.
 
 Required roles are `orchestrator`, `architect`, `worker`, `reviewer`, and
-`tester`. A task plan may choose only a profile allowed by the worker role. A
-run-level `--profile role=name` override is also checked against the allowlist.
+`tester`.
+
+Optional first-class role:
+
+- **`researcher`（技术研究员）**: read-only technical research used by the optional
+  explore stage before architect planning (`taskMorphology.explore.enabled`).
+  When the role is absent, explore falls back to `architect` so older project
+  configs keep loading. New defaults and `agent-team.example.yaml` include it.
+
+Other notes:
+
+- A task plan may choose only a profile allowed by the worker role.
+- A run-level `--profile role=name` override is also checked against the allowlist.
 Fallbacks are attempted in declared order and recorded in invocation artifacts;
 there is no silent model fallback.
 
@@ -247,6 +258,7 @@ evolution:
     proposerProfile: codex-orchestrator
     baselineStrategy: balanced
     targetStrategy: auto-evolved
+    useGlobalCliDefaults: false
     evaluationGoal: >-
       Improve one small, well-tested reliability issue without changing public
       behavior or release configuration. Run every configured quality command.
@@ -257,6 +269,13 @@ session from the evolution workbench, after which all requested cycles run
 automatically. `maxCycles` is 1-10 and is also the hard ceiling exposed by the UI.
 `maxConsecutiveNoImprovement` cannot exceed it. `evaluationRepeats` is 1-2 and the
 worst repeated score wins the aggregate. `minimumScoreDelta` is 0-1000.
+
+`useGlobalCliDefaults` (default `false`) threads the desktop global CLI defaults
+(`~/.agent-team/desktop-settings.json`) into evaluation runs as ephemeral
+profiles for roles the evaluated strategy does not map itself. Strategy
+`roleProfiles` always win over global defaults, and roles missing from the
+project config are ignored; when no usable global default exists, evaluation
+falls back to the project yaml profile chains.
 
 The proposer role/profile must resolve to a read-only profile. `baselineStrategy`
 must name a configured strategy. `targetStrategy` must be a valid custom strategy

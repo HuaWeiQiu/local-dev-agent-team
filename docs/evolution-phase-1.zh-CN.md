@@ -385,6 +385,11 @@ agent-team resume <run-id> \
    预算。通过证据仅接受精确匹配服务端固定目标/策略且状态为 `completed` 的自动评测 run。
    Start 幂等键持久绑定请求轮数和已认证本地 session operator，重启不会把同一请求再次执行。
 
+   `useGlobalCliDefaults: true`（默认 false）时，评测 run 继承桌面全局 CLI 默认
+   （`~/.agent-team/desktop-settings.json`），为策略未映射的角色生成 ephemeral profile；
+   策略自身 `roleProfiles` 永远优先，本机无可用全局默认时退回项目 yaml 默认链。详见
+   [global-cli-inventory-and-role-picker](./global-cli-inventory-and-role-picker.zh-CN.md) 6.4 节。
+
 ## 10. 维护者快速核对清单
 
 - [ ] 是否只修改了文档声明路径，而没有“顺手”改 `src/` 冒充已应用候选？

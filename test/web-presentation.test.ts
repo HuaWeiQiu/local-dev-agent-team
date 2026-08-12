@@ -69,6 +69,7 @@ describe("web workbench projections", () => {
     expect(topologyDisplayName("parallel-dag")).toBe("依赖并行");
     expect(topologyDisplayName("sequential")).toBe("顺序执行");
     expect(agentRoleLabel("orchestrator")).toBe("总控");
+    expect(agentRoleLabel("researcher")).toBe("技术研究员");
     expect(agentRoleLabel("worker")).toBe("执行");
     expect(agentRoleLabel("reviewer")).toBe("审查");
     expect(profileDisplayName("codex-orchestrator")).toBe("Codex · 总控");

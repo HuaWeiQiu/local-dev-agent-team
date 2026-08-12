@@ -451,12 +451,22 @@ export interface CliInventory {
   scannedAt: string;
   home: string;
   clis: CliProbeResult[];
+  /** Config-file fingerprint used for auto cache invalidation */
+  sourceFingerprint?: string;
 }
+
+export type InventoryCacheReason = "refresh" | "stale" | "fingerprint" | "miss" | "hit";
 
 export interface DesktopSettingsView {
   version: 1;
   defaults: { roles: Record<string, RoleBindingInput> };
-  ui: { showCliPickerInRunLauncher: boolean };
+  ui: {
+    showCliPickerInRunLauncher: boolean;
+    /** Soft auto re-check while settings is open / on interval */
+    autoDetectCliConfig?: boolean;
+    /** Soft re-check when window regains focus */
+    autoDetectOnFocus?: boolean;
+  };
   inventoryCachedAt: string | null;
 }
 
@@ -464,6 +474,7 @@ export interface DesktopSettingsResponse {
   settings: DesktopSettingsView;
   inventory: CliInventory;
   fromCache: boolean;
+  reason?: InventoryCacheReason;
   suggestedDefaults: Record<string, RoleBindingInput>;
 }
 

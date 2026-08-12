@@ -1,7 +1,13 @@
 import type { AgentProfile, AgentTeamConfig, Reasoning } from "../config/schema.js";
 import type { RoleBinding } from "./settings.js";
 
-const READ_ONLY_ROLES = new Set(["orchestrator", "architect", "reviewer", "tester"]);
+const READ_ONLY_ROLES = new Set([
+  "orchestrator",
+  "architect",
+  "researcher",
+  "reviewer",
+  "tester",
+]);
 
 const REASONING_BY_CLI: Record<string, readonly string[]> = {
   codex: ["low", "medium", "high", "xhigh", "max"],

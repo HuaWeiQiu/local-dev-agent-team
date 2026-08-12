@@ -103,6 +103,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getInitialTheme());
   const [roleDefaults, setRoleDefaults] = useState<Record<string, RoleBindingInput>>({});
   const [cliInventory, setCliInventory] = useState<CliInventory>();
+  const [autoDetectOnFocus, setAutoDetectOnFocus] = useState(true);
   const [desktopShell] = useState(() => {
     try {
       return isTauri();
@@ -368,9 +369,13 @@ export default function App() {
 
   const refreshDesktopSettings = useCallback(async () => {
     try {
+      // Soft read: server invalidates cache when CLI config mtime fingerprint changes.
       const response = await getDesktopSettings();
       setRoleDefaults(response.settings.defaults.roles);
       setCliInventory(response.inventory);
+      const auto = response.settings.ui.autoDetectCliConfig !== false
+        && response.settings.ui.autoDetectOnFocus !== false;
+      setAutoDetectOnFocus(auto);
     } catch {
       // Settings require desktop session; plain browser serve may 401 — ignore.
     }
@@ -379,6 +384,23 @@ export default function App() {
   useEffect(() => {
     void refreshDesktopSettings();
   }, [refreshDesktopSettings]);
+
+  // When user returns to the app after editing ~/.codex/config.toml etc., refresh inventory.
+  // Respects settings → 「回到窗口时检测」; open launcher always refreshes (manual path).
+  useEffect(() => {
+    if (!autoDetectOnFocus) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshDesktopSettings();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [autoDetectOnFocus, refreshDesktopSettings]);
 
   const openLauncher = useCallback((strategy?: string) => {
     setError(undefined);

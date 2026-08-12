@@ -20,11 +20,19 @@ import type {
   CliId,
   CliInventory,
   CliProbeResult,
+  DesktopSettingsResponse,
   DesktopSettingsView,
   RoleBindingInput,
 } from "../types";
 
-const ROLE_ORDER = ["orchestrator", "architect", "worker", "reviewer", "tester"] as const;
+const ROLE_ORDER = [
+  "orchestrator",
+  "architect",
+  "researcher",
+  "worker",
+  "reviewer",
+  "tester",
+] as const;
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
   grok: "Grok",
@@ -42,32 +50,115 @@ export function SettingsWorkbench() {
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
   const [fromCache, setFromCache] = useState(false);
+  const [cacheReason, setCacheReason] = useState<string>();
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const applyResponse = useCallback((response: DesktopSettingsResponse, quiet = false) => {
+    setSettings(response.settings);
+    setInventory(response.inventory);
+    setRoles({ ...response.settings.defaults.roles });
+    setFromCache(response.fromCache);
+    setCacheReason(response.reason);
+    // Always surface config-change detections; suppress only routine cache hits / first paint noise when quiet.
+    if (response.reason === "fingerprint") {
+      setMessage("检测到本机 CLI 配置文件已变更，已自动重新检索模型与思考深度");
+      return;
+    }
+    if (quiet) return;
+    if (response.reason === "stale") {
+      setMessage("缓存已过期，已自动重新检索本机 CLI 配置");
+    } else if (response.reason === "miss") {
+      setMessage("已完成首次本机 CLI 检索");
+    }
+  }, []);
+
+  const load = useCallback(async (opts?: { quiet?: boolean; keepVisible?: boolean }) => {
+    if (!opts?.keepVisible) setLoading(true);
     setError(undefined);
     try {
       const response = await getDesktopSettings();
-      setSettings(response.settings);
-      setInventory(response.inventory);
-      setRoles({ ...response.settings.defaults.roles });
-      setFromCache(response.fromCache);
+      applyResponse(response, opts?.quiet === true);
     } catch (loadError) {
       setError(formatDesktopError(loadError));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyResponse]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const autoDetectEnabled = settings?.ui.autoDetectCliConfig !== false;
+  const autoDetectOnFocus = settings?.ui.autoDetectOnFocus !== false;
+
+  // Auto re-check when user returns to the tab / window, or every 30s while settings is open.
+  // Server only re-scans when config mtime fingerprint changes — cheap hit path uses cache.
+  // Manual detect button always works regardless of these toggles.
+  useEffect(() => {
+    if (!autoDetectEnabled) return;
+    const onVisible = () => {
+      if (!autoDetectOnFocus) return;
+      if (document.visibilityState === "visible") {
+        void load({ quiet: true, keepVisible: true });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void load({ quiet: true, keepVisible: true });
+      }
+    }, 30_000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      window.clearInterval(timer);
+    };
+  }, [autoDetectEnabled, autoDetectOnFocus, load]);
 
   const clisById = useMemo(() => {
     const map = new Map<CliId, CliProbeResult>();
     for (const cli of inventory?.clis ?? []) map.set(cli.id, cli);
     return map;
   }, [inventory]);
+
+  // If inventory updates and a selected model/reasoning disappeared, snap to CLI defaults.
+  useEffect(() => {
+    if (!inventory) return;
+    setRoles((current) => {
+      let anyChanged = false;
+      const next: Record<string, RoleBindingInput> = { ...current };
+      for (const [role, binding] of Object.entries(current)) {
+        const cli = clisById.get(binding.cli);
+        if (!cli) continue;
+        let model = binding.model;
+        let reasoning = binding.reasoning;
+        let roleChanged = false;
+        if (model && cli.models.length > 0 && !cli.models.some((item) => item.id === model)) {
+          model = cli.defaultModel ?? cli.models[0]?.id;
+          roleChanged = true;
+        }
+        const modelInfo = cli.models.find((item) => item.id === (model ?? binding.model));
+        const options = modelInfo?.reasoningOptions ?? [];
+        if (reasoning && options.length > 0 && !options.includes(reasoning)) {
+          reasoning = cli.defaultReasoning ?? options[0] ?? "high";
+          roleChanged = true;
+        }
+        if (roleChanged) {
+          anyChanged = true;
+          next[role] = {
+            cli: binding.cli,
+            ...(model ? { model } : {}),
+            ...(reasoning ? { reasoning } : {}),
+          };
+        }
+      }
+      if (anyChanged) {
+        setMessage((prev) => prev ?? "部分角色的模型/思考深度已随 CLI 配置更新自动校正");
+      }
+      return anyChanged ? next : current;
+    });
+  }, [clisById, inventory]);
 
   const rescan = async () => {
     setScanning(true);
@@ -77,15 +168,40 @@ export function SettingsWorkbench() {
       const result = await scanCliInventory();
       setInventory(result.inventory);
       setFromCache(false);
-      setMessage("已重新检索本机 CLI 配置");
-      // refresh settings envelope for cache timestamp
+      setCacheReason(result.reason ?? "refresh");
+      setMessage("已强制重新检索本机 CLI 配置");
+      // refresh settings envelope for cache timestamp + sanitized defaults
       const response = await getDesktopSettings();
-      setSettings(response.settings);
+      applyResponse(response, true);
+      setMessage("已强制重新检索本机 CLI 配置");
     } catch (scanError) {
       setError(formatDesktopError(scanError));
     } finally {
       setScanning(false);
     }
+  };
+
+  const uiState = settings?.ui ?? {
+    showCliPickerInRunLauncher: true,
+    autoDetectCliConfig: true,
+    autoDetectOnFocus: true,
+  };
+
+  const patchUi = (patch: Partial<DesktopSettingsView["ui"]>) => {
+    setSettings((current) => {
+      if (!current) {
+        return {
+          version: 1,
+          defaults: { roles },
+          ui: { ...uiState, ...patch },
+          inventoryCachedAt: inventory?.scannedAt ?? null,
+        };
+      }
+      return {
+        ...current,
+        ui: { ...current.ui, ...patch },
+      };
+    });
   };
 
   const save = async () => {
@@ -95,10 +211,14 @@ export function SettingsWorkbench() {
     try {
       await saveDesktopSettings({
         defaults: { roles },
-        ui: settings?.ui ?? { showCliPickerInRunLauncher: true },
+        ui: {
+          showCliPickerInRunLauncher: uiState.showCliPickerInRunLauncher,
+          autoDetectCliConfig: uiState.autoDetectCliConfig !== false,
+          autoDetectOnFocus: uiState.autoDetectOnFocus !== false,
+        },
       });
       setMessage("全局默认已保存（仅本机，不写进项目仓库）");
-      await load();
+      await load({ quiet: true, keepVisible: true });
     } catch (saveError) {
       setError(formatDesktopError(saveError));
     } finally {
@@ -146,7 +266,7 @@ export function SettingsWorkbench() {
         <div className="settings-hero-actions">
           <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
             {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
-            <span>{scanning ? "检索中" : "重新检索"}</span>
+            <span>{scanning ? "检测中" : "手动检测"}</span>
           </button>
           <button type="button" className="button primary" onClick={() => void save()} disabled={saving || scanning}>
             {saving ? <LoaderCircle size={16} className="spin" /> : <Save size={16} />}
@@ -164,15 +284,73 @@ export function SettingsWorkbench() {
 
       <section className="settings-panel">
         <div className="settings-panel-head">
+          <RefreshCw size={18} />
+          <div>
+            <h2>CLI 配置检测</h2>
+            <small>自动检测可关；手动检测随时可用，强制扫本机配置</small>
+          </div>
+        </div>
+        <div className="detect-options">
+          <label className="detect-option">
+            <input
+              type="checkbox"
+              checked={uiState.autoDetectCliConfig !== false}
+              onChange={(event) => patchUi({ autoDetectCliConfig: event.target.checked })}
+              disabled={saving || scanning}
+            />
+            <span>
+              <strong>自动检测</strong>
+              <small>设置页打开时每 30 秒检查配置指纹；变更则刷新模型/思考深度</small>
+            </span>
+          </label>
+          <label className="detect-option">
+            <input
+              type="checkbox"
+              checked={uiState.autoDetectOnFocus !== false}
+              onChange={(event) => patchUi({ autoDetectOnFocus: event.target.checked })}
+              disabled={saving || scanning || uiState.autoDetectCliConfig === false}
+            />
+            <span>
+              <strong>回到窗口时检测</strong>
+              <small>切回 Agent Team 时检查 ~/.codex 等配置是否改过</small>
+            </span>
+          </label>
+          <div className="detect-manual-row">
+            <div>
+              <strong>手动检测</strong>
+              <small>立即强制重扫本机 Codex / Grok / Kimi / Claude，不依赖自动开关</small>
+            </div>
+            <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
+              {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
+              <span>{scanning ? "检测中…" : "立即手动检测"}</span>
+            </button>
+          </div>
+          <p className="settings-detect-hint">
+            监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存默认」。
+          </p>
+        </div>
+      </section>
+
+      <section className="settings-panel">
+        <div className="settings-panel-head">
           <Terminal size={18} />
           <div>
             <h2>本机 CLI 清单</h2>
             <small>
               {inventory
-                ? `${fromCache ? "缓存" : "实时"} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
+                ? `${cacheSourceLabel(fromCache, cacheReason)} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
                 : "尚未扫描"}
             </small>
           </div>
+          <button
+            type="button"
+            className="button secondary settings-inline-detect"
+            onClick={() => void rescan()}
+            disabled={scanning || saving}
+          >
+            {scanning ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}
+            <span>{scanning ? "检测中" : "手动检测"}</span>
+          </button>
         </div>
         <div className="cli-card-grid">
           {(inventory?.clis ?? []).map((cli) => (
@@ -298,4 +476,20 @@ function formatDesktopError(error: unknown): string {
     return "需要桌面控制会话。请从 Agent Team 桌面端打开，或带 session 的本机服务。";
   }
   return errorMessage(error);
+}
+
+function cacheSourceLabel(fromCache: boolean, reason: string | undefined): string {
+  if (fromCache || reason === "hit") return "缓存（配置未变）";
+  switch (reason) {
+    case "fingerprint":
+      return "已自动更新（检测到配置变更）";
+    case "stale":
+      return "已自动更新（缓存过期）";
+    case "refresh":
+      return "强制检索";
+    case "miss":
+      return "首次检索";
+    default:
+      return fromCache ? "缓存" : "实时";
+  }
 }

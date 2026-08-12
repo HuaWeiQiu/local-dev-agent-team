@@ -55,6 +55,30 @@ profiles:
       supportsWebSockets: false
     timeoutSeconds: 1800
 
+  # —— 技术研究员（只读调研）——
+  grok-researcher:
+    adapter: grok
+    model: grok
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 20
+    timeoutSeconds: 1800
+
+  codex-researcher:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    codexProvider:
+      id: sub2api
+      baseUrl: https://sub2api.ktyun.cc
+      wireApi: responses
+      requiresOpenAIAuth: true
+      supportsWebSockets: false
+    timeoutSeconds: 1800
+
   # —— 审查（只读）——
   grok-reviewer:
     adapter: grok
@@ -157,6 +181,12 @@ roles:
     allowedProfiles: [grok-architect, codex-architect]
     fallbackProfiles: [codex-architect]
 
+  researcher:
+    defaultProfile: grok-researcher
+    allowedProfiles: [grok-researcher, codex-researcher]
+    fallbackProfiles: [codex-researcher]
+    promptFile: prompts/researcher.md
+
   worker:
     defaultProfile: grok-worker
     allowedProfiles: [grok-worker, grok-worker-fast, grok-worker-heavy, codex-worker]
@@ -253,6 +283,8 @@ evolution:
     proposerProfile: codex-orchestrator
     baselineStrategy: balanced
     targetStrategy: auto-evolved
+    # 评测 run 继承全局设置里的 CLI/模型/思考深度默认；策略自身 roleProfiles 优先
+    useGlobalCliDefaults: true
     evaluationGoal: >-
       Improve one small, well-tested reliability issue in this repository without
       changing public behavior or release configuration. Run every configured quality

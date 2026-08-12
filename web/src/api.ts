@@ -44,10 +44,26 @@ export async function getDesktopSettings(): Promise<DesktopSettingsResponse> {
   return await request<DesktopSettingsResponse>("/api/desktop/settings");
 }
 
-export async function scanCliInventory(): Promise<{ inventory: CliInventory; fromCache: boolean }> {
-  return await request<{ inventory: CliInventory; fromCache: boolean }>(
+export async function scanCliInventory(): Promise<{
+  inventory: CliInventory;
+  fromCache: boolean;
+  reason?: string;
+}> {
+  return await request<{ inventory: CliInventory; fromCache: boolean; reason?: string }>(
     "/api/desktop/cli-inventory/scan",
     { method: "POST", body: "{}" },
+  );
+}
+
+/** Soft read: server auto-rescans when config mtime fingerprint changes. */
+export async function getCliInventory(options: { refresh?: boolean } = {}): Promise<{
+  inventory: CliInventory;
+  fromCache: boolean;
+  reason?: string;
+}> {
+  const query = options.refresh ? "?refresh=1" : "";
+  return await request<{ inventory: CliInventory; fromCache: boolean; reason?: string }>(
+    `/api/desktop/cli-inventory${query}`,
   );
 }
 
@@ -57,7 +73,14 @@ export async function saveDesktopSettings(input: {
 }): Promise<{ settings: unknown }> {
   return await request<{ settings: unknown }>("/api/desktop/settings", {
     method: "PUT",
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      defaults: input.defaults,
+      ui: {
+        showCliPickerInRunLauncher: input.ui.showCliPickerInRunLauncher,
+        autoDetectCliConfig: input.ui.autoDetectCliConfig ?? true,
+        autoDetectOnFocus: input.ui.autoDetectOnFocus ?? true,
+      },
+    }),
   });
 }
 

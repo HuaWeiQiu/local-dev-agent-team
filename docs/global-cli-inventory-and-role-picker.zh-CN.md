@@ -126,11 +126,38 @@ type CliInventory = {
 ### 4.2 UI
 
 - **设置 → Agent CLI**  
-  - 按钮「重新检索」  
+  - 按钮「重新检索」（强制扫）  
   - 表格：CLI | 已安装 | 授权 | 默认模型 | 思考深度 | 操作  
-  - 下方「角色默认」：五角色各自下拉 CLI / 模型 / 思考深度  
+  - 下方「角色默认」：六角色（含技术研究员）各自下拉 CLI / 模型 / 思考深度  
 - 未安装的 CLI 灰显，不可设为默认。  
 - 授权 `missing` / `invalid` 显示中文提示与跳转（打开对应 CLI 登录文档，不代填密钥）。
+
+### 4.3 配置变更自动检测（已实现）
+
+缓存不能只靠「1 小时 TTL + 人手点重新检索」。用户改了 `~/.codex/config.toml` / `~/.kimi-code/config.toml` 等之后，设置页与新建运行的模型/思考深度列表必须跟着变。
+
+**失效规则（`getInventory`）**：
+
+1. **主信号：配置指纹**  
+   对白名单路径（`~/.codex/config.toml`、`auth.json`、`~/.grok/config.toml`、`~/.kimi-code/config.toml`、`~/.claude/settings.json`）做 `mtimeMs + size` 拼接，得到 `sourceFingerprint`。  
+   与缓存里的指纹不一致 → **强制重扫**（不读文件内容，密钥不进缓存键）。
+2. **兜底 TTL**：配置未变时，默认缓存最多 **15 分钟**（`DEFAULT_INVENTORY_MAX_AGE_MS`）。
+3. **手动强制**：`POST /api/desktop/cli-inventory/scan` 或 UI「重新检索」→ `refresh: true`。
+
+**UI 同步**：
+
+- 打开「设置」/「新建运行」、窗口重新获得焦点、设置页每 30s 轻量 `GET /api/desktop/settings`（指纹未变则走缓存，几乎无成本）。
+- 指纹变化时状态条提示「检测到本机 CLI 配置文件已变更…」。
+- 若某角色已保存的模型/思考深度不在新列表里，自动落到该 CLI 的 defaultModel / defaultReasoning（`sanitizeRoleBindings`），不静默写坏项目 yaml。
+
+**手动检测（始终可用）**：
+
+- 设置页顶部 / CLI 清单旁 /「CLI 配置检测」区块的 **「手动检测」** 按钮 → `POST /api/desktop/cli-inventory/scan` 强制重扫。
+- 与自动检测开关无关：关掉自动后仍可手动点。
+- 全局 UI 开关（`~/.agent-team/desktop-settings.json` → `ui`）：
+  - `autoDetectCliConfig`（默认 true）：设置页 30s 轮询
+  - `autoDetectOnFocus`（默认 true）：回到窗口时检测  
+  改完后点「保存默认」写入本机。
 
 ---
 
@@ -213,15 +240,25 @@ Run 内生成虚拟名如 `runtime/grok/high`，只存在于 run 状态，避免
 - Grok / Kimi：同理，CLI 读自己的 config。  
 - 若项目 yaml 里写了 `codexProvider.baseUrl`（如 sub2api），与全局 inventory 的 provider 列表对齐时，**项目指定优先**（避免桌面默认打到错误的 api.openai.com）。
 
+### 6.4 自动演进评测继承全局默认（已实现）
+
+- 项目 yaml 设 `evolution.automatic.useGlobalCliDefaults: true` 后，自动演进的评测 run 会
+  读取桌面全局默认（`~/.agent-team/desktop-settings.json` 的 `defaults.roles` + 最新
+  inventory），为每个角色生成 ephemeral profile。
+- **策略自身 `roleProfiles` 优先**：被评测的策略（incumbent / 候选）已映射的角色不会被
+  全局默认覆盖——`roleProfiles` 是被评测变量，全局默认只补策略没映射的角色。
+- 只保留本项目 `roles` 里存在的角色；本机无可用全局默认时自动退回项目 yaml 的默认
+  profile 链，不会让评测失败。
+
 ---
 
 ## 7. 控制面 API 草案
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/desktop/cli-inventory/scan` | 触发检索；桌面会话鉴权 |
-| `GET` | `/api/desktop/cli-inventory` | 读缓存 + 是否过期 |
-| `GET` | `/api/desktop/settings` | 读全局设置 |
+| `POST` | `/api/desktop/cli-inventory/scan` | 强制检索；桌面会话鉴权 |
+| `GET` | `/api/desktop/cli-inventory` | 读缓存；`?refresh=1` 强制；指纹变则自动重扫；返回 `fromCache` + `reason` |
+| `GET` | `/api/desktop/settings` | 读全局设置 + 最新 inventory（同上自动失效） |
 | `PUT` | `/api/desktop/settings` | 写全局默认（校验 CLI 已安装） |
 | `POST` | `/api/projects/:id/runs` | 扩展 `roleBindings` |
 
@@ -242,7 +279,7 @@ Run 内生成虚拟名如 `runtime/grok/high`，只存在于 run 状态，避免
 ### Phase 2 — 全局默认
 
 - `desktop-settings.json`  
-- 五角色默认 CLI/模型/思考深度  
+- 六角色默认 CLI/模型/思考深度（含 researcher / 技术研究员） 
 - 新建运行表单预填全局默认（仍落到现有 profile 名若项目仅有静态 profile）
 
 **验收**：改一次全局默认，三个项目新建运行默认一致（在项目未禁止时）。
@@ -277,7 +314,7 @@ Run 内生成虚拟名如 `runtime/grok/high`，只存在于 run 状态，避免
 | 风险 | 对策 |
 | --- | --- |
 | CLI 配置格式变更 | probe 版本化；失败则 `installed=true, models=[]` |
-| 扫描拖慢启动 | 异步扫 + 缓存 TTL（如 1h）；设置页手动刷新 |
+| 扫描拖慢启动 | 指纹未变走缓存；TTL 15min 兜底；设置页可强制刷新；焦点/30s 只做轻量 GET |
 | 用户以为全局默认 = 所有项目强制 | UI 文案写清「可被项目禁止 / 单次覆盖」 |
 | Codex 有 provider 但 key 无效 | `auth.status=invalid` 仅在用户点「验证」后设置；默认只 `present` |
 

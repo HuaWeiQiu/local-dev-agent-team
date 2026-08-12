@@ -403,6 +403,11 @@ roles:
     defaultProfile: codex-architect
     allowedProfiles: [codex-architect]
 
+  researcher:
+    defaultProfile: codex-researcher
+    allowedProfiles: [codex-researcher]
+    promptFile: prompts/researcher.md
+
   worker:
     defaultProfile: grok-worker
     allowedProfiles: [grok-worker]
@@ -424,6 +429,10 @@ roles:
 - `worker`：工作
 - `reviewer`：审查
 - `tester`：测试
+
+可选一等角色：
+
+- `researcher`：技术研究员（只读调研；开启 explore 时优先使用；缺省时回退到架构）
 
 也可以只对本次运行临时覆盖角色 profile：
 

@@ -43,7 +43,14 @@ import type {
 } from "../types";
 
 const nodeTypes = { strategyStage: StrategyStageNode };
-const roleOrder = ["orchestrator", "architect", "worker", "reviewer", "tester"];
+const roleOrder = [
+  "orchestrator",
+  "architect",
+  "researcher",
+  "worker",
+  "reviewer",
+  "tester",
+];
 
 interface StrategyDraft {
   mode: StrategyTopologyMode;

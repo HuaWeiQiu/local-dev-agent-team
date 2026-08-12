@@ -39,7 +39,7 @@ export function compileStrategyTopology(
     stage("intake", "agent", "目标分析", ["orchestrator"]),
   ];
   if (options?.exploreEnabled) {
-    stages.push(stage("explore", "agent", "代码探索", ["architect"]));
+    stages.push(stage("explore", "agent", "技术调研 / 代码探索", ["researcher"]));
   }
   stages.push(stage("architecture", "agent", "任务规划", ["architect"]));
   if (approvalGates.includes("plan")) {

@@ -369,6 +369,7 @@ export class ProfiledAgentService implements RoleAgentService {
     const defaultNames: Record<string, string> = {
       orchestrator: "orchestrator-intake.md",
       architect: "architect.md",
+      researcher: "researcher.md",
       worker: "worker.md",
       reviewer: "reviewer.md",
       tester: "tester.md",

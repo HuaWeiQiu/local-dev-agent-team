@@ -655,16 +655,22 @@ export class LocalWorkflowRunner {
       return undefined;
     }
 
-    await store.transition(state, "exploring", "只读探索代码库（explore）");
+    await store.transition(state, "exploring", "技术研究员只读调研代码库（explore）");
+    const exploreRole = this.loaded.config.roles.researcher ? "researcher" : "architect";
     store.emit(state.id, "run.explore.started", {
-      profile: explore.profile ?? state.strategy.roleProfiles.architect ?? null,
+      role: exploreRole,
+      profile:
+        explore.profile
+        ?? state.strategy.roleProfiles.researcher
+        ?? state.strategy.roleProfiles.architect
+        ?? null,
       maxInjectedChars: explore.maxInjectedChars,
       failOpen: explore.failOpen,
     });
 
     try {
       const result = await agent.runStructured({
-        role: "architect",
+        role: exploreRole,
         runId: state.id,
         artifactKey: "explore",
         ...(explore.profile ? { profileName: explore.profile } : {}),
@@ -675,7 +681,7 @@ export class LocalWorkflowRunner {
           project: this.loaded.config.project,
           baseCommit,
           instructions: [
-            "Read-only repository exploration before task planning.",
+            "Read-only technical research before task planning.",
             "Do not propose file edits or commits.",
             "Return a structured summary of modules, risks, and constraints.",
           ],

@@ -68,6 +68,7 @@ export function topologyDisplayName(mode: string | undefined | null): string {
 const roleLabels: Record<string, string> = {
   orchestrator: "总控",
   architect: "架构",
+  researcher: "技术研究员",
   worker: "执行",
   reviewer: "审查",
   tester: "测试",
@@ -86,6 +87,8 @@ const profileLabels: Record<string, string> = {
   "grok-orchestrator": "Grok · 总控",
   "codex-architect": "Codex · 架构",
   "grok-architect": "Grok · 架构",
+  "codex-researcher": "Codex · 技术研究员",
+  "grok-researcher": "Grok · 技术研究员",
   "codex-reviewer": "Codex · 审查",
   "grok-reviewer": "Grok · 审查",
   "codex-tester": "Codex · 测试",

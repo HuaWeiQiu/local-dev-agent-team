@@ -1318,31 +1318,38 @@ async function dispatchDesktopApi(
 
   if (method === "GET" && url.pathname === "/api/desktop/cli-inventory") {
     const refresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
-    const { inventory, fromCache } = await getInventory({ refresh });
-    sendJson(response, 200, { inventory, fromCache });
+    const { inventory, fromCache, reason } = await getInventory({ refresh });
+    sendJson(response, 200, { inventory, fromCache, reason });
     return true;
   }
 
   if (method === "POST" && url.pathname === "/api/desktop/cli-inventory/scan") {
     requireDesktopMutation(request, serverOrigin, sessionOperator);
-    const { inventory, fromCache } = await getInventory({ refresh: true });
-    sendJson(response, 200, { inventory, fromCache });
+    const { inventory, fromCache, reason } = await getInventory({ refresh: true });
+    sendJson(response, 200, { inventory, fromCache, reason });
     return true;
   }
 
   if (method === "GET" && url.pathname === "/api/desktop/settings") {
     const settings = await loadDesktopSettings();
-    const { inventory, fromCache } = await getInventory({ refresh: false });
-    const roleDefaults = mergeRoleDefaults(settings, inventory);
+    const { inventory, fromCache, reason } = await getInventory({ refresh: false });
+    // Re-load after getInventory may have rewritten the cache fingerprint.
+    const latest = await loadDesktopSettings();
+    const roleDefaults = mergeRoleDefaults(latest, inventory);
     sendJson(response, 200, {
       settings: {
-        version: settings.version,
+        version: latest.version,
         defaults: { roles: roleDefaults },
-        ui: settings.ui,
-        inventoryCachedAt: settings.inventoryCachedAt ?? null,
+        ui: {
+          showCliPickerInRunLauncher: latest.ui.showCliPickerInRunLauncher,
+          autoDetectCliConfig: latest.ui.autoDetectCliConfig,
+          autoDetectOnFocus: latest.ui.autoDetectOnFocus,
+        },
+        inventoryCachedAt: latest.inventoryCachedAt ?? null,
       },
       inventory,
       fromCache,
+      reason,
       suggestedDefaults: suggestDefaultsFromInventory(inventory),
     });
     return true;
@@ -1356,6 +1363,7 @@ async function dispatchDesktopApi(
       version: 1,
       inventoryCache: current.inventoryCache,
       inventoryCachedAt: current.inventoryCachedAt,
+      inventorySourceFingerprint: current.inventorySourceFingerprint,
       defaults: body.defaults,
       ui: body.ui,
     });

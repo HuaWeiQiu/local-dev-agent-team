@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -26,6 +26,11 @@ import {
   classificationForCode,
   RoleProfileChainError,
 } from "../src/providers/failure.js";
+import {
+  inventorySourceFingerprint,
+  type CliInventory,
+} from "../src/desktop/cli-inventory.js";
+import { desktopSettingsPath } from "../src/desktop/settings.js";
 
 const candidateDefinition: NamedStrategy = {
   topology: { mode: "sequential" },
@@ -419,6 +424,86 @@ describe("automatic evolution controller", () => {
     await closeHarness(harness);
   });
 
+  it("threads global CLI role defaults into evaluation runs when enabled", async () => {
+    const desktopHome = await mkdtemp(path.join(tmpdir(), "agent-team-desktop-home-"));
+    const fingerprint = await inventorySourceFingerprint(desktopHome);
+    const inventoryCache: CliInventory = {
+      scannedAt: new Date().toISOString(),
+      home: desktopHome,
+      sourceFingerprint: fingerprint,
+      clis: [{
+        id: "grok",
+        installed: true,
+        runtimeSupported: true,
+        auth: { status: "present" },
+        configPaths: [],
+        models: [{ id: "grok-4", label: "Grok 4", reasoningOptions: ["low", "medium", "high"] }],
+        defaultModel: "grok-4",
+        defaultReasoning: "medium",
+      }],
+    };
+    await mkdir(path.join(desktopHome, ".agent-team"), { recursive: true });
+    await writeFile(desktopSettingsPath(desktopHome), JSON.stringify({
+      version: 1,
+      defaults: {
+        roles: {
+          worker: { cli: "grok", model: "grok-4", reasoning: "medium" },
+          reviewer: { cli: "grok", model: "grok-4", reasoning: "medium" },
+        },
+      },
+      inventoryCache,
+      inventoryCachedAt: new Date().toISOString(),
+      inventorySourceFingerprint: fingerprint,
+    }), "utf8");
+
+    const seenBindings: Array<Record<string, unknown> | undefined> = [];
+    const harness = await createHarness((strategy) => (strategy.startsWith("auto-eval-") ? 2 : 10), {
+      useGlobalCliDefaults: true,
+      runWorkflow: async (request, context) => {
+        const strategy = request.strategy ?? "balanced";
+        seenBindings.push(request.roleBindings as Record<string, unknown> | undefined);
+        const state = evaluationState(
+          context.runId,
+          "balanced",
+          strategy.startsWith("auto-eval-") ? 2 : 10,
+          true,
+          undefined,
+          request.goal,
+          context.purpose,
+        );
+        state.strategy.name = strategy;
+        return state;
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        desktopHome,
+        createSessionId: () => "global-defaults-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for global defaults coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "global-defaults-command");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.status).toBe("completed");
+    expect(seenBindings.length).toBeGreaterThan(0);
+    for (const bindings of seenBindings) {
+      expect(bindings).toMatchObject({
+        worker: { cli: "grok", model: "grok-4", reasoning: "medium" },
+        reviewer: { cli: "grok", model: "grok-4", reasoning: "medium" },
+      });
+    }
+    await closeHarness(harness);
+  });
+
   it("reports an active project conflict synchronously without poisoning the start command", async () => {
     const harness = await createHarness(() => 8);
     const controller = new AutomaticEvolutionController(
@@ -499,6 +584,7 @@ async function createHarness(
   limits: {
     maxCycles?: number;
     noImprovement?: number;
+    useGlobalCliDefaults?: boolean;
     runWorkflow?: NonNullable<SupervisorDependencies["runWorkflow"]>;
   } = {},
 ): Promise<AutomationHarness> {
@@ -506,6 +592,7 @@ async function createHarness(
   const config = createAutomaticConfig("automatic-evolution");
   config.evolution.automatic.maxCycles = limits.maxCycles ?? 3;
   config.evolution.automatic.maxConsecutiveNoImprovement = limits.noImprovement ?? 2;
+  config.evolution.automatic.useGlobalCliDefaults = limits.useGlobalCliDefaults ?? false;
   await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config), "utf8");
   await writeFile(path.join(root, ".gitignore"), ".agent-team/\n", "utf8");
   await writeFile(path.join(root, "README.md"), "automatic evolution fixture\n", "utf8");

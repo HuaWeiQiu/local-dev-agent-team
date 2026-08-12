@@ -27,7 +27,14 @@ interface RunLauncherProps {
   onSubmit(input: StartRunInput): Promise<void>;
 }
 
-const ROLE_ORDER = ["orchestrator", "architect", "worker", "reviewer", "tester"] as const;
+const ROLE_ORDER = [
+  "orchestrator",
+  "architect",
+  "researcher",
+  "worker",
+  "reviewer",
+  "tester",
+] as const;
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
   grok: "Grok",

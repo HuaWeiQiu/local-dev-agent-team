@@ -72,6 +72,28 @@ describe("configuration", () => {
     );
   });
 
+  it("allows projects without optional researcher role", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const config = createDefaultConfig("fixture");
+    delete (config.roles as Record<string, unknown>).researcher;
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+    const loaded = await loadConfig(root);
+    expect(loaded.config.roles.researcher).toBeUndefined();
+    expect(loaded.config.roles.architect).toBeTruthy();
+  });
+
+  it("rejects workspace-write profiles for optional researcher role", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const config = createDefaultConfig("fixture");
+    config.roles.researcher!.allowedProfiles.push("codex-worker");
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+    await expect(loadConfig(root)).rejects.toThrow(
+      "researcher cannot allow workspace-write profile 'codex-worker'",
+    );
+  });
+
   it("rejects inherited MCP tools on a read-only profile", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
     const config = createDefaultConfig("fixture");

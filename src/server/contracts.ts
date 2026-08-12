@@ -26,7 +26,13 @@ export const desktopSettingsUpdateSchema = z.object({
   }).default({ roles: {} }),
   ui: z.object({
     showCliPickerInRunLauncher: z.boolean().default(true),
-  }).default({ showCliPickerInRunLauncher: true }),
+    autoDetectCliConfig: z.boolean().default(true),
+    autoDetectOnFocus: z.boolean().default(true),
+  }).default({
+    showCliPickerInRunLauncher: true,
+    autoDetectCliConfig: true,
+    autoDetectOnFocus: true,
+  }),
 });
 
 export const strategyBlueprintRequestSchema = z.object({

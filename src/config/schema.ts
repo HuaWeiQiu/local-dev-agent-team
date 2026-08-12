@@ -1,11 +1,25 @@
 import { z } from "zod";
 
-export const workflowRoles = [
+/** Roles that every project config must define. */
+export const requiredWorkflowRoles = [
   "orchestrator",
   "architect",
   "worker",
   "reviewer",
   "tester",
+] as const;
+
+/**
+ * Optional roles that projects may define.
+ * - researcher（技术研究员）: read-only explore / technical research before planning.
+ *   When absent, explore falls back to architect.
+ */
+export const optionalWorkflowRoles = ["researcher"] as const;
+
+/** All known first-class workflow roles (required + optional). */
+export const workflowRoles = [
+  ...requiredWorkflowRoles,
+  ...optionalWorkflowRoles,
 ] as const;
 
 export const reasoningSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
@@ -177,6 +191,12 @@ export const automaticEvolutionSchema = z
       )
       .default("auto-evolved"),
     evaluationGoal: z.string().trim().max(20_000).default(""),
+    /**
+     * When true, evaluation runs inherit the machine-global desktop CLI defaults
+     * (~/.agent-team/desktop-settings.json) as roleBindings; strategy roleProfiles
+     * in project yaml still win for roles they explicitly map.
+     */
+    useGlobalCliDefaults: z.boolean().default(false),
   })
   .strict()
   .superRefine((automation, context) => {
@@ -200,6 +220,7 @@ export const evolutionConfigSchema = z.object({
     proposerRole: "orchestrator",
     targetStrategy: "auto-evolved",
     evaluationGoal: "",
+    useGlobalCliDefaults: false,
   }),
 });
 
@@ -294,6 +315,7 @@ export const configSchema = z
         proposerRole: "orchestrator",
         targetStrategy: "auto-evolved",
         evaluationGoal: "",
+        useGlobalCliDefaults: false,
       },
     }),
     quality: z.object({
@@ -333,7 +355,7 @@ export const configSchema = z
       });
     }
 
-    for (const roleName of workflowRoles) {
+    for (const roleName of requiredWorkflowRoles) {
       if (!config.roles[roleName]) {
         context.addIssue({
           code: "custom",
@@ -397,7 +419,14 @@ export const configSchema = z
         const exploreProfile = strategy.taskMorphology?.explore?.profile;
         if (exploreProfile) {
           const profile = config.profiles[exploreProfile];
-          const architectRole = config.roles.architect;
+          // Prefer researcher (技术研究员); allow architect allowlist for backward-compatible configs.
+          const exploreOwners = [
+            config.roles.researcher,
+            config.roles.architect,
+          ].filter(Boolean);
+          const allowedByOwner = exploreOwners.some((role) =>
+            role!.allowedProfiles.includes(exploreProfile),
+          );
           if (!profile) {
             context.addIssue({
               code: "custom",
@@ -410,11 +439,11 @@ export const configSchema = z
               path: ["strategies", "definitions", strategyName, "taskMorphology", "explore", "profile"],
               message: `Explore profile '${exploreProfile}' must be read-only`,
             });
-          } else if (architectRole && !architectRole.allowedProfiles.includes(exploreProfile)) {
+          } else if (exploreOwners.length > 0 && !allowedByOwner) {
             context.addIssue({
               code: "custom",
               path: ["strategies", "definitions", strategyName, "taskMorphology", "explore", "profile"],
-              message: `Explore profile '${exploreProfile}' is not allowed for architect`,
+              message: `Explore profile '${exploreProfile}' is not allowed for researcher (or architect)`,
             });
           }
         }

@@ -5759,6 +5759,105 @@ button.palette-item:disabled {
   font-size: var(--text-12);
 }
 
+.settings-panel-head {
+  flex-wrap: wrap;
+}
+
+.settings-panel-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-detect-hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--text-12);
+  line-height: 1.45;
+  opacity: 0.9;
+}
+
+.detect-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detect-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+  cursor: pointer;
+}
+
+.detect-option input {
+  margin-top: 3px;
+}
+
+.detect-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detect-option strong {
+  font-size: var(--text-14);
+}
+
+.detect-option small {
+  color: var(--muted);
+  font-size: var(--text-12);
+  line-height: 1.45;
+}
+
+.detect-manual-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-0));
+}
+
+.detect-manual-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detect-manual-row strong {
+  font-size: var(--text-14);
+}
+
+.detect-manual-row small {
+  color: var(--muted);
+  font-size: var(--text-12);
+  line-height: 1.45;
+}
+
+.settings-inline-detect {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (max-width: 720px) {
+  .detect-manual-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .cli-card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

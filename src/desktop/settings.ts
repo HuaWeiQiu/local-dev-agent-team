@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { CliId, CliInventory } from "./cli-inventory.js";
-import { scanCliInventory } from "./cli-inventory.js";
+import { inventorySourceFingerprint, scanCliInventory } from "./cli-inventory.js";
 
 const roleBindingSchema = z.object({
   cli: z.enum(["codex", "grok", "kimi", "claude"]),
@@ -15,12 +15,22 @@ const desktopSettingsSchema = z.object({
   version: z.literal(1),
   inventoryCache: z.unknown().optional(),
   inventoryCachedAt: z.string().optional(),
+  /** Last known fingerprint of watched CLI config files (mtime/size). */
+  inventorySourceFingerprint: z.string().optional(),
   defaults: z.object({
     roles: z.record(z.string(), roleBindingSchema).default({}),
   }).default({ roles: {} }),
   ui: z.object({
     showCliPickerInRunLauncher: z.boolean().default(true),
-  }).default({ showCliPickerInRunLauncher: true }),
+    /** When true, settings/launcher soft-check config fingerprints on focus & interval. */
+    autoDetectCliConfig: z.boolean().default(true),
+    /** When true, window focus/visibility triggers a soft inventory check. */
+    autoDetectOnFocus: z.boolean().default(true),
+  }).default({
+    showCliPickerInRunLauncher: true,
+    autoDetectCliConfig: true,
+    autoDetectOnFocus: true,
+  }),
 });
 
 export type RoleBinding = z.infer<typeof roleBindingSchema>;
@@ -29,10 +39,14 @@ export type DesktopSettings = z.infer<typeof desktopSettingsSchema>;
 export const WORKFLOW_ROLES = [
   "orchestrator",
   "architect",
+  "researcher",
   "worker",
   "reviewer",
   "tester",
 ] as const;
+
+/** Soft TTL when config files are unchanged. Fingerprint mismatch always wins. */
+export const DEFAULT_INVENTORY_MAX_AGE_MS = 15 * 60 * 1000;
 
 export function desktopSettingsPath(home = homedir()): string {
   return path.join(home, ".agent-team", "desktop-settings.json");
@@ -61,26 +75,50 @@ export async function saveDesktopSettings(
 
 export async function getInventory(
   options: { refresh?: boolean; maxAgeMs?: number; home?: string } = {},
-): Promise<{ inventory: CliInventory; fromCache: boolean }> {
+): Promise<{ inventory: CliInventory; fromCache: boolean; reason: "refresh" | "stale" | "fingerprint" | "miss" | "hit" }> {
   const home = options.home ?? homedir();
-  const maxAgeMs = options.maxAgeMs ?? 60 * 60 * 1000;
+  const maxAgeMs = options.maxAgeMs ?? DEFAULT_INVENTORY_MAX_AGE_MS;
   const settings = await loadDesktopSettings(home);
+  const currentFingerprint = await inventorySourceFingerprint(home);
+
   if (!options.refresh && settings.inventoryCache && settings.inventoryCachedAt) {
     const age = Date.now() - Date.parse(settings.inventoryCachedAt);
-    if (Number.isFinite(age) && age >= 0 && age < maxAgeMs) {
+    const cached = settings.inventoryCache as CliInventory;
+    const cachedFingerprint =
+      settings.inventorySourceFingerprint
+      ?? cached.sourceFingerprint
+      ?? "";
+    const fingerprintMatch = cachedFingerprint !== "" && cachedFingerprint === currentFingerprint;
+    const ageOk = Number.isFinite(age) && age >= 0 && age < maxAgeMs;
+    if (ageOk && fingerprintMatch) {
       return {
-        inventory: settings.inventoryCache as CliInventory,
+        inventory: {
+          ...cached,
+          sourceFingerprint: cachedFingerprint,
+        },
         fromCache: true,
+        reason: "hit",
       };
     }
+    // Fall through to rescan; fingerprint change is the primary invalidation signal.
   }
+
   const inventory = await scanCliInventory(home);
+  const reason = options.refresh
+    ? "refresh"
+    : !settings.inventoryCache
+      ? "miss"
+      : (settings.inventorySourceFingerprint ?? (settings.inventoryCache as CliInventory).sourceFingerprint) !== currentFingerprint
+        ? "fingerprint"
+        : "stale";
+
   await saveDesktopSettings({
     ...settings,
     inventoryCache: inventory,
     inventoryCachedAt: inventory.scannedAt,
+    inventorySourceFingerprint: inventory.sourceFingerprint ?? currentFingerprint,
   }, home);
-  return { inventory, fromCache: false };
+  return { inventory, fromCache: false, reason };
 }
 
 /** Build default role bindings from inventory when user has not set defaults. */
@@ -113,10 +151,62 @@ export function suggestDefaultsFromInventory(inventory: CliInventory): Record<st
   return {
     orchestrator: pick(["codex", "grok", "claude"]),
     architect: pick(["grok", "codex", "claude"]),
+    researcher: pick(["grok", "codex", "claude", "kimi"]),
     worker: pick(["grok", "codex", "claude"]),
     reviewer: pick(["grok", "codex", "claude"]),
     tester: pick(["grok", "codex", "claude"]),
   };
+}
+
+/**
+ * Drop or fix model / reasoning choices that no longer exist after a CLI config change.
+ * Does not rewrite persisted settings — callers decide whether to save.
+ */
+export function sanitizeRoleBindings(
+  roles: Record<string, RoleBinding>,
+  inventory: CliInventory,
+): { roles: Record<string, RoleBinding>; changed: boolean; notes: string[] } {
+  const byId = new Map(inventory.clis.map((cli) => [cli.id, cli]));
+  let changed = false;
+  const notes: string[] = [];
+  const next: Record<string, RoleBinding> = {};
+
+  for (const [role, binding] of Object.entries(roles)) {
+    const cli = byId.get(binding.cli);
+    if (!cli) {
+      next[role] = binding;
+      continue;
+    }
+
+    let model = binding.model;
+    let reasoning = binding.reasoning;
+
+    if (model && cli.models.length > 0 && !cli.models.some((item) => item.id === model)) {
+      const fallback = cli.defaultModel ?? cli.models[0]?.id;
+      if (fallback) {
+        notes.push(`${role}: 模型「${model}」已不在 ${cli.id} 列表，已改为「${fallback}」`);
+        model = fallback;
+        changed = true;
+      }
+    }
+
+    const modelInfo = cli.models.find((item) => item.id === (model ?? binding.model));
+    const reasoningOptions = modelInfo?.reasoningOptions ?? [];
+    if (reasoning && reasoningOptions.length > 0 && !reasoningOptions.includes(reasoning)) {
+      const fallback = cli.defaultReasoning ?? reasoningOptions[0] ?? "high";
+      notes.push(`${role}: 思考深度「${reasoning}」不可用，已改为「${fallback}」`);
+      reasoning = fallback;
+      changed = true;
+    }
+
+    next[role] = {
+      cli: binding.cli,
+      ...(model ? { model } : {}),
+      ...(reasoning ? { reasoning } : {}),
+    };
+  }
+
+  return { roles: next, changed, notes };
 }
 
 export function mergeRoleDefaults(
@@ -128,5 +218,5 @@ export function mergeRoleDefaults(
   for (const [role, binding] of Object.entries(settings.defaults.roles)) {
     merged[role] = binding;
   }
-  return merged;
+  return sanitizeRoleBindings(merged, inventory).roles;
 }

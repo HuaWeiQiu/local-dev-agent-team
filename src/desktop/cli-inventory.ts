@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { runProcess } from "../process/run.js";
@@ -42,6 +42,11 @@ export interface CliInventory {
   scannedAt: string;
   home: string;
   clis: CliProbeResult[];
+  /**
+   * Fingerprint of watched CLI config files (mtime + size).
+   * Used by settings cache to auto-invalidate when the user changes models / thinking / auth files.
+   */
+  sourceFingerprint?: string;
 }
 
 const CODEX_REASONING = ["low", "medium", "high", "xhigh", "max"];
@@ -49,17 +54,49 @@ const GROK_REASONING = ["low", "medium", "high"];
 const KIMI_REASONING = ["low", "medium", "high", "xhigh"];
 const CLAUDE_REASONING = ["low", "medium", "high"];
 
+/** Known config / auth paths that should trigger inventory refresh when they change. */
+export function watchedCliConfigPaths(home = homedir()): string[] {
+  return [
+    path.join(home, ".codex", "config.toml"),
+    path.join(home, ".codex", "auth.json"),
+    path.join(home, ".grok", "config.toml"),
+    path.join(home, ".kimi-code", "config.toml"),
+    path.join(home, ".claude", "settings.json"),
+  ];
+}
+
+/**
+ * Build a cheap fingerprint from watched config files.
+ * Does not read file contents (no secrets); only path + mtimeMs + size, or "missing".
+ */
+export async function inventorySourceFingerprint(home = homedir()): Promise<string> {
+  const parts: string[] = [];
+  for (const filePath of watchedCliConfigPaths(home)) {
+    try {
+      const info = await stat(filePath);
+      parts.push(`${filePath}:${Math.trunc(info.mtimeMs)}:${info.size}`);
+    } catch {
+      parts.push(`${filePath}:missing`);
+    }
+  }
+  return parts.join("|");
+}
+
 export async function scanCliInventory(home = homedir()): Promise<CliInventory> {
-  const clis = await Promise.all([
-    probeCodex(home),
-    probeGrok(home),
-    probeKimi(home),
-    probeClaude(home),
+  const [clis, sourceFingerprint] = await Promise.all([
+    Promise.all([
+      probeCodex(home),
+      probeGrok(home),
+      probeKimi(home),
+      probeClaude(home),
+    ]),
+    inventorySourceFingerprint(home),
   ]);
   return {
     scannedAt: new Date().toISOString(),
     home,
     clis,
+    sourceFingerprint,
   };
 }
 

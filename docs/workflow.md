@@ -4,18 +4,20 @@
 
 1. The controller turns the goal into a structured intake: scope, constraints,
    risks, and acceptance criteria.
-2. The architect produces a validated dependency DAG with owned paths,
+2. Optional explore stage: the **researcher** (技术研究员) performs read-only
+   technical research and injects a structured summary into planning.
+3. The architect produces a validated dependency DAG with owned paths,
    acceptance commands, and optional worker profile choices.
-3. The scheduler selects a dependency-ready wave whose paths do not overlap.
-4. Each worker receives its own branch and Git worktree from the current
+4. The scheduler selects a dependency-ready wave whose paths do not overlap.
+5. Each worker receives its own branch and Git worktree from the current
    integration commit.
-5. Project checks run as deterministic processes. Reviewer and tester agents
+6. Project checks run as deterministic processes. Reviewer and tester agents
    independently inspect the staged diff and recorded results.
-6. Failed gates produce bounded feedback for the same worker. Escalation or an
+7. Failed gates produce bounded feedback for the same worker. Escalation or an
    exhausted retry budget blocks the run.
-7. Passing task commits merge into the integration branch in stable task-ID
+8. Passing task commits merge into the integration branch in stable task-ID
    order. Final project checks and the supervising controller run once more.
-8. A passing run creates a durable final approval request and stops at
+9. A passing run creates a durable final approval request and stops at
    `awaiting-human`. Approval moves it to `ready-to-merge`; publication, CI
    observation, repair, and completion remain separate explicit commands.
 
