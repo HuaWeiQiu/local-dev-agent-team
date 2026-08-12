@@ -188,7 +188,7 @@ Git worktree 仍是代码合并与证据单位；容器只是运行隔离层，�
 | `0.2` | 评测实验室 | 多任务 suite、隐藏任务、重复评测、版本化证据、成本与稳定性指标、Champion/Challenger |
 | `0.3` | 经验记忆 | 事实/候选/已验证三层存储；检索、衰减、重验证、删除和审计；无未经验证的自动注入 |
 | `0.4` | 工具和沙箱 | MCP 工具注册与授权、统一审计；Docker 后端；网络和秘密默认隔离 |
-| `0.5` | 编排与模板 | 条件、有界循环、handoff、子团队、role pool；至少六个可运行团队模板和向导 |
+| `0.5` | 编排与模板 | 条件、有界循环、handoff、子团队、role pool；至少六个可运行团队模板和向导；**多 Profile 灵活性**（用户模板 / 本机 CLI 探测建议 / init 套用，见 [multi-profile-flexibility.zh-CN.md](multi-profile-flexibility.zh-CN.md)，当前未实现） |
 | `1.0` | 远程团队平台 | HTTPS、身份与租户隔离、远程执行节点、A2A、触发器、升级与恢复手册 |
 
 每个阶段都应继续使用“实现 -> 自动测试 -> 独立复审 -> 最小修复 -> 重测 -> 文档与提交”的
@@ -202,6 +202,7 @@ Git worktree 仍是代码合并与证据单位；容器只是运行隔离层，�
 - 不让 Agent 修改自己的评分函数、隐藏评测或预算上限。
 - 不把单次评测胜出宣传成长期能力提升。
 - 不为获得某个项目的 UI 或 memory 功能而同时运行两套编排状态机。
+- 不默认根据本机已安装的 Codex / Claude / Kimi / Grok **静默改写**各项目 `agent-team.yaml`（多 Profile 应以项目配置为权威；用户模板与探测仅为可选增强，见 [multi-profile-flexibility.zh-CN.md](multi-profile-flexibility.zh-CN.md)）。
 
 ## 8. 第一批实施任务
 
