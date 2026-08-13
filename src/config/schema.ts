@@ -1,4 +1,10 @@
 import { z } from "zod";
+import { commandSchema } from "../domain/commands.js";
+
+// commandSchema 单源在 domain 叶子包（domain/commands.ts），此处再导出以保持
+// config 包的对外 API 稳定（evaluation/domain、quality 等仍从这里导入）。
+export { commandSchema } from "../domain/commands.js";
+export type { CommandSpec } from "../domain/commands.js";
 
 /** Roles that every project config must define. */
 export const requiredWorkflowRoles = [
@@ -37,11 +43,6 @@ export const codexProviderSchema = z.object({
   wireApi: z.literal("responses").default("responses"),
   requiresOpenAIAuth: z.boolean().default(true),
   supportsWebSockets: z.boolean().default(false),
-});
-
-export const commandSchema = z.object({
-  command: z.string().min(1),
-  args: z.array(z.string()).default([]),
 });
 
 export const profileSchema = z.object({
@@ -570,7 +571,6 @@ export type NamedStrategy = z.infer<typeof namedStrategySchema>;
 export type Reasoning = z.infer<typeof reasoningSchema>;
 export type Permission = z.infer<typeof permissionSchema>;
 export type ExternalToolsPolicy = z.infer<typeof externalToolsSchema>;
-export type CommandSpec = z.infer<typeof commandSchema>;
 export type ApprovalGate = z.infer<typeof approvalGateSchema>;
 export type StrategyTopologyMode = z.infer<typeof strategyTopologyModeSchema>;
 export type StrategyTopology = z.infer<typeof strategyTopologySchema>;

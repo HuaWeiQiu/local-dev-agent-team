@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { commandSchema } from "../config/schema.js";
+import { commandSchema } from "./commands.js";
 
 export const goalIntakeSchema = z.object({
   goalSummary: z.string().min(1),

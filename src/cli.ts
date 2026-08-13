@@ -32,6 +32,15 @@ program
   .description("Local-first orchestration for software-development agents")
   .version("0.1.0");
 
+/**
+ * CLI assembly point: explicitly enable full validation (adapter conformance +
+ * evaluation suite parsing) on every config load. The config package itself
+ * only produces a LoadedConfig; cross-package validation is opted into here.
+ */
+function loadValidatedConfig(configPath?: string): Promise<LoadedConfig> {
+  return loadConfig(process.cwd(), configPath, { validation: "full" });
+}
+
 program
   .command("init")
   .description("Create an agent-team.yaml in a project")
@@ -67,7 +76,7 @@ program
       process.stdout.write(`Valid: ${workspace.path} (${workspace.projects.length} projects)\n`);
       return;
     }
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     process.stdout.write(`Valid: ${loaded.path}\n`);
   });
 
@@ -77,7 +86,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const output = Object.entries(loaded.config.roles).map(([role, policy]) => ({
       role,
       defaultProfile: policy.defaultProfile,
@@ -101,7 +110,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const manifest = buildInteropManifest(loaded.config);
     if (options.json) {
       process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -134,7 +143,7 @@ program
       probeModels: boolean;
       json: boolean;
     }) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const checks = await runDoctor(loaded, {
         probeModel: options.probeModels,
         ...(options.profile ? { profileName: options.profile } : {}),
@@ -170,7 +179,7 @@ program
       schema?: string;
       config?: string;
     }) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const resolved = resolveProfile(loaded.config, options.role, options.profile);
       assertDiagnosticProfilePermission(
         options.role,
@@ -221,7 +230,7 @@ program
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
       try {
         const started = runtime.supervisor.start({
           goal: options.goal,
@@ -261,7 +270,7 @@ program
           await loadWorkspace(process.cwd(), options.workspace),
           { host: options.host, port, sessionToken },
         )
-      : await startControlService(await loadConfig(process.cwd(), options.config), {
+      : await startControlService(await loadValidatedConfig(options.config), {
           host: options.host,
           port,
           sessionToken,
@@ -309,7 +318,7 @@ program
       options.expectedRevision,
       "--expected-revision",
     );
-    const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+    const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
     try {
       const promptContent = options.promptFile
         ? await readFile(path.resolve(options.promptFile))
@@ -356,7 +365,7 @@ program
       if (options.decision !== "approved" && options.decision !== "rejected") {
         throw new Error("--decision must be 'approved' or 'rejected'");
       }
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
       try {
         const result = await runtime.supervisor.respondApproval(runId, {
           requestId: options.request,
@@ -387,7 +396,7 @@ program
       runId: string,
       options: { actor: string; reason: string; config?: string },
     ) => {
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
       try {
         await runtime.supervisor.resume(runId, {
           actor: options.actor,
@@ -409,7 +418,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (runId: string | undefined, options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const runsDirectory = path.resolve(
       loaded.root,
       loaded.config.project.stateDirectory,
@@ -474,7 +483,7 @@ program
         tail?: string;
       },
     ) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const databasePath = path.join(
         path.resolve(loaded.root, loaded.config.project.stateDirectory),
         "control.sqlite",
@@ -604,7 +613,7 @@ async function loadRunContext(configPath?: string): Promise<{
   loaded: LoadedConfig;
   store: RunStateStore;
 }> {
-  const loaded = await loadConfig(process.cwd(), configPath);
+  const loaded = await loadValidatedConfig(configPath);
   const runsDirectory = path.resolve(
     loaded.root,
     loaded.config.project.stateDirectory,

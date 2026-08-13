@@ -197,10 +197,10 @@ an explicitly started, hard-bounded strategy loop on top of those records.
 | Domain | `src/evolution/domain.ts` | Schemas, trust context from role config, digests, evidence binding, lifecycle, pure guarded promote/reject/rollback |
 | Catalog | `src/evolution/catalog.ts` | Pure synchronous in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit, trust-validating restore |
 | Persistence | `src/evolution/persistence.ts` | Repository-local versioned document, exact revision witness, ordered audit replay, full pre-write document validation/comparison, symlink-safe paths, atomic file commit, fail-closed reopen |
-| Application | `src/evolution/application.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
+| Application | `src/evolution/application.ts` (coordinator), `application-journal.ts`, `application-preview.ts`, `application-target.ts`, `application-schemas.ts`, `application-shared.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
 | Control service | `src/server/evolution-service.ts`, `src/server/http.ts` | Session-bound proposal ingress, fixed server preflight, exact preview material, project mutation latch, shutdown drain, sanitized HTTP projection |
 | Workbench | `web/src/components/EvolutionWorkbench.tsx`, `web/src/api.ts` | React/Tauri state-driven proposal UI, exact preview confirmation, stable per-intent idempotency keys, stale-preview cleanup, responsive navigation |
-| Automatic strategy loop | `src/evolution/automation.ts`, `src/server/evolution-automation.ts` | Read-only candidate proposer, isolated fixed-goal evaluation runs, deterministic scoring, bounded stopping, automatic strategy apply, runtime-default recovery |
+| Automatic strategy loop | `src/evolution/automation.ts`, `src/evolution/automatic-controller.ts`, thin shell `src/server/evolution-automation.ts` | Read-only candidate proposer, isolated fixed-goal evaluation runs, deterministic scoring, bounded stopping, automatic strategy apply, runtime-default recovery, persisted last-evaluation record |
 
 Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human
