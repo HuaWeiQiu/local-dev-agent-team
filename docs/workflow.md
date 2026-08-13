@@ -85,8 +85,11 @@ outside the workstation.
 An interrupted run can resume only from a matching checkpoint. A partial wave
 is abandoned as evidence and its incomplete tasks restart on new branches.
 Cancelled or blocked runs can still be retried as new linked runs. Neither path
-claims that a killed CLI process continued in place. Each resume restarts the
-full execution timeout budget; the deadline is not prorated across attempts.
+claims that a killed CLI process continued in place. Execution time and
+per-task rework attempts accumulate across resume segments: the timeout is
+prorated against the recorded elapsed time (an exhausted budget blocks the
+resume), and a task that already consumed its rework limit stays blocked
+instead of being granted a fresh budget.
 
 Approval requests and responses are persisted in the run snapshot and emitted
 to the ordered event ledger. A response records decision, actor, reason, and

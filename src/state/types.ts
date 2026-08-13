@@ -181,6 +181,13 @@ export interface RunState {
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  /**
+   * Wall-clock execution time consumed by run/resume segments, accumulated
+   * across pauses and interruptions. Resume prorates the strategy's
+   * execution timeout against this figure instead of restarting the full
+   * budget; a run whose accumulated time reached the limit is blocked.
+   */
+  executionElapsedMs?: number;
   usage?: RunUsage;
   pullRequestUrl?: string;
   pullRequestNumber?: number;

@@ -212,6 +212,7 @@ export class LocalWorkflowRunner {
       history: [{ at: now, status: "created", message: "Run created" }],
     };
     await store.save(state);
+    const segmentStartedAt = Date.now();
     const deadline = createExecutionDeadline(strategy.executionTimeoutSeconds, options.signal);
     const workflowSignal = deadline.signal;
     const budget = new RunBudgetTracker(state, store);
@@ -417,16 +418,27 @@ export class LocalWorkflowRunner {
       return state;
     } finally {
       deadline.dispose();
+      await this.recordExecutionSegment(state, store, segmentStartedAt);
     }
   }
 
   async resume(state: RunState, options: WorkflowResumeOptions): Promise<RunState> {
     const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
     const git = new GitManager(this.loaded.root, this.worktreesDirectory);
-    const deadline = createExecutionDeadline(
-      state.strategy.executionTimeoutSeconds ?? legacyExecutionTimeoutSeconds,
-      options.signal,
-    );
+    // The execution timeout is prorated across segments: accumulated wall
+    // clock time from earlier runs/resumes is deducted, and an exhausted
+    // budget blocks the resume instead of restarting the full window.
+    const executionTimeoutSeconds =
+      state.strategy.executionTimeoutSeconds ?? legacyExecutionTimeoutSeconds;
+    const elapsedMs = state.executionElapsedMs ?? 0;
+    const remainingSeconds = Math.max(0, executionTimeoutSeconds - elapsedMs / 1_000);
+    if (remainingSeconds <= 0) {
+      state.error = `Execution time budget of ${executionTimeoutSeconds}s exhausted across resumed segments`;
+      await store.transition(state, "blocked", state.error);
+      return state;
+    }
+    const segmentStartedAt = Date.now();
+    const deadline = createExecutionDeadline(remainingSeconds, options.signal);
     const workflowSignal = deadline.signal;
     const effectiveProfileOverrides = {
       ...state.strategy.roleProfiles,
@@ -473,6 +485,7 @@ export class LocalWorkflowRunner {
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
       await store.save(state);
+      await this.recordExecutionSegment(state, store, segmentStartedAt);
       return state;
     }
     try {
@@ -504,6 +517,7 @@ export class LocalWorkflowRunner {
       return state;
     } finally {
       deadline.dispose();
+      await this.recordExecutionSegment(state, store, segmentStartedAt);
     }
   }
 
@@ -1266,12 +1280,24 @@ export class LocalWorkflowRunner {
     if (reused === "rework") {
       feedback = taskState.error ?? "Previous review requested changes";
     }
+    // Attempt counts persist across resume segments: a task interrupted at
+    // attempt N continues at N+1, and a task that already exhausted its
+    // rework limit stays blocked instead of being granted a fresh budget.
+    const priorAttempts = Math.max(taskState.attempts, 0);
+    const startAttempt =
+      reused === "rework"
+        ? Math.min(priorAttempts + 1, maxAttempts)
+        : priorAttempts > 0
+          ? priorAttempts + 1
+          : 1;
+    if (startAttempt > maxAttempts) {
+      taskState.status = "blocked";
+      taskState.error = `Rework attempts exhausted: ${priorAttempts} attempt(s) against limit ${state.strategy.maxReworkAttempts}`;
+      await store.save(state);
+      return;
+    }
 
-    for (
-      let attempt = reused === "rework" ? Math.min(taskState.attempts + 1, maxAttempts) : 1;
-      attempt <= maxAttempts;
-      attempt += 1
-    ) {
+    for (let attempt = startAttempt; attempt <= maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
@@ -1641,6 +1667,28 @@ export class LocalWorkflowRunner {
   }
 
   /**
+   * Accumulate the wall-clock time of one run/resume segment so the strategy
+   * execution timeout is prorated instead of restarting on every resume.
+   * Accounting must never mask the segment outcome, so failures are ignored.
+   */
+  private async recordExecutionSegment(
+    state: RunState,
+    store: RunStateStore,
+    startedAt: number,
+  ): Promise<void> {
+    const elapsed = Date.now() - startedAt;
+    if (elapsed <= 0) {
+      return;
+    }
+    state.executionElapsedMs = (state.executionElapsedMs ?? 0) + elapsed;
+    try {
+      await store.save(state);
+    } catch {
+      // Best-effort accounting.
+    }
+  }
+
+  /**
    * Best-effort removal of a terminal run's task worktrees and task branches
    * (including `-resume-N` variants). Failures only produce warnings. The
    * integration worktree/branch is never touched: publication and pending
@@ -1969,7 +2017,8 @@ async function pathExists(target: string): Promise<boolean> {
 }
 
 function resetIncompleteTask(task: TaskRunState): void {  task.status = "pending";
-  task.attempts = 0;
+  // attempts intentionally preserved: the rework limit must count across
+  // resume segments, otherwise repeated pause/resume bypasses it.
   delete task.branch;
   delete task.worktree;
   delete task.commit;

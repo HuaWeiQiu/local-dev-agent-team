@@ -1198,6 +1198,99 @@ describe("local workflow", () => {
     expect(settled.history.some((entry) => entry.status === "interrupted")).toBe(true);
   }, 30_000);
 
+  it("blocks a resume whose accumulated execution time budget is exhausted", async () => {
+    const { root, loaded } = await createFixture("time-budget", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Create alpha and beta files", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    // The first segment accumulated wall-clock time.
+    expect(state.executionElapsedMs).toBeGreaterThan(0);
+
+    // Later segments simulate having consumed the whole budget already.
+    state.executionElapsedMs = state.strategy.executionTimeoutSeconds * 1_000;
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const refused = await runner.resume(state, {
+      mode: "approval",
+      actor: "operator",
+      reason: "Budget was exhausted in earlier segments",
+    });
+    expect(refused.status).toBe("blocked");
+    expect(refused.error).toContain("Execution time budget");
+  }, 30_000);
+
+  it("continues a task's attempt count across resume and blocks when the limit is reached", async () => {
+    const { root, loaded } = await createFixture("rework-limit", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 1,
+        maxReworkAttempts: 1,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    let workerCalls = 0;
+    class FailingWorkerService extends FakeAgentService {
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        workerCalls += 1;
+        throw new Error("worker always fails");
+      }
+    }
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FailingWorkerService(),
+    });
+    const state = await runner.run({ goal: "Create alpha and beta files", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+    // Alpha already burned both allowed attempts (1 initial + 1 rework) in an
+    // earlier segment; beta is untouched. The run itself was interrupted.
+    state.status = "interrupted";
+    state.tasks[0]!.attempts = 2;
+    state.tasks[0]!.status = "working";
+    state.tasks[0]!.branch = `agent-team/${branchSegment(state.id)}/alpha`;
+    state.tasks[0]!.worktree = path.join(
+      root,
+      ".agent-team",
+      "worktrees",
+      state.id,
+      "alpha",
+    );
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Simulate an interrupted run whose rework limit was consumed",
+    });
+
+    const alpha = recovered.tasks.find((task) => task.task.id === "alpha")!;
+    expect(alpha.status).toBe("blocked");
+    expect(alpha.attempts).toBe(2);
+    expect(alpha.error).toContain("Rework attempts exhausted");
+    const beta = recovered.tasks.find((task) => task.task.id === "beta")!;
+    // Beta starts fresh: attempt 1 fails, attempt 2 fails, then it blocks.
+    expect(beta.status).toBe("blocked");
+    expect(beta.attempts).toBe(2);
+    // Alpha got no extra worker call despite the resume: workerCalls = beta's 2.
+    expect(workerCalls).toBe(2);
+  }, 30_000);
+
   it("still refuses recovery when the post-checkpoint HEAD contains foreign commits", async () => {
     const { root, loaded } = await createFixture("foreign-head", (config) => {
       config.strategies!.definitions.guarded = {

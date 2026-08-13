@@ -130,6 +130,7 @@ export const runStateSchema = z.looseObject({
   approvals: z.array(nested<ApprovalRequest>()).optional(),
   recoveries: z.array(nested<RecoveryRecord>()).optional(),
   resumeCount: z.number().optional(),
+  executionElapsedMs: z.number().optional(),
   usage: runUsageSchema.optional(),
   pullRequestUrl: z.string().optional(),
   pullRequestNumber: z.number().optional(),
