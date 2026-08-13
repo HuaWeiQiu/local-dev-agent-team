@@ -2006,7 +2006,7 @@ function findTaskState(state: RunState, taskId: string): TaskRunState {
 export function isPlaceholderVerdict(verdict: string, summary: string): boolean {
   const text = `${verdict} ${summary}`.toLowerCase();
   return (
-    /review in progress|placeholder will be replaced|still reading|before issuing|before judging|reading the full (review|tester) prompt|independently inspecting|inspecting .+ before issuing|正在检查|再给结论|正在阅读|正在读|先读完|尚未给出/.test(
+    /review in progress|placeholder will be replaced|still reading|before issuing|before judging|before any .+ verdict|need the full prompt|independent inspection|reading the full (review|tester) prompt|independently inspecting|inspecting .+ before issuing|正在检查|再给结论|正在阅读|正在读|先读完|尚未给出/.test(
       text,
     )
   );

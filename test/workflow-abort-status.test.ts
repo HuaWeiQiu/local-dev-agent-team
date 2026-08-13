@@ -67,6 +67,26 @@ describe("placeholder specialist verdicts", () => {
     expect(isPlaceholderVerdict("request_changes", "正在阅读完整审查提示词")).toBe(true);
   });
 
+  it("treats need-full-prompt escalates with empty findings as placeholders", () => {
+    // Real-world phrasing from a grok reviewer that returned a final escalate
+    // while still declaring intent to inspect, with zero findings.
+    const summary =
+      "Need the full prompt and independent inspection of the staged diff before any approve/request_changes verdict.";
+    expect(isPlaceholderVerdict("escalate", summary)).toBe(true);
+    expect(
+      isHardSpecialistEscalation(
+        { verdict: "escalate", summary, findings: [] },
+        { verdict: "approve", summary: "Covered", missingTests: [] },
+      ),
+    ).toBe(false);
+    expect(
+      shouldTrustQualityOverReview(
+        { verdict: "escalate", summary, findings: [] },
+        { verdict: "approve", summary: "Covered", missingTests: [] },
+      ),
+    ).toBe(true);
+  });
+
   it("lets a docs task pass when quality already passed and specialists escalate", () => {
     expect(
       shouldAcceptDocsDespiteEscalate(
