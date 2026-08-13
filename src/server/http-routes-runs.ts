@@ -29,6 +29,7 @@ import {
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
 import { ExperienceService } from "../experience/service.js";
+import { GithubActionError } from "../github/errors.js";
 import {
   loadLayeredRoleDisplay,
   resolveLayeredRoleBindings,
@@ -511,6 +512,19 @@ export const runRoutes: ProjectApiRoute[] = [
   },
   {
     method: "POST",
+    pattern: "/runs/:runId/actions/publish",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      try {
+        const result = await context.supervisor.publish(runId);
+        sendJson(response, 202, result);
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
     pattern: "/runs/:runId/actions/retry",
     handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
       const runId = decodePathSegment(params.runId!);
@@ -703,6 +717,11 @@ const runParameterMessage =
 function runActionHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   const message = error instanceof Error ? error.message : String(error);
+  // GitHub publication failures carry actionable prompts that the UI must
+  // surface verbatim (not logged in, missing git identity, token scopes...).
+  if (error instanceof GithubActionError) {
+    return new HttpError(422, error.message, error.code);
+  }
   if (error instanceof ProjectMutationConflictError) {
     return new HttpError(409, message, error.code);
   }

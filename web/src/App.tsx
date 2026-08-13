@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
@@ -271,6 +271,16 @@ export default function App() {
               <History size={16} /><span>从检查点继续</span>
             </button>
           ) : null}
+          {workspaceMode === "monitor" && run && ["ready-to-merge", "ci-failed"].includes(run.status) && (
+            <button
+              className="button primary"
+              onClick={() => void actions.publish()}
+              disabled={busy}
+              title="推送集成分支并创建 Pull Request"
+            >
+              <GitPullRequest size={16} /><span>发布</span>
+            </button>
+          )}
           {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
             <button
               className="button secondary"

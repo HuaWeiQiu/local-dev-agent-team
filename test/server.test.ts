@@ -123,6 +123,74 @@ describe("control HTTP server", () => {
     events.close();
   });
 
+  it("rejects publishing when GitHub integration is disabled", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    const config = createDefaultConfig("publish-fixture");
+    config.github!.enabled = false;
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const run = fakeState("publish-run", "Publish me");
+    run.status = "ready-to-merge";
+    await states.save(run);
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    const response = await fetch(
+      `${listening.url}/api/runs/publish-run/actions/publish`,
+      { method: "POST" },
+    );
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as { error?: string; code?: string };
+    expect(body.code).toBe("GITHUB_ACTION_FAILED");
+    expect(body.error).toContain("已关闭 GitHub 集成");
+
+    // With GitHub enabled but no final approval, the prompt must say so.
+    const enabledConfig = createDefaultConfig("publish-fixture-2");
+    const unapprovedRun = fakeState("unapproved-run", "Publish me");
+    unapprovedRun.status = "ready-to-merge";
+    await new RunStateStore(path.join(root, ".agent-team", "runs"), events).save(unapprovedRun);
+    const enabledRoot = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(path.join(enabledRoot, "agent-team.yaml"), stringifyYaml(enabledConfig));
+    const enabledLoaded = await loadConfig(enabledRoot);
+    const enabledEvents = new SqliteEventStore(
+      path.join(enabledRoot, ".agent-team", "events.sqlite"),
+    );
+    const enabledStates = new RunStateStore(
+      path.join(enabledRoot, ".agent-team", "runs"),
+      enabledEvents,
+    );
+    await enabledStates.save(unapprovedRun);
+    const enabledSupervisor = new RunSupervisor(enabledLoaded, enabledEvents);
+    const enabledListening = await listenControlServer(enabledLoaded, enabledSupervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+    const second = await fetch(
+      `${enabledListening.url}/api/runs/unapproved-run/actions/publish`,
+      { method: "POST" },
+    );
+    expect(second.status).toBe(422);
+    const secondBody = (await second.json()) as { error?: string };
+    expect(secondBody.error).toContain("requires final human approval");
+    await enabledSupervisor.close();
+    await enabledListening.close();
+    enabledEvents.close();
+
+    await supervisor.close();
+    await listening.close();
+    events.close();
+  });
+
   it("validates pause requests and rejects unknown runs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
     await writeFile(

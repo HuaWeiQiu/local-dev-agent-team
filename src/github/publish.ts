@@ -4,6 +4,11 @@ import type { LoadedConfig } from "../config/load.js";
 import { GitManager } from "../git/manager.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
+import {
+  classifyGithubFailure,
+  githubActionError,
+  GithubActionError,
+} from "./errors.js";
 import { GithubClient, summarizeChecks, type GithubCheck } from "./client.js";
 
 export class GithubPublisher {
@@ -15,16 +20,25 @@ export class GithubPublisher {
 
   async publish(state: RunState): Promise<RunState> {
     if (!this.loaded.config.github.enabled) {
-      throw new Error("GitHub integration is disabled in agent-team.yaml");
+      throw githubActionError(
+        "github-disabled",
+        "GitHub integration is disabled in agent-team.yaml",
+      );
     }
     const finalApproval = state.approvals
       ?.filter((approval) => approval.gate === "final")
       .at(-1);
     if (finalApproval?.status !== "approved") {
-      throw new Error(`Run '${state.id}' requires final human approval before publication`);
+      throw githubActionError(
+        "other",
+        `Run '${state.id}' requires final human approval before publication`,
+      );
     }
     if (!["waiting-ci", "ci-failed", "ready-to-merge"].includes(state.status)) {
-      throw new Error(`Run '${state.id}' cannot be published from status '${state.status}'`);
+      throw githubActionError(
+        "other",
+        `Run '${state.id}' cannot be published from status '${state.status}'`,
+      );
     }
     await this.store.transition(state, "publishing", "Publishing integration branch to GitHub");
     try {
@@ -70,9 +84,11 @@ export class GithubPublisher {
     } catch (error) {
       // Never leave a run stuck in "publishing": fall back to the
       // re-publishable state, mirroring the repair loop's ci-failed fallback.
-      state.error = error instanceof Error ? error.message : String(error);
+      const classified: GithubActionError =
+        error instanceof GithubActionError ? error : classifyGithubFailure(error);
+      state.error = classified.message;
       await this.store.transition(state, "ready-to-merge", `Publication failed: ${state.error}`);
-      throw error;
+      throw classified;
     }
   }
 

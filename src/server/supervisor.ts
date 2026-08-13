@@ -10,6 +10,9 @@ import type {
 } from "../evidence/types.js";
 import { SqliteEventStore } from "../events/store.js";
 import {
+  GithubPublisher,
+} from "../github/publish.js";
+import {
   materializeRoleBindings,
   roleBindingsFromRunState,
 } from "../desktop/role-bindings.js";
@@ -597,6 +600,28 @@ export class RunSupervisor {
    */
   async deleteRun(runId: string): Promise<RunCleanupResult> {
     return await this.retention.deleteRun(runId);
+  }
+
+  /**
+   * Publish a final-approved run: push the integration branch and create or
+   * find its pull request. GitHub-related failures are classified into
+   * distinguishable prompts (see github/errors.ts).
+   */
+  async publish(runId: string): Promise<{
+    runId: string;
+    status: string;
+    pullRequestUrl?: string;
+  }> {
+    return await this.serializeAction(runId, async () => {
+      const state = await this.requireRun(runId);
+      const publisher = new GithubPublisher(this.loaded, this.stateStore);
+      const published = await publisher.publish(state);
+      return {
+        runId,
+        status: published.status,
+        ...(published.pullRequestUrl ? { pullRequestUrl: published.pullRequestUrl } : {}),
+      };
+    });
   }
 
   async reconcileInterruptedRuns(): Promise<number> {

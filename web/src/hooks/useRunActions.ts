@@ -9,6 +9,7 @@ import {
   pauseRun,
   preflightStrategyBlueprint,
   previewRunCleanup,
+  publishRun,
   respondApproval,
   resumeRun,
   retryRun,
@@ -181,6 +182,25 @@ export function useRunActions({
     }
   };
 
+  const publish = async () => {
+    if (!scope || !selectedRunId) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const result = await publishRun(scope, selectedRunId);
+      await Promise.all([refreshRuns(), refreshRun(selectedRunId)]);
+      if (result.pullRequestUrl) {
+        setError(undefined);
+        window.open(result.pullRequestUrl, "_blank", "noopener");
+      }
+    } catch (requestError) {
+      // GitHub 相关失败会原样显示可操作的提示（未登录/身份缺失/token 权限等）。
+      setError(runActionErrorMessage(requestError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitRunAction = async (input: {
     decision?: "approved" | "rejected";
     actor: string;
@@ -281,6 +301,7 @@ export function useRunActions({
     create,
     cancel,
     retry,
+    publish,
     submitRunAction,
     handleDeleteRun,
     openCleanup,

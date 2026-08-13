@@ -212,6 +212,16 @@ export async function pauseRun(
   });
 }
 
+export async function publishRun(
+  scope: ProjectScope,
+  runId: string,
+): Promise<{ runId: string; status: string; pullRequestUrl?: string }> {
+  return await request<{ runId: string; status: string; pullRequestUrl?: string }>(
+    `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/publish`,
+    { method: "POST" },
+  );
+}
+
 export async function retryRun(scope: ProjectScope, runId: string): Promise<string> {
   const response = await request<{ runId: string }>(
     `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/retry`,
