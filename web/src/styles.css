@@ -383,6 +383,12 @@ code {
   white-space: nowrap;
 }
 
+.pr-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .pr-link {
   display: inline-flex;
   align-items: center;
@@ -390,15 +396,34 @@ code {
   padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
+  background: transparent;
   color: var(--accent);
   font-size: var(--text-12);
   font-weight: 600;
+  font-family: inherit;
   text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .pr-link:hover {
   background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.pr-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.pr-open:hover {
+  color: var(--accent);
   border-color: var(--accent);
 }
 

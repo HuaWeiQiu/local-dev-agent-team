@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, Check, CircleDot, Copy, ExternalLink, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
@@ -25,6 +25,7 @@ const retryableStatuses = new Set(["blocked", "cancelled", "interrupted"]);
 export default function App() {
   const [workspace, setWorkspace] = useState<WorkspaceInfo>();
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const [prCopied, setPrCopied] = useState(false);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [launcherStrategy, setLauncherStrategy] = useState<string>();
   const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">("monitor");
@@ -242,16 +243,29 @@ export default function App() {
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
               {run.pullRequestUrl && (
-                <a
-                  className="pr-link"
-                  href={run.pullRequestUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="查看 Pull Request"
-                >
-                  <GitPullRequest size={13} />
-                  PR #{run.pullRequestNumber ?? ""}
-                </a>
+                <span className="pr-group">
+                  <button
+                    className="pr-link"
+                    type="button"
+                    onClick={() => void handleCopyPullRequest(run.pullRequestUrl!, setPrCopied)}
+                    title="点击复制 PR 链接"
+                    aria-label="复制 PR 链接"
+                  >
+                    <GitPullRequest size={13} />
+                    PR #{run.pullRequestNumber ?? ""}
+                    {prCopied ? <Check size={12} /> : <Copy size={12} />}
+                  </button>
+                  <a
+                    className="pr-open"
+                    href={run.pullRequestUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="在新标签页打开 PR"
+                    aria-label="在新标签页打开 PR"
+                  >
+                    <ExternalLink size={13} />
+                  </a>
+                </span>
               )}
             </>
           ) : <span>本地 Agent 控制台</span>}
@@ -444,4 +458,40 @@ export default function App() {
 
 function MobileTab({ active, onClick, icon, label }: { active: boolean; onClick(): void; icon: React.ReactNode; label: string }) {
   return <button className={active ? "is-active" : ""} onClick={onClick}>{icon}<span>{label}</span></button>;
+}
+
+/** 复制 PR 链接到剪贴板：优先 Clipboard API，失败时退回 execCommand。 */
+async function handleCopyPullRequest(
+  url: string,
+  setCopied: (copied: boolean) => void,
+): Promise<void> {
+  const ok = await copyTextToClipboard(url);
+  setCopied(ok);
+  if (ok) {
+    window.setTimeout(() => setCopied(false), 1_600);
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path (non-secure contexts, some webviews).
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
 }
