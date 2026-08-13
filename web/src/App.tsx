@@ -241,6 +241,18 @@ export default function App() {
             <>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
+              {run.pullRequestUrl && (
+                <a
+                  className="pr-link"
+                  href={run.pullRequestUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="查看 Pull Request"
+                >
+                  <GitPullRequest size={13} />
+                  PR #{run.pullRequestNumber ?? ""}
+                </a>
+              )}
             </>
           ) : <span>本地 Agent 控制台</span>}
         </div>

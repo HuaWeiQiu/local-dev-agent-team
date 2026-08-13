@@ -335,6 +335,8 @@ export interface RunState {
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
   usage?: {
     agentInvocations: number;
     agentDurationMs: number;

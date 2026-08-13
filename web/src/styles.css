@@ -383,6 +383,25 @@ code {
   white-space: nowrap;
 }
 
+.pr-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: var(--text-12);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.pr-link:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .topbar-run {
   display: flex;
   min-width: 0;
