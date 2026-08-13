@@ -55,8 +55,9 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # The control-service test drives the built dist/cli.js end to end.
-      - run: pnpm build:server
+      # The control-service test drives dist/cli.js and the Tauri build
+      # script needs the bundled Node binary in src-tauri/binaries.
+      - run: pnpm desktop:prepare
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
