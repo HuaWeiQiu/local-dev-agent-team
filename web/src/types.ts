@@ -228,6 +228,7 @@ export interface RunSummary {
   updatedAt: string;
   taskCounts: Record<TaskStatus, number>;
   error?: string;
+  parentRunId?: string;
 }
 
 export interface Task {
@@ -495,6 +496,15 @@ export interface DesktopSettingsResponse {
   suggestedDefaults: Record<string, RoleBindingInput>;
 }
 
+export interface ProjectRoleSettingsView {
+  projectId: string;
+  projectName: string;
+  roles: Record<string, RoleBindingInput>;
+  global: Record<string, RoleBindingInput>;
+  effective: Record<string, RoleBindingInput>;
+  sources: Record<string, "global" | "project">;
+}
+
 export interface UsageDetail {
   agentInvocations: number;
   agentDurationMs: number;
@@ -683,7 +693,7 @@ export interface AutomaticEvolutionSnapshot {
   stopReason: string | null;
   error: string | null;
   failureCode: string | null;
-  roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
+  roleBindingSource: "global-cli-defaults" | "layered-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
   lastEvaluation: {

@@ -99,7 +99,7 @@ export interface AutomaticEvolutionSnapshot {
   /** Stable provider failure code when status is paused for infrastructure issues. */
   failureCode: string | null;
   /** Which role-binding source evaluation runs use: desktop global CLI defaults or project yaml. */
-  roleBindingSource: "global-cli-defaults" | "project-yaml" | null;
+  roleBindingSource: "global-cli-defaults" | "layered-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
   /** Most recent completed evaluation suite identity; null until an evaluation finishes. */

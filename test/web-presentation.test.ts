@@ -15,6 +15,7 @@ import {
   runActionErrorMessage,
   runListSubtitle,
   runStatusLabel,
+  shouldPreserveRoleEdits,
   statusTone,
   strategyDisplayName,
   summarizeGoal,
@@ -152,11 +153,30 @@ describe("web workbench projections", () => {
     expect(strategyDisplayName("my-custom-blueprint")).toBe("my-custom-blueprint");
   });
 
+  it("preserves unsaved role edits only on quiet keep-visible auto refresh", () => {
+    // 脏 + 自动刷新（轮询 / focus 的 quiet+keepVisible load）→ 保留编辑
+    expect(shouldPreserveRoleEdits(true, { quiet: true, keepVisible: true })).toBe(true);
+    // 未脏 → 照常覆盖
+    expect(shouldPreserveRoleEdits(false, { quiet: true, keepVisible: true })).toBe(false);
+    // 首次加载 / 手动触发路径不保留：无 opts、只 quiet、只 keepVisible、keepVisible=false
+    expect(shouldPreserveRoleEdits(true, undefined)).toBe(false);
+    expect(shouldPreserveRoleEdits(true, {})).toBe(false);
+    expect(shouldPreserveRoleEdits(true, { quiet: true })).toBe(false);
+    expect(shouldPreserveRoleEdits(true, { keepVisible: true })).toBe(false);
+    expect(shouldPreserveRoleEdits(true, { quiet: true, keepVisible: false })).toBe(false);
+  });
+
   it("maps run action errors to actionable Chinese guidance", () => {
     expect(runActionErrorMessage(new ApiError(404, "Run not found"))).toContain("刷新列表后重试");
     expect(runActionErrorMessage(new ApiError(401, "Desktop session is required", "SESSION_REQUIRED"))).toContain("控制会话");
     expect(runActionErrorMessage(new ApiError(403, "Forbidden", "ORIGIN_DENIED"))).toContain("来源");
     expect(runActionErrorMessage(new ApiError(409, "Run is not active in this control service"))).toContain("刷新列表后重试");
+    expect(
+      runActionErrorMessage(new ApiError(409, "Run 'r1' still has an active child run", "RUN_STATE_CONFLICT")),
+    ).toContain("后续运行");
+    expect(
+      runActionErrorMessage(new ApiError(409, "Run 'r1' is still referenced as a parent of another retained run")),
+    ).toContain("后续运行");
     expect(runActionErrorMessage(new Error("Run 'r1' cannot be retried from status 'completed'"))).toContain("不允许重试");
     expect(runActionErrorMessage(new Error("Run 'r1' has no recoverable task-boundary checkpoint"))).toContain("重试为新运行");
     expect(runActionErrorMessage(new Error("Approval request 'a1' expired at 2026-01-01"))).toContain("审批已过期");

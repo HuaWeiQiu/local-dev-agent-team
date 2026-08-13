@@ -76,7 +76,8 @@ test("creates, preflights, applies and rolls back an evolution candidate", async
   const promptContent = `你好，执行者 👋\n请保持变更可验证。\n${testInfo.project.name}\n`;
   await promptDialog.getByLabel("提示词内容").fill(promptContent);
   await promptDialog.getByRole("button", { name: "创建候选" }).click();
-  await expect(workbench.getByRole("heading", { name: "worker.md", exact: true })).toBeVisible();
+  // 当前 UI 用角色中文名作候选标题（proposalTitle → agentRoleLabel("worker") = 「执行」）
+  await expect(workbench.getByRole("heading", { name: "执行", exact: true })).toBeVisible();
   await workbench.getByRole("button", { name: "开始预检" }).click();
   await expect(workbench.getByRole("button", { name: "查看并应用" })).toBeVisible();
   await workbench.getByRole("button", { name: "查看并应用" }).click();

@@ -194,6 +194,75 @@ describe("cli inventory and role bindings", () => {
   });
 });
 
+describe("layered role settings", () => {
+  it("lets a project role override the matching global role and inherit the rest", async () => {
+    const { mergeLayeredRoleBindings, roleBindingSources, resolveLayeredRoleBindings, saveProjectRoleSettings } =
+      await import("../src/desktop/project-role-settings.js");
+    const { saveDesktopSettings } = await import("../src/desktop/settings.js");
+
+    const global = {
+      orchestrator: { cli: "grok" as const, model: "grok-4.6", reasoning: "high" },
+      architect: { cli: "grok" as const, model: "grok-4.6", reasoning: "high" },
+      worker: { cli: "grok" as const, model: "grok-4.6", reasoning: "high" },
+    };
+    const project = {
+      architect: { cli: "codex" as const, model: "gpt-5.6-sol", reasoning: "high" },
+    };
+    const merged = mergeLayeredRoleBindings(global, project);
+    expect(merged.orchestrator).toEqual(global.orchestrator);
+    expect(merged.architect).toEqual(project.architect);
+    expect(merged.worker).toEqual(global.worker);
+    expect(roleBindingSources(global, project)).toEqual({
+      orchestrator: "global",
+      architect: "project",
+      worker: "global",
+    });
+
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-layered-home-"));
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-layered-root-"));
+    await saveDesktopSettings({
+      version: 1,
+      defaults: { roles: global },
+      ui: {
+        showCliPickerInRunLauncher: true,
+        autoDetectCliConfig: true,
+        autoDetectOnFocus: true,
+      },
+    }, home);
+    await saveProjectRoleSettings(root, ".agent-team", { version: 1, roles: project });
+
+    const resolved = await resolveLayeredRoleBindings({
+      root,
+      stateDirectory: ".agent-team",
+      knownRoles: ["orchestrator", "architect", "worker"],
+      home,
+    });
+    expect(resolved).toEqual(merged);
+
+    const explicit = await resolveLayeredRoleBindings({
+      root,
+      stateDirectory: ".agent-team",
+      requestBindings: { worker: { cli: "kimi", model: "kimi-code", reasoning: "high" } },
+      knownRoles: ["orchestrator", "architect", "worker"],
+      home,
+    });
+    expect(explicit).toEqual({ worker: { cli: "kimi", model: "kimi-code", reasoning: "high" } });
+  });
+
+  it("does not invent bindings when neither global nor project saved a role", async () => {
+    const { resolveLayeredRoleBindings } = await import("../src/desktop/project-role-settings.js");
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-empty-home-"));
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-empty-root-"));
+    const resolved = await resolveLayeredRoleBindings({
+      root,
+      stateDirectory: ".agent-team",
+      knownRoles: ["orchestrator", "worker"],
+      home,
+    });
+    expect(resolved).toBeUndefined();
+  });
+});
+
 describe("kimi stream-json parser", () => {
   it("extracts assistant JSON content from stream-json lines", async () => {
     const { parseKimiStreamJson } = await import("../src/adapters/shared.js");

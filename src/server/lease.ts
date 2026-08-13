@@ -1,10 +1,7 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { processIsRunning, processStartToken } from "../process/alive.js";
 
 export interface ControlLease {
   release(): Promise<void>;
@@ -78,7 +75,7 @@ export async function acquireControlLease(stateRoot: string): Promise<ControlLea
 }
 
 async function ownerIsAlive(owner: LockOwner): Promise<boolean> {
-  if (!processIsAlive(owner.pid)) {
+  if (!(await processIsRunning(owner.pid))) {
     return false;
   }
   // 旧格式锁没有启动时间，或 ps 不可用：降级为仅按 PID 存活性判定。
@@ -91,16 +88,6 @@ async function ownerIsAlive(owner: LockOwner): Promise<boolean> {
   }
   // PID 存活但启动时间与记录不符：PID 已被无关进程复用，锁是残留的。
   return started === owner.started;
-}
-
-async function processStartToken(pid: number): Promise<string | undefined> {
-  try {
-    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)]);
-    const started = stdout.trim();
-    return started.length > 0 ? started : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function reclaimBackoffMs(attempt: number): number {
@@ -150,15 +137,6 @@ async function readLock(lockPath: string): Promise<LockOwner | undefined> {
     throw new Error(
       `Control lease '${lockPath}' is incomplete or invalid; refusing to take ownership`,
     );
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return isCode(error, "EPERM");
   }
 }
 

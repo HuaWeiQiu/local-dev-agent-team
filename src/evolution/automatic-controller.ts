@@ -47,10 +47,9 @@ import {
 } from "../evaluation/resolve.js";
 import {
   getInventory,
-  loadDesktopSettings,
-  mergeRoleDefaults,
   type RoleBinding,
 } from "../desktop/settings.js";
+import { resolveLayeredRoleBindings } from "../desktop/project-role-settings.js";
 
 export type AutomaticEvolutionErrorCode =
   | "AUTOMATION_DISABLED"
@@ -617,8 +616,8 @@ export class AutomaticEvolutionController {
     );
     const suiteDigest = computeSuiteDigest(suite);
     const pairings: Array<{ taskId: string; state: RunState }> = [];
-    const allBindings = await this.resolveGlobalRoleBindings();
-    // Strategy roleProfiles 是被评测变量，必须赢过全局 CLI 默认；全局默认只补未映射的角色。
+    const allBindings = await this.resolveLayeredRoleBindingsForEvaluation();
+    // Strategy roleProfiles 是被评测变量，必须赢过全局 / 项目 CLI 默认；默认只补未映射的角色。
     const strategyRoleProfiles = resolveStrategy(this.loaded.config, strategy).roleProfiles;
     const roleBindings = allBindings
       ? Object.fromEntries(
@@ -627,7 +626,7 @@ export class AutomaticEvolutionController {
       : undefined;
     const effectiveBindings =
       roleBindings && Object.keys(roleBindings).length > 0 ? roleBindings : undefined;
-    this.state.roleBindingSource = effectiveBindings ? "global-cli-defaults" : "project-yaml";
+    this.state.roleBindingSource = effectiveBindings ? "layered-cli-defaults" : "project-yaml";
     this.touch();
 
     for (const task of suite.tasks) {
@@ -723,27 +722,28 @@ export class AutomaticEvolutionController {
   }
 
   /**
-   * 本机全局 CLI 默认（~/.agent-team/desktop-settings.json）→ roleBindings。
+   * 本机全局默认 + 项目覆盖（缺角色回落全局）→ roleBindings。
    * 仅当 evolution.automatic.useGlobalCliDefaults = true 时启用。
    * 返回值约定：undefined 未解析过 / null 不可用（退回项目 yaml 默认）。
    */
-  private async resolveGlobalRoleBindings(): Promise<Record<string, RoleBinding> | undefined> {
+  private async resolveLayeredRoleBindingsForEvaluation(): Promise<Record<string, RoleBinding> | undefined> {
     if (!this.config.useGlobalCliDefaults) return undefined;
     if (this.globalRoleBindings !== undefined) {
       return this.globalRoleBindings ?? undefined;
     }
     try {
-      const settings = await loadDesktopSettings(this.desktopHome);
       const { inventory } = await getInventory({
         refresh: false,
         ...(this.desktopHome ? { home: this.desktopHome } : {}),
       });
-      const merged = mergeRoleDefaults(settings, inventory);
-      // 只保留本项目存在的角色
-      const filtered = Object.fromEntries(
-        Object.entries(merged).filter(([role]) => role in this.loaded.config.roles),
-      );
-      this.globalRoleBindings = Object.keys(filtered).length > 0 ? filtered : null;
+      const merged = await resolveLayeredRoleBindings({
+        root: this.loaded.root,
+        stateDirectory: this.loaded.config.project.stateDirectory,
+        knownRoles: Object.keys(this.loaded.config.roles),
+        ...(this.desktopHome ? { home: this.desktopHome } : {}),
+        inventory,
+      });
+      this.globalRoleBindings = merged && Object.keys(merged).length > 0 ? merged : null;
     } catch {
       this.globalRoleBindings = null;
     }

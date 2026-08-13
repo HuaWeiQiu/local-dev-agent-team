@@ -8,6 +8,7 @@ import type {
   PublicConfig,
   DesktopSettingsResponse,
   DesktopSettingsView,
+  ProjectRoleSettingsView,
   EvidenceFilePreview,
   EvolutionPreviewResponse,
   EvolutionProposal,
@@ -86,6 +87,20 @@ export async function saveDesktopSettings(input: {
 
 export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {
   return await request<PublicConfig>(`${apiRoot(scope)}/config`);
+}
+
+export async function getProjectRoleSettings(scope: ProjectScope): Promise<ProjectRoleSettingsView> {
+  return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`);
+}
+
+export async function saveProjectRoleSettings(
+  scope: ProjectScope,
+  roles: Record<string, RoleBindingInput | null>,
+): Promise<ProjectRoleSettingsView> {
+  return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`, {
+    method: "PUT",
+    body: JSON.stringify({ roles }),
+  });
 }
 
 export async function getRuns(scope: ProjectScope): Promise<RunSummary[]> {

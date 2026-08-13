@@ -236,6 +236,7 @@ export class ProfiledAgentService implements RoleAgentService {
               adapterName: candidate.profile.adapter,
               profile: candidate.profile,
               cwd: options.cwd ?? this.root,
+              runId: options.runId,
               prompt,
               artifactDirectory,
               ...(outputSchema ? { outputSchema } : {}),

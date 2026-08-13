@@ -274,12 +274,13 @@ automatically. `maxCycles` is 1-10 and is also the hard ceiling exposed by the U
 `maxConsecutiveNoImprovement` cannot exceed it. `evaluationRepeats` is 1-2 and the
 worst repeated score wins the aggregate. `minimumScoreDelta` is 0-1000.
 
-`useGlobalCliDefaults` (default `false`) threads the desktop global CLI defaults
-(`~/.agent-team/desktop-settings.json`) into evaluation runs as ephemeral
-profiles for roles the evaluated strategy does not map itself. Strategy
-`roleProfiles` always win over global defaults, and roles missing from the
-project config are ignored; when no usable global default exists, evaluation
-falls back to the project yaml profile chains.
+`useGlobalCliDefaults` (default `false`) threads the merged desktop defaults
+(`~/.agent-team/desktop-settings.json` plus `<repo>/.agent-team/role-settings.json`)
+into evaluation runs as ephemeral profiles for roles the evaluated strategy
+does not map itself. Project overrides win per role; missing project roles
+inherit the global binding. Strategy `roleProfiles` always win over those
+defaults, and roles missing from the project config are ignored; when no usable
+saved default exists, evaluation falls back to the project yaml profile chains.
 
 The proposer role/profile must resolve to a read-only profile. `baselineStrategy`
 must name a configured strategy. `targetStrategy` must be a valid custom strategy
@@ -374,10 +375,10 @@ Run action endpoints (`cancel`, `retry`, `respond-approval`, `resume`,
 | 409 | `RUN_STATE_CONFLICT` (or the mutation-conflict code) | Status/lifecycle conflict: wrong source status, stale approval, expired preview, concurrent project mutation, evolution automation ownership |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; the detail is logged server-side and the body stays generic |
 
-Plan approval is forced whenever any planned task defines
-`acceptanceCommands`, regardless of strategy gates, so agent-produced commands
-never execute without human review of the introducing plan. See
-[workflow.md](./workflow.md) for the approval lifecycle.
+Plan approval is required exactly when the selected strategy gates `plan`;
+`acceptanceCommands` do not force an extra stop (the deterministic quality
+gates already override any LLM verdict). See [workflow.md](./workflow.md) for
+the approval lifecycle.
 
 ## GitHub
 

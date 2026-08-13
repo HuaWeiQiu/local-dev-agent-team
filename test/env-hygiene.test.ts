@@ -7,6 +7,7 @@ import { KimiAdapter } from "../src/adapters/kimi.js";
 import { adapterRoleWarning } from "../src/adapters/conformance.js";
 import type { AgentProfile } from "../src/config/schema.js";
 import { loadDesktopSettings, saveDesktopSettings } from "../src/desktop/settings.js";
+import { loadProjectRoleSettings, saveProjectRoleSettings } from "../src/desktop/project-role-settings.js";
 import {
   envSecretValues,
   redactEnvSecrets,
@@ -233,5 +234,19 @@ describe("desktop settings file permissions", () => {
 
     expect(settings.version).toBe(1);
     expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("writes project role-settings.json with mode 0600", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-project-roles-"));
+
+    await saveProjectRoleSettings(root, ".agent-team", {
+      version: 1,
+      roles: { worker: { cli: "grok", model: "grok-4.6", reasoning: "high" } },
+    });
+    const filePath = path.join(root, ".agent-team", "role-settings.json");
+    expect((await stat(filePath)).mode & 0o777).toBe(0o600);
+
+    const loaded = await loadProjectRoleSettings(root, ".agent-team");
+    expect(loaded.roles.worker?.cli).toBe("grok");
   });
 });

@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import { minimatch } from "minimatch";
+import { pathMatchesOwnedPath } from "../domain/owned-paths.js";
 import { runProcess, type ProcessResult } from "../process/run.js";
 
 export interface WorktreeInfo {
@@ -96,6 +96,11 @@ export class GitManager {
     await this.git(["worktree", "remove", "--force", directory], this.root, 120_000, undefined, signal);
   }
 
+  /** Drop stale worktree registrations whose directories are already gone. */
+  async pruneWorktrees(signal?: AbortSignal): Promise<void> {
+    await this.git(["worktree", "prune"], this.root, 120_000, undefined, signal);
+  }
+
   async listBranches(pattern: string, signal?: AbortSignal): Promise<string[]> {
     const result = await this.git(
       ["branch", "--list", "--format=%(refname:short)", pattern],
@@ -142,7 +147,7 @@ export class GitManager {
 
   assertOwnedPaths(files: string[], patterns: string[]): void {
     const violations = files.filter(
-      (file) => !patterns.some((pattern) => minimatch(file, pattern, { dot: true })),
+      (file) => !patterns.some((pattern) => pathMatchesOwnedPath(file, pattern)),
     );
     if (violations.length > 0) {
       throw new Error(`Changed files outside task ownership: ${violations.join(", ")}`);
@@ -426,6 +431,36 @@ export class GitManager {
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+  }
+
+  /**
+   * Map of commit hash -> subject for first-parent commits after
+   * `fromExclusive` up to `toRef`. Used to recognize the deterministic merge
+   * commits (`merge: <taskId> <title>`) after a crash between a task merge
+   * and its state save.
+   */
+  async commitSubjects(
+    directory: string,
+    fromExclusive: string,
+    toRef: string,
+    signal?: AbortSignal,
+  ): Promise<Map<string, string>> {
+    const result = await this.git(
+      ["log", "--first-parent", "--format=%H%x00%s", `${fromExclusive}..${toRef}`],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    const subjects = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+      const separator = line.indexOf("\0");
+      if (separator <= 0) {
+        continue;
+      }
+      subjects.set(line.slice(0, separator), line.slice(separator + 1));
+    }
+    return subjects;
   }
 
   async isClean(directory: string, signal?: AbortSignal): Promise<boolean> {

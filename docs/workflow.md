@@ -92,11 +92,11 @@ Approval requests and responses are persisted in the run snapshot and emitted
 to the ordered event ledger. A response records decision, actor, reason, and
 time. The actor is a local audit assertion, not authenticated identity.
 
-Plan approval is required whenever the strategy gates `plan`, and also —
-regardless of strategy — whenever any planned task defines
-`acceptanceCommands`, so agent-produced commands never execute without human
-review of the plan that introduced them. The approval summary states which
-tasks triggered this forced gate.
+Plan approval is required exactly when the selected strategy gates `plan`.
+`acceptanceCommands` do not add a forced plan stop: they are deterministic
+commands from the operator's project configuration, and the quality gates
+already refuse to trust any LLM verdict that contradicts their exit codes.
+The approval summary states which tasks the gate covers.
 
 ## Publication Lifecycle
 

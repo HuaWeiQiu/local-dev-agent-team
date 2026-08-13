@@ -21,6 +21,7 @@ import type { LoadedConfig } from "./config/load.js";
 import { startControlService } from "./server/start.js";
 import { resolveSessionToken } from "./server/session-token.js";
 import { startProjectRuntime } from "./server/project-runtime.js";
+import { resolveLayeredRoleBindings } from "./desktop/project-role-settings.js";
 import { loadWorkspace } from "./workspace/load.js";
 import { startWorkspaceControlService } from "./workspace/service.js";
 import { assertDiagnosticProfilePermission } from "./security/permissions.js";
@@ -230,12 +231,21 @@ program
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
-      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
+      const loaded = await loadValidatedConfig(options.config);
+      const runtime = await startProjectRuntime(loaded);
       try {
+        const roleBindings = Object.keys(profileOverrides).length > 0
+          ? undefined
+          : await resolveLayeredRoleBindings({
+              root: loaded.root,
+              stateDirectory: loaded.config.project.stateDirectory,
+              knownRoles: Object.keys(loaded.config.roles),
+            });
         const started = runtime.supervisor.start({
           goal: options.goal,
           profileOverrides,
           ...(options.strategy ? { strategy: options.strategy } : {}),
+          ...(roleBindings ? { roleBindings } : {}),
         });
         const state = await runtime.supervisor.wait(started.runId);
         if (!state) throw new Error(`Run '${started.runId}' stopped without a final state`);

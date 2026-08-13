@@ -38,6 +38,54 @@ describe("project control lease", () => {
     await expect(readFile(lockPath, "utf8")).resolves.toBe(contents);
   });
 
+  it("reclaims a lock whose owner PID is a zombie", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const { spawn } = await import("node:child_process");
+    const holder = spawn(
+      "sh",
+      ["-c", `${JSON.stringify(process.execPath)} -e 'process.exit(0)' & echo $!; exec sleep 30`],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const pid = await new Promise<number>((resolve, reject) => {
+      let stdout = "";
+      holder.stdout?.on("data", (chunk: Buffer | string) => {
+        stdout += String(chunk);
+        const line = stdout.trim();
+        if (/^\d+$/.test(line)) {
+          resolve(Number(line));
+        }
+      });
+      holder.once("error", reject);
+      holder.once("exit", (code) => {
+        reject(new Error(`zombie holder exited ${code}`));
+      });
+    });
+    try {
+      const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-zombie-"));
+      const lockPath = path.join(root, "control.lock");
+      await writeFile(
+        lockPath,
+        `${JSON.stringify({
+          pid,
+          token: "00000000-0000-4000-8000-000000000000",
+          started: "Wed Jan  1 00:00:00 2020",
+        })}\n`,
+        "utf8",
+      );
+      const lease = await acquireControlLease(root);
+      const owner = JSON.parse(await readFile(lockPath, "utf8")) as {
+        pid: number;
+        token: string;
+      };
+      expect(owner.pid).toBe(process.pid);
+      await lease.release();
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
   it("reclaims a well-formed stale owner whose PID is dead", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-stale-"));
     const lockPath = path.join(root, "control.lock");

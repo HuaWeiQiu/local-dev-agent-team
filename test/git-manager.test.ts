@@ -21,6 +21,32 @@ describe("GitManager ownership", () => {
     );
   });
 
+  it("treats a directory prefix as the whole tree without matching a sibling prefix", () => {
+    const manager = new GitManager("/tmp", "/tmp/.agent-team/worktrees");
+    const hostFiles = [
+      "apps/photoshop-uxp/src/host/photoshop-glow-host.mjs",
+      "apps/photoshop-uxp/src/host/source-pixel-hash.mjs",
+      "apps/photoshop-uxp/tests/photoshop-glow-host.test.mjs",
+      "apps/photoshop-uxp/tests/source-pixel-hash.test.mjs",
+    ];
+    expect(() =>
+      manager.assertOwnedPaths(hostFiles, [
+        "apps/photoshop-uxp/src/host/",
+        "apps/photoshop-uxp/tests/",
+      ]),
+    ).not.toThrow();
+    expect(() => manager.assertOwnedPaths(["src/apiv2/x.ts"], ["src/api"])).toThrow(
+      "outside task ownership",
+    );
+    expect(() => manager.assertOwnedPaths(["README.md.bak"], ["README.md"])).toThrow(
+      "outside task ownership",
+    );
+    expect(() => manager.assertOwnedPaths(["PROJECT_STATE.md"], ["PROJECT_STATE.md"])).not.toThrow();
+    expect(() =>
+      manager.assertOwnedPaths(["docs/runbooks/windows-host.md"], ["docs/runbooks/"]),
+    ).not.toThrow();
+  });
+
   it("returns a bounded diff between validated commits", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-git-diff-"));
     await git(root, ["init", "-b", "main"]);
@@ -359,6 +385,25 @@ describe("GitManager exact tracked-file commit", () => {
       expect(await readFile(path.join(root, "README.md"), "utf8")).toBe("readme\n");
     },
   );
+});
+
+describe("GitManager commit subjects and worktree pruning", () => {
+  it("maps first-parent commits to their subjects and prunes stale worktrees", async () => {
+    const { root, manager } = await createRepo();
+    const base = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+    await writeFile(path.join(root, "README.md"), "readme two\n", "utf8");
+    await git(root, ["commit", "-am", "second subject line"]);
+    const head = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+
+    const subjects = await manager.commitSubjects(root, base, "HEAD");
+    expect(subjects.get(head)).toBe("second subject line");
+    expect(subjects.size).toBe(1);
+
+    // Prune is a safe no-op when there are no stale registrations.
+    await manager.pruneWorktrees();
+    const listed = (await git(root, ["worktree", "list"])).stdout.trim();
+    expect(listed.split("\n")).toHaveLength(1);
+  });
 });
 
 async function createRepo(): Promise<{ root: string; manager: GitManager }> {

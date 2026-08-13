@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { Dirent } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import { buildRunEvidence, type LocalEvidenceStore } from "../evidence/local.js";
@@ -14,6 +16,7 @@ import type { SqliteEventStore } from "../events/store.js";
 import { GitManager } from "../git/manager.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState, RunUsage } from "../state/types.js";
+import { branchSegment } from "../workflow/id.js";
 
 export interface RunUsageDetail {
   agentInvocations: number;
@@ -206,6 +209,7 @@ export class RunRetention {
           throw error;
         }
         await this.stateStore.removeQuarantined(quarantined);
+        await this.removeRunGitArtifacts(candidate.id);
         deletedRunIds.push(candidate.id);
         reclaimedBytes += candidate.bytes;
       }
@@ -247,12 +251,121 @@ export class RunRetention {
         throw error;
       }
       await this.stateStore.removeQuarantined(quarantined);
+      await this.removeRunGitArtifacts(runId);
       return { deletedRunIds: [runId], reclaimedBytes: bytes };
     });
   }
 
   clearPreviews(): void {
     this.cleanupPreviews.clear();
+  }
+
+  /**
+   * Startup sweep for worktree directories whose run id no longer exists in
+   * the state store — e.g. runs deleted before worktree cleanup existed, or
+   * runs whose state was quarantined by an interrupted cleanup. Only
+   * directories matching the generated run-id shape are touched, and known
+   * run ids are always preserved.
+   */
+  async sweepUnknownRunArtifacts(): Promise<{
+    removedDirectories: string[];
+    removedBranches: number;
+  }> {
+    const states = await this.stateStore.list();
+    const known = new Set(states.map((state) => state.id));
+    const worktreesRoot = path.resolve(
+      this.loaded.root,
+      this.loaded.config.project.stateDirectory,
+      "worktrees",
+    );
+    let entries: string[] = [];
+    try {
+      entries = await readdir(worktreesRoot);
+    } catch {
+      return { removedDirectories: [], removedBranches: 0 };
+    }
+    const removedDirectories: string[] = [];
+    let removedBranches = 0;
+    for (const entry of entries) {
+      if (!runIdShape.test(entry) || known.has(entry)) {
+        continue;
+      }
+      removedBranches += await this.removeRunGitArtifacts(entry);
+      removedDirectories.push(entry);
+    }
+    return { removedDirectories, removedBranches };
+  }
+
+  /**
+   * Remove every Git worktree (task variants and integration) and local
+   * branch a deleted run left behind. Best-effort: the run record is already
+   * terminal and deleted, so failures only warn — they never resurrect or
+   * block the deletion.
+   */
+  private async removeRunGitArtifacts(runId: string): Promise<number> {
+    const worktreesRoot = path.resolve(
+      this.loaded.root,
+      this.loaded.config.project.stateDirectory,
+      "worktrees",
+    );
+    const runWorktrees = path.join(worktreesRoot, runId);
+    let entries: Dirent[] = [];
+    try {
+      entries = await readdir(runWorktrees, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    // Git operations are best-effort: the project may not be a Git
+    // repository at all (test fixtures, non-git project roots), and a
+    // deleted run must not resurrect just because cleanup could not run.
+    let branchesRemoved = 0;
+    try {
+      const git = new GitManager(this.loaded.root, worktreesRoot);
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const worktree = path.join(runWorktrees, entry.name);
+        try {
+          await git.removeWorktree(worktree);
+        } catch (error) {
+          console.warn(
+            `[agent-team] failed to remove worktree '${worktree}': ${errorMessage(error)}`,
+          );
+        }
+      }
+      const prefix = `agent-team/${branchSegment(runId)}/`;
+      const branches = await git.listBranches(`${prefix}*`);
+      for (const branch of branches) {
+        try {
+          await git.deleteBranch(branch);
+          branchesRemoved += 1;
+        } catch (error) {
+          console.warn(
+            `[agent-team] failed to delete branch '${branch}': ${errorMessage(error)}`,
+          );
+        }
+      }
+      try {
+        await git.pruneWorktrees();
+      } catch (error) {
+        console.warn(
+          `[agent-team] failed to prune stale worktree registrations: ${errorMessage(error)}`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[agent-team] skipped Git cleanup for run '${runId}': ${errorMessage(error)}`,
+      );
+    }
+    try {
+      await rm(runWorktrees, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(
+        `[agent-team] failed to remove run directory '${runWorktrees}': ${errorMessage(error)}`,
+      );
+    }
+    return branchesRemoved;
   }
 
   private async integrationDiff(state: RunState): Promise<IntegrationDiffEvidence> {
@@ -327,4 +440,14 @@ function usageDetail(usage: RunUsage | undefined): RunUsageDetail {
     reportedCostUsd: usage?.reportedCostUsd ?? 0,
     costReported: usage?.reportedCostUsd !== undefined,
   };
+}
+
+/**
+ * Generated run ids look like `20260812T081838Z-<goal-slug>-<6 hex chars>`
+ * (see createRunId). The sweep only ever touches directories with this shape.
+ */
+const runIdShape = /^\d{8}T\d{6}Z-[a-z0-9-]+-[a-f0-9]{6}$/;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

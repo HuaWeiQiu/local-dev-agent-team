@@ -94,6 +94,7 @@ const activeStatuses = new Set([
   "created",
   "orchestrating",
   "architecting",
+  "exploring",
   "planned",
   "implementing",
   "reviewing-testing",
@@ -359,7 +360,11 @@ export class RunSupervisor {
     });
   }
 
-  async retry(runId: string, idempotencyKey?: string): Promise<StartRunResult> {
+  async retry(
+    runId: string,
+    idempotencyKey?: string,
+    options?: { fallbackRoleBindings?: StartRunRequest["roleBindings"] },
+  ): Promise<StartRunResult> {
     return await this.serializeAction(runId, async () => {
       const source = await this.get(runId);
       if (!source) {
@@ -371,7 +376,7 @@ export class RunSupervisor {
       if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
         throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
       }
-      const roleBindings = source.roleBindings
+      const copiedBindings = source.roleBindings
         ? Object.fromEntries(
             Object.entries(source.roleBindings).map(([role, binding]) => [
               role,
@@ -383,6 +388,10 @@ export class RunSupervisor {
             ]),
           )
         : undefined;
+      const roleBindings =
+        copiedBindings && Object.keys(copiedBindings).length > 0
+          ? copiedBindings
+          : options?.fallbackRoleBindings;
       return this.start(
         {
           goal: source.goal,
@@ -583,6 +592,18 @@ export class RunSupervisor {
       }
     }
     return count;
+  }
+
+  /**
+   * Startup sweep for Git worktrees/branches left by runs that were deleted
+   * before worktree cleanup existed. Runs with a persisted state are never
+   * touched.
+   */
+  async reconcileUnknownWorktrees(): Promise<{
+    removedDirectories: string[];
+    removedBranches: number;
+  }> {
+    return await this.retention.sweepUnknownRunArtifacts();
   }
 
   /** Best-effort cleanup of `.deleting-*` directories left by interrupted cleanups. */

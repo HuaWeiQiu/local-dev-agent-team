@@ -32,8 +32,8 @@ interface UseRunActionsOptions {
   /** useRunEvents 返回的运行监控数据与刷新函数 */
   monitor: RunMonitor;
   setMonitorPanel: Dispatch<SetStateAction<MonitorPanel>>;
-  setMobileView: Dispatch<SetStateAction<"runs" | "design" | "evolution" | "experience" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">>;
-  setWorkspaceMode: Dispatch<SetStateAction<"monitor" | "design" | "evolution" | "experience" | "settings">>;
+  setMobileView: Dispatch<SetStateAction<"runs" | "design" | "evolution" | "experience" | "project" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">>;
+  setWorkspaceMode: Dispatch<SetStateAction<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">>;
   setLauncherOpen: Dispatch<SetStateAction<boolean>>;
   setLauncherStrategy: Dispatch<SetStateAction<string | undefined>>;
 }

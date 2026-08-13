@@ -49,6 +49,12 @@ export interface TaskRunState {
   commit?: string;
   /** Integration-branch merge commit produced when this task was merged. */
   mergeCommit?: string;
+  /**
+   * Crash-window marker: set to the task branch just before `git merge` so a
+   * crash between the merge and the next save can be recognized during
+   * recovery by matching the deterministic merge-commit subject.
+   */
+  merging?: string;
   profile?: string;
   quality?: QualityReport;
   review?: ReviewVerdict;
@@ -133,6 +139,7 @@ export interface RunSummary {
   updatedAt: string;
   taskCounts: Record<TaskStatus, number>;
   error?: string;
+  parentRunId?: string;
 }
 
 export interface RunRoleBinding {

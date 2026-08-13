@@ -5947,6 +5947,38 @@ button.palette-item:disabled {
   gap: 8px;
 }
 
+.settings-layer-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-0);
+  width: fit-content;
+}
+
+.settings-layer-tabs button {
+  min-width: 72px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-13);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-layer-tabs button.is-active {
+  color: var(--ink);
+  background: var(--surface-1);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.settings-layer-tabs button:disabled {
+  cursor: default;
+}
+
 .settings-banner {
   display: flex;
   align-items: center;
@@ -6080,6 +6112,33 @@ button.palette-item:disabled {
 .settings-inline-detect {
   margin-left: auto;
   flex-shrink: 0;
+}
+
+.role-source-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: var(--text-11);
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.role-source-badge.is-global {
+  color: var(--muted);
+  background: var(--surface-2, var(--surface-0));
+}
+
+.role-source-badge.is-project {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.role-default-card.is-project {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.role-inherit-button {
+  margin-top: 4px;
 }
 
 @media (max-width: 720px) {

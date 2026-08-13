@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { getDesktopSettings } from "../api";
-import type { CliInventory, RoleBindingInput } from "../types";
+import { getDesktopSettings, getProjectRoleSettings } from "../api";
+import type { CliInventory, ProjectScope, RoleBindingInput } from "../types";
 
 /**
  * 桌面端全局设置（角色默认绑定、CLI 盘点与选型开关）的读取与自动刷新：
  * 挂载时拉取一次；开启「回到窗口时检测」时在窗口聚焦/可见时重新盘点。
+ * 有当前项目时，有效角色 = 项目覆盖 ∪ 全局缺省。
  */
-export function useDesktopSettings() {
+export function useDesktopSettings(scope?: ProjectScope | undefined) {
   const [roleDefaults, setRoleDefaults] = useState<Record<string, RoleBindingInput>>({});
   const [cliInventory, setCliInventory] = useState<CliInventory>();
   const [showCliPicker, setShowCliPicker] = useState(true);
@@ -16,16 +17,25 @@ export function useDesktopSettings() {
     try {
       // Soft read: server invalidates cache when CLI config mtime fingerprint changes.
       const response = await getDesktopSettings();
-      setRoleDefaults(response.settings.defaults.roles);
       setCliInventory(response.inventory);
       setShowCliPicker(response.settings.ui.showCliPickerInRunLauncher !== false);
       const auto = response.settings.ui.autoDetectCliConfig !== false
         && response.settings.ui.autoDetectOnFocus !== false;
       setAutoDetectOnFocus(auto);
+      if (scope) {
+        try {
+          const layered = await getProjectRoleSettings(scope);
+          setRoleDefaults(layered.effective);
+          return;
+        } catch {
+          // Fall back to global defaults when the project route is unavailable.
+        }
+      }
+      setRoleDefaults(response.settings.defaults.roles);
     } catch {
       // Settings require desktop session; plain browser serve may 401 — ignore.
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     void refreshDesktopSettings();

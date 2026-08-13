@@ -58,6 +58,18 @@ export function strategyDisplayName(name: string | undefined | null): string {
   return strategyLabels[name] ?? name;
 }
 
+/**
+ * 自动刷新（轮询 / 窗口 focus+visible 触发的 quiet+keepVisible 加载）是否应跳过
+ * roles/projectRoles 覆盖、保留用户尚未保存的角色编辑。
+ * 手动「手动检测 / 立即手动检测」和保存后的回读不属于自动刷新路径，允许覆盖。
+ */
+export function shouldPreserveRoleEdits(
+  dirty: boolean,
+  opts: { quiet?: boolean; keepVisible?: boolean } | undefined,
+): boolean {
+  return dirty && opts?.quiet === true && opts?.keepVisible === true;
+}
+
 /** Topology mode ids → Chinese UI labels. */
 export function topologyDisplayName(mode: string | undefined | null): string {
   if (!mode) return "未指定";
@@ -201,7 +213,6 @@ export function runActionErrorMessage(error: unknown): string {
       return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
     }
     if (error.status === 404) return "目标运行已不存在，请刷新列表后重试。";
-    if (error.status === 409) return "运行状态已变化或不由当前服务管理，请刷新列表后重试。";
     if (error.code === "REQUEST_TOO_LARGE") return "请求内容过大，请精简后重试。";
   }
   const text = errorMessage(error);
@@ -213,8 +224,11 @@ export function runActionErrorMessage(error: unknown): string {
   }
   if (/is already active/i.test(text)) return "该运行已在执行中，无需重复操作。";
   if (/is still active; cancel it first/i.test(text)) return "运行仍在执行中，请先取消再删除。";
-  if (/still has an active child run|still referenced as a parent/i.test(text)) {
-    return "该运行仍被其他运行引用，请先处理关联运行。";
+  if (/still has an active child run/i.test(text)) {
+    return "该运行是后续运行的来源，请先取消或结束上面正在执行的运行，再删除这条记录。";
+  }
+  if (/still referenced as a parent/i.test(text)) {
+    return "该运行仍被后续运行引用，请先删除或处理那些后续运行。";
   }
   if (/Approval request '.*' was not found/i.test(text)) return "审批请求已不存在，请刷新后重试。";
   if (/already has a response/i.test(text)) return "该审批已处理过，请刷新查看最新状态。";
@@ -223,6 +237,9 @@ export function runActionErrorMessage(error: unknown): string {
   if (/cannot accept an approval response/i.test(text)) return "运行正在执行中，暂时不能响应审批。";
   if (/Cleanup preview is missing or expired|changed after preview/i.test(text)) {
     return "清理预览已过期或状态已变化，请重新生成预览后再确认。";
+  }
+  if (error instanceof ApiError && error.status === 409) {
+    return "运行状态已变化或不由当前服务管理，请刷新列表后重试。";
   }
   return text;
 }

@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
@@ -27,9 +27,9 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>();
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [launcherStrategy, setLauncherStrategy] = useState<string>();
-  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience" | "settings">("monitor");
+  const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">("monitor");
   const [monitorPanel, setMonitorPanel] = useState<MonitorPanel>("graph");
-  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
+  const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "project" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
   const [desktopShell] = useState(() => {
     try {
       return isTauri();
@@ -63,7 +63,7 @@ export default function App() {
     setLauncherStrategy,
   });
   const { busy, runAction, cleanupOpen, cleanupPreview, cleanupError } = actions;
-  const { roleDefaults, cliInventory, showCliPicker, refreshDesktopSettings } = useDesktopSettings();
+  const { roleDefaults, cliInventory, showCliPicker, refreshDesktopSettings } = useDesktopSettings(scope);
   const addDesktopProject = useDesktopProject({ desktopShell, setBusy: actions.setBusy, setError });
 
   useEffect(() => {
@@ -152,6 +152,15 @@ export default function App() {
             <BookMarked size={20} /><span>经验</span>
           </button>
           <button
+            className={workspaceMode === "project" ? "is-active" : ""}
+            onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }}
+            aria-label="项目设置"
+            title="项目设置 · 当前项目角色覆盖"
+            disabled={!scope}
+          >
+            <FolderCog size={20} /><span>项目</span>
+          </button>
+          <button
             className={workspaceMode === "settings" ? "is-active" : ""}
             onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }}
             aria-label="全局设置"
@@ -228,7 +237,7 @@ export default function App() {
           <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
         </div>
         <div className="topbar-run">
-          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : workspaceMode === "experience" ? <><span className="topbar-context-label">经验库</span><strong>候选晋升与跨项目共享</strong></> : run ? (
+          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : workspaceMode === "experience" ? <><span className="topbar-context-label">经验库</span><strong>候选晋升与跨项目共享</strong></> : workspaceMode === "project" ? <><span className="topbar-context-label">项目设置</span><strong>当前项目角色覆盖</strong></> : workspaceMode === "settings" ? <><span className="topbar-context-label">全局设置</span><strong>本机 CLI 与角色默认</strong></> : run ? (
             <>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
@@ -289,17 +298,19 @@ export default function App() {
       </header>
 
       <nav className="mobile-nav" aria-label="移动端视图">
-        {workspaceMode === "evolution" || workspaceMode === "experience" ? <>
+        {workspaceMode === "evolution" || workspaceMode === "experience" || workspaceMode === "project" ? <>
           <MobileTab active={false} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Activity size={16} />} label="运行" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
           <MobileTab active={workspaceMode === "evolution"} onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} icon={<Sparkles size={16} />} label="演进" />
           <MobileTab active={workspaceMode === "experience"} onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} icon={<BookMarked size={16} />} label="经验" />
+          <MobileTab active={workspaceMode === "project"} onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }} icon={<FolderCog size={16} />} label="项目" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} icon={<Settings2 size={16} />} label="设置" />
         </> : workspaceMode === "settings" ? <>
           <MobileTab active={false} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("graph"); setMobileView("flow"); }} icon={<Activity size={16} />} label="运行" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("design"); setMobileView("design"); }} icon={<Network size={16} />} label="编排" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} icon={<Sparkles size={16} />} label="演进" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} icon={<BookMarked size={16} />} label="经验" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }} icon={<FolderCog size={16} />} label="项目" />
           <MobileTab active icon={<Settings2 size={16} />} label="设置" onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} />
         </> : <>
           <MobileTab active={workspaceMode === "monitor" && mobileView === "runs"} onClick={() => { setWorkspaceMode("monitor"); setMobileView("runs"); }} icon={<Rows3 size={16} />} label="运行" />
@@ -309,13 +320,28 @@ export default function App() {
           <MobileTab active={workspaceMode === "monitor" && mobileView === "logs"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("activity"); setMobileView("logs"); }} icon={<ScrollText size={16} />} label="日志" />
           <MobileTab active={workspaceMode === "monitor" && mobileView === "evidence"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("evidence"); setMobileView("evidence"); }} icon={<FileCheck2 size={16} />} label="证据" />
           <MobileTab active={workspaceMode === "monitor" && mobileView === "usage"} onClick={() => { setWorkspaceMode("monitor"); setMonitorPanel("usage"); setMobileView("usage"); }} icon={<Gauge size={16} />} label="用量" />
+          <MobileTab active={false} onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }} icon={<FolderCog size={16} />} label="项目" />
           <MobileTab active={false} onClick={() => { setWorkspaceMode("settings"); setMobileView("settings"); }} icon={<Settings2 size={16} />} label="设置" />
         </>}
       </nav>
 
       <div className="workspace-shell">
         {workspaceMode === "settings" ? (
-          <SettingsWorkbench />
+          <SettingsWorkbench
+            pane="global"
+            {...(scope ? { scope } : {})}
+            {...(selectedProject?.name ? { projectName: selectedProject.name } : {})}
+            onOpenProject={() => { setWorkspaceMode("project"); setMobileView("project"); }}
+            onSaved={() => void refreshDesktopSettings()}
+          />
+        ) : workspaceMode === "project" && scope ? (
+          <SettingsWorkbench
+            pane="project"
+            scope={scope}
+            {...(selectedProject?.name ? { projectName: selectedProject.name } : {})}
+            onOpenGlobal={() => { setWorkspaceMode("settings"); setMobileView("settings"); }}
+            onSaved={() => void refreshDesktopSettings()}
+          />
         ) : workspaceMode === "evolution" && config && scope ? (
           <EvolutionWorkbench key={scopeKey} scope={scope} config={config} />
         ) : workspaceMode === "experience" && scope ? (

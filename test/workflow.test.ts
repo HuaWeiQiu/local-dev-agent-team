@@ -456,6 +456,57 @@ describe("local workflow", () => {
     expect(state.history.some((entry) => entry.message.includes("不调用架构模型"))).toBe(true);
   }, 30_000);
 
+  it("applies the plan gate to controller-produced DAGs and resumes after approval", async () => {
+    class CountWorkerCallsService extends FakeAgentService {
+      workerCalls = 0;
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        this.workerCalls += 1;
+        return super.runText(options);
+      }
+    }
+    const { loaded } = await createFixture("named-paths-plan-gate", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const service = new CountWorkerCallsService();
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => service,
+    });
+    const state = await runner.run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
+      strategyName: "guarded",
+    });
+
+    // The plan gate must stop the deterministic path before any worker runs.
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.map((task) => task.status)).toEqual(["pending", "pending", "pending"]);
+    expect(service.workerCalls).toBe(0);
+    expect(state.approvals?.at(-1)).toMatchObject({ gate: "plan", status: "pending" });
+    expect(state.checkpoints?.at(-1)?.stage).toBe("plan-ready");
+
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+    const continued = await runner.resume(state, {
+      mode: "approval",
+      actor: "tech-lead",
+      reason: "Plan approved",
+    });
+
+    expect(continued.status).toBe("awaiting-human");
+    expect(continued.tasks.map((task) => task.status)).toEqual(["merged", "merged", "merged"]);
+    expect(continued.approvals?.at(-1)).toMatchObject({ gate: "final", status: "pending" });
+  }, 30_000);
+
   it("keeps merged work when a sibling docs task blocks", async () => {
     class ChangelogFailAgentService extends FakeAgentService {
       override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
@@ -883,6 +934,202 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
+  it("recovers a merge whose state save crashed after git.merge", async () => {
+    const { root, loaded } = await createFixture("merge-save-crash", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Recover unsaved merge", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    // Simulate a crash between git.merge and the state save: the merge commit
+    // is in the integration branch, the task still reads "passed", the
+    // `merging` intent marker was persisted, and the worktree is already gone.
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    const alphaCommit = (await gitOut(alphaWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+    await git(state.integrationWorktree, ["merge", "--no-ff", alphaBranch, "-m", "merge: alpha Alpha"]);
+    await git(root, ["worktree", "remove", "--force", alphaWorktree]);
+    const mergeHead = (await gitOut(state.integrationWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "passed";
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.commit = alphaCommit;
+    state.tasks[0]!.merging = alphaBranch;
+    state.tasks[1]!.status = "working";
+    state.tasks[1]!.attempts = 1;
+    state.tasks[1]!.branch = `agent-team/${segment}/beta`;
+    state.tasks[1]!.worktree = path.join(root, ".agent-team", "worktrees", state.id, "beta");
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Host crashed between the alpha merge and the state save",
+    });
+
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    // Alpha's merge is recovered from the deterministic commit subject, not redone.
+    expect(recovered.tasks[0]!.mergeCommit).toBe(mergeHead);
+    expect(recovered.tasks[0]!.merging).toBeUndefined();
+    expect(recovered.tasks[1]!.branch).toContain("-resume-1");
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
+    );
+    expect(await readFile(path.join(recovered.integrationWorktree, "beta.txt"), "utf8")).toBe(
+      "beta\n",
+    );
+  }, 30_000);
+
+  it("clears a stale merging marker when the crash happened before git.merge", async () => {
+    const { root, loaded } = await createFixture("pre-merge-crash", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Recover pre-merge crash", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    // Crash after the intent save but before git.merge: the marker exists,
+    // the merge commit does not, and the task worktree is still present.
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    const alphaCommit = (await gitOut(alphaWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "passed";
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.commit = alphaCommit;
+    state.tasks[0]!.merging = alphaBranch;
+    state.tasks[1]!.status = "working";
+    state.tasks[1]!.attempts = 1;
+    state.tasks[1]!.branch = `agent-team/${segment}/beta`;
+    state.tasks[1]!.worktree = path.join(root, ".agent-team", "worktrees", state.id, "beta");
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Host crashed after the merge intent save",
+    });
+
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    // The stale marker is cleared and alpha merges through the normal path.
+    expect(recovered.tasks[0]!.merging).toBeUndefined();
+    expect(recovered.tasks[0]!.mergeCommit).toBeTypeOf("string");
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
+    );
+    expect(await readFile(path.join(recovered.integrationWorktree, "beta.txt"), "utf8")).toBe(
+      "beta\n",
+    );
+  }, 30_000);
+
+  it("refuses a forged merge subject that does not point at the recorded task commit", async () => {
+    const { root, loaded } = await createFixture("forged-subject", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Reject forged merge", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    const alphaCommit = (await gitOut(alphaWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+    // A foreign single-parent commit that reuses the deterministic subject:
+    // it must never be accepted as the task's merge.
+    await writeFile(path.join(state.integrationWorktree, "forged.txt"), "forged\n");
+    await git(state.integrationWorktree, ["add", "forged.txt"]);
+    await git(state.integrationWorktree, ["commit", "-m", "merge: alpha Alpha"]);
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "passed";
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.commit = alphaCommit;
+    state.tasks[0]!.merging = alphaBranch;
+    state.tasks[1]!.status = "working";
+    state.tasks[1]!.attempts = 1;
+    state.tasks[1]!.branch = `agent-team/${segment}/beta`;
+    state.tasks[1]!.worktree = path.join(root, ".agent-team", "worktrees", state.id, "beta");
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const refused = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Attempt recovery with a forged merge subject",
+    });
+    expect(refused.status).toBe("interrupted");
+    expect(refused.error).toContain("does not point at the recorded task commit");
+  }, 30_000);
+
   it("still refuses recovery when the post-checkpoint HEAD contains foreign commits", async () => {
     const { root, loaded } = await createFixture("foreign-head", (config) => {
       config.strategies!.definitions.guarded = {
@@ -936,6 +1183,142 @@ describe("local workflow", () => {
     });
     expect(refused.status).toBe("interrupted");
     expect(refused.error).toContain("does not match checkpoint");
+  }, 30_000);
+
+  it("resumes a quality-passed task by reviewing or merging instead of redoing worker work", async () => {
+    const { root, loaded } = await createFixture("reuse-passed", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    let workerCalls = 0;
+    class CountingAgentService extends FakeAgentService {
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        workerCalls += 1;
+        return super.runText(options);
+      }
+    }
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new CountingAgentService(),
+    });
+    const state = await runner.run({
+      goal: "Create alpha and beta files",
+      strategyName: "guarded",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(workerCalls).toBe(0);
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    const commit = (await gitOut(alphaWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "passed";
+    state.tasks[0]!.attempts = 1;
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.commit = commit;
+    state.tasks[0]!.quality = {
+      passed: true,
+      commands: [{ spec: { command: process.execPath, args: ["-e", "process.exit(0)"] }, exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    };
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Control service stopped after quality passed",
+    });
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.tasks[0]).toMatchObject({ status: "merged", commit });
+    expect(recovered.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    expect(recovered.recoveries?.at(-1)?.abandonedTasks).toEqual([]);
+    expect(workerCalls).toBe(1);
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
+    );
+  }, 30_000);
+
+  it("resumes a quality-passed reviewing task without rerunning the worker", async () => {
+    const { root, loaded } = await createFixture("reuse-review", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    let workerCalls = 0;
+    class CountingAgentService extends FakeAgentService {
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        workerCalls += 1;
+        return super.runText(options);
+      }
+    }
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new CountingAgentService(),
+    });
+    const state = await runner.run({
+      goal: "Create alpha and beta files",
+      strategyName: "guarded",
+    });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "working";
+    state.tasks[0]!.attempts = 1;
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.quality = {
+      passed: true,
+      commands: [{ spec: { command: process.execPath, args: ["-e", "process.exit(0)"] }, exitCode: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false }],
+    };
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Control service stopped during review",
+    });
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.tasks[0]?.status).toBe("merged");
+    expect(recovered.recoveries?.at(-1)?.abandonedTasks).toEqual([]);
+    expect(workerCalls).toBe(1);
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
+    );
   }, 30_000);
 });
 

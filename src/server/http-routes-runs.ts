@@ -21,12 +21,20 @@ import {
   cleanupPreviewRequestSchema,
   cleanupRunRequestSchema,
   experienceReasonRequestSchema,
+  projectRoleSettingsUpdateSchema,
   resumeRunRequestSchema,
   startRunRequestSchema,
   strategyBlueprintPreflightRequestSchema,
   strategyBlueprintRequestSchema,
 } from "./contracts.js";
 import { ExperienceService } from "../experience/service.js";
+import {
+  loadLayeredRoleDisplay,
+  resolveLayeredRoleBindings,
+  saveProjectRoleSettings,
+} from "../desktop/project-role-settings.js";
+import { getInventory } from "../desktop/settings.js";
+import { requireDesktopMutation } from "./http-routes-desktop.js";
 import {
   ProjectMutationConflictError,
   RunNotFoundError,
@@ -62,6 +70,58 @@ export const runRoutes: ProjectApiRoute[] = [
     pattern: "/config",
     handler: (context, _request, response) => {
       sendJson(response, 200, buildPublicConfig(context.loaded, context.strategies));
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/role-settings",
+    handler: async (context, _request, response) => {
+      const { inventory } = await getInventory({ refresh: false });
+      const layered = await loadLayeredRoleDisplay({
+        root: context.loaded.root,
+        stateDirectory: context.loaded.config.project.stateDirectory,
+        inventory,
+      });
+      sendJson(response, 200, {
+        projectId: context.id,
+        projectName: context.loaded.config.project.name,
+        roles: layered.project,
+        global: layered.global,
+        effective: layered.effective,
+        sources: layered.sources,
+      });
+    },
+  },
+  {
+    method: "PUT",
+    pattern: "/role-settings",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireDesktopMutation(request, serverOrigin, sessionOperator);
+      const body = projectRoleSettingsUpdateSchema.parse(await readJson(request));
+      const roles = Object.fromEntries(
+        Object.entries(body.roles).flatMap(([role, binding]) =>
+          binding ? [[role, binding] as const] : [],
+        ),
+      );
+      await saveProjectRoleSettings(
+        context.loaded.root,
+        context.loaded.config.project.stateDirectory,
+        { version: 1, roles },
+      );
+      const { inventory } = await getInventory({ refresh: false });
+      const layered = await loadLayeredRoleDisplay({
+        root: context.loaded.root,
+        stateDirectory: context.loaded.config.project.stateDirectory,
+        inventory,
+      });
+      sendJson(response, 200, {
+        projectId: context.id,
+        projectName: context.loaded.config.project.name,
+        roles: layered.project,
+        global: layered.global,
+        effective: layered.effective,
+        sources: layered.sources,
+      });
     },
   },
   {
@@ -287,14 +347,15 @@ export const runRoutes: ProjectApiRoute[] = [
   {
     method: "POST",
     pattern: "/runs",
-    handler: async (context, request, response) => {
+    handler: async (context, request, response, _url, _params, _serverOrigin, sessionOperator) => {
       const parsed = startRunRequestSchema.safeParse(await readJson(request));
       if (!parsed.success) {
         throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
       }
       const idempotency = optionalIdempotencyKey(request);
       try {
-        const result = context.supervisor.start(parsed.data, idempotency);
+        const started = await withLayeredRoleBindings(context, parsed.data, sessionOperator);
+        const result = context.supervisor.start(started, idempotency);
         sendJson(response, result.deduplicated ? 200 : 202, result);
       } catch (error) {
         throw runActionHttpError(error);
@@ -433,11 +494,22 @@ export const runRoutes: ProjectApiRoute[] = [
   {
     method: "POST",
     pattern: "/runs/:runId/actions/retry",
-    handler: async (context, request, response, _url, params) => {
+    handler: async (context, request, response, _url, params, _serverOrigin, sessionOperator) => {
       const runId = decodePathSegment(params.runId!);
       const idempotency = optionalIdempotencyKey(request);
       try {
-        const result = await context.supervisor.retry(runId, idempotency);
+        const fallbackRoleBindings = sessionOperator
+          ? await resolveLayeredRoleBindings({
+              root: context.loaded.root,
+              stateDirectory: context.loaded.config.project.stateDirectory,
+              knownRoles: Object.keys(context.loaded.config.roles),
+            })
+          : undefined;
+        const result = await context.supervisor.retry(
+          runId,
+          idempotency,
+          fallbackRoleBindings ? { fallbackRoleBindings } : undefined,
+        );
         sendJson(response, result.deduplicated ? 200 : 202, result);
       } catch (error) {
         throw runActionHttpError(error);
@@ -495,6 +567,24 @@ export const runRoutes: ProjectApiRoute[] = [
     },
   },
 ];
+
+async function withLayeredRoleBindings(
+  context: ProjectHttpContext,
+  request: import("./contracts.js").StartRunRequest,
+  sessionOperator: string | undefined,
+): Promise<import("./contracts.js").StartRunRequest> {
+  if (request.roleBindings && Object.keys(request.roleBindings).length > 0) {
+    return request;
+  }
+  if (!sessionOperator) return request;
+  const roleBindings = await resolveLayeredRoleBindings({
+    root: context.loaded.root,
+    stateDirectory: context.loaded.config.project.stateDirectory,
+    knownRoles: Object.keys(context.loaded.config.roles),
+  });
+  if (!roleBindings) return request;
+  return { ...request, roleBindings };
+}
 
 function listRunEvents(supervisor: RunSupervisor, runId: string): RunEvent[] {
   const collected: RunEvent[] = [];

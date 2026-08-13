@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { finished } from "node:stream/promises";
 import path from "node:path";
 import type { AgentProfile } from "../config/schema.js";
+import { beginLiveChild } from "../process/live-children.js";
 import { runProcess } from "../process/run.js";
+import { resolveAgentTeamStateRoot } from "../process/state-root.js";
 import {
   classifyProviderFailure,
   type ProviderFailureClassification,
@@ -25,6 +27,7 @@ export interface InvokeOptions {
   onStderr?: (chunk: string) => void;
   onActivity?: (activity: AgentActivitySnapshot) => void;
   maxOutputBytes?: number;
+  runId?: string;
 }
 
 export class AgentInvocationError extends Error {
@@ -114,6 +117,11 @@ async function invokePreparedAgent(
   try {
     process = await runProcess({
       ...invocation,
+      liveChild: beginLiveChild(resolveAgentTeamStateRoot(invocation.cwd), {
+        command: invocation.command,
+        cwd: invocation.cwd,
+        ...(options.runId ? { runId: options.runId } : {}),
+      }),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.maxOutputBytes ? { maxOutputBytes: options.maxOutputBytes } : {}),
       onStdout: (chunk) => {

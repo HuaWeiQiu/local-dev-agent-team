@@ -24,7 +24,7 @@ import {
   taskPlanJsonSchema,
   testVerdictJsonSchema,
 } from "../domain/json-schemas.js";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, writeFile } from "node:fs/promises";
 import {
   assessPlanCompleteness,
   canUseHandoverFallback,
@@ -248,6 +248,21 @@ export class LocalWorkflowRunner {
           }));
           await store.transition(state, "planned", `Controller produced ${state.tasks.length} task(s) from the goal`);
           const checkpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
+          // The plan gate applies to controller-produced DAGs exactly as it
+          // does to architect-produced plans: otherwise a named-path goal
+          // would silently bypass the gate and the run would later become
+          // unrecoverable (recovery requires the approval this path skipped).
+          const planGate = requiresPlanApproval(state);
+          if (planGate && state.purpose !== "evolution-evaluation") {
+            await this.requestApproval(
+              state,
+              store,
+              checkpoint,
+              "plan",
+              `Approve ${state.tasks.length} planned task(s) before worker execution`,
+            );
+            return state;
+          }
           return await this.continueFromCheckpoint(
             state,
             checkpoint,
@@ -431,6 +446,7 @@ export class LocalWorkflowRunner {
       }
       checkpoint = latestCheckpoint(state);
       await this.assertCheckpointMatches(state, checkpoint, git);
+      await this.reconcilePostCheckpointMerges(state, checkpoint, git, store);
       if (options.mode === "approval") {
         const approval = latestApproval(state, "plan");
         if (approval?.status !== "approved" || approval.checkpointId !== checkpoint.id) {
@@ -664,8 +680,11 @@ export class LocalWorkflowRunner {
   /**
    * Tolerate a crash between a task merge and the wave checkpoint: the
    * integration HEAD may sit exactly on the recorded merge commits of tasks
-   * that are marked merged but absent from the checkpoint. Anything else
-   * (foreign commits, missing records, divergence) keeps the refusal.
+   * that are marked merged but absent from the checkpoint, plus merge commits
+   * for tasks whose `merging` intent was persisted before the Git merge.
+   * Anything else (foreign commits, missing records, divergence) keeps the
+   * refusal. A `merging` marker without a matching merge commit simply means
+   * the crash happened before the merge and needs no tolerance here.
    */
   private async isOnlyPostCheckpointMerges(
     state: RunState,
@@ -683,7 +702,10 @@ export class LocalWorkflowRunner {
         )
         .map((task) => task.mergeCommit!),
     );
-    if (expected.size === 0) {
+    const mergingTasks = state.tasks.filter(
+      (task) => !checkpointed.has(task.task.id) && typeof task.merging === "string",
+    );
+    if (expected.size === 0 && mergingTasks.length === 0) {
       return false;
     }
     const extras = await git.commitsBetween(
@@ -691,9 +713,83 @@ export class LocalWorkflowRunner {
       checkpoint.integrationCommit,
       "HEAD",
     );
-    return (
-      extras.length === expected.size && extras.every((commit) => expected.has(commit))
+    const subjects =
+      mergingTasks.length > 0
+        ? await git.commitSubjects(state.integrationWorktree, checkpoint.integrationCommit, "HEAD")
+        : new Map<string, string>();
+    const unmatchedSubjects = new Map<string, boolean>(
+      mergingTasks.map((task) => [`merge: ${task.task.id} ${task.task.title}`, true]),
     );
+    for (const commit of extras) {
+      if (expected.has(commit)) {
+        continue;
+      }
+      const subject = subjects.get(commit);
+      if (!subject || !unmatchedSubjects.has(subject)) {
+        return false;
+      }
+      unmatchedSubjects.delete(subject);
+    }
+    return true;
+  }
+
+  /**
+   * Complete merges whose state save crashed. Tasks with a persisted
+   * `merging` marker get their merge commit back from the deterministic
+   * commit subject; a marker without a matching merge means the crash
+   * happened before `git merge`, so the marker is cleared and the task
+   * merges normally during recovery.
+   */
+  private async reconcilePostCheckpointMerges(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    git: GitManager,
+    store: RunStateStore,
+  ): Promise<void> {
+    const mergingTasks = state.tasks.filter((task) => typeof task.merging === "string");
+    if (mergingTasks.length === 0) {
+      return;
+    }
+    const subjects = await git.commitSubjects(
+      state.integrationWorktree,
+      checkpoint.integrationCommit,
+      "HEAD",
+    );
+    let changed = false;
+    for (const task of mergingTasks) {
+      const expectedSubject = `merge: ${task.task.id} ${task.task.title}`;
+      const mergedCommit = [...subjects.entries()].find(
+        ([, subject]) => subject === expectedSubject,
+      )?.[0];
+      delete task.merging;
+      changed = true;
+      if (mergedCommit) {
+        // A matching subject alone is not enough: verify the merge commit's
+        // second parent is the task commit this orchestrator recorded, so a
+        // foreign commit that happens to reuse the subject still refuses.
+        const secondParent = await git
+          .resolveCommit(`${mergedCommit}^2`)
+          .catch(() => undefined);
+        if (typeof task.commit !== "string" || secondParent !== task.commit) {
+          throw new Error(
+            `Merge commit '${mergedCommit}' for task '${task.task.id}' does not point at the recorded task commit`,
+          );
+        }
+        task.mergeCommit = mergedCommit;
+        task.status = "merged";
+        if (task.worktree) {
+          try {
+            await git.removeWorktree(task.worktree);
+          } catch {
+            // Leftover task worktrees are best-effort; terminal cleanup
+            // removes anything that survives.
+          }
+        }
+      }
+    }
+    if (changed) {
+      await store.save(state);
+    }
   }
 
   private async prepareRecovery(
@@ -719,6 +815,7 @@ export class LocalWorkflowRunner {
     }
     const completed = new Set(checkpoint.completedTaskIds);
     const abandonedTasks: RecoveryRecord["abandonedTasks"] = [];
+    let abandonedIncomplete = false;
     for (const task of state.tasks) {
       if (completed.has(task.task.id)) {
         if (task.status !== "merged") {
@@ -732,7 +829,18 @@ export class LocalWorkflowRunner {
         // never reset or redo it.
         continue;
       }
+      if (task.status === "passed" && task.commit && task.branch && task.worktree) {
+        // Quality and review already landed a task commit. Keep the worktree
+        // so resume can merge it instead of paying for another worker wave.
+        continue;
+      }
+      if (task.quality?.passed && task.branch && task.worktree) {
+        // Worker and quality already finished. Keep the worktree so resume
+        // can review or commit instead of paying for another implementation.
+        continue;
+      }
       if (task.status !== "pending") {
+        abandonedIncomplete = true;
         abandonedTasks.push({
           taskId: task.task.id,
           status: task.status,
@@ -744,7 +852,9 @@ export class LocalWorkflowRunner {
       }
       resetIncompleteTask(task);
     }
-    state.resumeCount = (state.resumeCount ?? 0) + 1;
+    if (abandonedIncomplete) {
+      state.resumeCount = (state.resumeCount ?? 0) + 1;
+    }
     state.recoveries = [
       ...(state.recoveries ?? []),
       {
@@ -787,6 +897,52 @@ export class LocalWorkflowRunner {
       if (task.status === "merged") {
         completed.add(task.task.id);
       }
+    }
+    const alreadyPassed = state.tasks.filter(
+      (task) =>
+        task.status === "passed" &&
+        !completed.has(task.task.id) &&
+        Boolean(task.branch) &&
+        Boolean(task.worktree) &&
+        Boolean(task.commit),
+    );
+    if (alreadyPassed.length > 0) {
+      await store.transition(state, "integrating", "合并中断前已通过质量门的任务");
+      for (const taskState of alreadyPassed.sort((left, right) =>
+        left.task.id.localeCompare(right.task.id),
+      )) {
+        signal?.throwIfAborted();
+        if (!taskState.branch || !taskState.worktree) {
+          throw new Error(`Task '${taskState.task.id}' has no branch/worktree metadata`);
+        }
+        // Same crash-window protection as the wave merge loop: persist the
+        // merge intent before the Git side effect so recovery can match the
+        // deterministic merge-commit subject.
+        taskState.merging = taskState.branch;
+        await store.save(state);
+        taskState.mergeCommit = await git.merge(
+          state.integrationWorktree,
+          taskState.branch,
+          `merge: ${taskState.task.id} ${taskState.task.title}`,
+          signal,
+        );
+        taskState.status = "merged";
+        delete taskState.merging;
+        completed.add(taskState.task.id);
+        try {
+          await git.removeWorktree(taskState.worktree, signal);
+        } catch (error) {
+          await this.recordCleanupWarning(
+            state,
+            store,
+            `Failed to remove task worktree '${taskState.worktree}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        await store.save(state);
+      }
+      await this.recordCheckpoint(state, store, git, "task-wave-integrated");
     }
     const started = new Set(completed);
     const blockedIds = new Set(
@@ -862,20 +1018,23 @@ export class LocalWorkflowRunner {
       const results = await Promise.allSettled(
         wave.map(async (task) => {
           const taskState = findTaskState(state, task.id);
-          const recoverySuffix = state.resumeCount ? `-resume-${state.resumeCount}` : "";
-          const taskSegment = `${branchSegment(task.id)}${recoverySuffix}`;
-          const branch = `agent-team/${branchSegment(state.id)}/${taskSegment}`;
-          const worktree = path.join(this.worktreesDirectory, state.id, taskSegment);
-          taskState.branch = branch;
-          taskState.worktree = worktree;
-          taskState.status = "working";
-          await git.createWorktree(branch, integrationCommit, worktree, waveSignal);
-          await this.prepareWorktreeDependencies(
-            worktree,
-            waveSignal,
-            state.strategy.maxProcessOutputBytes,
-          );
-          await store.save(state);
+          const reuseWorktree = await this.canReusePassedWorktree(taskState);
+          if (!reuseWorktree) {
+            const recoverySuffix = state.resumeCount ? `-resume-${state.resumeCount}` : "";
+            const taskSegment = `${branchSegment(task.id)}${recoverySuffix}`;
+            const branch = `agent-team/${branchSegment(state.id)}/${taskSegment}`;
+            const worktree = path.join(this.worktreesDirectory, state.id, taskSegment);
+            taskState.branch = branch;
+            taskState.worktree = worktree;
+            taskState.status = "working";
+            await git.createWorktree(branch, integrationCommit, worktree, waveSignal);
+            await this.prepareWorktreeDependencies(
+              worktree,
+              waveSignal,
+              state.strategy.maxProcessOutputBytes,
+            );
+            await store.save(state);
+          }
           await this.executeOneTask(state, taskState, store, git, waveAgent, budget, waveSignal);
           return taskState;
         }),
@@ -922,6 +1081,11 @@ export class LocalWorkflowRunner {
         if (!taskState.branch || !taskState.worktree) {
           throw new Error(`Task '${taskState.task.id}' has no branch/worktree metadata`);
         }
+        // Persist the merge intent before the Git side effect: a crash after
+        // the merge but before the next save is then recoverable by matching
+        // the deterministic merge-commit subject during resume.
+        taskState.merging = taskState.branch;
+        await store.save(state);
         taskState.mergeCommit = await git.merge(
           state.integrationWorktree,
           taskState.branch,
@@ -929,6 +1093,7 @@ export class LocalWorkflowRunner {
           signal,
         );
         taskState.status = "merged";
+        delete taskState.merging;
         completed.add(taskState.task.id);
         try {
           await git.removeWorktree(taskState.worktree, signal);
@@ -1073,8 +1238,26 @@ export class LocalWorkflowRunner {
     const maxAttempts = state.strategy.maxReworkAttempts + 1;
     let feedback = "";
     let lastReworkExperienceIds: string[] = [];
+    const reused = await this.tryFinishAlreadyPassedTask(
+      state,
+      taskState,
+      store,
+      git,
+      agent,
+      signal,
+    );
+    if (reused === "committed") {
+      return;
+    }
+    if (reused === "rework") {
+      feedback = taskState.error ?? "Previous review requested changes";
+    }
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    for (
+      let attempt = reused === "rework" ? Math.min(taskState.attempts + 1, maxAttempts) : 1;
+      attempt <= maxAttempts;
+      attempt += 1
+    ) {
       signal?.throwIfAborted();
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
@@ -1189,6 +1372,83 @@ export class LocalWorkflowRunner {
     taskState.status = "blocked";
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
     await store.save(state);
+  }
+
+  private async canReusePassedWorktree(taskState: TaskRunState): Promise<boolean> {
+    return Boolean(
+      taskState.quality?.passed &&
+        taskState.branch &&
+        taskState.worktree &&
+        (await pathExists(taskState.worktree)),
+    );
+  }
+
+  private async tryFinishAlreadyPassedTask(
+    state: RunState,
+    taskState: TaskRunState,
+    store: RunStateStore,
+    git: GitManager,
+    agent: RoleAgentService,
+    signal?: AbortSignal,
+  ): Promise<"committed" | "rework" | "fresh"> {
+    if (!(await this.canReusePassedWorktree(taskState)) || !taskState.worktree) {
+      return "fresh";
+    }
+    if (taskState.commit) {
+      taskState.status = "passed";
+      await store.save(state);
+      return "committed";
+    }
+    await git.stage(taskState.worktree, signal);
+    const files = await git.changedFiles(taskState.worktree, signal);
+    if (files.length === 0) {
+      return "fresh";
+    }
+    try {
+      git.assertOwnedPaths(files, taskState.task.ownedPaths);
+    } catch {
+      return "fresh";
+    }
+    const attempt = Math.max(taskState.attempts, 1);
+    const diff = await git.stagedDiff(taskState.worktree, 160_000, signal);
+    const quality = taskState.quality!;
+    if (
+      taskState.review &&
+      taskState.test &&
+      (passesTaskGates(quality, taskState.review, taskState.test) ||
+        shouldTrustQualityOverReview(taskState.review, taskState.test) ||
+        shouldAcceptDocsDespiteEscalate(taskState.task, taskState.review, taskState.test))
+    ) {
+      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
+      return "committed";
+    }
+    const { review, test } = await this.reviewTaskAttempt(
+      state,
+      taskState,
+      taskState.worktree,
+      store,
+      agent,
+      quality,
+      files,
+      diff,
+      attempt,
+    );
+    if (
+      quality.passed &&
+      (passesTaskGates(quality, review, test) ||
+        shouldTrustQualityOverReview(review, test) ||
+        shouldAcceptDocsDespiteEscalate(taskState.task, review, test))
+    ) {
+      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
+      return "committed";
+    }
+    if (isHardSpecialistEscalation(review, test) && !quality.passed) {
+      return "fresh";
+    }
+    taskState.status = "reworking";
+    taskState.error = buildReworkFeedback(quality, review, test);
+    await store.save(state);
+    return "rework";
   }
 
   private async prepareWorktreeDependencies(
@@ -1685,12 +1945,22 @@ function requiresPlanApproval(state: RunState): boolean {
   return state.strategy.approvalGates.includes("plan");
 }
 
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resetIncompleteTask(task: TaskRunState): void {  task.status = "pending";
   task.attempts = 0;
   delete task.branch;
   delete task.worktree;
   delete task.commit;
   delete task.mergeCommit;
+  delete task.merging;
   delete task.profile;
   delete task.quality;
   delete task.review;

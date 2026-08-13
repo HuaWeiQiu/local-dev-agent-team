@@ -213,6 +213,7 @@ export function summarizeRun(state: RunState): import("./types.js").RunSummary {
     updatedAt: state.updatedAt,
     taskCounts,
     ...(state.error ? { error: state.error } : {}),
+    ...(state.parentRunId ? { parentRunId: state.parentRunId } : {}),
   };
 }
 

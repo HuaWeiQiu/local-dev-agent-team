@@ -58,7 +58,9 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await expect(page.locator(".react-flow__node")).toHaveCount(4);
   await expect(page.locator(".react-flow__edge")).toHaveCount(4);
   if (testInfo.project.name === "mobile") {
-    await expect(page.getByRole("button", { name: "重试为新运行" })).toBeVisible();
+    // fixture 运行被控制服务恢复为 interrupted：顶栏重试按钮文案为「重新开始」，
+    // 移动端按钮文字隐藏，可访问名取 title「放弃检查点，用同一目标新开一条 run」
+    await expect(page.getByRole("button", { name: /重新开始|放弃检查点/ })).toBeVisible();
     await page.getByRole("button", { name: "详情", exact: true }).click();
   }
 
@@ -105,24 +107,31 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await page.getByRole("button", { name: "新建运行" }).first().click();
   const launcher = page.getByRole("dialog");
   await expect(launcher.getByRole("heading", { name: "启动 Agent 团队" })).toBeVisible();
-  await expect(launcher.getByText("balanced", { exact: true })).toBeVisible();
-  await expect(launcher.getByText("strict", { exact: true })).toBeVisible();
-  await expect(launcher.getByText("MCP 继承：worker", { exact: true })).toBeVisible();
-  await launcher.getByText("strict", { exact: true }).click();
-  const strictInput = launcher.locator('.strategy-segments input[value="strict"]');
-  const strictStrategy = strictInput.locator("..");
+  // 策略段渲染中文显示名（strategyDisplayName）：fixture 内置 balanced/strict → 「均衡」「严格」
+  const balancedSegment = launcher.locator(".strategy-segments label").filter({ hasText: "均衡" });
+  const strictSegment = launcher.locator(".strategy-segments label").filter({ hasText: "严格" });
+  await expect(balancedSegment).toBeVisible();
+  await expect(strictSegment).toBeVisible();
+  await strictSegment.click();
+  const strictInput = strictSegment.locator('input[value="strict"]');
+  await expect(strictInput).toBeChecked();
+  // 键盘焦点：从「目标」Tab 进入策略单选项组——浏览器聚焦组内已选中的 radio（strict），焦点环可见
   await launcher.getByLabel("目标").focus();
   await page.keyboard.press("Tab");
   await expect(strictInput).toBeFocused();
-  await expect(strictStrategy).toHaveCSS("outline-style", "solid");
-  await launcher.getByRole("button", { name: "角色 Profile 覆盖" }).click();
-  await expect(launcher.locator(".profile-grid select")).toHaveCount(5);
-  await expect(
-    launcher.locator(".profile-grid label").filter({ hasText: "architect" }).locator("option").first(),
-  ).toHaveText("策略默认 (claude-reviewer)");
-  await expect(launcher.getByRole("button", { name: "启动运行" })).toBeInViewport();
+  await expect(strictInput.locator("..")).toHaveCSS("outline-style", "solid");
+  // 角色绑定区可见：6 个内置角色卡，每卡 CLI / 模型 / 思考 3 个下拉
+  await expect(launcher.getByRole("button", { name: "角色与模型（CLI / 模型 / 思考深度）" })).toBeVisible();
+  const roleGrid = launcher.locator(".role-binding-grid");
+  await expect(roleGrid).toBeVisible();
+  await expect(roleGrid.locator(".role-binding-card")).toHaveCount(6);
+  await expect(roleGrid.locator("select")).toHaveCount(18);
+  // 移动端弹窗内容超出视口时表单内部滚动：先把底部操作区滚进视口再断言可达
+  const launchButton = launcher.getByRole("button", { name: "启动运行" });
+  await launchButton.scrollIntoViewIfNeeded();
+  await expect(launchButton).toBeInViewport();
   await page.screenshot({
-    path: testInfo.outputPath(`${testInfo.project.name}-interop-policy.png`),
+    path: testInfo.outputPath(`${testInfo.project.name}-run-launcher.png`),
     fullPage: false,
   });
   await launcher.getByRole("button", { name: "关闭" }).click();
@@ -143,7 +152,8 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await expect(composer.locator(".strategy-stage-node").filter({ hasText: "串行执行" })).toBeVisible();
   const blueprintName = `strict-${testInfo.project.name}`;
   await composer.getByLabel("策略蓝图名称").fill(blueprintName);
-  await composer.locator(".policy-toggle input").check();
+  // 启用「计划审批」门禁：policy-toggle 现有两个开关（代码探索 / 计划审批），按可访问名定位
+  await composer.getByRole("checkbox", { name: "计划审批" }).check();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(8);
   await expect(composer.locator(".strategy-stage-node").filter({ hasText: "计划审批" })).toBeVisible();
   if (testInfo.project.name === "mobile") {
@@ -180,13 +190,14 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   if (testInfo.project.name === "mobile") {
     await composer.getByRole("button", { name: "策略设置", exact: true }).click();
   }
+  // 角色配置以中文名标注（agentRoleLabel），architect → 「架构」
   const architectProfile = composer.locator(".role-policy-list label")
-    .filter({ hasText: "architect" })
+    .filter({ hasText: "架构" })
     .locator("select");
   await architectProfile.selectOption("");
   await architectProfile.selectOption("claude-reviewer");
   await expect(composer.getByRole("button", { name: "运行", exact: true })).toBeEnabled();
-  await composer.locator(".policy-toggle input").uncheck();
+  await composer.getByRole("checkbox", { name: "计划审批" }).uncheck();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(7);
   await composer.getByRole("button", { name: "重置策略草稿" }).click();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(8);

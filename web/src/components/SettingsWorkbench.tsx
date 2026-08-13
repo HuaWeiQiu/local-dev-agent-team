@@ -1,6 +1,7 @@
 import {
   CheckCircle2,
   CircleAlert,
+  FolderCog,
   LoaderCircle,
   RefreshCw,
   Save,
@@ -12,19 +13,24 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getDesktopSettings,
+  getProjectRoleSettings,
   saveDesktopSettings,
+  saveProjectRoleSettings,
   scanCliInventory,
   ApiError,
 } from "../api";
-import { agentRoleLabel, errorMessage, orderedRoles } from "../presentation";
+import { errorMessage, orderedRoles, shouldPreserveRoleEdits } from "../presentation";
 import type {
   CliId,
   CliInventory,
   CliProbeResult,
   DesktopSettingsResponse,
   DesktopSettingsView,
+  ProjectRoleSettingsView,
+  ProjectScope,
   RoleBindingInput,
 } from "../types";
+import { applyRolePatch, RoleBindingEditor } from "./RoleBindingEditor";
 
 const BUILT_IN_ROLES = [
   "orchestrator",
@@ -41,10 +47,26 @@ const CLI_LABEL: Record<CliId, string> = {
   claude: "Claude",
 };
 
-export function SettingsWorkbench() {
+export function SettingsWorkbench({
+  pane = "global",
+  scope,
+  projectName,
+  onOpenProject,
+  onOpenGlobal,
+  onSaved,
+}: {
+  pane?: "global" | "project";
+  scope?: ProjectScope;
+  projectName?: string;
+  onOpenProject?(): void;
+  onOpenGlobal?(): void;
+  onSaved?(): void;
+}) {
   const [settings, setSettings] = useState<DesktopSettingsView>();
   const [inventory, setInventory] = useState<CliInventory>();
   const [roles, setRoles] = useState<Record<string, RoleBindingInput>>({});
+  const [projectRoles, setProjectRoles] = useState<Record<string, RoleBindingInput>>({});
+  const [projectSources, setProjectSources] = useState<Record<string, "global" | "project">>({});
   const [suggested, setSuggested] = useState<Record<string, RoleBindingInput>>({});
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -53,39 +75,67 @@ export function SettingsWorkbench() {
   const [error, setError] = useState<string>();
   const [fromCache, setFromCache] = useState(false);
   const [cacheReason, setCacheReason] = useState<string>();
+  // 脏标记：用户改了「全局角色默认」/「项目角色」但尚未保存（或放弃）时为 true。
+  // 自动刷新（quiet+keepVisible）看到脏标记时不得覆盖 roles/projectRoles，只提示保留。
+  const [rolesDirty, setRolesDirty] = useState(false);
 
-  const applyResponse = useCallback((response: DesktopSettingsResponse, quiet = false) => {
+  const applyProject = useCallback((layered: ProjectRoleSettingsView) => {
+    setProjectRoles({ ...layered.effective });
+    setProjectSources({ ...layered.sources });
+  }, []);
+
+  const applyResponse = useCallback((response: DesktopSettingsResponse, opts?: { quiet?: boolean; keepVisible?: boolean }) => {
     setSettings(response.settings);
     setInventory(response.inventory);
-    setRoles({ ...response.settings.defaults.roles });
+    // 不变量：roles 只在非脏或用户明确触发（手动检测 / 保存回读）时被服务端默认覆盖；
+    // 自动刷新（quiet+keepVisible）遇脏则跳过覆盖，见 shouldPreserveRoleEdits。
+    const preserveRoleEdits = shouldPreserveRoleEdits(rolesDirty, opts);
+    if (!preserveRoleEdits) {
+      setRoles({ ...response.settings.defaults.roles });
+    }
     setSuggested({ ...response.suggestedDefaults });
     setFromCache(response.fromCache);
     setCacheReason(response.reason);
+    if (preserveRoleEdits) {
+      // 自动刷新跳过了 roles/projectRoles 覆盖：其余字段（inventory/settings.ui/suggested）已照常刷新。
+      setMessage("检测到未保存的角色修改，已保留；自动刷新未覆盖它们");
+      return;
+    }
     // Always surface config-change detections; suppress only routine cache hits / first paint noise when quiet.
     if (response.reason === "fingerprint") {
       setMessage("检测到本机 CLI 配置文件已变更，已自动重新检索模型与思考深度");
       return;
     }
-    if (quiet) return;
+    if (opts?.quiet) return;
     if (response.reason === "stale") {
       setMessage("缓存已过期，已自动重新检索本机 CLI 配置");
     } else if (response.reason === "miss") {
       setMessage("已完成首次本机 CLI 检索");
     }
-  }, []);
+  }, [rolesDirty]);
 
   const load = useCallback(async (opts?: { quiet?: boolean; keepVisible?: boolean }) => {
     if (!opts?.keepVisible) setLoading(true);
     setError(undefined);
+    // 自动刷新（quiet+keepVisible）在脏状态下同时保留项目角色的本地编辑。
+    const preserveRoleEdits = shouldPreserveRoleEdits(rolesDirty, opts);
     try {
       const response = await getDesktopSettings();
-      applyResponse(response, opts?.quiet === true);
+      applyResponse(response, opts);
+      if (scope) {
+        try {
+          const layered = await getProjectRoleSettings(scope);
+          if (!preserveRoleEdits) applyProject(layered);
+        } catch (projectError) {
+          if (pane === "project") setError(formatDesktopError(projectError));
+        }
+      }
     } catch (loadError) {
       setError(formatDesktopError(loadError));
     } finally {
       setLoading(false);
     }
-  }, [applyResponse]);
+  }, [applyProject, applyResponse, pane, rolesDirty, scope]);
 
   useEffect(() => {
     void load();
@@ -127,9 +177,13 @@ export function SettingsWorkbench() {
 
   // 已知角色保持既定顺序，项目自定义角色追加在后
   const roleNames = useMemo(() => {
-    const names = orderedRoles([...Object.keys(roles), ...Object.keys(suggested)]);
+    const names = orderedRoles([
+      ...Object.keys(roles),
+      ...Object.keys(projectRoles),
+      ...Object.keys(suggested),
+    ]);
     return names.length > 0 ? names : BUILT_IN_ROLES;
-  }, [roles, suggested]);
+  }, [projectRoles, roles, suggested]);
 
   // If inventory updates and a selected model/reasoning disappeared, snap to CLI defaults.
   useEffect(() => {
@@ -180,8 +234,9 @@ export function SettingsWorkbench() {
       setCacheReason(result.reason ?? "refresh");
       setMessage("已强制重新检索本机 CLI 配置");
       // refresh settings envelope for cache timestamp + sanitized defaults
+      // 手动「重新检测」是用户明确意图：即使有脏编辑也按最新服务端默认覆盖。
       const response = await getDesktopSettings();
-      applyResponse(response, true);
+      applyResponse(response, { quiet: true });
       setMessage("已强制重新检索本机 CLI 配置");
     } catch (scanError) {
       setError(formatDesktopError(scanError));
@@ -218,16 +273,30 @@ export function SettingsWorkbench() {
     setError(undefined);
     setMessage(undefined);
     try {
-      await saveDesktopSettings({
-        defaults: { roles },
-        ui: {
-          showCliPickerInRunLauncher: uiState.showCliPickerInRunLauncher,
-          autoDetectCliConfig: uiState.autoDetectCliConfig !== false,
-          autoDetectOnFocus: uiState.autoDetectOnFocus !== false,
-        },
-      });
-      setMessage("全局默认已保存（仅本机，不写进项目仓库）");
-      await load({ quiet: true, keepVisible: true });
+      if (pane === "project") {
+        if (!scope) throw new Error("当前没有选中项目");
+        const payload: Record<string, RoleBindingInput | null> = {};
+        for (const role of roleNames) {
+          payload[role] = projectSources[role] === "project" ? projectRoles[role] ?? null : null;
+        }
+        applyProject(await saveProjectRoleSettings(scope, payload));
+        setRolesDirty(false);
+        setMessage("项目角色已保存（只覆盖本项目；未覆盖的角色继续用全局）");
+      } else {
+        await saveDesktopSettings({
+          defaults: { roles },
+          ui: {
+            showCliPickerInRunLauncher: uiState.showCliPickerInRunLauncher,
+            autoDetectCliConfig: uiState.autoDetectCliConfig !== false,
+            autoDetectOnFocus: uiState.autoDetectOnFocus !== false,
+          },
+        });
+        // 保存成功后清脏，回读刷新才按新保存的默认覆盖（不会回滚用户刚才的保存）。
+        setRolesDirty(false);
+        setMessage("全局默认已保存（仅本机，不写进项目仓库）");
+        await load({ quiet: true, keepVisible: true });
+      }
+      onSaved?.();
     } catch (saveError) {
       setError(formatDesktopError(saveError));
     } finally {
@@ -236,23 +305,27 @@ export function SettingsWorkbench() {
   };
 
   const updateRole = (role: string, patch: Partial<RoleBindingInput>) => {
-    setRoles((current) => {
-      const base = current[role] ?? { cli: "grok" as CliId, reasoning: "high" };
-      const next = { ...base, ...patch };
-      const cli = clisById.get(next.cli);
-      if (patch.cli && cli) {
-        const model = cli.defaultModel ?? cli.models[0]?.id;
-        if (model) next.model = model;
-        next.reasoning = cli.defaultReasoning
-          ?? cli.models[0]?.reasoningOptions?.[0]
-          ?? "high";
-      }
-      return { ...current, [role]: next };
-    });
+    setRolesDirty(true);
+    if (pane === "project") {
+      setProjectRoles((current) => applyRolePatch(current, role, patch, inventory));
+      setProjectSources((current) => ({ ...current, [role]: "project" }));
+      return;
+    }
+    setRoles((current) => applyRolePatch(current, role, patch, inventory));
+  };
+
+  const inheritGlobal = (role: string) => {
+    setRolesDirty(true);
+    setProjectRoles((current) => ({
+      ...current,
+      [role]: roles[role] ?? current[role] ?? { cli: "grok" as CliId, reasoning: "high" },
+    }));
+    setProjectSources((current) => ({ ...current, [role]: "global" }));
   };
 
   // 按本机 CLI 检索结果填充推荐默认（仅未保存的界面状态，仍需点「保存默认」）
   const adoptSuggested = () => {
+    setRolesDirty(true);
     setRoles((current) => {
       const next = { ...current };
       for (const [role, binding] of Object.entries(suggested)) {
@@ -267,34 +340,74 @@ export function SettingsWorkbench() {
     return (
       <div className="settings-workbench settings-loading">
         <LoaderCircle className="spin" size={28} />
-        <strong>正在加载全局设置</strong>
+        <strong>{pane === "project" ? "正在加载项目设置" : "正在加载全局设置"}</strong>
       </div>
     );
   }
 
+  const isProject = pane === "project";
+
   return (
-    <section className="settings-workbench" aria-label="全局设置">
+    <section className="settings-workbench" aria-label={isProject ? "项目设置" : "全局设置"}>
       <header className="settings-hero">
-        <div className="settings-hero-icon"><Settings2 size={22} /></div>
+        <div className="settings-hero-icon">{isProject ? <FolderCog size={22} /> : <Settings2 size={22} />}</div>
         <div>
-          <span className="section-kicker">本机全局</span>
-          <h1>Agent CLI 与角色默认</h1>
+          <span className="section-kicker">{isProject ? `当前项目${projectName ? ` · ${projectName}` : ""}` : "本机全局"}</span>
+          <h1>{isProject ? "项目角色覆盖" : "Agent CLI 与角色默认"}</h1>
           <p>
-            检索本机 Codex / Grok / Kimi / Claude 的配置与授权状态，设置默认模型与思考深度。
-            新建运行时各角色会预填这些默认值；项目 yaml 仍可收紧权限边界。
+            {isProject
+              ? "只改当前项目。某个角色没单独设置时，自动用全局默认；保存后新建运行和重试都会按合并结果选 CLI。"
+              : "检索本机 Codex / Grok / Kimi / Claude 的配置与授权状态，设置默认模型与思考深度。项目没有单独覆盖的角色会用这里的值。"}
           </p>
         </div>
         <div className="settings-hero-actions">
-          <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
-            {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
-            <span>{scanning ? "检测中" : "手动检测"}</span>
-          </button>
+          {!isProject && (
+            <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
+              {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
+              <span>{scanning ? "检测中" : "手动检测"}</span>
+            </button>
+          )}
+          {isProject && onOpenGlobal && (
+            <button type="button" className="button secondary" onClick={onOpenGlobal}>
+              <Settings2 size={16} />
+              <span>全局设置</span>
+            </button>
+          )}
+          {!isProject && onOpenProject && (
+            <button type="button" className="button secondary" onClick={onOpenProject} disabled={!scope}>
+              <FolderCog size={16} />
+              <span>项目设置</span>
+            </button>
+          )}
           <button type="button" className="button primary" onClick={() => void save()} disabled={saving || scanning}>
             {saving ? <LoaderCircle size={16} className="spin" /> : <Save size={16} />}
-            <span>{saving ? "保存中" : "保存默认"}</span>
+            <span>{saving ? "保存中" : isProject ? "保存项目" : "保存全局"}</span>
           </button>
         </div>
       </header>
+
+      <div className="settings-layer-tabs" role="tablist" aria-label="设置范围">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={!isProject}
+          className={!isProject ? "is-active" : ""}
+          onClick={() => onOpenGlobal?.()}
+          disabled={!isProject && !onOpenGlobal}
+        >
+          全局
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={isProject}
+          className={isProject ? "is-active" : ""}
+          onClick={() => onOpenProject?.()}
+          disabled={!scope || (isProject && !onOpenProject)}
+        >
+          项目
+        </button>
+      </div>
 
       {(error || message) && (
         <div className={`settings-banner ${error ? "is-error" : "is-ok"}`} role="status">
@@ -303,7 +416,7 @@ export function SettingsWorkbench() {
         </div>
       )}
 
-      <section className="settings-panel">
+      {!isProject && <section className="settings-panel">
         <div className="settings-panel-head">
           <RefreshCw size={18} />
           <div>
@@ -359,12 +472,12 @@ export function SettingsWorkbench() {
             </button>
           </div>
           <p className="settings-detect-hint">
-            监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存默认」。
+            监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存全局」。
           </p>
         </div>
-      </section>
+      </section>}
 
-      <section className="settings-panel">
+      {!isProject && <section className="settings-panel">
         <div className="settings-panel-head">
           <Terminal size={18} />
           <div>
@@ -414,83 +527,40 @@ export function SettingsWorkbench() {
             </article>
           ))}
         </div>
-      </section>
+      </section>}
 
       <section className="settings-panel">
         <div className="settings-panel-head">
           <ShieldCheck size={18} />
           <div>
-            <h2>角色默认映射</h2>
-            <small>保存后，新建运行会预填这些选择（仍可在弹窗里改一次）</small>
+            <h2>{isProject ? "项目角色" : "全局角色默认"}</h2>
+            <small>
+              {isProject
+                ? "改过的角色只对本项目生效；点「恢复全局」后该角色重新跟全局走"
+                : "保存后，没有项目覆盖的角色会用这些值；新建运行仍可在弹窗里改一次"}
+            </small>
           </div>
-          <button
-            type="button"
-            className="button secondary settings-inline-detect"
-            onClick={adoptSuggested}
-            disabled={saving || scanning || Object.keys(suggested).length === 0}
-            title="按本机 CLI 检索结果填充推荐的默认模型与思考深度"
-          >
-            <Sparkles size={14} />
-            <span>采用建议默认</span>
-          </button>
+          {!isProject && (
+            <button
+              type="button"
+              className="button secondary settings-inline-detect"
+              onClick={adoptSuggested}
+              disabled={saving || scanning || Object.keys(suggested).length === 0}
+              title="按本机 CLI 检索结果填充推荐的默认模型与思考深度"
+            >
+              <Sparkles size={14} />
+              <span>采用建议默认</span>
+            </button>
+          )}
         </div>
-        <div className="role-default-grid">
-          {roleNames.map((role) => {
-            const binding = roles[role] ?? { cli: "grok" as CliId, reasoning: "high" };
-            const cli = clisById.get(binding.cli);
-            const models = cli?.models ?? [];
-            const reasoningOptions = (
-              models.find((m) => m.id === binding.model)?.reasoningOptions
-              ?? cli?.models[0]?.reasoningOptions
-              ?? ["low", "medium", "high"]
-            );
-            return (
-              <div key={role} className="role-default-card">
-                <strong>{agentRoleLabel(role)}</strong>
-                <label>
-                  <span>Agent CLI</span>
-                  <select
-                    value={binding.cli}
-                    onChange={(event) => updateRole(role, { cli: event.target.value as CliId })}
-                  >
-                    {(["codex", "grok", "claude", "kimi"] as CliId[]).map((id) => {
-                      const item = clisById.get(id);
-                      const disabled = !item?.installed || !item.runtimeSupported;
-                      return (
-                        <option key={id} value={id} disabled={disabled}>
-                          {CLI_LABEL[id]}
-                          {!item?.installed ? "（未安装）" : !item.runtimeSupported ? "（暂不可调用）" : ""}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </label>
-                <label>
-                  <span>模型</span>
-                  <select
-                    value={binding.model ?? ""}
-                    onChange={(event) => updateRole(role, { model: event.target.value })}
-                  >
-                    {(models.length > 0 ? models : [{ id: binding.model ?? "default", label: binding.model ?? "default" }]).map((model) => (
-                      <option key={model.id} value={model.id}>{model.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>思考深度</span>
-                  <select
-                    value={binding.reasoning ?? "high"}
-                    onChange={(event) => updateRole(role, { reasoning: event.target.value })}
-                  >
-                    {reasoningOptions.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            );
-          })}
-        </div>
+        <RoleBindingEditor
+          roles={isProject ? projectRoles : roles}
+          roleNames={roleNames}
+          {...(inventory ? { inventory } : {})}
+          disabled={saving || scanning}
+          {...(isProject ? { sources: projectSources, onClear: inheritGlobal } : {})}
+          onChange={updateRole}
+        />
       </section>
     </section>
   );

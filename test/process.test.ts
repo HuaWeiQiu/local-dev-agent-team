@@ -73,4 +73,38 @@ describe("managed processes", () => {
     expect(result.stdoutBytes).toBe(4);
     expect(result.stdoutTruncated).toBe(true);
   });
+
+  it("absorbs EPIPE when the child exits without reading a large stdin prompt", async () => {
+    // A child that never consumes stdin closes the pipe read end; writing a
+    // prompt larger than the pipe buffer then surfaces EPIPE on the stdin
+    // stream. Without a listener this crashes the caller (the control
+    // service), so the runner must absorb it and report via the exit code.
+    const largePrompt = "x".repeat(1024 * 1024);
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: process.cwd(),
+      stdin: largePrompt,
+      timeoutMs: 5_000,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+  });
+
+  it("survives a child that stays alive but never reads stdin", async () => {
+    // The child keeps the pipe open long enough for the writer to fill the
+    // buffer and block, then exits: the pending write resolves with EPIPE
+    // only after the reader goes away.
+    const largePrompt = "y".repeat(512 * 1024);
+    const result = await runProcess({
+      command: process.execPath,
+      args: ["-e", "setTimeout(() => process.exit(7), 150)"],
+      cwd: process.cwd(),
+      stdin: largePrompt,
+      timeoutMs: 5_000,
+    });
+
+    expect(result.exitCode).toBe(7);
+  });
 });

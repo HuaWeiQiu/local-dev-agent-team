@@ -15,6 +15,7 @@ import {
   selectTaskWave,
   validateTaskPlan,
 } from "../src/domain/plan.js";
+import { pathMatchesOwnedPath } from "../src/domain/owned-paths.js";
 
 function plan(): TaskPlan {
   return {
@@ -142,6 +143,13 @@ describe("plan completeness", () => {
     const fallback = fallbackHandoverTaskPlan();
     expect(fallback.tasks.map((task) => task.id)).toEqual(["T1", "T2", "T3", "T4"]);
     expect(assessPlanCompleteness(fallback, "根据交接文档完成任务").status).toBe("complete");
+    const t1 = fallback.tasks.find((task) => task.id === "T1");
+    expect(
+      [
+        "apps/photoshop-uxp/src/host/source-pixel-hash.mjs",
+        "apps/photoshop-uxp/tests/source-pixel-hash.test.mjs",
+      ].every((file) => t1?.ownedPaths.some((pattern) => pathMatchesOwnedPath(file, pattern))),
+    ).toBe(true);
     const named = fallbackNamedTaskPlan(
       "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
     );

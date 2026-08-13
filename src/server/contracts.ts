@@ -35,6 +35,11 @@ export const desktopSettingsUpdateSchema = z.object({
   }),
 });
 
+/** Per-project role overrides. Omit a role (or set null) to inherit the global default. */
+export const projectRoleSettingsUpdateSchema = z.object({
+  roles: z.record(z.string().min(1), roleBindingSchema.nullable()).default({}),
+});
+
 export const strategyBlueprintRequestSchema = z.object({
   definition: namedStrategySchema,
 });

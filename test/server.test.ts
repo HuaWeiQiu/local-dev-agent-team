@@ -402,6 +402,78 @@ describe("control HTTP server", () => {
     await supervisor.close();
     events.close();
   });
+
+  it("exposes project role settings and keeps yaml profiles when no desktop session is present", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-role-settings-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("layered-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    let startedRequest: { roleBindings?: Record<string, unknown> } | undefined;
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        startedRequest = request;
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fakeState(context.runId, request.goal);
+      },
+    });
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    try {
+      const empty = await fetch(`${listening.url}/api/role-settings`);
+      expect(empty.status).toBe(200);
+      await expect(empty.json()).resolves.toMatchObject({
+        projectName: "layered-fixture",
+        roles: {},
+      });
+
+      const saved = await fetch(`${listening.url}/api/role-settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          roles: {
+            worker: { cli: "grok", model: "grok-4.6", reasoning: "high" },
+            orchestrator: null,
+          },
+        }),
+      });
+      expect(saved.status).toBe(200);
+      const savedBody = await saved.json() as {
+        roles: { worker?: { cli: string } };
+        sources: Record<string, string>;
+      };
+      expect(savedBody.roles.worker?.cli).toBe("grok");
+      expect(savedBody.sources.worker).toBe("project");
+
+      const start = await fetch(`${listening.url}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ goal: "Keep yaml profiles" }),
+      });
+      expect(start.status).toBe(202);
+      const { runId } = await start.json() as { runId: string };
+      expect(startedRequest?.roleBindings).toBeUndefined();
+      await fetch(`${listening.url}/api/runs/${encodeURIComponent(runId)}/actions/cancel`, {
+        method: "POST",
+      });
+      await supervisor.wait(runId);
+    } finally {
+      await supervisor.close();
+      await listening.close();
+      events.close();
+    }
+  });
 });
 
 async function readUntil(

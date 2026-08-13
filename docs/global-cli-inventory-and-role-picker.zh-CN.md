@@ -102,7 +102,7 @@ type CliInventory = {
 
 ### 4.1 存储
 
-`~/.agent-team/desktop-settings.json`（桌面壳读写；控制服务只读投影）：
+`~/.agent-team/desktop-settings.json`（本机全局；控制服务只读投影）：
 
 ```jsonc
 {
@@ -157,7 +157,17 @@ type CliInventory = {
 - 全局 UI 开关（`~/.agent-team/desktop-settings.json` → `ui`）：
   - `autoDetectCliConfig`（默认 true）：设置页 30s 轮询
   - `autoDetectOnFocus`（默认 true）：回到窗口时检测  
-  改完后点「保存默认」写入本机。
+  改完后点「保存全局」写入本机。
+
+### 4.4 项目角色覆盖（已实现）
+
+左侧导航「项目」与设置页的「项目」页签共用同一份覆盖：
+
+- 文件：`<repo>/.agent-team/role-settings.json`（0600，已在 `.agent-team/` 里被 Git 忽略）
+- 合并：项目里写了的角色覆盖全局；没写的角色继续用全局
+- HTTP：`GET/PUT /api/projects/:id/role-settings`（单项目模式为 `/api/role-settings`）
+- 桌面会话启动/重试：请求没带 `roleBindings` 时，注入全局 ∪ 项目合并结果
+- 无桌面会话的 `agent-team serve` / 测试：不注入，继续走项目 yaml profile
 
 ---
 
@@ -174,7 +184,7 @@ type CliInventory = {
 测试        [Grok    ▾]  [grok         ▾]  [medium▾]
 ```
 
-- 初始值 = L1 全局默认，再套项目允许列表过滤。  
+- 初始值 = 项目覆盖 ∪ 全局默认（项目没写的角色用全局），再套项目允许列表过滤。  
 - 切换 CLI 时模型列表随 inventory 刷新。  
 - 高级区仍可显示「映射到的内部 profile 名」供排障（可折叠）。
 
@@ -260,6 +270,8 @@ Run 内生成虚拟名如 `runtime/grok/high`，只存在于 run 状态，避免
 | `GET` | `/api/desktop/cli-inventory` | 读缓存；`?refresh=1` 强制；指纹变则自动重扫；返回 `fromCache` + `reason` |
 | `GET` | `/api/desktop/settings` | 读全局设置 + 最新 inventory（同上自动失效） |
 | `PUT` | `/api/desktop/settings` | 写全局默认（校验 CLI 已安装） |
+| `GET` | `/api/projects/:id/role-settings` | 读项目覆盖 + 全局 + 合并结果 |
+| `PUT` | `/api/projects/:id/role-settings` | 写项目覆盖；`null` 表示该角色继承全局 |
 | `POST` | `/api/projects/:id/runs` | 扩展 `roleBindings` |
 
 桌面 Tauri 命令可薄封装上述 HTTP，或直接扫盘后 `PUT settings`（二选一，建议 **扫盘在 Node 控制面**，权限与日志统一）。

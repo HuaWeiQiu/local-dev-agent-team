@@ -92,7 +92,7 @@ export async function dispatchDesktopApi(
   throw new HttpError(404, "Desktop route not found");
 }
 
-function requireDesktopMutation(
+export function requireDesktopMutation(
   request: IncomingMessage,
   serverOrigin: string,
   sessionOperator: string | undefined,

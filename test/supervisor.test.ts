@@ -278,17 +278,23 @@ describe("run supervisor", () => {
     const cliRun = fakeState("cli-run", "Started by agent-team run", "implementing");
     const foreignRun = fakeState("foreign-run", "Started by another service", "implementing");
     foreignRun.supervisorId = randomUUID();
-    await Promise.all([states.save(cliRun), states.save(foreignRun)]);
+    const exploringRun = fakeState("exploring-run", "Crashed while exploring", "exploring");
+    exploringRun.supervisorId = randomUUID();
+    await Promise.all([states.save(cliRun), states.save(foreignRun), states.save(exploringRun)]);
     const supervisor = new RunSupervisor(loaded, events);
 
     // The startup lease guarantees no other live supervisor, so both the
     // foreign-owned run and the legacy run without a supervisorId are dead.
-    expect(await supervisor.reconcileInterruptedRuns()).toBe(2);
+    expect(await supervisor.reconcileInterruptedRuns()).toBe(3);
     await expect(supervisor.get(cliRun.id)).resolves.toMatchObject({
       status: "interrupted",
       error: "The owning control service stopped before the run completed",
     });
     await expect(supervisor.get(foreignRun.id)).resolves.toMatchObject({
+      status: "interrupted",
+      error: "The owning control service stopped before the run completed",
+    });
+    await expect(supervisor.get(exploringRun.id)).resolves.toMatchObject({
       status: "interrupted",
       error: "The owning control service stopped before the run completed",
     });

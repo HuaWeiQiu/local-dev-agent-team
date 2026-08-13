@@ -66,7 +66,8 @@ export const RunRail = memo(function RunRail({
         {visibleRuns.map((run) => {
           const completed = run.taskCounts.merged + run.taskCounts.passed;
           const total = Object.values(run.taskCounts).reduce((sum, count) => sum + count, 0);
-          const canDelete = deletableStatuses.has(run.status);
+          const referencedAsParent = runs.some((item) => item.parentRunId === run.id);
+          const canDelete = deletableStatuses.has(run.status) && !referencedAsParent;
           return (
             <div
               key={run.id}
@@ -100,15 +101,16 @@ export const RunRail = memo(function RunRail({
                   </span>
                 </span>
               </button>
-              {canDelete && onDelete ? (
+              {deletableStatuses.has(run.status) && onDelete ? (
                 <button
                   type="button"
                   className="run-item-delete"
-                  title="删除此运行"
-                  aria-label={`删除运行 ${shortRunId(run.id)}`}
-                  disabled={busy}
+                  title={referencedAsParent ? "仍被后续运行引用，结束后才能删除" : "删除此运行"}
+                  aria-label={referencedAsParent ? `运行 ${shortRunId(run.id)} 仍被后续运行引用` : `删除运行 ${shortRunId(run.id)}`}
+                  disabled={busy || referencedAsParent}
                   onClick={(event) => {
                     event.stopPropagation();
+                    if (referencedAsParent) return;
                     onDelete(run.id);
                   }}
                 >

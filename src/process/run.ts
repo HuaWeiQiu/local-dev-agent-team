@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { envSecretValues, redactEnvSecrets, sanitizedChildEnv } from "./env.js";
+import type { LiveChildHandle } from "./live-children.js";
 
 export interface ProcessRequest {
   command: string;
@@ -12,6 +13,7 @@ export interface ProcessRequest {
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
   maxOutputBytes?: number;
+  liveChild?: LiveChildHandle;
 }
 
 export interface ProcessResult {
@@ -45,6 +47,9 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    if (child.pid) {
+      void request.liveChild?.attach(child.pid).catch(() => undefined);
+    }
 
     let stdout = "";
     let stderr = "";
@@ -115,6 +120,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         clearTimeout(escalationTimer);
       }
       request.signal?.removeEventListener("abort", abort);
+      void request.liveChild?.release().catch(() => undefined);
       reject(error);
     });
 
@@ -124,6 +130,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         clearTimeout(escalationTimer);
       }
       request.signal?.removeEventListener("abort", abort);
+      void request.liveChild?.release().catch(() => undefined);
       if (callbackError) {
         reject(callbackError);
         return;
@@ -144,6 +151,17 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       });
     });
 
+    // The child may exit without ever reading its stdin: some adapters never
+    // consume it, and CLI validation failures can exit early. Writing a large
+    // prompt into a closed pipe then surfaces EPIPE/ECONNRESET on the stdin
+    // stream; without a listener that error would crash the whole control
+    // service. The real failure is still observed through the process exit
+    // code, so only unexpected stdin errors reject.
+    child.stdin.on("error", (error) => {
+      if (!isPipeTermination(error)) {
+        reject(error);
+      }
+    });
     if (request.stdin !== undefined) {
       child.stdin.end(request.stdin);
     } else {
@@ -176,4 +194,12 @@ function utf8Prefix(value: string, maxBytes: number): string {
   let end = maxBytes;
   while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
   return encoded.subarray(0, end).toString("utf8");
+}
+
+function isPipeTermination(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "EPIPE" || error.code === "ECONNRESET")
+  );
 }
