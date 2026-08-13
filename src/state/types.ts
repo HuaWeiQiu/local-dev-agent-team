@@ -47,6 +47,8 @@ export interface TaskRunState {
   branch?: string;
   worktree?: string;
   commit?: string;
+  /** Integration-branch merge commit produced when this task was merged. */
+  mergeCommit?: string;
   profile?: string;
   quality?: QualityReport;
   review?: ReviewVerdict;

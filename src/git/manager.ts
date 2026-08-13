@@ -404,6 +404,30 @@ export class GitManager {
     return (await this.git(["rev-parse", "HEAD"], directory, 120_000, undefined, signal)).stdout.trim();
   }
 
+  /**
+   * First-parent commits reachable from `toRef` but not from `fromExclusive`
+   * (`rev-list --first-parent from..to`): the commits by which the branch
+   * itself advanced, excluding commits pulled in through merged branches.
+   */
+  async commitsBetween(
+    directory: string,
+    fromExclusive: string,
+    toRef: string,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const result = await this.git(
+      ["rev-list", "--first-parent", `${fromExclusive}..${toRef}`],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
   async isClean(directory: string, signal?: AbortSignal): Promise<boolean> {
     const status = await this.git(
       ["status", "--porcelain=v1", "-z", "--untracked-files=all"],

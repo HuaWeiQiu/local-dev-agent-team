@@ -373,11 +373,14 @@ fn open_registered_workspace_sync(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "无法定位桌面配置目录".to_string())?;
+    let token_path = session_token_path(app)
+        .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
     match start_service(
         &paths,
         &service_root,
         &config,
         Some(&workspace_bundle.registry_path),
+        &token_path,
     ) {
         Ok(mut service) => {
             service.project_root = focus_root.clone();
@@ -444,8 +447,10 @@ fn start_service(
     root: &Path,
     config: &SelectedConfig,
     registry_path: Option<&Path>,
+    token_path: &Path,
 ) -> Result<ManagedService, String> {
     let token = random_session_token();
+    write_session_token_file(token_path, &token)?;
     let mut command = Command::new(&paths.node);
     command
         .arg(&paths.cli)
@@ -460,7 +465,10 @@ fn start_service(
         })
         .arg(&config.path)
         .current_dir(root)
-        .env("AGENT_TEAM_SESSION_TOKEN", &token)
+        // 令牌经 0600 文件传递，env 里只出现路径：同 uid 进程用 ps eww
+        // 看不到令牌值，也避免令牌随环境变量被子进程继承。
+        .env("AGENT_TEAM_SESSION_TOKEN_FILE", token_path)
+        .env_remove("AGENT_TEAM_SESSION_TOKEN")
         // GUI apps on macOS often inherit a tiny PATH without Homebrew.
         // Ensure codex/grok CLIs remain resolvable for multi-agent workers.
         .env("PATH", desktop_path_env())
@@ -759,6 +767,32 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join("desktop.json"))
         .map_err(|error| error.to_string())
+}
+
+fn session_token_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("runtime").join("session-token"))
+        .map_err(|error| error.to_string())
+}
+
+/// Write the session token to a 0600 file. Every startup rewrites the file,
+/// so a stale token from a previous run is simply overwritten.
+fn write_session_token_file(path: &Path, token: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建会话令牌目录 {}：{error}", parent.to_string_lossy()))?;
+    }
+    fs::write(path, token)
+        .map_err(|error| format!("无法写入会话令牌文件 {}：{error}", path.to_string_lossy()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // set_permissions 也修正已存在文件的过宽权限（create 时的 mode 只对新建生效）。
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("无法设置会话令牌文件权限：{error}"))?;
+    }
+    Ok(())
 }
 
 fn load_settings(app: &AppHandle) -> Result<Option<DesktopSettings>, String> {
@@ -1485,6 +1519,24 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn writes_session_token_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir().unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+
+        write_session_token_file(&token_path, "first-token").unwrap();
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "first-token");
+        assert_eq!(fs::metadata(&token_path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // 重启重写：即使旧文件权限被放宽，重写后也必须回到 0600。
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_session_token_file(&token_path, "second-token").unwrap();
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "second-token");
+        assert_eq!(fs::metadata(&token_path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn presents_an_existing_control_service_as_a_busy_project() {
         let status = service_start_error_status(
@@ -1562,7 +1614,8 @@ mod tests {
             process_output_detail(&init.stdout, &init.stderr)
         );
         let config = discover_config(root.path()).unwrap();
-        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+        let mut service = start_service(&paths, root.path(), &config, None, &token_path).unwrap();
 
         let unauthorized = http_get(&service.url, "/api/health", None);
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
@@ -1613,7 +1666,8 @@ mod tests {
             path: root.path().join("agent-team.yaml"),
             kind: ConfigKind::Project,
         };
-        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+        let mut service = start_service(&paths, root.path(), &config, None, &token_path).unwrap();
 
         // start_service 用 process_group(0) 让服务独立成组。
         let pid = service.child.id() as libc::pid_t;

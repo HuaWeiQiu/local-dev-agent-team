@@ -16,6 +16,7 @@ import {
   type AutomaticStrategyCandidate,
 } from "../evolution/automation.js";
 import { EvolutionApplicationCoordinator } from "../evolution/application.js";
+import { AutomaticEvolutionStateStore } from "../evolution/automatic-state.js";
 import {
   computeCandidateDigest,
   EVOLUTION_DOMAIN_VERSION,
@@ -110,6 +111,7 @@ export class AutomaticEvolutionController {
   private readonly proposeCandidate: AutomaticEvolutionDependencies["proposeCandidate"];
   private readonly desktopHome: string | undefined;
   private readonly artifactStore: RunStateStore;
+  private readonly stateStore: AutomaticEvolutionStateStore;
   private state: AutomaticEvolutionSnapshot;
   private loop: Promise<void> | undefined;
   private abortController: AbortController | undefined;
@@ -131,6 +133,9 @@ export class AutomaticEvolutionController {
     this.desktopHome = dependencies.desktopHome;
     this.artifactStore = new RunStateStore(
       path.resolve(loaded.root, loaded.config.project.stateDirectory, "runs"),
+    );
+    this.stateStore = new AutomaticEvolutionStateStore(
+      path.resolve(loaded.root, loaded.config.project.stateDirectory, "evolution"),
     );
     this.state = this.initialState();
   }
@@ -167,6 +172,18 @@ export class AutomaticEvolutionController {
       isDeepStrictEqual(target, proposal.candidate.definition)
     ) {
       this.strategies.setRuntimeDefault(this.config.targetStrategy);
+    }
+  }
+
+  /**
+   * 控制服务重启后恢复最近一次评测记录；损坏的落盘数据被丢弃为 null，
+   * 不阻断启动。新一轮 start() 会保留该记录，直到新评测完成时刷新。
+   */
+  async restoreLastEvaluation(): Promise<void> {
+    const record = await this.stateStore.loadLastEvaluation();
+    if (record) {
+      this.state.lastEvaluation = record;
+      this.touch();
     }
   }
 
@@ -233,6 +250,8 @@ export class AutomaticEvolutionController {
       sessionId,
       startedAt: now,
       updatedAt: now,
+      // 最近一次完成的评测在新一轮基线评测刷新前仍然有效。
+      lastEvaluation: this.state.lastEvaluation,
     };
     this.session = session;
     this.abortController = new AbortController();
@@ -639,6 +658,16 @@ export class AutomaticEvolutionController {
       completedAt: this.timestamp(),
     };
     this.touch();
+    try {
+      await this.stateStore.saveLastEvaluation(this.state.lastEvaluation);
+    } catch (error) {
+      // 提示性数据的落盘失败不应中止评测循环。
+      console.warn(
+        `[evolution-automation] failed to persist last evaluation record: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return {
       runIds: outcomes.map((outcome) => outcome.runId),
       passed: suiteAggregate.passed,

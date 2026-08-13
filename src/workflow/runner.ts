@@ -544,9 +544,11 @@ export class LocalWorkflowRunner {
   ): Promise<void> {
     const integrationCommit = await git.currentCommit(state.integrationWorktree);
     if (integrationCommit !== checkpoint.integrationCommit) {
-      throw new Error(
-        `Integration worktree HEAD '${integrationCommit}' does not match checkpoint '${checkpoint.integrationCommit}'`,
-      );
+      if (!(await this.isOnlyPostCheckpointMerges(state, checkpoint, git))) {
+        throw new Error(
+          `Integration worktree HEAD '${integrationCommit}' does not match checkpoint '${checkpoint.integrationCommit}'`,
+        );
+      }
     }
     if (!(await git.isClean(state.integrationWorktree))) {
       throw new Error("Integration worktree has uncommitted changes outside the checkpoint");
@@ -557,6 +559,41 @@ export class LocalWorkflowRunner {
         throw new Error(`Checkpoint references unknown task '${taskId}'`);
       }
     }
+  }
+
+  /**
+   * Tolerate a crash between a task merge and the wave checkpoint: the
+   * integration HEAD may sit exactly on the recorded merge commits of tasks
+   * that are marked merged but absent from the checkpoint. Anything else
+   * (foreign commits, missing records, divergence) keeps the refusal.
+   */
+  private async isOnlyPostCheckpointMerges(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    git: GitManager,
+  ): Promise<boolean> {
+    const checkpointed = new Set(checkpoint.completedTaskIds);
+    const expected = new Set(
+      state.tasks
+        .filter(
+          (task) =>
+            task.status === "merged" &&
+            !checkpointed.has(task.task.id) &&
+            typeof task.mergeCommit === "string",
+        )
+        .map((task) => task.mergeCommit!),
+    );
+    if (expected.size === 0) {
+      return false;
+    }
+    const extras = await git.commitsBetween(
+      state.integrationWorktree,
+      checkpoint.integrationCommit,
+      "HEAD",
+    );
+    return (
+      extras.length === expected.size && extras.every((commit) => expected.has(commit))
+    );
   }
 
   private async prepareRecovery(
@@ -766,7 +803,7 @@ export class LocalWorkflowRunner {
         if (!taskState.branch || !taskState.worktree) {
           throw new Error(`Task '${taskState.task.id}' has no branch/worktree metadata`);
         }
-        await git.merge(
+        taskState.mergeCommit = await git.merge(
           state.integrationWorktree,
           taskState.branch,
           `merge: ${taskState.task.id} ${taskState.task.title}`,
@@ -1413,6 +1450,7 @@ function resetIncompleteTask(task: TaskRunState): void {  task.status = "pending
   delete task.branch;
   delete task.worktree;
   delete task.commit;
+  delete task.mergeCommit;
   delete task.profile;
   delete task.quality;
   delete task.review;

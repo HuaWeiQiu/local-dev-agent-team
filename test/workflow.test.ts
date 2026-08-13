@@ -577,6 +577,133 @@ describe("local workflow", () => {
       "beta\n",
     );
   }, 30_000);
+
+  it("resumes when HEAD is ahead of the checkpoint by exactly the recorded merge commits", async () => {
+    const { root, loaded } = await createFixture("post-merge-crash", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Recover merged alpha", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    // Simulate a crash after alpha's merge but before the wave checkpoint:
+    // integration HEAD moved ahead of checkpoint.integrationCommit, and the
+    // merge commit was recorded on the task state.
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    await git(state.integrationWorktree, ["merge", "--no-ff", alphaBranch, "-m", "merge: alpha"]);
+    await git(root, ["worktree", "remove", "--force", alphaWorktree]);
+    const mergeHead = (await gitOut(state.integrationWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+    expect(mergeHead).not.toBe(checkpoint.integrationCommit);
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "merged";
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.mergeCommit = mergeHead;
+    state.tasks[1]!.status = "working";
+    state.tasks[1]!.attempts = 1;
+    state.tasks[1]!.branch = `agent-team/${segment}/beta`;
+    state.tasks[1]!.worktree = path.join(root, ".agent-team", "worktrees", state.id, "beta");
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const recovered = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Host crashed after merge before the wave checkpoint",
+    });
+
+    expect(recovered.status).toBe("awaiting-human");
+    expect(recovered.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+    // Alpha's merge is trusted, not redone; beta is re-executed.
+    expect(recovered.tasks[0]!.branch).toBe(alphaBranch);
+    expect(recovered.tasks[1]!.branch).toContain("-resume-1");
+    expect(recovered.recoveries).toMatchObject([
+      { actor: "operator", abandonedTasks: [{ taskId: "beta", status: "working", attempts: 1 }] },
+    ]);
+    expect(await readFile(path.join(recovered.integrationWorktree, "alpha.txt"), "utf8")).toBe(
+      "alpha\n",
+    );
+    expect(await readFile(path.join(recovered.integrationWorktree, "beta.txt"), "utf8")).toBe(
+      "beta\n",
+    );
+  }, 30_000);
+
+  it("still refuses recovery when the post-checkpoint HEAD contains foreign commits", async () => {
+    const { root, loaded } = await createFixture("foreign-head", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        roleProfiles: {},
+        approvalGates: ["plan", "final"],
+        approvalTimeoutSeconds: 86_400,
+      };
+    });
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    });
+    const state = await runner.run({ goal: "Reject foreign commits", strategyName: "guarded" });
+    expect(state.status).toBe("awaiting-human");
+    state.approvals![0]!.status = "approved";
+    state.approvals![0]!.response = {
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Plan ownership reviewed",
+      respondedAt: new Date().toISOString(),
+    };
+
+    const segment = branchSegment(state.id);
+    const alphaBranch = `agent-team/${segment}/alpha`;
+    const alphaWorktree = path.join(root, ".agent-team", "worktrees", state.id, "alpha");
+    const checkpoint = state.checkpoints!.at(-1)!;
+    await git(root, ["worktree", "add", "-b", alphaBranch, alphaWorktree, checkpoint.integrationCommit]);
+    await writeFile(path.join(alphaWorktree, "alpha.txt"), "alpha\n");
+    await git(alphaWorktree, ["add", "alpha.txt"]);
+    await git(alphaWorktree, ["commit", "-m", "agent: alpha"]);
+    await git(state.integrationWorktree, ["merge", "--no-ff", alphaBranch, "-m", "merge: alpha"]);
+    await git(root, ["worktree", "remove", "--force", alphaWorktree]);
+    const mergeHead = (await gitOut(state.integrationWorktree, ["rev-parse", "HEAD"])).stdout.trim();
+    // A commit the orchestrator never produced lands on the integration branch.
+    await writeFile(path.join(state.integrationWorktree, "foreign.txt"), "foreign\n");
+    await git(state.integrationWorktree, ["add", "foreign.txt"]);
+    await git(state.integrationWorktree, ["commit", "-m", "foreign commit"]);
+
+    state.status = "interrupted";
+    state.tasks[0]!.status = "merged";
+    state.tasks[0]!.branch = alphaBranch;
+    state.tasks[0]!.worktree = alphaWorktree;
+    state.tasks[0]!.mergeCommit = mergeHead;
+    await new RunStateStore(path.join(root, ".agent-team", "runs")).save(state);
+
+    const refused = await runner.resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Attempt recovery with foreign commits on the integration branch",
+    });
+    expect(refused.status).toBe("interrupted");
+    expect(refused.error).toContain("does not match checkpoint");
+  }, 30_000);
 });
 
 async function createFixture(

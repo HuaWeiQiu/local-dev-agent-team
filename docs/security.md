@@ -43,6 +43,15 @@ a security boundary.
   security policy; it cannot load remote scripts or frame other content.
 - Managed Unix child processes use a separate process group so cancellation and
   timeout escalation reach their descendants.
+- The desktop shell never places the control-service session token in the node
+  sidecar's environment. It writes the token to a `0600` file under the app
+  data directory (`runtime/session-token`, rewritten on every startup) and
+  passes only the path via `AGENT_TEAM_SESSION_TOKEN_FILE`, so the secret does
+  not appear in `ps eww` output and cannot ride along through environment
+  inheritance. The direct `AGENT_TEAM_SESSION_TOKEN` variable remains
+  supported for CLI `serve` and other embedders; the file takes precedence,
+  and the service refuses to start when the file is missing, empty, or not
+  `0600`.
 - Child processes never inherit `AGENT_TEAM_*` orchestrator variables (most
   notably the control-service session token): `src/process/env.ts` strips them
   by denylist before spawn while leaving PATH/HOME/proxy variables intact. Any
@@ -79,6 +88,11 @@ Approval `actor` values are supplied by the local caller for audit readability;
 the loopback service does not authenticate OS or organizational identity. Use a
 separately authenticated gateway before exposing the control plane beyond one
 trusted workstation.
+
+The session-token file narrows token exposure to the filesystem: `0600` keeps
+other OS users out, but processes running under the same uid can still read the
+file. That residual is a platform boundary of same-uid isolation, not something
+the transport choice can close.
 
 The service does not expose an A2A endpoint. A2A requires an authenticated,
 authorized HTTPS boundary; adding a well-known Agent Card alone would advertise

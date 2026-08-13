@@ -63,6 +63,7 @@ export class EvolutionProjectService {
 
   async initialize(): Promise<void> {
     await this.automatic.restoreRuntimeDefault();
+    await this.automatic.restoreLastEvaluation();
   }
 
   async close(): Promise<void> {

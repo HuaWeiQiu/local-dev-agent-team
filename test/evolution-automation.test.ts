@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -235,6 +235,117 @@ describe("automatic evolution controller", () => {
       completedAt: expect.any(String),
     });
     expect(Number.isNaN(Date.parse(snapshot.lastEvaluation!.completedAt))).toBe(false);
+    await closeHarness(harness);
+  });
+
+  it("persists the latest evaluation suite identity across control-service restarts", async () => {
+    const harness = await createHarness(() => 8);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "persisted-evaluation-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for persisted evaluation coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "persisted-evaluation-command");
+    const snapshot = await controller.wait();
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.status).toBe("completed");
+    expect(snapshot.lastEvaluation).not.toBeNull();
+
+    const statePath = path.join(
+      harness.root,
+      harness.loaded.config.project.stateDirectory,
+      "evolution",
+      "automatic-controller.json",
+    );
+    const info = await stat(statePath);
+    expect(info.mode & 0o777).toBe(0o600);
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      version: number;
+      lastEvaluation: unknown;
+    };
+    expect(persisted.version).toBe(1);
+    expect(persisted.lastEvaluation).toEqual(snapshot.lastEvaluation);
+
+    const root = harness.root;
+    await closeHarness(harness);
+
+    const reopened = await reopenHarness(root);
+    const restored = new AutomaticEvolutionController(
+      reopened.loaded,
+      reopened.coordinator,
+      reopened.strategies,
+      reopened.supervisor,
+    );
+    expect(restored.snapshot().lastEvaluation).toBeNull();
+    await restored.restoreLastEvaluation();
+    expect(restored.snapshot().lastEvaluation).toEqual(snapshot.lastEvaluation);
+    await closeHarness(reopened);
+  });
+
+  it("discards a corrupt persisted evaluation without blocking startup", async () => {
+    const harness = await createHarness(() => 8);
+    const statePath = path.join(
+      harness.root,
+      harness.loaded.config.project.stateDirectory,
+      "evolution",
+      "automatic-controller.json",
+    );
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+    );
+
+    await writeFile(statePath, "not json at all", "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "not-a-sha256-digest",
+        completedAt: "2026-08-12T00:00:00.000Z",
+      },
+    }), "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "a".repeat(64),
+        completedAt: "not-a-timestamp",
+      },
+    }), "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "a".repeat(64),
+        completedAt: "2026-08-12T00:00:00.000Z",
+      },
+    }), "utf8");
+    await controller.restoreLastEvaluation();
+    expect(controller.snapshot().lastEvaluation).toEqual({
+      suiteName: "fixture-suite",
+      suiteDigest: "a".repeat(64),
+      completedAt: "2026-08-12T00:00:00.000Z",
+    });
     await closeHarness(harness);
   });
 

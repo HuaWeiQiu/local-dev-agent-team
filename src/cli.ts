@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
@@ -20,6 +19,7 @@ import { GithubPublisher } from "./github/publish.js";
 import { GithubRepairRunner, type RepairPushSummary } from "./github/repair.js";
 import type { LoadedConfig } from "./config/load.js";
 import { startControlService } from "./server/start.js";
+import { resolveSessionToken } from "./server/session-token.js";
 import { startProjectRuntime } from "./server/project-runtime.js";
 import { loadWorkspace } from "./workspace/load.js";
 import { startWorkspaceControlService } from "./workspace/service.js";
@@ -255,7 +255,7 @@ program
   .action(async (options: { host: string; port: string; config?: string; workspace?: string }) => {
     assertExclusiveConfigOptions(options);
     const port = parsePort(options.port);
-    const sessionToken = process.env.AGENT_TEAM_SESSION_TOKEN ?? randomBytes(32).toString("hex");
+    const sessionToken = await resolveSessionToken();
     const service = options.workspace
       ? await startWorkspaceControlService(
           await loadWorkspace(process.cwd(), options.workspace),
