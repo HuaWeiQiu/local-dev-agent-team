@@ -404,11 +404,22 @@ export class EvolutionApplicationJournal {
       }
     }
     for (const audit of snapshot.auditRecords) {
-      if (audit.kind === "rejection" || audit.applicationCommandId === undefined) continue;
+      if (
+        audit.kind === "rejection" ||
+        audit.kind === "archive" ||
+        audit.kind === "unarchive" ||
+        audit.kind === "delete" ||
+        !("applicationCommandId" in audit) ||
+        audit.applicationCommandId === undefined
+      ) {
+        continue;
+      }
       const completed = completedByCommand.get(audit.applicationCommandId);
+      const pending = this.#state.pending;
       const pendingOwnsAudit =
-        this.#state.pending?.commandId === audit.applicationCommandId &&
-        this.#catalogOutcomeMatchesPending(this.#state.pending, snapshot, revision);
+        pending !== null &&
+        pending.commandId === audit.applicationCommandId &&
+        this.#catalogOutcomeMatchesPending(pending, snapshot, revision);
       if (
         !pendingOwnsAudit &&
         (!completed ||

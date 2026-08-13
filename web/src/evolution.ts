@@ -7,7 +7,7 @@ import type {
   StrategyDefinition,
 } from "./types";
 
-export type EvolutionFilter = "open" | "all" | EvolutionLifecycleStatus;
+export type EvolutionFilter = "open" | "all" | "archived" | EvolutionLifecycleStatus;
 
 const statusOrder: Record<EvolutionLifecycleStatus, number> = {
   proposed: 0,
@@ -108,13 +108,19 @@ export function visibleEvolutionProposals(
   const normalized = query.trim().toLocaleLowerCase("zh-CN");
   return proposals
     .filter((proposal) => {
+      // 归档候选只出现在「已归档」视图；其余视图一律排除
+      if (filter === "archived") {
+        if (proposal.archivedAt === undefined) return false;
+      } else if (proposal.archivedAt !== undefined) {
+        return false;
+      }
       if (filter === "open" && (
         ["rejected", "rolled-back"].includes(proposal.status)
         || (proposal.status === "promoted" && proposal.application !== null)
       )) {
         return false;
       }
-      if (filter !== "open" && filter !== "all" && proposal.status !== filter) return false;
+      if (filter !== "open" && filter !== "all" && filter !== "archived" && proposal.status !== filter) return false;
       if (!normalized) return true;
       return `${proposal.id} ${proposalTitle(proposal)} ${proposalTarget(proposal)}`
         .toLocaleLowerCase("zh-CN")

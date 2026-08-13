@@ -584,6 +584,8 @@ export interface EvolutionProposal {
   id: string;
   createdAt: string;
   status: EvolutionLifecycleStatus;
+  /** ISO 时间；缺省表示未归档。归档候选默认不出现在列表中。 */
+  archivedAt?: string;
   candidate: EvolutionCandidate;
   policy: {
     version: 1;

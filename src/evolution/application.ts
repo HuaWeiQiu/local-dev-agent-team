@@ -27,11 +27,14 @@ import type { EvolutionCatalogSnapshot } from "./catalog.js";
 import {
   computeCandidateDigest,
   parseHumanDecision,
+  type ArchiveRecord,
+  type DeletionRecord,
   type EvolutionProposal,
   type HumanDecision,
   type PromotionRecord,
   type RejectionRecord,
   type RollbackRecord,
+  type UnarchiveRecord,
 } from "./domain.js";
 import { DurableEvolutionCatalog } from "./persistence.js";
 import {
@@ -630,6 +633,72 @@ export class EvolutionApplicationCoordinator {
     return await this.#enqueue(async () => {
       this.#assertWritable();
       return await this.#catalog.reject(proposalId, {
+        actor: requireNonEmpty(input.operator, "operator"),
+        reason: requireNonEmpty(input.reason, "reason"),
+        decidedAt: new Date(this.#now()).toISOString(),
+      }, this.#state.catalogWriter);
+    });
+  }
+
+  /**
+   * Archive a reviewed proposal (presentation-only marker). No target
+   * mutation, preview, or command binding — same channel as reject.
+   */
+  async archive(
+    proposalId: string,
+    input: { operator: string; reason?: string },
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: ArchiveRecord;
+    committedRevision: number;
+  }> {
+    return await this.#enqueue(async () => {
+      this.#assertWritable();
+      return await this.#catalog.archive(proposalId, {
+        actor: requireNonEmpty(input.operator, "operator"),
+        ...(input.reason === undefined
+          ? {}
+          : { reason: requireNonEmpty(input.reason, "reason") }),
+        decidedAt: new Date(this.#now()).toISOString(),
+      }, this.#state.catalogWriter);
+    });
+  }
+
+  /** Remove a proposal's archival marker. */
+  async unarchive(
+    proposalId: string,
+    input: { operator: string; reason?: string },
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: UnarchiveRecord;
+    committedRevision: number;
+  }> {
+    return await this.#enqueue(async () => {
+      this.#assertWritable();
+      return await this.#catalog.unarchive(proposalId, {
+        actor: requireNonEmpty(input.operator, "operator"),
+        ...(input.reason === undefined
+          ? {}
+          : { reason: requireNonEmpty(input.reason, "reason") }),
+        decidedAt: new Date(this.#now()).toISOString(),
+      }, this.#state.catalogWriter);
+    });
+  }
+
+  /**
+   * Physically delete a rejected proposal, retaining a tombstone audit record.
+   * No target mutation or command binding — same channel as reject.
+   */
+  async deleteProposal(
+    proposalId: string,
+    input: { operator: string; reason: string },
+  ): Promise<{
+    record: DeletionRecord;
+    committedRevision: number;
+  }> {
+    return await this.#enqueue(async () => {
+      this.#assertWritable();
+      return await this.#catalog.deleteProposal(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         reason: requireNonEmpty(input.reason, "reason"),
         decidedAt: new Date(this.#now()).toISOString(),

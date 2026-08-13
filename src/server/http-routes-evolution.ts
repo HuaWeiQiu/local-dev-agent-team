@@ -11,8 +11,10 @@ import {
 } from "../evolution/domain.js";
 import { EvolutionPersistenceError } from "../evolution/persistence.js";
 import {
+  evolutionArchiveRequestSchema,
   evolutionConfirmRequestSchema,
   evolutionAutomationStartRequestSchema,
+  evolutionDeleteRequestSchema,
   evolutionEmptyRequestSchema,
   evolutionPreviewRequestSchema,
   evolutionPromptProposalRequestSchema,
@@ -43,10 +45,16 @@ export const evolutionRoutes: ProjectApiRoute[] = [
   {
     method: "GET",
     pattern: "/evolution",
-    handler: async (context, _request, response, _url, _params, _serverOrigin, sessionOperator) => {
+    handler: async (context, _request, response, url, _params, _serverOrigin, sessionOperator) => {
       requireEvolutionSession(sessionOperator);
       try {
-        sendJson(response, 200, await requireEvolutionService(context).snapshot());
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).snapshot({
+            includeArchived: url.searchParams.get("includeArchived") === "true",
+          }),
+        );
       } catch (error) {
         throw evolutionHttpError(error);
       }
@@ -165,6 +173,72 @@ export const evolutionRoutes: ProjectApiRoute[] = [
           response,
           200,
           await requireEvolutionService(context).reject(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.reason,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/archive",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionArchiveRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).archive(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.reason,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/unarchive",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionArchiveRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).unarchive(
+            decodePathSegment(params.proposalId!),
+            operator,
+            parsed.data.reason,
+          ),
+        );
+      } catch (error) {
+        throw evolutionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/evolution/proposals/:proposalId/actions/delete",
+    handler: async (context, request, response, _url, params, serverOrigin, sessionOperator) => {
+      const operator = requireEvolutionMutation(request, serverOrigin, sessionOperator);
+      const parsed = evolutionDeleteRequestSchema.safeParse(await readEvolutionJson(request));
+      if (!parsed.success) throw invalidRequest(parsed.error.issues.map((issue) => issue.message));
+      try {
+        sendJson(
+          response,
+          200,
+          await requireEvolutionService(context).deleteProposal(
             decodePathSegment(params.proposalId!),
             operator,
             parsed.data.reason,

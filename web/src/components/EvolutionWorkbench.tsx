@@ -1,4 +1,6 @@
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   Ban,
   Bot,
@@ -19,12 +21,15 @@ import {
   Search,
   ShieldCheck,
   Square,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  archiveEvolutionProposal,
   confirmEvolutionPromotion,
   confirmEvolutionRollback,
+  deleteEvolutionProposal,
   evaluateEvolutionProposal,
   getEvolution,
   previewEvolutionPromotion,
@@ -35,6 +40,7 @@ import {
   rejectEvolutionProposal,
   startAutomaticEvolution,
   stopAutomaticEvolution,
+  unarchiveEvolutionProposal,
 } from "../api";
 import {
   evolutionLocked,
@@ -89,10 +95,13 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
 
+  // 只有「已归档」视图才向服务端请求归档候选；其余视图服务端默认不含
+  const includeArchived = filter === "archived";
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const next = await getEvolution(scope);
+      const next = await getEvolution(scope, { includeArchived });
       setSnapshot(next);
       setSelectedId((current) => current && next.proposals.some((item) => item.id === current)
         ? current
@@ -105,7 +114,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     } finally {
       setLoading(false);
     }
-  }, [scope]);
+  }, [scope, includeArchived]);
 
   useEffect(() => {
     let active = true;
@@ -117,7 +126,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     setPollError(undefined);
     setAutomationStartIntent(undefined);
     setLoading(true);
-    void getEvolution(scope)
+    void getEvolution(scope, { includeArchived })
       .then((next) => {
         if (!active) return;
         setSnapshot(next);
@@ -134,6 +143,13 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     return () => { active = false; };
   }, [scope]);
 
+  // 切换是否查看归档候选时重新拉取（归档项由服务端按需返回）
+  useEffect(() => {
+    if (!snapshot) return;
+    void refresh().catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [includeArchived]);
+
   const automationStatus = snapshot?.automation.status;
   useEffect(() => {
     if (automationStatus !== "running" && automationStatus !== "stopping") return;
@@ -141,7 +157,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     let timer: number | undefined;
     const poll = async () => {
       try {
-        const next = await getEvolution(scope);
+        const next = await getEvolution(scope, { includeArchived });
         if (!active) return;
         setSnapshot(next);
         setPollError(undefined);
@@ -158,7 +174,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [automationStatus, scope]);
+  }, [automationStatus, scope, includeArchived]);
 
   const proposals = useMemo(
     () => visibleEvolutionProposals(snapshot?.proposals ?? [], filter, query),
@@ -279,6 +295,10 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
         }, decision.commandId);
         return;
       }
+      if (decision.mode === "delete") {
+        await deleteEvolutionProposal(scope, decision.proposalId, { reason: submittedReason }, decision.commandId);
+        return;
+      }
       const preview = decision.preview;
       if (!preview || Date.parse(preview.preview.expiresAt) <= Date.now()) {
         throw new Error("预览已经过期，请关闭后重新查看。");
@@ -326,6 +346,22 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
     await mutate(() => stopAutomaticEvolution(scope));
   };
 
+  const archiveProposal = async () => {
+    if (!selected) return;
+    await mutate(() => archiveEvolutionProposal(scope, selected.id, {}, crypto.randomUUID()));
+  };
+
+  const unarchiveProposal = async () => {
+    if (!selected) return;
+    await mutate(() => unarchiveEvolutionProposal(scope, selected.id, {}, crypto.randomUUID()));
+  };
+
+  const openDeleteDecision = () => {
+    if (!selected) return;
+    setDecision({ mode: "delete", proposalId: selected.id, commandId: crypto.randomUUID() });
+    setDialogError(undefined);
+  };
+
   if (!snapshot) {
     return (
       <section className="evolution-boot" aria-label="演进工作台">
@@ -360,7 +396,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
         <div className="evolution-rail-tools">
           <label className="evolution-search"><Search size={15} /><input value={query} disabled={busy} onChange={(event) => setQuery(event.target.value)} placeholder="搜索候选" aria-label="搜索候选" /></label>
           <select value={filter} disabled={busy} onChange={(event) => setFilter(event.target.value as EvolutionFilter)} aria-label="候选状态筛选">
-            <option value="open">待处理</option><option value="all">全部</option><option value="proposed">待预检</option><option value="evaluated">已预检</option><option value="promoted">已晋升</option><option value="rejected">已拒绝</option><option value="rolled-back">已回滚</option>
+            <option value="open">待处理</option><option value="all">全部</option><option value="archived">已归档</option><option value="proposed">待预检</option><option value="evaluated">已预检</option><option value="promoted">已晋升</option><option value="rejected">已拒绝</option><option value="rolled-back">已回滚</option>
           </select>
         </div>
         <div className="evolution-proposal-list">
@@ -387,7 +423,7 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
             </header>
             <ProposalProgress proposal={selected} />
             <div className="evolution-mobile-action">
-              <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} />
+              <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} onArchive={() => void archiveProposal()} onUnarchive={() => void unarchiveProposal()} onDelete={() => openDeleteDecision()} />
             </div>
             <nav className="evolution-tabs" role="tablist" aria-label="候选详情">
               <DetailTabButton active={tab === "overview"} onClick={() => setTab("overview")} icon={<GitCompareArrows size={15} />} label="概览" />
@@ -406,10 +442,10 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
       <aside className="evolution-inspector">
         <header><span className="section-kicker">操作</span><h2>下一步</h2><button className="icon-button" onClick={() => void refresh().catch(() => undefined)} disabled={loading || busy} aria-label="刷新演进状态" title="刷新"><RefreshCw size={16} className={loading ? "is-spinning" : ""} /></button></header>
         {selected ? (
-          <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} />
+          <ActionPanel proposal={selected} locked={locked} busy={busy} onEvaluate={() => void evaluate()} onPromote={() => void openPreview("promote")} onRollback={() => void openPreview("rollback")} onReject={() => openReasonDecision("reject")} onAdopt={() => openReasonDecision("adopt")} onArchive={() => void archiveProposal()} onUnarchive={() => void unarchiveProposal()} onDelete={() => openDeleteDecision()} />
         ) : <div className="evolution-inspector-empty">选择候选后显示可执行操作</div>}
         <section className="evolution-scope-note"><ShieldCheck size={16} /><div><strong>{selected?.evaluation?.source === "server-automatic-run-evaluation-v1" ? "自动演进记录" : "人工候选控制"}</strong><span>{selected?.evaluation?.source === "server-automatic-run-evaluation-v1" ? "项目级控制器已隔离评测并按确定性分数决定；候选本身不能自授权。" : "结构预检不会执行候选；应用与回滚仍需要人工查看精确预览。"}</span></div></section>
-        {selected && <section className="evolution-metadata"><h3>目标信息</h3><dl className="detail-list"><div><dt>类型</dt><dd>{selected.candidate.kind === "strategy-blueprint" ? "执行策略" : "角色提示词"}</dd></div><div><dt>Catalog</dt><dd>修订 {snapshot.catalogRevision}</dd></div><div><dt>目标摘要</dt><dd><code>{shortDigest(selected.application?.afterTargetDigest ?? null)}</code></dd></div><div><dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd></div></dl></section>}
+        {selected && <section className="evolution-metadata"><h3>目标信息</h3><dl className="detail-list"><div><dt>类型</dt><dd>{selected.candidate.kind === "strategy-blueprint" ? "执行策略" : "角色提示词"}</dd></div><div><dt>Catalog</dt><dd>修订 {snapshot.catalogRevision}</dd></div><div><dt>目标摘要</dt><dd><code>{shortDigest(selected.application?.afterTargetDigest ?? null)}</code></dd></div><div><dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd></div>{selected.archivedAt && <div><dt>归档时间</dt><dd>{formatDate(selected.archivedAt)}</dd></div>}</dl></section>}
         {(error || pollError) && <p className="evolution-inline-error" role="alert">{error ?? pollError}</p>}
       </aside>
 
@@ -505,7 +541,7 @@ function AutomationBar({ automation, requestedCycles, busy, startIntentPending, 
   );
 }
 
-function ActionPanel({ proposal, locked, busy, onEvaluate, onPromote, onRollback, onReject, onAdopt }: {
+function ActionPanel({ proposal, locked, busy, onEvaluate, onPromote, onRollback, onReject, onAdopt, onArchive, onUnarchive, onDelete }: {
   proposal: EvolutionProposal;
   locked: boolean;
   busy: boolean;
@@ -514,8 +550,36 @@ function ActionPanel({ proposal, locked, busy, onEvaluate, onPromote, onRollback
   onRollback(): void;
   onReject(): void;
   onAdopt(): void;
+  onArchive(): void;
+  onUnarchive(): void;
+  onDelete(): void;
 }) {
   const disabled = locked || busy;
+  if (proposal.archivedAt !== undefined) {
+    return <section className="evolution-next-action is-complete"><Archive size={22} /><h3>已归档</h3><p>候选已从默认列表收起，审计记录完整保留。取消归档后可继续操作。</p><button className="button secondary" onClick={onUnarchive} disabled={disabled}><ArchiveRestore size={16} />取消归档</button>{proposal.status === "rejected" && <button className="button danger-quiet" onClick={onDelete} disabled={disabled}><Trash2 size={15} />删除候选</button>}</section>;
+  }
+  const main = statusAction(proposal, disabled, { onEvaluate, onPromote, onRollback, onReject, onAdopt });
+  const reviewable = proposal.status === "evaluated" || proposal.status === "promoted" || proposal.status === "rejected" || proposal.status === "rolled-back";
+  if (!reviewable) return main;
+  return <>
+    {main}
+    <section className="evolution-next-action is-complete">
+      <Archive size={22} /><h3>归档候选</h3>
+      <p>归档后从默认列表收起，审计记录保留，可随时取消归档。</p>
+      <button className="button secondary" onClick={onArchive} disabled={disabled}><Archive size={16} />归档</button>
+      {proposal.status === "rejected" && <button className="button danger-quiet" onClick={onDelete} disabled={disabled}><Trash2 size={15} />删除候选</button>}
+    </section>
+  </>;
+}
+
+function statusAction(proposal: EvolutionProposal, disabled: boolean, handlers: {
+  onEvaluate(): void;
+  onPromote(): void;
+  onRollback(): void;
+  onReject(): void;
+  onAdopt(): void;
+}): React.ReactNode {
+  const { onEvaluate, onPromote, onRollback, onReject, onAdopt } = handlers;
   if (proposal.status === "proposed") return <section className="evolution-next-action"><ShieldCheck size={22} /><h3>运行结构预检</h3><p>校验候选结构、信任边界和目标条件。</p><button className="button primary" onClick={onEvaluate} disabled={disabled}><ShieldCheck size={16} />开始预检</button></section>;
   if (proposal.status === "evaluating") return <section className="evolution-next-action"><RefreshCw size={22} /><h3>继续结构预检</h3><p>上次预检未完成，可以从当前候选安全重入。</p><button className="button primary" onClick={onEvaluate} disabled={disabled}><RefreshCw size={16} />继续预检</button></section>;
   if (proposal.status === "evaluated" && proposal.evaluation?.result.passed && proposal.evaluation.source === "server-structural-preflight-v1") {
@@ -581,6 +645,12 @@ function evolutionErrorMessage(error: unknown): string {
     if (error.code === "AUTOMATION_TARGET_CONFLICT") return "自动演进目标已被其他策略占用，未修改现有目标。";
     if (error.code === "AUTOMATION_BUDGET_EXPANSION") return "候选提高了资源或时间上限，已安全拒绝本轮自动应用。";
     if (error.code === "AUTOMATION_COMMAND_CONFLICT") return "这个启动请求已被其他自动演进会话使用，请刷新状态后再决定。";
+    if (error.code === "PROPOSAL_ARCHIVED") return "候选已归档，请先取消归档再执行变更操作。";
+    if (error.code === "PROPOSAL_ALREADY_ARCHIVED") return "候选已经归档，无需重复操作。";
+    if (error.code === "PROPOSAL_NOT_ARCHIVED") return "候选不在已归档状态，无法取消归档。";
+    if (error.code === "PROPOSAL_STATE_CONFLICT") return "候选当前状态不允许该操作，请刷新后核对。";
+    if (error.code === "PROPOSAL_NOT_DELETABLE") return "只有已拒绝的候选可以删除。";
+    if (error.code === "REASON_REQUIRED") return "该操作必须填写原因。";
   }
   return errorMessage(error);
 }

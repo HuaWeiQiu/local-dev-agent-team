@@ -245,8 +245,12 @@ export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
   return await request<UsageReport>(`${apiRoot(scope)}/usage`);
 }
 
-export async function getEvolution(scope: ProjectScope): Promise<EvolutionSnapshot> {
-  return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution`, { cache: "no-store" });
+export async function getEvolution(
+  scope: ProjectScope,
+  options: { includeArchived?: boolean } = {},
+): Promise<EvolutionSnapshot> {
+  const query = options.includeArchived ? "?includeArchived=true" : "";
+  return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution${query}`, { cache: "no-store" });
 }
 
 export async function getExperience(
@@ -458,6 +462,33 @@ export async function reconcileEvolutionProposal(
   commandId: string,
 ): Promise<void> {
   await evolutionAction(scope, proposalId, "reconcile", input, commandId);
+}
+
+export async function archiveEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason?: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "archive", input, commandId);
+}
+
+export async function unarchiveEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason?: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "unarchive", input, commandId);
+}
+
+export async function deleteEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "delete", input, commandId);
 }
 
 export function runExportUrl(scope: ProjectScope, runId: string): string {

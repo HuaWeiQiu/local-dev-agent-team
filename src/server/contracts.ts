@@ -90,6 +90,18 @@ export const evolutionReasonRequestSchema = z
   .object({ reason: z.string().trim().min(1).max(2_000) })
   .strict();
 
+export const evolutionArchiveRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
+
+export const evolutionDeleteRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+
 export const evolutionPreviewRequestSchema = z
   .object({ expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) })
   .strict();
