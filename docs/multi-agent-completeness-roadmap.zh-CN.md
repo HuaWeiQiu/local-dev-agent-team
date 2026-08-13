@@ -194,6 +194,18 @@ Git worktree 仍是代码合并与证据单位；容器只是运行隔离层，�
 每个阶段都应继续使用“实现 -> 自动测试 -> 独立复审 -> 最小修复 -> 重测 -> 文档与提交”的
 交付循环，不能为了扩充功能绕过现有安全边界。
 
+### 已确认的延后加固项（2026-08-13 全量审查结论）
+
+以下三项属于新能力而非缺陷修复，需各自设计评审后单独排期，细节见
+[security.md](security.md) 的「Known Limitations And Planned Hardening」：
+
+1. **审批第二因素**：per-approval nonce 或 Tauri 原生审批通道，根治「agent 持会话
+   token 自批门禁」这一类问题（当前缓解：子进程 env 剔除 + token 文件 + repair 人工确认）。
+2. **Windows 子进程组查杀**：POSIX process group 的 SIGTERM/SIGKILL 升级在 Windows 只杀
+   直接子进程，孙进程可能泄漏；macOS/Linux 不受影响。
+3. **同 uid 本机边界**：0600 token 文件只隔离其他 OS 用户；彻底的同 uid 隔离依赖独立
+   OS 账户或容器沙箱（对应 `0.4` 工具和沙箱阶段）。
+
 ## 7. 明确不做
 
 - 不用更多 Agent 数量代替任务拆分质量、上下文质量和确定性验证。

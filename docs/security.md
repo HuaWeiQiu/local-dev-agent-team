@@ -232,6 +232,28 @@ Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0016](./adr/0016-evolution-control-plane.md), and
 [ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md).
 
+## Known Limitations And Planned Hardening
+
+These items are deliberate deferrals (new capabilities, not bug fixes).
+Each needs its own design review before implementation:
+
+- **Approval second factor.** Human approval currently relies on the
+  session cookie plus the `actor` label. The environment scrubbing and
+  token-file delivery above shrink the exposure, but a same-uid process
+  can still read the token file. The planned fix is a per-approval nonce
+  delivered only to the authenticated UI (or a Tauri-native approval
+  channel that never crosses HTTP), so an agent process cannot approve
+  its own gates even if it obtains the session token.
+- **Windows process-group kill.** `runProcess` uses detached POSIX
+  process groups for SIGTERM/SIGKILL escalation; on Windows only the
+  direct child is terminated and agent CLI grandchildren may outlive a
+  cancellation. macOS and Linux are unaffected.
+- **Same-uid local boundary.** A process running as the same OS user can
+  read the 0600 token file and inspect this service's memory. The token
+  file only isolates other OS users; full same-uid isolation would
+  require running agents under separate OS accounts or containers (see
+  the sandbox track in the completeness roadmap).
+
 ## Reporting
 
 Do not open a public issue containing an exploitable secret or private
