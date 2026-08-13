@@ -1940,7 +1940,7 @@ mod tests {
     fn process_is_alive_treats_zombie_as_dead() {
         let mut holder = Command::new("sh")
             .arg("-c")
-            .arg("node -e 'process.exit(0)' & echo $!; exec sleep 30")
+            .arg("exit 0 & echo $!; exec sleep 30")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1951,8 +1951,16 @@ mod tests {
             .read_line(&mut line)
             .unwrap();
         let pid: u32 = line.trim().parse().expect("zombie child pid");
-        thread::sleep(Duration::from_millis(50));
-        let zombie = process_is_zombie(pid);
+        // The child may take a moment to exit on loaded CI runners, so poll
+        // for the zombie state instead of racing a fixed sleep.
+        let mut zombie = false;
+        for _ in 0..100 {
+            if process_is_zombie(pid) {
+                zombie = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
         let alive = process_is_alive(pid);
         let _ = holder.kill();
         let _ = holder.wait();
