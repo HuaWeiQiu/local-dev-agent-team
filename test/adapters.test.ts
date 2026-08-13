@@ -6,6 +6,7 @@ import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { CodexActivityParser } from "../src/adapters/codex-events.js";
 import { GrokAdapter } from "../src/adapters/grok.js";
+import { KimiAdapter } from "../src/adapters/kimi.js";
 import { AgentInvocationError, invokeAgent } from "../src/adapters/invoke.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
 import type { AgentProfile } from "../src/config/schema.js";
@@ -244,6 +245,38 @@ describe("Codex adapter", () => {
       threadId: "thread-after-oversized-record",
       status: "running",
     });
+  });
+});
+
+describe("Kimi adapter", () => {
+  it("keeps the CLI prompt argument and still satisfies the stdin contract", () => {
+    const invocation = new KimiAdapter().buildInvocation(
+      { ...readOnlyProfile, adapter: "kimi", model: "kimi-code" },
+      { cwd: "/tmp/repo", prompt: "Review the tester verdict" },
+    );
+    expect(invocation.command).toBe("kimi");
+    expect(invocation.args).toContain("--prompt");
+    const promptIndex = invocation.args.indexOf("--prompt");
+    expect(invocation.args[promptIndex + 1]).toContain("Review the tester verdict");
+    expect(invocation.args).toContain("--output-format");
+    expect(invocation.args).toContain("stream-json");
+    expect(invocation.args).toContain("kimi-code");
+    expect(invocation.stdin).toBe("Review the tester verdict");
+  });
+
+  it("embeds a JSON schema in the CLI prompt while stdin stays the original request", () => {
+    const invocation = new KimiAdapter().buildInvocation(
+      { ...readOnlyProfile, adapter: "kimi" },
+      {
+        cwd: "/tmp/repo",
+        prompt: "Return the verdict",
+        outputSchema: { type: "object", properties: { verdict: { type: "string" } } },
+      },
+    );
+    const promptIndex = invocation.args.indexOf("--prompt");
+    expect(invocation.args[promptIndex + 1]).toContain("JSON Schema");
+    expect(invocation.args[promptIndex + 1]).toContain("verdict");
+    expect(invocation.stdin).toBe("Return the verdict");
   });
 });
 

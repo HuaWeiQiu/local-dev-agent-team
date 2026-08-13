@@ -73,12 +73,16 @@ Do not run shell commands that modify the workspace. Prefer read/search tools on
     }
     // Note: kimi rejects combining -p with --yolo/--auto/--plan; rely on config
     // default_permission_mode and prompt constraints for permission behavior.
+    // The CLI only accepts the prompt as -p text (no stdin / --prompt-file).
+    // The harness still requires stdin === request.prompt, so pass the original
+    // request prompt on stdin and the possibly-enriched text on --prompt.
     args.push(...profile.args);
 
     return {
       command: profile.executable ?? "kimi",
       args,
       cwd: request.cwd,
+      stdin: request.prompt,
       timeoutMs: profile.timeoutSeconds * 1_000,
       env: {
         ...sanitizedChildEnv(),
