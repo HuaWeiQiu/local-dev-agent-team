@@ -54,7 +54,9 @@ describe("desktop PR release", () => {
       binaryPath: "node.exe",
       destinationName: "agent-team-node-x86_64-pc-windows-msvc.exe",
     });
-  });
+    // Spawning the script from a cold CI runner can exceed the default 5s
+    // timeout; the describe path never downloads, so a generous bound is safe.
+  }, 30_000);
 
   it("builds every PR revision with read-only pinned actions", async () => {
     const source = await readFile(
