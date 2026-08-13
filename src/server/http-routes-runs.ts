@@ -23,6 +23,7 @@ import {
   experienceReasonRequestSchema,
   projectRoleSettingsUpdateSchema,
   resumeRunRequestSchema,
+  pauseRunRequestSchema,
   startRunRequestSchema,
   strategyBlueprintPreflightRequestSchema,
   strategyBlueprintRequestSchema,
@@ -486,6 +487,23 @@ export const runRoutes: ProjectApiRoute[] = [
           throw new HttpError(409, "Run is not active in this control service");
         }
         sendJson(response, 202, { runId, status: "cancel-requested" });
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/pause",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = pauseRunRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      const runId = decodePathSegment(params.runId!);
+      try {
+        const paused = await context.supervisor.pause(runId, parsed.data);
+        sendJson(response, 202, { runId, status: paused ? "pause-requested" : "not-active" });
       } catch (error) {
         throw runActionHttpError(error);
       }

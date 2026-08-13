@@ -6,6 +6,7 @@ import {
   deleteStrategyBlueprint,
   downloadRunEvents,
   getEvidenceFile,
+  pauseRun,
   preflightStrategyBlueprint,
   previewRunCleanup,
   respondApproval,
@@ -65,7 +66,7 @@ export function useRunActions({
   } = monitor;
   const [busy, setBusy] = useState(false);
   const [runAction, setRunAction] = useState<{
-    mode: "approval" | "resume";
+    mode: "approval" | "resume" | "pause";
     approval?: ApprovalRequest;
   }>();
   const [cleanupOpen, setCleanupOpen] = useState(false);
@@ -194,6 +195,11 @@ export function useRunActions({
         await respondApproval(scope, selectedRunId, {
           requestId: runAction.approval.id,
           decision: input.decision,
+          actor: input.actor,
+          reason: input.reason,
+        });
+      } else if (runAction.mode === "pause") {
+        await pauseRun(scope, selectedRunId, {
           actor: input.actor,
           reason: input.reason,
         });

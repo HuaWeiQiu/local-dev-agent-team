@@ -1,10 +1,10 @@
-import { Check, History, X } from "lucide-react";
+import { Check, History, Pause, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { completenessBarCopy, planCompletenessForRun } from "../plan-completeness";
 import type { ApprovalRequest, RunState } from "../types";
 
 interface RunActionDialogProps {
-  mode: "approval" | "resume" | undefined;
+  mode: "approval" | "resume" | "pause" | undefined;
   approval?: ApprovalRequest;
   run?: RunState;
   busy: boolean;
@@ -62,9 +62,15 @@ export function RunActionDialog({
       <section className="run-action-dialog" role="dialog" aria-modal="true" aria-labelledby="run-action-title">
         <header>
           <div>
-            <span className="section-kicker">{mode === "approval" ? "人工门禁" : "检查点"}</span>
+            <span className="section-kicker">
+              {mode === "approval" ? "人工门禁" : mode === "pause" ? "运行控制" : "检查点"}
+            </span>
             <h2 id="run-action-title">
-              {mode === "approval" ? (approval?.gate === "plan" ? "审批执行计划" : "审批交付结果") : "恢复运行"}
+              {mode === "approval"
+                ? (approval?.gate === "plan" ? "审批执行计划" : "审批交付结果")
+                : mode === "pause"
+                  ? "暂停运行"
+                  : "恢复运行"}
             </h2>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭">
@@ -132,8 +138,8 @@ export function RunActionDialog({
               </button>
             )}
             <button type="submit" className="button primary" disabled={busy || !actor.trim() || !reason.trim() || approveBlocked}>
-              {mode === "approval" ? <Check size={16} /> : <History size={16} />}
-              {busy ? "提交中" : mode === "approval" ? "批准" : "恢复"}
+              {mode === "approval" ? <Check size={16} /> : mode === "pause" ? <Pause size={16} /> : <History size={16} />}
+              {busy ? "提交中" : mode === "approval" ? "批准" : mode === "pause" ? "暂停" : "恢复"}
             </button>
           </footer>
         </form>

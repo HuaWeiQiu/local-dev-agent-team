@@ -61,6 +61,11 @@ export const resumeRunRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2_000),
 });
 
+export const pauseRunRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(2_000),
+});
+
 export const cleanupPreviewRequestSchema = z.object({
   /** 0 = all eligible terminal runs regardless of age. */
   olderThanDays: z.number().int().min(0).max(3_650),
@@ -142,5 +147,6 @@ export const experienceReasonRequestSchema = z
 
 export type ApprovalResponseRequest = z.infer<typeof approvalResponseRequestSchema>;
 export type ResumeRunRequest = z.infer<typeof resumeRunRequestSchema>;
+export type PauseRunRequest = z.infer<typeof pauseRunRequestSchema>;
 export type CleanupPreviewRequest = z.infer<typeof cleanupPreviewRequestSchema>;
 export type CleanupRunRequest = z.infer<typeof cleanupRunRequestSchema>;

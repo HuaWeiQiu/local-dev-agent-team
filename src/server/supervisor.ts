@@ -324,6 +324,36 @@ export class RunSupervisor {
     return await this.cancelOwned(runId);
   }
 
+  /**
+   * Pause an actively executing run: the workflow signal is aborted, the run
+   * settles as `interrupted` (resumable from its latest checkpoint), and task
+   * worktrees are kept so quality-passed tasks can be reused on resume.
+   * Runs parked at a human gate or already terminal cannot be paused.
+   */
+  async pause(runId: string, request: { actor: string; reason: string }): Promise<boolean> {
+    if (this.automationOwner) {
+      throw new ProjectMutationConflictError(
+        "Automatic evolution owns run control until its bounded loop finishes",
+      );
+    }
+    const active = this.active.get(runId);
+    if (active) {
+      this.events.emit(runId, "run.pause-requested", {
+        actor: request.actor,
+        reason: request.reason,
+      });
+      active.controller.abort(new Error("Run paused by user"));
+      return true;
+    }
+    const state = await this.get(runId);
+    if (!state) {
+      throw new Error(`Run '${runId}' was not found`);
+    }
+    throw new Error(
+      `Run '${runId}' (${state.status}) cannot be paused: only actively executing runs can pause`,
+    );
+  }
+
   private async cancelOwned(runId: string, automationOwner?: symbol): Promise<boolean> {
     if (this.automationOwner && this.automationOwner !== automationOwner) {
       throw new ProjectMutationConflictError(

@@ -123,6 +123,45 @@ describe("control HTTP server", () => {
     events.close();
   });
 
+  it("validates pause requests and rejects unknown runs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("pause-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    const missingBody = await fetch(
+      `${listening.url}/api/runs/unknown-run/actions/pause`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    expect(missingBody.status).toBe(400);
+
+    const unknownRun = await fetch(
+      `${listening.url}/api/runs/unknown-run/actions/pause`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ actor: "owner", reason: "going home" }),
+      },
+    );
+    expect(unknownRun.status).toBeGreaterThanOrEqual(400);
+
+    await supervisor.close();
+    await listening.close();
+    events.close();
+  });
+
   it("routes durable final approval responses through the supervisor", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
     await writeFile(

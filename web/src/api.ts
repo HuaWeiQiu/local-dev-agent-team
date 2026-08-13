@@ -201,6 +201,17 @@ export async function cancelRun(scope: ProjectScope, runId: string): Promise<voi
   });
 }
 
+export async function pauseRun(
+  scope: ProjectScope,
+  runId: string,
+  input: { actor: string; reason: string },
+): Promise<void> {
+  await request(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/pause`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function retryRun(scope: ProjectScope, runId: string): Promise<string> {
   const response = await request<{ runId: string }>(
     `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/retry`,

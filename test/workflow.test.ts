@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -15,6 +15,7 @@ import { loadConfig } from "../src/config/load.js";
 import type { PendingRunEvent, RunEventSink } from "../src/events/types.js";
 import { runProcess } from "../src/process/run.js";
 import { RunStateStore } from "../src/state/store.js";
+import type { RunState } from "../src/state/types.js";
 import { branchSegment } from "../src/workflow/id.js";
 import { LocalWorkflowRunner } from "../src/workflow/runner.js";
 
@@ -1130,6 +1131,73 @@ describe("local workflow", () => {
     expect(refused.error).toContain("does not point at the recorded task commit");
   }, 30_000);
 
+  it("pauses into a resumable interrupted state and keeps the task worktree", async () => {
+    const { root, loaded } = await createFixture("pause-runner", (config) => {
+      config.strategies!.definitions.guarded = {
+        maxParallel: 1,
+        maxReworkAttempts: 0,
+        roleProfiles: {},
+        approvalGates: ["final"],
+      };
+    });
+    class BlockingAgentService extends FakeAgentService {
+      workflowSignal?: AbortSignal;
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        const context = options.context as { task: { id: string; ownedPaths: string[] } };
+        const target = path.join(options.cwd!, context.task.ownedPaths[0]!);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, `${context.task.id}\n`);
+        // Block like a long-running worker until the workflow signal aborts.
+        await new Promise<void>((resolve) => {
+          if (this.workflowSignal?.aborted) {
+            resolve();
+            return;
+          }
+          this.workflowSignal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { text: "implemented", profileName: "fake-worker", usedFallback: false };
+      }
+    }
+    const controller = new AbortController();
+    const service = new BlockingAgentService();
+    const runner = new LocalWorkflowRunner(loaded, {
+      createAgentService: (_store, _overrides, signal) => {
+        service.workflowSignal = signal;
+        return service;
+      },
+    });
+    const running = runner.run({
+      goal: "Create alpha and beta files",
+      strategyName: "guarded",
+      signal: controller.signal,
+    });
+    // Wait until the first wave is mid-execution with a persisted worktree.
+    const store = new RunStateStore(path.join(root, ".agent-team", "runs"));
+    let current: RunState | undefined;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const states = await store.list();
+      current = states.find(
+        (state) => state.status === "implementing" && state.tasks.some((task) => task.status === "working" && task.worktree),
+      );
+      if (current) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(current).toBeDefined();
+    const worktree = current!.tasks.find((task) => task.status === "working")!.worktree!;
+    expect(await pathExists(worktree)).toBe(true);
+
+    // The supervisor aborts the workflow with the deterministic pause message.
+    controller.abort(new Error("Run paused by user"));
+
+    const settled = await running;
+    expect(settled.status).toBe("interrupted");
+    expect(settled.error).toContain("paused");
+    // The task worktree survives the pause so resume can reuse the work.
+    expect(await pathExists(worktree)).toBe(true);
+    expect(settled.history.some((entry) => entry.status === "interrupted")).toBe(true);
+  }, 30_000);
+
   it("still refuses recovery when the post-checkpoint HEAD contains foreign commits", async () => {
     const { root, loaded } = await createFixture("foreign-head", (config) => {
       config.strategies!.definitions.guarded = {
@@ -1351,4 +1419,13 @@ async function gitOut(cwd: string, args: string[]) {
     throw new Error(result.stderr);
   }
   return result;
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await access(target);
+    return true;
+  } catch {
+    return false;
+  }
 }

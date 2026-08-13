@@ -400,13 +400,20 @@ export class LocalWorkflowRunner {
       );
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
+      // A user pause settles as interrupted (resumable) instead of cancelled
+      // and keeps task worktrees, so quality-passed tasks can be reused by
+      // resume. The pause is recognized by its deterministic abort message
+      // rather than a state flag, which could be overwritten by a racing save.
+      const paused = /paused by user/i.test(state.error);
       await store.transition(
         state,
         terminalStatusAfterFailure(error, workflowSignal),
         state.error,
       );
-      await this.recordExperienceFromRun(state, store);
-      await this.cleanupRunArtifacts(state, store, git);
+      if (!paused) {
+        await this.recordExperienceFromRun(state, store);
+        await this.cleanupRunArtifacts(state, store, git);
+      }
       return state;
     } finally {
       deadline.dispose();
@@ -480,13 +487,20 @@ export class LocalWorkflowRunner {
       );
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
+      // A user pause settles as interrupted (resumable) instead of cancelled
+      // and keeps task worktrees, so quality-passed tasks can be reused by
+      // resume. The pause is recognized by its deterministic abort message
+      // rather than a state flag, which could be overwritten by a racing save.
+      const paused = /paused by user/i.test(state.error);
       await store.transition(
         state,
         terminalStatusAfterFailure(error, workflowSignal),
         state.error,
       );
-      await this.recordExperienceFromRun(state, store);
-      await this.cleanupRunArtifacts(state, store, git);
+      if (!paused) {
+        await this.recordExperienceFromRun(state, store);
+        await this.cleanupRunArtifacts(state, store, git);
+      }
       return state;
     } finally {
       deadline.dispose();
@@ -2083,6 +2097,11 @@ export function terminalStatusAfterFailure(
 ): Extract<RunStatus, "cancelled" | "interrupted" | "blocked"> {
   if (!signal?.aborted) return "blocked";
   const message = error instanceof Error ? error.message : String(error);
+  // A user pause settles as interrupted: the run stays resumable from its
+  // latest checkpoint instead of being discarded like a cancellation.
+  if (/paused by user/i.test(message)) {
+    return "interrupted";
+  }
   if (/cancelled by user/i.test(message) || /^Run cancelled\b/i.test(message)) {
     return "cancelled";
   }

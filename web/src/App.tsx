@@ -1,5 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, CircleDot, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
@@ -271,6 +271,16 @@ export default function App() {
               <History size={16} /><span>从检查点继续</span>
             </button>
           ) : null}
+          {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
+            <button
+              className="button secondary"
+              onClick={() => actions.setRunAction({ mode: "pause" })}
+              disabled={busy}
+              title="暂停运行（保留检查点，稍后可恢复）"
+            >
+              <Pause size={16} /><span>暂停</span>
+            </button>
+          )}
           {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
             <button className="button danger-quiet" onClick={() => void actions.cancel()} disabled={busy} title="取消运行"><Ban size={16} /><span>取消</span></button>
           )}

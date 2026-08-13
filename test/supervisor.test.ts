@@ -302,6 +302,38 @@ describe("run supervisor", () => {
     events.close();
   });
 
+  it("pauses an active run and rejects runs parked at a human gate", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const parked = fakeApprovalState("gate-run", "final");
+    await states.save(parked);
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fakeState(context.runId, request.goal, "interrupted");
+      },
+    });
+    const started = supervisor.start({ goal: "Pause me", profileOverrides: {} });
+    const completed = supervisor.wait(started.runId);
+
+    // An actively executing run accepts the pause request.
+    await expect(
+      supervisor.pause(started.runId, { actor: "owner", reason: "going home" }),
+    ).resolves.toBe(true);
+    const settled = await completed;
+    expect(settled.status).toBe("interrupted");
+
+    // A run parked at a human gate cannot be paused.
+    await expect(
+      supervisor.pause(parked.id, { actor: "owner", reason: "pause" }),
+    ).rejects.toThrow("cannot be paused");
+    await supervisor.close();
+    events.close();
+  });
+
   it("rejects evolution mutation while a run is active", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
