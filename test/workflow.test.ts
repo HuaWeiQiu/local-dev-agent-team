@@ -237,6 +237,58 @@ describe("local workflow", () => {
     expect(reloaded?.roleBindings).toEqual(state.roleBindings);
   }, 30_000);
 
+  it("rehydrates runtime picker profiles on resume without a fake agent service", async () => {
+    const { root, loaded } = await createFixture("runtime-resume");
+    const store = new RunStateStore(path.join(root, ".agent-team", "runs"));
+    const now = new Date().toISOString();
+    const runId = "runtime-resume-run";
+    const state = {
+      id: runId,
+      goal: "Continue after approval with desktop grok-4.6",
+      root,
+      configPath: path.join(root, "agent-team.yaml"),
+      baseBranch: "main",
+      baseCommit: (await gitOut(root, ["rev-parse", "HEAD"])).stdout.trim(),
+      integrationBranch: `agent-team/${runId}/integration`,
+      integrationWorktree: path.join(root, ".agent-team", "worktrees", runId, "integration"),
+      status: "interrupted" as const,
+      createdAt: now,
+      updatedAt: now,
+      profileOverrides: {
+        worker: "runtime/worker/grok/grok-4.6/high",
+      },
+      strategy: {
+        name: "balanced",
+        maxParallel: 2,
+        maxReworkAttempts: 2,
+        executionTimeoutSeconds: 14_400,
+        maxAgentInvocations: 64,
+        maxProcessOutputBytes: 1_048_576,
+        maxArtifactBytes: 1_073_741_824,
+        roleProfiles: {},
+        approvalGates: ["final"] as Array<"plan" | "final">,
+        approvalTimeoutSeconds: 86_400,
+      },
+      tasks: [],
+      history: [],
+    };
+    await store.save(state);
+    expect(loaded.config.roles.worker!.allowedProfiles).not.toContain(
+      "runtime/worker/grok/grok-4.6/high",
+    );
+
+    const resumed = await new LocalWorkflowRunner(loaded).resume(state, {
+      mode: "recovery",
+      actor: "operator",
+      reason: "Must keep the desktop grok-4.6 worker after restart",
+    });
+
+    expect(resumed.error ?? "").not.toContain("is not allowed for role");
+    expect(loaded.config.roles.worker!.allowedProfiles).not.toContain(
+      "runtime/worker/grok/grok-4.6/high",
+    );
+  }, 30_000);
+
   it("completes an isolated evolution evaluation after local gates without publication approval", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-evaluation-workflow-"));
     await git(root, ["init", "-b", "main"]);

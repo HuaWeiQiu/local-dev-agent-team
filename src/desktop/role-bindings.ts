@@ -1,4 +1,5 @@
 import type { AgentProfile, AgentTeamConfig, Reasoning } from "../config/schema.js";
+import type { RunRoleBinding, RunState } from "../state/types.js";
 import type { RoleBinding } from "./settings.js";
 
 const READ_ONLY_ROLES = new Set([
@@ -91,6 +92,60 @@ export function materializeRoleBindings(
   }
 
   return { config, profileOverrides, bindings: audit };
+}
+
+const RUNTIME_PROFILE_NAME =
+  /^runtime\/([^/]+)\/(codex|grok|kimi|claude)\/(.+)\/([^/]+)$/;
+
+/** Recover picker bindings from a persisted run so resume can rebuild ephemeral profiles. */
+export function roleBindingsFromRunState(state: {
+  profileOverrides: Record<string, string>;
+  roleBindings?: Record<string, RunRoleBinding>;
+}): Record<string, RoleBinding> {
+  if (state.roleBindings && Object.keys(state.roleBindings).length > 0) {
+    return Object.fromEntries(
+      Object.entries(state.roleBindings).map(([role, binding]) => [
+        role,
+        roleBindingFromPersisted(binding),
+      ]),
+    );
+  }
+
+  const recovered: Record<string, RoleBinding> = {};
+  for (const [role, profileName] of Object.entries(state.profileOverrides ?? {})) {
+    const parsed = parseRuntimeProfileName(profileName);
+    if (!parsed || parsed.role !== role) continue;
+    recovered[role] = {
+      cli: parsed.cli,
+      model: parsed.model,
+      reasoning: parsed.reasoning,
+    };
+  }
+  return recovered;
+}
+
+export function parseRuntimeProfileName(profileName: string): {
+  role: string;
+  cli: RoleBinding["cli"];
+  model: string;
+  reasoning: string;
+} | undefined {
+  const match = RUNTIME_PROFILE_NAME.exec(profileName);
+  if (!match) return undefined;
+  return {
+    role: match[1]!,
+    cli: match[2] as RoleBinding["cli"],
+    model: match[3]!,
+    reasoning: match[4]!,
+  };
+}
+
+function roleBindingFromPersisted(binding: RunRoleBinding): RoleBinding {
+  return {
+    cli: binding.cli,
+    ...(binding.model ? { model: binding.model } : {}),
+    ...(binding.reasoning ? { reasoning: binding.reasoning } : {}),
+  };
 }
 
 function defaultModelForCli(cli: string): string {

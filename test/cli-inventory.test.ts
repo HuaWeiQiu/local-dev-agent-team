@@ -6,7 +6,11 @@ import {
   inventorySourceFingerprint,
   scanCliInventory,
 } from "../src/desktop/cli-inventory.js";
-import { materializeRoleBindings } from "../src/desktop/role-bindings.js";
+import {
+  materializeRoleBindings,
+  parseRuntimeProfileName,
+  roleBindingsFromRunState,
+} from "../src/desktop/role-bindings.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import {
   getInventory,
@@ -61,6 +65,23 @@ describe("cli inventory and role bindings", () => {
     expect(worker?.adapter).toBe("codex");
     expect(worker?.permission).toBe("workspace-write");
     expect(worker?.reasoning).toBe("max");
+  });
+
+  it("recovers picker bindings from persisted runtime profile names", () => {
+    expect(parseRuntimeProfileName("runtime/worker/grok/grok-4.6/high")).toEqual({
+      role: "worker",
+      cli: "grok",
+      model: "grok-4.6",
+      reasoning: "high",
+    });
+    expect(roleBindingsFromRunState({
+      profileOverrides: {
+        worker: "runtime/worker/grok/grok-4.6/high",
+        reviewer: "codex-reviewer",
+      },
+    })).toEqual({
+      worker: { cli: "grok", model: "grok-4.6", reasoning: "high" },
+    });
   });
 
   it("materializes kimi roleBindings onto the kimi adapter", () => {

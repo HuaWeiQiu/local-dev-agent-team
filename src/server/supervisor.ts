@@ -9,7 +9,10 @@ import type {
   RunEvidence,
 } from "../evidence/types.js";
 import { SqliteEventStore } from "../events/store.js";
-import { materializeRoleBindings } from "../desktop/role-bindings.js";
+import {
+  materializeRoleBindings,
+  roleBindingsFromRunState,
+} from "../desktop/role-bindings.js";
 import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
 import type {
@@ -187,8 +190,12 @@ export class RunSupervisor {
 
     let runConfig = this.loaded.config;
     let profileOverrides = { ...request.profileOverrides };
-    if (request.roleBindings && Object.keys(request.roleBindings).length > 0) {
-      const material = materializeRoleBindings(this.loaded.config, request.roleBindings);
+    const startBindings =
+      request.roleBindings && Object.keys(request.roleBindings).length > 0
+        ? request.roleBindings
+        : roleBindingsFromRunState({ profileOverrides });
+    if (Object.keys(startBindings).length > 0) {
+      const material = materializeRoleBindings(this.loaded.config, startBindings);
       runConfig = material.config;
       // roleBindings win over legacy profileOverrides for the same role
       profileOverrides = {
@@ -244,6 +251,7 @@ export class RunSupervisor {
         : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events }).run({
             goal: request.goal,
             profileOverrides,
+            ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
             ...(request.strategy ? { strategyName: request.strategy } : {}),
             runId,
             signal: controller.signal,
@@ -662,13 +670,24 @@ export class RunSupervisor {
       signal: controller.signal,
       supervisorId: this.id,
     };
+    const loadedForResume = this.configForPersistedRun(state);
     const workflow = this.dependencies.resumeWorkflow
       ? this.dependencies.resumeWorkflow(state, resumeOptions)
-      : new LocalWorkflowRunner(this.loaded, { eventSink: this.events }).resume(
+      : new LocalWorkflowRunner(loadedForResume, { eventSink: this.events }).resume(
           state,
           resumeOptions,
         );
     this.track(state.id, controller, workflow);
+  }
+
+  /** Rebuild ephemeral desktop picker profiles before resume/approval continuation. */
+  private configForPersistedRun(state: RunState): typeof this.loaded {
+    const bindings = roleBindingsFromRunState(state);
+    if (Object.keys(bindings).length === 0) {
+      return this.loaded;
+    }
+    const material = materializeRoleBindings(this.loaded.config, bindings);
+    return { ...this.loaded, config: material.config };
   }
 
   private assertRunStartAllowed(automationOwner?: symbol): void {

@@ -54,14 +54,21 @@ import {
   RunBudgetTracker,
 } from "../observability/budget.js";
 import { ExperienceService } from "../experience/service.js";
+import {
+  materializeRoleBindings,
+  roleBindingsFromRunState,
+} from "../desktop/role-bindings.js";
+import type { AgentTeamConfig } from "../config/schema.js";
+
+type WorkflowRoleBindings = Record<
+  string,
+  { cli: RunRoleBinding["cli"]; model?: string | undefined; reasoning?: string | undefined }
+>;
 
 export interface WorkflowRunOptions {
   goal: string;
   profileOverrides?: Record<string, string>;
-  roleBindings?: Record<
-    string,
-    { cli: RunRoleBinding["cli"]; model?: string | undefined; reasoning?: string | undefined }
-  >;
+  roleBindings?: WorkflowRoleBindings;
   strategyName?: string;
   runId?: string;
   signal?: AbortSignal;
@@ -196,16 +203,13 @@ export class LocalWorkflowRunner {
     const deadline = createExecutionDeadline(strategy.executionTimeoutSeconds, options.signal);
     const workflowSignal = deadline.signal;
     const budget = new RunBudgetTracker(state, store);
-    const agent = this.dependencies.createAgentService
-      ? this.dependencies.createAgentService(store, effectiveProfileOverrides, workflowSignal)
-      : new ProfiledAgentService(
-          this.loaded.config,
-          this.loaded.root,
-          store,
-          effectiveProfileOverrides,
-          workflowSignal,
-          budget,
-        );
+    const agent = this.createRoleAgentService(
+      store,
+      effectiveProfileOverrides,
+      workflowSignal,
+      budget,
+      options.roleBindings,
+    );
 
     try {
       workflowSignal.throwIfAborted();
@@ -325,16 +329,13 @@ export class LocalWorkflowRunner {
       ...state.profileOverrides,
     };
     const budget = new RunBudgetTracker(state, store);
-    const agent = this.dependencies.createAgentService
-      ? this.dependencies.createAgentService(store, effectiveProfileOverrides, workflowSignal)
-      : new ProfiledAgentService(
-          this.loaded.config,
-          this.loaded.root,
-          store,
-          effectiveProfileOverrides,
-          workflowSignal,
-          budget,
-        );
+    const agent = this.createRoleAgentService(
+      store,
+      effectiveProfileOverrides,
+      workflowSignal,
+      budget,
+      state,
+    );
     let checkpoint: RunCheckpoint;
     try {
       // Pre-execution validation only. Failures here (dirty worktree, stale
@@ -1310,6 +1311,46 @@ export class LocalWorkflowRunner {
     }
   }
 
+  private createRoleAgentService(
+    store: RunStateStore,
+    profileOverrides: Record<string, string>,
+    signal: AbortSignal | undefined,
+    budget: RunBudgetTracker,
+    bindingsSource?: RunState | WorkflowRoleBindings,
+  ): RoleAgentService {
+    if (this.dependencies.createAgentService) {
+      return this.dependencies.createAgentService(store, profileOverrides, signal);
+    }
+    return new ProfiledAgentService(
+      this.configWithRuntimeProfiles(bindingsSource),
+      this.loaded.root,
+      store,
+      profileOverrides,
+      signal,
+      budget,
+    );
+  }
+
+  private configWithRuntimeProfiles(
+    bindingsSource?: RunState | WorkflowRoleBindings,
+  ): AgentTeamConfig {
+    const bindings = this.roleBindingsFromSource(bindingsSource);
+    if (Object.keys(bindings).length === 0) {
+      return this.loaded.config;
+    }
+    return materializeRoleBindings(this.loaded.config, bindings).config;
+  }
+
+  private roleBindingsFromSource(
+    bindingsSource?: RunState | WorkflowRoleBindings,
+  ): WorkflowRoleBindings {
+    if (!bindingsSource) return {};
+    if (isRunState(bindingsSource)) {
+      return roleBindingsFromRunState(bindingsSource);
+    }
+    return bindingsSource;
+  }
+
   private async recordAttemptCard(
     state: RunState,
     store: RunStateStore,
@@ -1506,6 +1547,10 @@ function buildReworkFeedback(
     null,
     2,
   );
+}
+
+function isRunState(value: RunState | WorkflowRoleBindings): value is RunState {
+  return typeof value === "object" && value !== null && "id" in value && "profileOverrides" in value;
 }
 
 function compactQuality(report: QualityReport): unknown {

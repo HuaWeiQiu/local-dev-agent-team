@@ -123,6 +123,35 @@ describe("run supervisor", () => {
     events.close();
   });
 
+  it("re-materializes desktop runtime profiles before plan continuation", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeApprovalState("runtime-worker-plan", "plan");
+    state.profileOverrides = {
+      worker: "runtime/worker/grok/grok-4.6/high",
+    };
+    await states.save(state);
+    const supervisor = new RunSupervisor(loaded, events, {
+      resumeWorkflow: async (resumed) => resumed,
+    });
+    const workerRole = loaded.config.roles.worker!;
+    expect(workerRole.allowedProfiles).not.toContain("runtime/worker/grok/grok-4.6/high");
+
+    const action = await supervisor.respondApproval(state.id, {
+      requestId: state.approvals![0]!.id,
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Continue with the desktop picker worker",
+    });
+    expect(action.status).toBe("resuming");
+    expect(loaded.config.roles.worker!.allowedProfiles).not.toContain(
+      "runtime/worker/grok/grok-4.6/high",
+    );
+    await supervisor.close();
+    events.close();
+  });
+
   it("continues an approved plan through the managed active-run lifecycle", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
