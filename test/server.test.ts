@@ -70,6 +70,7 @@ describe("control HTTP server", () => {
         expect.objectContaining({ name: "claude", contractVersion: 1 }),
         expect.objectContaining({ name: "codex", contractVersion: 1 }),
         expect.objectContaining({ name: "grok", contractVersion: 1 }),
+        expect.objectContaining({ name: "kimi", contractVersion: 1 }),
       ],
       protocols: {
         mcp: { specification: "2026-07-28", defaultPolicy: "deny" },
@@ -116,6 +117,113 @@ describe("control HTTP server", () => {
       headers: { origin: "https://example.com" },
     });
     expect(forbidden.status).toBe(403);
+
+    await supervisor.close();
+    await listening.close();
+    events.close();
+  });
+
+  it("rejects publishing when GitHub integration is disabled", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    const config = createDefaultConfig("publish-fixture");
+    config.github!.enabled = false;
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const run = fakeState("publish-run", "Publish me");
+    run.status = "ready-to-merge";
+    await states.save(run);
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    const response = await fetch(
+      `${listening.url}/api/runs/publish-run/actions/publish`,
+      { method: "POST" },
+    );
+    expect(response.status).toBe(422);
+    const body = (await response.json()) as { error?: string; code?: string };
+    expect(body.code).toBe("GITHUB_ACTION_FAILED");
+    expect(body.error).toContain("已关闭 GitHub 集成");
+
+    // With GitHub enabled but no final approval, the prompt must say so.
+    const enabledConfig = createDefaultConfig("publish-fixture-2");
+    const unapprovedRun = fakeState("unapproved-run", "Publish me");
+    unapprovedRun.status = "ready-to-merge";
+    await new RunStateStore(path.join(root, ".agent-team", "runs"), events).save(unapprovedRun);
+    const enabledRoot = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(path.join(enabledRoot, "agent-team.yaml"), stringifyYaml(enabledConfig));
+    const enabledLoaded = await loadConfig(enabledRoot);
+    const enabledEvents = new SqliteEventStore(
+      path.join(enabledRoot, ".agent-team", "events.sqlite"),
+    );
+    const enabledStates = new RunStateStore(
+      path.join(enabledRoot, ".agent-team", "runs"),
+      enabledEvents,
+    );
+    await enabledStates.save(unapprovedRun);
+    const enabledSupervisor = new RunSupervisor(enabledLoaded, enabledEvents);
+    const enabledListening = await listenControlServer(enabledLoaded, enabledSupervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+    const second = await fetch(
+      `${enabledListening.url}/api/runs/unapproved-run/actions/publish`,
+      { method: "POST" },
+    );
+    expect(second.status).toBe(422);
+    const secondBody = (await second.json()) as { error?: string };
+    expect(secondBody.error).toContain("requires final human approval");
+    await enabledSupervisor.close();
+    await enabledListening.close();
+    enabledEvents.close();
+
+    await supervisor.close();
+    await listening.close();
+    events.close();
+  });
+
+  it("validates pause requests and rejects unknown runs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("pause-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    const missingBody = await fetch(
+      `${listening.url}/api/runs/unknown-run/actions/pause`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    expect(missingBody.status).toBe(400);
+
+    const unknownRun = await fetch(
+      `${listening.url}/api/runs/unknown-run/actions/pause`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ actor: "owner", reason: "going home" }),
+      },
+    );
+    expect(unknownRun.status).toBeGreaterThanOrEqual(400);
 
     await supervisor.close();
     await listening.close();
@@ -400,6 +508,78 @@ describe("control HTTP server", () => {
     await listening.close();
     await supervisor.close();
     events.close();
+  });
+
+  it("exposes project role settings and keeps yaml profiles when no desktop session is present", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-role-settings-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("layered-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    let startedRequest: { roleBindings?: Record<string, unknown> } | undefined;
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        startedRequest = request;
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fakeState(context.runId, request.goal);
+      },
+    });
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+
+    try {
+      const empty = await fetch(`${listening.url}/api/role-settings`);
+      expect(empty.status).toBe(200);
+      await expect(empty.json()).resolves.toMatchObject({
+        projectName: "layered-fixture",
+        roles: {},
+      });
+
+      const saved = await fetch(`${listening.url}/api/role-settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          roles: {
+            worker: { cli: "grok", model: "grok-4.6", reasoning: "high" },
+            orchestrator: null,
+          },
+        }),
+      });
+      expect(saved.status).toBe(200);
+      const savedBody = await saved.json() as {
+        roles: { worker?: { cli: string } };
+        sources: Record<string, string>;
+      };
+      expect(savedBody.roles.worker?.cli).toBe("grok");
+      expect(savedBody.sources.worker).toBe("project");
+
+      const start = await fetch(`${listening.url}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ goal: "Keep yaml profiles" }),
+      });
+      expect(start.status).toBe(202);
+      const { runId } = await start.json() as { runId: string };
+      expect(startedRequest?.roleBindings).toBeUndefined();
+      await fetch(`${listening.url}/api/runs/${encodeURIComponent(runId)}/actions/cancel`, {
+        method: "POST",
+      });
+      await supervisor.wait(runId);
+    } finally {
+      await supervisor.close();
+      await listening.close();
+      events.close();
+    }
   });
 });
 

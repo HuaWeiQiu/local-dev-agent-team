@@ -118,6 +118,7 @@ separately authenticated HTTPS gateway before that boundary can change.
 ```text
 created
   -> orchestrating
+  -> exploring (optional: read-only researcher research before planning)
   -> architecting
   -> planned
   -> implementing
@@ -127,16 +128,41 @@ created
   -> final-checks
   -> awaiting-human
   -> ready-to-merge
+  -> publishing
+  -> waiting-ci
   -> completed
+```
+
+`exploring` runs only when the strategy enables the explore stage; the
+researcher (or architect fallback) is read-only, and with `failOpen` a failed
+exploration is skipped and planning proceeds.
+
+The GitHub publication and CI-repair sub-loop is explicit-command driven:
+
+```text
+ready-to-merge
+  -> publishing (agent-team publish; requires final human approval)
+  -> waiting-ci (draft pull request created)
+publishing --publication error--> ready-to-merge (re-publishable)
+waiting-ci --checks pass--> ready-to-merge (human merge required)
+waiting-ci --checks fail--> ci-failed
+ci-failed -> repairing (agent-team repair, bounded attempts,
+                          human-confirmed push)
+repairing -> waiting-ci (repair commit pushed; new checks)
+repairing -> ci-failed (repair did not pass local gates)
+ready-to-merge -> completed (agent-team complete, after the PR merges)
 ```
 
 Any state can transition to `blocked` on a non-recoverable infrastructure or
 policy failure. State is persisted after every transition for audit and
 diagnosis.
 
-Control-service cancellation transitions a run to `cancelled`. When a new
-service instance finds a non-terminal run owned by a previous service instance,
-it records `interrupted` while preserving worktrees, branches, and artifacts.
+Control-service cancellation transitions a run to `cancelled`. Runs parked at
+`awaiting-human` or recovered as `interrupted` are not owned by an active
+process; the control service can still cancel them with a direct terminal
+transition. When a new service instance finds a non-terminal run owned by a
+previous service instance, it records `interrupted` while preserving worktrees,
+branches, and artifacts.
 Recovery is allowed only when the integration HEAD matches the latest durable
 task-boundary checkpoint. Work from a partial wave is retained as abandoned
 evidence and rerun on new branches; an interrupted agent process is never
@@ -171,10 +197,10 @@ an explicitly started, hard-bounded strategy loop on top of those records.
 | Domain | `src/evolution/domain.ts` | Schemas, trust context from role config, digests, evidence binding, lifecycle, pure guarded promote/reject/rollback |
 | Catalog | `src/evolution/catalog.ts` | Pure synchronous in-memory indexes, audit trail, per-target active pointers, internal promotion provenance, deterministic snapshots, atomic commit, trust-validating restore |
 | Persistence | `src/evolution/persistence.ts` | Repository-local versioned document, exact revision witness, ordered audit replay, full pre-write document validation/comparison, symlink-safe paths, atomic file commit, fail-closed reopen |
-| Application | `src/evolution/application.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
+| Application | `src/evolution/application.ts` (coordinator), `application-journal.ts`, `application-preview.ts`, `application-target.ts`, `application-schemas.ts`, `application-shared.ts` | Exclusive catalog writer, immutable preview capabilities, prompt object ingress, target/Git apply, write-ahead journal, idempotency, crash reconciliation, target rollback chain |
 | Control service | `src/server/evolution-service.ts`, `src/server/http.ts` | Session-bound proposal ingress, fixed server preflight, exact preview material, project mutation latch, shutdown drain, sanitized HTTP projection |
 | Workbench | `web/src/components/EvolutionWorkbench.tsx`, `web/src/api.ts` | React/Tauri state-driven proposal UI, exact preview confirmation, stable per-intent idempotency keys, stale-preview cleanup, responsive navigation |
-| Automatic strategy loop | `src/evolution/automation.ts`, `src/server/evolution-automation.ts` | Read-only candidate proposer, isolated fixed-goal evaluation runs, deterministic scoring, bounded stopping, automatic strategy apply, runtime-default recovery |
+| Automatic strategy loop | `src/evolution/automation.ts`, `src/evolution/automatic-controller.ts`, thin shell `src/server/evolution-automation.ts` | Read-only candidate proposer, isolated fixed-goal evaluation runs, deterministic scoring, bounded stopping, automatic strategy apply, runtime-default recovery, persisted last-evaluation record |
 
 Current capabilities include trust-aware `strategy-blueprint` / `role-prompt`
 candidates, SHA-256 digests, immutable lifecycle, explicit human

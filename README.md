@@ -40,7 +40,8 @@
 - 不自动合并代码，最终合并必须由人确认。
 - 提供 React/Tauri 演进工作台：人工候选保留结构预检与精确确认；可选的项目级自动策略循环会在固定目标上隔离评测、按确定性分数自动应用更优策略，并受轮数、连续无提升和手动停止硬限制。
 - **经验库**：运行终态抽取候选 → 人工/评测晋升为已验证 → 可共享到本机公共目录；规划与返工会注入已验证经验（默认不注入候选）。
-- **运行历史清理**：支持单条删除终态运行，以及按保留天数批量清理。
+- **运行历史清理**：支持单条删除终态运行，以及按保留天数批量清理；删除会连同该运行的 Git worktree 与本地分支一起回收，控制服务启动时还会清扫历史遗留的孤儿 worktree 目录。
+- **运行暂停**：执行中的运行可以「暂停」——立即中止当前任务并以可恢复的 `interrupted` 状态落盘（保留检查点与任务 worktree），稍后从工作台「从检查点继续」即可接着跑；已合并的任务不会被重做。
 - **可选外挂质量门**：可把已安装的 CLI（例如阿里 `ocr review`）写进 `quality.commands`，不内嵌第二套评审引擎。
 
 当前内置以下 CLI 适配器：
@@ -48,6 +49,7 @@
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - Claude Code
 - Grok CLI
+- Kimi Code CLI
 
 适配器边界是开放的，后续可以增加其他支持非交互调用的 Agent CLI。
 
@@ -231,14 +233,15 @@ pnpm check、pnpm test、pnpm build 必须全部通过。
 | 活动日志 | 角色调用、活动时间线、stdout/stderr；规划/早失败时默认打开 |
 | 交付证据 | 汇总任务集成、质量门禁、最终判定、审批、集成 diff 和本地产物 |
 | 右侧检查器 | 运行策略、用量、审批，或所选任务的分支、提交、质量命令和审查结论 |
-| 经验（侧栏） | 候选/已验证/公共经验：晋升、拒绝、共享到本机公共库 |
+| 经验（侧栏） | 候选/已验证/公共经验：晋升（可一键填入最近评测 suiteDigest）、拒绝、共享到本机公共库、退役已验证经验；支持按目标文本检索预览将注入的经验 |
 
 点击任务节点会打开该任务的证据详情。任务图中的连线表示真实依赖关系；没有依赖且
 负责路径不冲突的任务，才可能并行执行。
 
 页面右上角会根据运行状态显示可用操作：
 
-- “取消”：终止仍在执行的运行。
+- “取消”：终止仍在执行的运行；停在“等待人工”（待审批）或被服务恢复为
+  “已中断”的运行也可直接取消为终态。
 - “处理审批”：批准或拒绝计划、交付审批，必须填写操作者和理由。
 - “从检查点继续”：服务中断后，从最近一个经过 Git 校验的检查点继续。
 - “重试为新运行”：为阻塞、取消或中断的运行创建新的关联运行，不改写原运行证据。
@@ -339,7 +342,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -403,6 +406,11 @@ roles:
     defaultProfile: codex-architect
     allowedProfiles: [codex-architect]
 
+  researcher:
+    defaultProfile: codex-researcher
+    allowedProfiles: [codex-researcher]
+    promptFile: prompts/researcher.md
+
   worker:
     defaultProfile: grok-worker
     allowedProfiles: [grok-worker]
@@ -424,6 +432,10 @@ roles:
 - `worker`：工作
 - `reviewer`：审查
 - `tester`：测试
+
+可选一等角色：
+
+- `researcher`：技术研究员（只读调研；开启 explore 时优先使用；缺省时回退到架构）
 
 也可以只对本次运行临时覆盖角色 profile：
 
@@ -604,7 +616,9 @@ agent-team complete <run-id>
 ```
 
 `repair` 有次数上限，并且默认禁止修改 GitHub Actions 工作流和
-`agent-team.yaml`。修复仍然必须重新通过项目命令、审查和测试门禁。
+`agent-team.yaml`。修复仍然必须重新通过项目命令、审查和测试门禁。推送修复提交前
+会打印远端、分支、提交说明和变更文件清单并要求人工确认；非交互会话拒绝推送，
+需显式传 `--yes`（`agent-team repair <run-id> --yes`）。
 
 ## 安全默认值
 

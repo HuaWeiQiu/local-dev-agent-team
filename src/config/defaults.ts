@@ -40,6 +40,11 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
         allowedProfiles: ["codex-planner"],
         fallbackProfiles: [],
       },
+      researcher: {
+        defaultProfile: "codex-planner",
+        allowedProfiles: ["codex-planner"],
+        fallbackProfiles: [],
+      },
       worker: {
         defaultProfile: "codex-worker",
         allowedProfiles: ["codex-worker"],
@@ -98,6 +103,7 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
         proposerRole: "orchestrator",
         targetStrategy: "auto-evolved",
         evaluationGoal: "",
+        useGlobalCliDefaults: false,
       },
     },
     quality: {

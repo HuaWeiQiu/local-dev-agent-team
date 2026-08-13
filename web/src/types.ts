@@ -228,6 +228,7 @@ export interface RunSummary {
   updatedAt: string;
   taskCounts: Record<TaskStatus, number>;
   error?: string;
+  parentRunId?: string;
 }
 
 export interface Task {
@@ -239,6 +240,7 @@ export interface Task {
   acceptanceCommands: Array<{ command: string; args: string[] }>;
   profile: string | null;
   batchKey?: string | null;
+  evidenceKind?: "commands" | "host-evidence" | null;
 }
 
 export interface Finding {
@@ -305,18 +307,36 @@ export interface RunState {
     };
   };
   profileOverrides: Record<string, string>;
+  roleBindings?: Record<string, {
+    cli: "codex" | "grok" | "kimi" | "claude";
+    model?: string;
+    reasoning?: string;
+    profileName: string;
+  }>;
   parentRunId?: string;
   createdAt: string;
   updatedAt: string;
   plan?: { summary: string; tasks: Task[] };
   tasks: TaskRunState[];
   history: Array<{ at: string; status: RunStatus; message: string }>;
-  finalQuality?: { passed: boolean };
+  finalQuality?: {
+    passed: boolean;
+    commands?: Array<{
+      spec: { command: string; args: string[] };
+      exitCode: number | null;
+      durationMs?: number;
+      timedOut?: boolean;
+      stdout?: string;
+      stderr?: string;
+    }>;
+  };
   finalDecision?: { decision: "ready" | "escalate"; reason: string };
   checkpoints?: RunCheckpoint[];
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
   usage?: {
     agentInvocations: number;
     agentDurationMs: number;
@@ -411,10 +431,80 @@ export interface RunCleanupResult {
   reclaimedBytes: number;
 }
 
+export type CliId = "codex" | "grok" | "kimi" | "claude";
+
+export interface RoleBindingInput {
+  cli: CliId;
+  model?: string;
+  reasoning?: string;
+}
+
 export interface StartRunInput {
   goal: string;
   strategy?: string;
   profileOverrides: Record<string, string>;
+  roleBindings?: Record<string, RoleBindingInput>;
+}
+
+export interface CliModelInfo {
+  id: string;
+  label: string;
+  provider?: string;
+  reasoningOptions?: string[];
+}
+
+export interface CliProbeResult {
+  id: CliId;
+  binary?: string;
+  installed: boolean;
+  version?: string;
+  auth: { status: "unknown" | "present" | "missing" | "invalid"; detail?: string };
+  configPaths: string[];
+  models: CliModelInfo[];
+  defaultModel?: string;
+  defaultReasoning?: string;
+  providers?: Array<{ id: string; baseUrl?: string; wireApi?: string }>;
+  runtimeSupported: boolean;
+}
+
+export interface CliInventory {
+  scannedAt: string;
+  home: string;
+  clis: CliProbeResult[];
+  /** Config-file fingerprint used for auto cache invalidation */
+  sourceFingerprint?: string;
+}
+
+export type InventoryCacheReason = "refresh" | "stale" | "fingerprint" | "miss" | "hit";
+
+export interface DesktopSettingsView {
+  version: 1;
+  defaults: { roles: Record<string, RoleBindingInput> };
+  ui: {
+    showCliPickerInRunLauncher: boolean;
+    /** Soft auto re-check while settings is open / on interval */
+    autoDetectCliConfig?: boolean;
+    /** Soft re-check when window regains focus */
+    autoDetectOnFocus?: boolean;
+  };
+  inventoryCachedAt: string | null;
+}
+
+export interface DesktopSettingsResponse {
+  settings: DesktopSettingsView;
+  inventory: CliInventory;
+  fromCache: boolean;
+  reason?: InventoryCacheReason;
+  suggestedDefaults: Record<string, RoleBindingInput>;
+}
+
+export interface ProjectRoleSettingsView {
+  projectId: string;
+  projectName: string;
+  roles: Record<string, RoleBindingInput>;
+  global: Record<string, RoleBindingInput>;
+  effective: Record<string, RoleBindingInput>;
+  sources: Record<string, "global" | "project">;
 }
 
 export interface UsageDetail {
@@ -517,6 +607,8 @@ export interface EvolutionProposal {
   id: string;
   createdAt: string;
   status: EvolutionLifecycleStatus;
+  /** ISO 时间；缺省表示未归档。归档候选默认不出现在列表中。 */
+  archivedAt?: string;
   candidate: EvolutionCandidate;
   policy: {
     version: 1;
@@ -603,8 +695,14 @@ export interface AutomaticEvolutionSnapshot {
   stopReason: string | null;
   error: string | null;
   failureCode: string | null;
+  roleBindingSource: "global-cli-defaults" | "layered-cli-defaults" | "project-yaml" | null;
   startedAt: string | null;
   updatedAt: string;
+  lastEvaluation: {
+    suiteName: string;
+    suiteDigest: string;
+    completedAt: string;
+  } | null;
   cycles: AutomaticEvolutionCycle[];
 }
 

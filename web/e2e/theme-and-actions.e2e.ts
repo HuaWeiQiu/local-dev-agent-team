@@ -147,7 +147,8 @@ test("retry issues a retry request for a retryable run", async ({ page }, testIn
   if (testInfo.project.name === "desktop") {
     await expect(page.getByText("已中断", { exact: true }).first()).toBeVisible();
   }
-  const retryButton = topbarAction(page, /重试/);
+  // interrupted 运行的重试按钮文案为「重新开始」；移动端按钮文字隐藏时可访问名取 title
+  const retryButton = topbarAction(page, /重新开始|重试|放弃检查点|以同一目标新开一条/);
   await expect(retryButton).toBeVisible();
   await retryButton.click();
   await expect.poll(() => retryRequested).toBe(true);

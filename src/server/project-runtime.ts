@@ -6,6 +6,7 @@ import { DurableEvolutionCatalog } from "../evolution/persistence.js";
 import { GitManager } from "../git/manager.js";
 import { StrategyBlueprintCatalog } from "../strategies/catalog.js";
 import { EvolutionProjectService } from "./evolution-service.js";
+import { reapOrphanAgentProcesses } from "../process/live-children.js";
 import { acquireControlLease } from "./lease.js";
 import { RunSupervisor } from "./supervisor.js";
 
@@ -32,6 +33,27 @@ export async function startProjectRuntime(loaded: LoadedConfig): Promise<Project
     });
     supervisor = new RunSupervisor(loaded, events);
     await supervisor.reconcileInterruptedRuns();
+    const swept = await supervisor.reconcileUnknownWorktrees();
+    if (swept.removedDirectories.length > 0) {
+      console.warn(
+        `[agent-team] removed ${swept.removedDirectories.length} worktree director${
+          swept.removedDirectories.length === 1 ? "y" : "ies"
+        } and ${swept.removedBranches} branch${
+          swept.removedBranches === 1 ? "" : "es"
+        } left behind by deleted runs`,
+      );
+    }
+    const orphans = await reapOrphanAgentProcesses({
+      stateRoot,
+      worktreesRoot: path.join(stateRoot, "worktrees"),
+    });
+    if (orphans.killed.length > 0) {
+      console.warn(
+        `[agent-team] reaped ${orphans.killed.length} leftover agent ${
+          orphans.killed.length === 1 ? "process" : "processes"
+        } after a previous control-service stop`,
+      );
+    }
 
     const catalog = await DurableEvolutionCatalog.open(loaded);
     const coordinator = await EvolutionApplicationCoordinator.open({

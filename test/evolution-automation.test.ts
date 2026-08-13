@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -18,6 +18,11 @@ import { SqliteEventStore } from "../src/events/store.js";
 import { GitManager } from "../src/git/manager.js";
 import { runProcess } from "../src/process/run.js";
 import { AutomaticEvolutionController } from "../src/server/evolution-automation.js";
+import { computeSuiteDigest } from "../src/evaluation/domain.js";
+import {
+  requireEvaluationSuite,
+  resolveEvaluationSuite,
+} from "../src/evaluation/resolve.js";
 import { RunSupervisor, type SupervisorDependencies } from "../src/server/supervisor.js";
 import type { RunState } from "../src/state/types.js";
 import { StrategyBlueprintCatalog } from "../src/strategies/catalog.js";
@@ -26,6 +31,11 @@ import {
   classificationForCode,
   RoleProfileChainError,
 } from "../src/providers/failure.js";
+import {
+  inventorySourceFingerprint,
+  type CliInventory,
+} from "../src/desktop/cli-inventory.js";
+import { desktopSettingsPath } from "../src/desktop/settings.js";
 
 const candidateDefinition: NamedStrategy = {
   topology: { mode: "sequential" },
@@ -191,6 +201,152 @@ describe("automatic evolution controller", () => {
     expect(() => restoredController.start(1, "improved-command", "session:alice"))
       .toThrow("already accepted by session 'improved-session'");
     await closeHarness(reopened);
+  });
+
+  it("exposes the latest evaluation suite identity with completion time", async () => {
+    const harness = await createHarness(() => 8);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "suite-identity-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for suite identity coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+    controller.start(1, "suite-identity-command");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.status).toBe("completed");
+    const suite = requireEvaluationSuite(
+      await resolveEvaluationSuite(harness.loaded.config, harness.loaded.root),
+      "test expectation",
+    );
+    expect(snapshot.lastEvaluation).toEqual({
+      suiteName: suite.name,
+      suiteDigest: computeSuiteDigest(suite),
+      completedAt: expect.any(String),
+    });
+    expect(Number.isNaN(Date.parse(snapshot.lastEvaluation!.completedAt))).toBe(false);
+    await closeHarness(harness);
+  });
+
+  it("persists the latest evaluation suite identity across control-service restarts", async () => {
+    const harness = await createHarness(() => 8);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "persisted-evaluation-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for persisted evaluation coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "persisted-evaluation-command");
+    const snapshot = await controller.wait();
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.status).toBe("completed");
+    expect(snapshot.lastEvaluation).not.toBeNull();
+
+    const statePath = path.join(
+      harness.root,
+      harness.loaded.config.project.stateDirectory,
+      "evolution",
+      "automatic-controller.json",
+    );
+    const info = await stat(statePath);
+    expect(info.mode & 0o777).toBe(0o600);
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      version: number;
+      lastEvaluation: unknown;
+    };
+    expect(persisted.version).toBe(1);
+    expect(persisted.lastEvaluation).toEqual(snapshot.lastEvaluation);
+
+    const root = harness.root;
+    await closeHarness(harness);
+
+    const reopened = await reopenHarness(root);
+    const restored = new AutomaticEvolutionController(
+      reopened.loaded,
+      reopened.coordinator,
+      reopened.strategies,
+      reopened.supervisor,
+    );
+    expect(restored.snapshot().lastEvaluation).toBeNull();
+    await restored.restoreLastEvaluation();
+    expect(restored.snapshot().lastEvaluation).toEqual(snapshot.lastEvaluation);
+    await closeHarness(reopened);
+  });
+
+  it("discards a corrupt persisted evaluation without blocking startup", async () => {
+    const harness = await createHarness(() => 8);
+    const statePath = path.join(
+      harness.root,
+      harness.loaded.config.project.stateDirectory,
+      "evolution",
+      "automatic-controller.json",
+    );
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+    );
+
+    await writeFile(statePath, "not json at all", "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "not-a-sha256-digest",
+        completedAt: "2026-08-12T00:00:00.000Z",
+      },
+    }), "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "a".repeat(64),
+        completedAt: "not-a-timestamp",
+      },
+    }), "utf8");
+    await expect(controller.restoreLastEvaluation()).resolves.toBeUndefined();
+    expect(controller.snapshot().lastEvaluation).toBeNull();
+
+    await writeFile(statePath, JSON.stringify({
+      version: 1,
+      lastEvaluation: {
+        suiteName: "fixture-suite",
+        suiteDigest: "a".repeat(64),
+        completedAt: "2026-08-12T00:00:00.000Z",
+      },
+    }), "utf8");
+    await controller.restoreLastEvaluation();
+    expect(controller.snapshot().lastEvaluation).toEqual({
+      suiteName: "fixture-suite",
+      suiteDigest: "a".repeat(64),
+      completedAt: "2026-08-12T00:00:00.000Z",
+    });
+    await closeHarness(harness);
   });
 
   it("stops before the hard limit after consecutive candidates do not improve", async () => {
@@ -419,6 +575,87 @@ describe("automatic evolution controller", () => {
     await closeHarness(harness);
   });
 
+  it("threads global CLI role defaults into evaluation runs when enabled", async () => {
+    const desktopHome = await mkdtemp(path.join(tmpdir(), "agent-team-desktop-home-"));
+    const fingerprint = await inventorySourceFingerprint(desktopHome);
+    const inventoryCache: CliInventory = {
+      scannedAt: new Date().toISOString(),
+      home: desktopHome,
+      sourceFingerprint: fingerprint,
+      clis: [{
+        id: "grok",
+        installed: true,
+        runtimeSupported: true,
+        auth: { status: "present" },
+        configPaths: [],
+        models: [{ id: "grok-4", label: "Grok 4", reasoningOptions: ["low", "medium", "high"] }],
+        defaultModel: "grok-4",
+        defaultReasoning: "medium",
+      }],
+    };
+    await mkdir(path.join(desktopHome, ".agent-team"), { recursive: true });
+    await writeFile(desktopSettingsPath(desktopHome), JSON.stringify({
+      version: 1,
+      defaults: {
+        roles: {
+          worker: { cli: "grok", model: "grok-4", reasoning: "medium" },
+          reviewer: { cli: "grok", model: "grok-4", reasoning: "medium" },
+        },
+      },
+      inventoryCache,
+      inventoryCachedAt: new Date().toISOString(),
+      inventorySourceFingerprint: fingerprint,
+    }), "utf8");
+
+    const seenBindings: Array<Record<string, unknown> | undefined> = [];
+    const harness = await createHarness((strategy) => (strategy.startsWith("auto-eval-") ? 2 : 10), {
+      useGlobalCliDefaults: true,
+      runWorkflow: async (request, context) => {
+        const strategy = request.strategy ?? "balanced";
+        seenBindings.push(request.roleBindings as Record<string, unknown> | undefined);
+        const state = evaluationState(
+          context.runId,
+          "balanced",
+          strategy.startsWith("auto-eval-") ? 2 : 10,
+          true,
+          undefined,
+          request.goal,
+          context.purpose,
+        );
+        state.strategy.name = strategy;
+        return state;
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        desktopHome,
+        createSessionId: () => "global-defaults-session",
+        proposeCandidate: async () => ({
+          rationale: "Candidate for global defaults coverage",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "global-defaults-command");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.status).toBe("completed");
+    expect(snapshot.roleBindingSource).toBe("layered-cli-defaults");
+    expect(seenBindings.length).toBeGreaterThan(0);
+    for (const bindings of seenBindings) {
+      expect(bindings).toMatchObject({
+        worker: { cli: "grok", model: "grok-4", reasoning: "medium" },
+        reviewer: { cli: "grok", model: "grok-4", reasoning: "medium" },
+      });
+    }
+    await closeHarness(harness);
+  });
+
   it("reports an active project conflict synchronously without poisoning the start command", async () => {
     const harness = await createHarness(() => 8);
     const controller = new AutomaticEvolutionController(
@@ -499,6 +736,7 @@ async function createHarness(
   limits: {
     maxCycles?: number;
     noImprovement?: number;
+    useGlobalCliDefaults?: boolean;
     runWorkflow?: NonNullable<SupervisorDependencies["runWorkflow"]>;
   } = {},
 ): Promise<AutomationHarness> {
@@ -506,6 +744,7 @@ async function createHarness(
   const config = createAutomaticConfig("automatic-evolution");
   config.evolution.automatic.maxCycles = limits.maxCycles ?? 3;
   config.evolution.automatic.maxConsecutiveNoImprovement = limits.noImprovement ?? 2;
+  config.evolution.automatic.useGlobalCliDefaults = limits.useGlobalCliDefaults ?? false;
   await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config), "utf8");
   await writeFile(path.join(root, ".gitignore"), ".agent-team/\n", "utf8");
   await writeFile(path.join(root, "README.md"), "automatic evolution fixture\n", "utf8");

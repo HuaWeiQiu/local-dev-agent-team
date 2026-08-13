@@ -6,10 +6,14 @@ import type {
   ExperienceStatus,
   ProjectScope,
   PublicConfig,
+  DesktopSettingsResponse,
+  DesktopSettingsView,
+  ProjectRoleSettingsView,
   EvidenceFilePreview,
   EvolutionPreviewResponse,
   EvolutionProposal,
   EvolutionSnapshot,
+  RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
   RunEvidence,
@@ -20,6 +24,7 @@ import type {
   StrategyBlueprintResult,
   UsageReport,
   WorkspaceInfo,
+  CliInventory,
 } from "./types";
 
 export class ApiError extends Error {
@@ -36,8 +41,66 @@ export async function getWorkspace(): Promise<WorkspaceInfo> {
   return await request<WorkspaceInfo>("/api/workspace");
 }
 
+export async function getDesktopSettings(): Promise<DesktopSettingsResponse> {
+  return await request<DesktopSettingsResponse>("/api/desktop/settings");
+}
+
+export async function scanCliInventory(): Promise<{
+  inventory: CliInventory;
+  fromCache: boolean;
+  reason?: string;
+}> {
+  return await request<{ inventory: CliInventory; fromCache: boolean; reason?: string }>(
+    "/api/desktop/cli-inventory/scan",
+    { method: "POST", body: "{}" },
+  );
+}
+
+/** Soft read: server auto-rescans when config mtime fingerprint changes. */
+export async function getCliInventory(options: { refresh?: boolean } = {}): Promise<{
+  inventory: CliInventory;
+  fromCache: boolean;
+  reason?: string;
+}> {
+  const query = options.refresh ? "?refresh=1" : "";
+  return await request<{ inventory: CliInventory; fromCache: boolean; reason?: string }>(
+    `/api/desktop/cli-inventory${query}`,
+  );
+}
+
+export async function saveDesktopSettings(input: {
+  defaults: { roles: Record<string, RoleBindingInput> };
+  ui: DesktopSettingsView["ui"];
+}): Promise<{ settings: unknown }> {
+  return await request<{ settings: unknown }>("/api/desktop/settings", {
+    method: "PUT",
+    body: JSON.stringify({
+      defaults: input.defaults,
+      ui: {
+        showCliPickerInRunLauncher: input.ui.showCliPickerInRunLauncher,
+        autoDetectCliConfig: input.ui.autoDetectCliConfig ?? true,
+        autoDetectOnFocus: input.ui.autoDetectOnFocus ?? true,
+      },
+    }),
+  });
+}
+
 export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {
   return await request<PublicConfig>(`${apiRoot(scope)}/config`);
+}
+
+export async function getProjectRoleSettings(scope: ProjectScope): Promise<ProjectRoleSettingsView> {
+  return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`);
+}
+
+export async function saveProjectRoleSettings(
+  scope: ProjectScope,
+  roles: Record<string, RoleBindingInput | null>,
+): Promise<ProjectRoleSettingsView> {
+  return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`, {
+    method: "PUT",
+    body: JSON.stringify({ roles }),
+  });
 }
 
 export async function getRuns(scope: ProjectScope): Promise<RunSummary[]> {
@@ -138,6 +201,27 @@ export async function cancelRun(scope: ProjectScope, runId: string): Promise<voi
   });
 }
 
+export async function pauseRun(
+  scope: ProjectScope,
+  runId: string,
+  input: { actor: string; reason: string },
+): Promise<void> {
+  await request(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/pause`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function publishRun(
+  scope: ProjectScope,
+  runId: string,
+): Promise<{ runId: string; status: string; pullRequestUrl?: string }> {
+  return await request<{ runId: string; status: string; pullRequestUrl?: string }>(
+    `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/publish`,
+    { method: "POST" },
+  );
+}
+
 export async function retryRun(scope: ProjectScope, runId: string): Promise<string> {
   const response = await request<{ runId: string }>(
     `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/retry`,
@@ -183,16 +267,26 @@ export async function resumeRun(
   });
 }
 
-export function eventStreamUrl(scope: ProjectScope, runId: string): string {
-  return `${apiRoot(scope)}/events?runId=${encodeURIComponent(runId)}&after=0`;
+/**
+ * SSE 事件流地址。不带 after 参数：首次连接服务端从 0 重放；
+ * EventSource 自动重连时浏览器会带 Last-Event-ID，服务端据此续传，
+ * 避免每次重连都全量重放。runId 缺省时订阅项目级全量事件流。
+ */
+export function eventStreamUrl(scope: ProjectScope, runId?: string): string {
+  const query = runId ? `?runId=${encodeURIComponent(runId)}` : "";
+  return `${apiRoot(scope)}/events${query}`;
 }
 
 export async function getUsage(scope: ProjectScope): Promise<UsageReport> {
   return await request<UsageReport>(`${apiRoot(scope)}/usage`);
 }
 
-export async function getEvolution(scope: ProjectScope): Promise<EvolutionSnapshot> {
-  return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution`, { cache: "no-store" });
+export async function getEvolution(
+  scope: ProjectScope,
+  options: { includeArchived?: boolean } = {},
+): Promise<EvolutionSnapshot> {
+  const query = options.includeArchived ? "?includeArchived=true" : "";
+  return await request<EvolutionSnapshot>(`${apiRoot(scope)}/evolution${query}`, { cache: "no-store" });
 }
 
 export async function getExperience(
@@ -208,10 +302,13 @@ export async function getExperience(
 export async function retrieveExperience(
   scope: ProjectScope,
   query = "",
+  options: { preview?: boolean } = {},
 ): Promise<ExperiencePlanningBundle> {
-  const suffix = query.trim()
-    ? `?q=${encodeURIComponent(query.trim())}`
-    : "";
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  // preview 只读预览：不计 hitCount、不写审计
+  if (options.preview) params.set("preview", "1");
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
   return await request<ExperiencePlanningBundle>(`${apiRoot(scope)}/experience/retrieve${suffix}`, {
     cache: "no-store",
   });
@@ -249,6 +346,21 @@ export async function rejectExperience(
 ): Promise<ExperienceEntry> {
   return await request<ExperienceEntry>(
     `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/reject`,
+    {
+      method: "POST",
+      body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),
+    },
+  );
+}
+
+export async function retireExperience(
+  scope: ProjectScope,
+  experienceId: string,
+  reason: string,
+  actor?: string,
+): Promise<ExperienceEntry> {
+  return await request<ExperienceEntry>(
+    `${apiRoot(scope)}/experience/${encodeURIComponent(experienceId)}/actions/retire`,
     {
       method: "POST",
       body: JSON.stringify({ reason, ...(actor ? { actor } : {}) }),
@@ -386,6 +498,33 @@ export async function reconcileEvolutionProposal(
   commandId: string,
 ): Promise<void> {
   await evolutionAction(scope, proposalId, "reconcile", input, commandId);
+}
+
+export async function archiveEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason?: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "archive", input, commandId);
+}
+
+export async function unarchiveEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason?: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "unarchive", input, commandId);
+}
+
+export async function deleteEvolutionProposal(
+  scope: ProjectScope,
+  proposalId: string,
+  input: { actor?: string; reason: string },
+  commandId: string,
+): Promise<void> {
+  await evolutionAction(scope, proposalId, "delete", input, commandId);
 }
 
 export function runExportUrl(scope: ProjectScope, runId: string): string {

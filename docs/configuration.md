@@ -61,7 +61,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -123,8 +123,10 @@ Responses HTTPS transport.
 Grok headless mode receives prompts through a private owner-only temporary file,
 because its headless CLI does not consume piped stdin. The control plane creates
 and removes that file for each invocation; profiles cannot override its path.
-Use `model: grok` for a Grok profile. A Codex model name such as
-`gpt-5.6-sol` is never passed to Grok.
+Use a real Grok model id such as `grok-4.6` or `grok-4.5-latest`. Bare
+`model: grok` is treated as inherit (the Grok CLI default) because `grok` is
+the CLI name, not a model id. A Codex model name such as `gpt-5.6-sol` is
+never passed to Grok.
 
 The Grok adapter uses `maxTurns` when configured and otherwise defaults one
 invocation to 24 turns. Scope and workflow behavior belong in the worker role's
@@ -150,8 +152,21 @@ allowlist, and fallbacks must be read-only. `agent-team invoke` is diagnostic
 and rejects workspace-write profiles even for the worker role.
 
 Required roles are `orchestrator`, `architect`, `worker`, `reviewer`, and
-`tester`. A task plan may choose only a profile allowed by the worker role. A
-run-level `--profile role=name` override is also checked against the allowlist.
+`tester`.
+
+Optional first-class role:
+
+- **`researcher`（技术研究员）**: read-only technical research used by the optional
+  explore stage before architect planning (`taskMorphology.explore.enabled`).
+  When the role is absent from the yaml, `loadConfig` backfills it by mirroring
+  `architect`'s profile chain (built-in `prompts/researcher.md`), so every project
+  shows it in the run launcher and CLI picker without editing the file. New
+  defaults and `agent-team.example.yaml` include it explicitly.
+
+Other notes:
+
+- A task plan may choose only a profile allowed by the worker role.
+- A run-level `--profile role=name` override is also checked against the allowlist.
 Fallbacks are attempted in declared order and recorded in invocation artifacts;
 there is no silent model fallback.
 
@@ -247,6 +262,7 @@ evolution:
     proposerProfile: codex-orchestrator
     baselineStrategy: balanced
     targetStrategy: auto-evolved
+    useGlobalCliDefaults: false
     evaluationGoal: >-
       Improve one small, well-tested reliability issue without changing public
       behavior or release configuration. Run every configured quality command.
@@ -257,6 +273,14 @@ session from the evolution workbench, after which all requested cycles run
 automatically. `maxCycles` is 1-10 and is also the hard ceiling exposed by the UI.
 `maxConsecutiveNoImprovement` cannot exceed it. `evaluationRepeats` is 1-2 and the
 worst repeated score wins the aggregate. `minimumScoreDelta` is 0-1000.
+
+`useGlobalCliDefaults` (default `false`) threads the merged desktop defaults
+(`~/.agent-team/desktop-settings.json` plus `<repo>/.agent-team/role-settings.json`)
+into evaluation runs as ephemeral profiles for roles the evaluated strategy
+does not map itself. Project overrides win per role; missing project roles
+inherit the global binding. Strategy `roleProfiles` always win over those
+defaults, and roles missing from the project config are ignored; when no usable
+saved default exists, evaluation falls back to the project yaml profile chains.
 
 The proposer role/profile must resolve to a read-only profile. `baselineStrategy`
 must name a configured strategy. `targetStrategy` must be a valid custom strategy
@@ -330,6 +354,31 @@ whether each configured quality command is available on `PATH`.
 
 `maxParallel` limits one dependency-ready scheduling wave. Parallel tasks must
 declare disjoint `ownedPaths`, and the plan is rejected when ownership overlaps.
+
+## Run Actions And Cancellation
+
+The control service cancels runs in two ways. A run owned by a live process is
+aborted through its execution controller. A run parked at `awaiting-human`
+(pending approval) or recovered as `interrupted` (previous service instance)
+has no live owner; it is still cancellable and moves directly to the terminal
+`cancelled` state. Cancellation while the automatic evolution loop owns the
+project is rejected as a conflict. See
+[architecture.md](./architecture.md#workflow-state) for the full state machine.
+
+Run action endpoints (`cancel`, `retry`, `respond-approval`, `resume`,
+`delete`, cleanup) classify failures by HTTP status and machine-readable code:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `INVALID_REQUEST` | Malformed body or unknown strategy/profile/role parameter |
+| 404 | `RUN_NOT_FOUND` | Unknown run id |
+| 409 | `RUN_STATE_CONFLICT` (or the mutation-conflict code) | Status/lifecycle conflict: wrong source status, stale approval, expired preview, concurrent project mutation, evolution automation ownership |
+| 500 | `INTERNAL_ERROR` | Unexpected failure; the detail is logged server-side and the body stays generic |
+
+Plan approval is required exactly when the selected strategy gates `plan`;
+`acceptanceCommands` do not force an extra stop (the deterministic quality
+gates already override any LLM verdict). See [workflow.md](./workflow.md) for
+the approval lifecycle.
 
 ## GitHub
 

@@ -93,6 +93,10 @@ describe("strategy resolution", () => {
     expect(resolved.swarmMaxConcurrency).toBe(2);
     expect(resolved.explore.enabled).toBe(true);
     expect(resolved.topology.stages.map((stage) => stage.id)).toContain("explore");
+    expect(resolved.topology.stages.find((stage) => stage.id === "explore")).toMatchObject({
+      roles: ["researcher"],
+      label: "技术调研 / 代码探索",
+    });
   });
 
   it("rejects an unknown requested strategy", () => {

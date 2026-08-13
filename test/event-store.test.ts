@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { SqliteEventStore } from "../src/events/store.js";
 
@@ -61,6 +62,65 @@ describe("SQLite event store", () => {
       claimed: false,
       response: { runId: "run-keep" },
     });
+    store.close();
+  });
+
+  it("matches claimed commands by run_id even when the response shape drifts", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    const databasePath = path.join(root, "events.sqlite");
+    const store = new SqliteEventStore(databasePath);
+    // Response carries extra fields, so a raw response_json match would miss.
+    store.claimCommand("start-shaped", "hash-a", { runId: "run-shaped", extra: "drift" });
+    // A legacy row claimed before the run_id column existed (run_id IS NULL).
+    const raw = new DatabaseSync(databasePath);
+    raw
+      .prepare(`
+        INSERT INTO command_idempotency (key, request_hash, response_json, created_at, run_id)
+        VALUES (?, ?, ?, ?, NULL)
+      `)
+      .run(
+        "start-legacy",
+        "hash-b",
+        JSON.stringify({ runId: "run-legacy" }),
+        new Date().toISOString(),
+      );
+    raw.close();
+
+    expect(store.deleteRun("run-shaped")).toEqual({ events: 0, commands: 1 });
+    expect(store.deleteRun("run-legacy")).toEqual({ events: 0, commands: 1 });
+    store.close();
+  });
+
+  it("adds the run_id column to databases created before it existed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
+    const databasePath = path.join(root, "events.sqlite");
+    const raw = new DatabaseSync(databasePath);
+    raw.exec(`
+      CREATE TABLE command_idempotency (
+        key TEXT PRIMARY KEY,
+        request_hash TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    raw
+      .prepare(`
+        INSERT INTO command_idempotency (key, request_hash, response_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `)
+      .run(
+        "start-old",
+        "hash-old",
+        JSON.stringify({ runId: "run-old" }),
+        new Date().toISOString(),
+      );
+    raw.close();
+
+    const store = new SqliteEventStore(databasePath);
+    store.claimCommand("start-new", "hash-new", { runId: "run-new" });
+    expect(store.deleteRun("run-new")).toEqual({ events: 0, commands: 1 });
+    // Pre-migration rows still fall back to the JSON response match.
+    expect(store.deleteRun("run-old")).toEqual({ events: 0, commands: 1 });
     store.close();
   });
 

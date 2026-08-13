@@ -56,6 +56,16 @@ describe("desktop control session", () => {
         status: "ok",
         project: "desktop-fixture",
       });
+
+      expect((await fetch(`${listening.url}/api/role-settings`)).status).toBe(401);
+      const roleSettings = await fetch(`${listening.url}/api/role-settings`, {
+        headers: { cookie: cookie! },
+      });
+      expect(roleSettings.status).toBe(200);
+      await expect(roleSettings.json()).resolves.toMatchObject({
+        projectName: "desktop-fixture",
+        roles: {},
+      });
     } finally {
       await listening.close();
       await supervisor.close();

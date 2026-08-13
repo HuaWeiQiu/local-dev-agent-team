@@ -3,15 +3,16 @@ import { flowPalette } from "./flow-theme";
 import type { TaskRunState } from "./types";
 
 /** 任务 DAG 节点网格：按 rank 横向分列，列内按序号纵向排列。 */
-export const TASK_NODE_GRID = { columnWidth: 290, rowHeight: 138 } as const;
+export const TASK_NODE_GRID = { columnWidth: 300, rowHeight: 168 } as const;
 /** 窄屏紧凑网格：rank 改为纵向堆叠，列内序号横向展开（即标准网格的转置）。 */
-export const TASK_NODE_GRID_COMPACT = { columnWidth: 280, rowHeight: 170 } as const;
+export const TASK_NODE_GRID_COMPACT = { columnWidth: 292, rowHeight: 196 } as const;
 /** 策略编排画布的阶段节点网格（蛇形布局）。 */
 export const STRATEGY_STAGE_GRID = { columnWidth: 270, rowHeight: 160 } as const;
 
 export interface TaskNodeData extends Record<string, unknown> {
   task: TaskRunState;
   compactLayout?: boolean;
+  runStatus?: import("./types").RunStatus;
 }
 
 export function buildTaskGraph(tasks: TaskRunState[]): {

@@ -43,6 +43,34 @@ a security boundary.
   security policy; it cannot load remote scripts or frame other content.
 - Managed Unix child processes use a separate process group so cancellation and
   timeout escalation reach their descendants.
+- The desktop shell never places the control-service session token in the node
+  sidecar's environment. It writes the token to a `0600` file under the app
+  data directory (`runtime/session-token`, rewritten on every startup) and
+  passes only the path via `AGENT_TEAM_SESSION_TOKEN_FILE`, so the secret does
+  not appear in `ps eww` output and cannot ride along through environment
+  inheritance. The direct `AGENT_TEAM_SESSION_TOKEN` variable remains
+  supported for CLI `serve` and other embedders; the file takes precedence,
+  and the service refuses to start when the file is missing, empty, or not
+  `0600`.
+- Child processes never inherit `AGENT_TEAM_*` orchestrator variables (most
+  notably the control-service session token): `src/process/env.ts` strips them
+  by denylist before spawn while leaving PATH/HOME/proxy variables intact. Any
+  occurrence of those secret values in captured child output is replaced with
+  `[redacted]` before it can reach persisted logs or the event stream.
+- GitHub repair pushes require explicit human confirmation. `agent-team repair`
+  prints the exact remote, branch, commit message, and changed-file summary and
+  asks interactively before pushing; a non-interactive session refuses to push
+  unless `--yes` is passed explicitly.
+
+## Adapter Enforcement Caveats
+
+- Codex, Claude, and Grok enforce read-only or workspace boundaries at the
+  execution layer (sandbox, plan mode, managed tool set). The Kimi CLI has no
+  non-interactive flag that enforces read-only at the execution layer, so Kimi
+  read-only roles are constrained by prompt text only. Binding a
+  read-only-designed role (orchestrator, architect, researcher, reviewer,
+  tester) to a Kimi profile remains allowed for compatibility but is surfaced
+  as an explicit adapter warning; do not treat it as a sandbox boundary.
 
 ## Credentials
 
@@ -60,6 +88,11 @@ Approval `actor` values are supplied by the local caller for audit readability;
 the loopback service does not authenticate OS or organizational identity. Use a
 separately authenticated gateway before exposing the control plane beyond one
 trusted workstation.
+
+The session-token file narrows token exposure to the filesystem: `0600` keeps
+other OS users out, but processes running under the same uid can still read the
+file. That residual is a platform boundary of same-uid isolation, not something
+the transport choice can close.
 
 The service does not expose an A2A endpoint. A2A requires an authenticated,
 authorized HTTPS boundary; adding a well-known Agent Card alone would advertise
@@ -198,6 +231,28 @@ Details: [evolution-phase-1.zh-CN.md](./evolution-phase-1.zh-CN.md),
 [ADR 0015](./adr/0015-controlled-evolution-application.md), and
 [ADR 0016](./adr/0016-evolution-control-plane.md), and
 [ADR 0017](./adr/0017-bounded-automatic-strategy-evolution.md).
+
+## Known Limitations And Planned Hardening
+
+These items are deliberate deferrals (new capabilities, not bug fixes).
+Each needs its own design review before implementation:
+
+- **Approval second factor.** Human approval currently relies on the
+  session cookie plus the `actor` label. The environment scrubbing and
+  token-file delivery above shrink the exposure, but a same-uid process
+  can still read the token file. The planned fix is a per-approval nonce
+  delivered only to the authenticated UI (or a Tauri-native approval
+  channel that never crosses HTTP), so an agent process cannot approve
+  its own gates even if it obtains the session token.
+- **Windows process-group kill.** `runProcess` uses detached POSIX
+  process groups for SIGTERM/SIGKILL escalation; on Windows only the
+  direct child is terminated and agent CLI grandchildren may outlive a
+  cancellation. macOS and Linux are unaffected.
+- **Same-uid local boundary.** A process running as the same OS user can
+  read the 0600 token file and inspect this service's memory. The token
+  file only isolates other OS users; full same-uid isolation would
+  require running agents under separate OS accounts or containers (see
+  the sandbox track in the completeness roadmap).
 
 ## Reporting
 

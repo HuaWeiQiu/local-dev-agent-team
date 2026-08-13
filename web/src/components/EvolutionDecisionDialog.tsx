@@ -1,10 +1,10 @@
-import { Check, RotateCcw, ShieldCheck, X } from "lucide-react";
+import { Check, RotateCcw, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { EvolutionPreviewMaterial, EvolutionPreviewResponse } from "../types";
 import { useModalKeyboard } from "../useModalKeyboard";
 
 export type EvolutionDecision = {
-  mode: "promote" | "rollback" | "reject" | "adopt";
+  mode: "promote" | "rollback" | "reject" | "adopt" | "delete";
   proposalId: string;
   commandId: string;
   preview?: EvolutionPreviewResponse;
@@ -24,6 +24,7 @@ const dialogCopy = {
   rollback: { kicker: "回滚", title: "确认回滚目标", action: "确认回滚" },
   reject: { kicker: "人工决定", title: "拒绝候选", action: "确认拒绝" },
   adopt: { kicker: "遗留恢复", title: "采纳当前目标", action: "确认采纳" },
+  delete: { kicker: "危险操作", title: "删除候选", action: "确认删除" },
 } as const;
 
 export function EvolutionDecisionDialog({ decision, busy, error, onClose, onSubmit }: EvolutionDecisionDialogProps) {
@@ -59,14 +60,16 @@ export function EvolutionDecisionDialog({ decision, busy, error, onClose, onSubm
             </>
           ) : decision.mode === "adopt" ? (
             <p className="evolution-preview-policy"><ShieldCheck size={15} />仅在当前目标与已晋升候选完全一致时登记现状，不会重新写入内容。</p>
+          ) : decision.mode === "delete" ? (
+            <p className="evolution-preview-policy"><ShieldCheck size={15} />删除后候选从列表与目录中移除，但会保留一条审计墓碑记录（含操作者与原因）；删除不可恢复。</p>
           ) : null}
           <label className="field-label" htmlFor="evolution-decision-reason">决定理由</label>
           <textarea id="evolution-decision-reason" value={reason} onChange={(event) => setReason(event.target.value)} rows={4} maxLength={2_000} autoFocus required disabled={decision.submittedReason !== undefined} />
           {error && <p className="form-error" role="alert">{error}</p>}
           <footer>
             <button type="button" className="button secondary" onClick={onClose} disabled={busy}>取消</button>
-            <button type="submit" className={decision.mode === "reject" ? "button danger-quiet" : "button primary"} disabled={busy || !reason.trim()}>
-              {decision.mode === "rollback" ? <RotateCcw size={16} /> : decision.mode === "reject" ? <X size={16} /> : <Check size={16} />}
+            <button type="submit" className={decision.mode === "reject" || decision.mode === "delete" ? "button danger-quiet" : "button primary"} disabled={busy || !reason.trim()}>
+              {decision.mode === "rollback" ? <RotateCcw size={16} /> : decision.mode === "reject" ? <X size={16} /> : decision.mode === "delete" ? <Trash2 size={16} /> : <Check size={16} />}
               {busy ? "提交中" : decision.submittedReason !== undefined ? "重试原确认" : copy.action}
             </button>
           </footer>

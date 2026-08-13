@@ -63,6 +63,7 @@ export class EvolutionProjectService {
 
   async initialize(): Promise<void> {
     await this.automatic.restoreRuntimeDefault();
+    await this.automatic.restoreLastEvaluation();
   }
 
   async close(): Promise<void> {
@@ -82,12 +83,13 @@ export class EvolutionProjectService {
     }
   }
 
-  async snapshot(): Promise<unknown> {
+  async snapshot(options: { includeArchived?: boolean } = {}): Promise<unknown> {
     return await this.perform(async () => {
       const control = await this.coordinator.readControlSnapshot();
       const applicationByProposal = new Map(
         control.application.applications.map((record) => [record.proposalId, record]),
       );
+      const includeArchived = options.includeArchived === true;
       return {
         catalogRevision: control.catalogRevision,
         applicationRevision: control.application.revision,
@@ -98,10 +100,14 @@ export class EvolutionProjectService {
           )
           .map(([role, policy]) => ({ role, path: policy.promptFile }))
           .sort((left, right) => left.role.localeCompare(right.role)),
-        proposals: control.catalog.proposals.map((proposal) => ({
-          ...proposal,
-          application: sanitizeApplication(applicationByProposal.get(proposal.id)),
-        })),
+        // Archived proposals are hidden from the default listing; the catalog
+        // itself always retains them (active pointers, audit replay unaffected).
+        proposals: control.catalog.proposals
+          .filter((proposal) => includeArchived || proposal.archivedAt === undefined)
+          .map((proposal) => ({
+            ...proposal,
+            application: sanitizeApplication(applicationByProposal.get(proposal.id)),
+          })),
         activeProposals: control.catalog.activeProposals,
         auditRecords: control.catalog.auditRecords,
         completedApplications: control.application.completed.map((record) => ({
@@ -191,6 +197,30 @@ export class EvolutionProjectService {
   async reject(proposalId: string, operator: string, reason: string): Promise<unknown> {
     return await this.perform(async () =>
       await this.coordinator.reject(proposalId, { operator, reason }),
+    );
+  }
+
+  async archive(proposalId: string, operator: string, reason?: string): Promise<unknown> {
+    return await this.perform(async () =>
+      await this.coordinator.archive(proposalId, {
+        operator,
+        ...(reason === undefined ? {} : { reason }),
+      }),
+    );
+  }
+
+  async unarchive(proposalId: string, operator: string, reason?: string): Promise<unknown> {
+    return await this.perform(async () =>
+      await this.coordinator.unarchive(proposalId, {
+        operator,
+        ...(reason === undefined ? {} : { reason }),
+      }),
+    );
+  }
+
+  async deleteProposal(proposalId: string, operator: string, reason: string): Promise<unknown> {
+    return await this.perform(async () =>
+      await this.coordinator.deleteProposal(proposalId, { operator, reason }),
     );
   }
 

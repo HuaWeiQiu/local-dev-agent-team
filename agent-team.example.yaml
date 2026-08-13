@@ -18,7 +18,7 @@ profiles:
 
   grok-orchestrator:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -35,7 +35,24 @@ profiles:
 
   grok-architect:
     adapter: grok
-    model: grok
+    model: grok-4.6
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    maxTurns: 20
+    timeoutSeconds: 1800
+
+  codex-researcher:
+    adapter: codex
+    model: gpt-5.6-sol
+    reasoning: high
+    permission: read-only
+    externalTools: deny
+    timeoutSeconds: 1800
+
+  grok-researcher:
+    adapter: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -44,7 +61,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -53,7 +70,7 @@ profiles:
 
   grok-worker-fast:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: medium
     permission: workspace-write
     externalTools: deny
@@ -78,7 +95,7 @@ profiles:
 
   grok-reviewer:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -95,7 +112,7 @@ profiles:
 
   grok-tester:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -112,6 +129,12 @@ roles:
     defaultProfile: grok-architect
     allowedProfiles: [grok-architect, codex-architect]
     fallbackProfiles: [codex-architect]
+
+  researcher:
+    defaultProfile: grok-researcher
+    allowedProfiles: [grok-researcher, codex-researcher]
+    fallbackProfiles: [codex-researcher]
+    promptFile: prompts/researcher.md
 
   worker:
     defaultProfile: grok-worker

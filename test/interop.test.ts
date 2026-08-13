@@ -10,7 +10,12 @@ describe("adapter and protocol boundaries", () => {
   it("publishes stable adapter contracts and explicit MCP/A2A modes", () => {
     const manifest = buildInteropManifest(createDefaultConfig("fixture"));
 
-    expect(manifest.adapters.map((adapter) => adapter.name)).toEqual(["claude", "codex", "grok"]);
+    expect(manifest.adapters.map((adapter) => adapter.name)).toEqual([
+      "claude",
+      "codex",
+      "grok",
+      "kimi",
+    ]);
     expect(manifest.adapters.every((adapter) => adapter.transport === "local-process")).toBe(true);
     expect(manifest.protocols.mcp).toMatchObject({
       specification: "2026-07-28",

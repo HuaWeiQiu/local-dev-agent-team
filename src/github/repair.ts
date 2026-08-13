@@ -21,12 +21,31 @@ import type { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { GithubClient } from "./client.js";
 
+export interface RepairPushSummary {
+  commitMessage: string;
+  remote: string;
+  branch: string;
+  changedFiles: string[];
+  additions: number;
+  deletions: number;
+}
+
+export interface GithubRepairOptions {
+  /**
+   * Human gate before the repair commit is pushed. Return false to abort the
+   * push; the attempt then fails back to ci-failed without touching the remote.
+   * When omitted (automation/tests), the push proceeds as before.
+   */
+  confirmPush?: (summary: RepairPushSummary) => Promise<boolean>;
+}
+
 export class GithubRepairRunner {
   constructor(
     private readonly loaded: LoadedConfig,
     private readonly store: RunStateStore,
     private readonly client = new GithubClient(),
     private readonly agent?: RoleAgentService,
+    private readonly options: GithubRepairOptions = {},
   ) {}
 
   async repair(state: RunState): Promise<RunState> {
@@ -148,10 +167,20 @@ export class GithubRepairRunner {
         );
       }
       await git.stage(state.integrationWorktree);
-      await git.commit(
-        state.integrationWorktree,
-        `fix: repair GitHub checks for ${state.id}`,
-      );
+      const commitMessage = `fix: repair GitHub checks for ${state.id}`;
+      await git.commit(state.integrationWorktree, commitMessage);
+      if (this.options.confirmPush) {
+        const confirmed = await this.options.confirmPush({
+          commitMessage,
+          remote: this.loaded.config.github.remote,
+          branch: state.integrationBranch,
+          changedFiles,
+          ...diffStat(diff),
+        });
+        if (!confirmed) {
+          throw new Error("GitHub repair push declined by operator");
+        }
+      }
       await git.push(
         state.integrationWorktree,
         this.loaded.config.github.remote,
@@ -168,4 +197,21 @@ export class GithubRepairRunner {
       deadline.dispose();
     }
   }
+}
+
+/** Approximate `git diff --stat` counters from a unified diff body. */
+function diffStat(diff: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      continue;
+    }
+    if (line.startsWith("+")) {
+      additions += 1;
+    } else if (line.startsWith("-")) {
+      deletions += 1;
+    }
+  }
+  return { additions, deletions };
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { commandSchema } from "../config/schema.js";
+import { commandSchema } from "./commands.js";
 
 export const goalIntakeSchema = z.object({
   goalSummary: z.string().min(1),
@@ -18,6 +18,12 @@ export const taskSchema = z.object({
   profile: z.string().nullable(),
   /** Optional batch affinity for swarm wave packing (same key preferred together). */
   batchKey: z.string().min(1).max(64).nullable().optional(),
+  /**
+   * Evidence contract for the task. `host-evidence` means the work is verified
+   * on a real host and may omit acceptanceCommands. Default is repository
+   * commands / review.
+   */
+  evidenceKind: z.enum(["commands", "host-evidence"]).nullable().optional(),
 });
 
 export const exploreSummarySchema = z.object({

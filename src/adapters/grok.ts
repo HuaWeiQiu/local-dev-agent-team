@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { AgentProfile, Reasoning } from "../config/schema.js";
 import { runProcess } from "../process/run.js";
+import { sanitizedChildEnv } from "../process/env.js";
 import { assertAdapterProfile } from "./conformance.js";
 import {
   parseGrokJson,
@@ -77,8 +78,9 @@ export class GrokAdapter implements AgentAdapter {
     if (profile.externalTools === "deny") {
       args.push("--disallowed-tools", deniedTools, "--deny", "MCPTool(*)");
     }
-    if (profile.model !== "inherit") {
-      args.push("--model", profile.model);
+    const model = resolveGrokModelId(profile.model);
+    if (model) {
+      args.push("--model", model);
     }
     if (request.outputSchema) {
       args.push("--json-schema", JSON.stringify(request.outputSchema));
@@ -93,14 +95,14 @@ export class GrokAdapter implements AgentAdapter {
       env:
         profile.externalTools === "deny"
           ? {
-              ...process.env,
+              ...sanitizedChildEnv(),
               HOME: path.dirname(request.promptFile),
               USERPROFILE: path.dirname(request.promptFile),
               GROK_HOME: process.env.GROK_HOME ?? path.join(homedir(), ".grok"),
               GROK_CLAUDE_MCPS_ENABLED: "false",
               GROK_CURSOR_MCPS_ENABLED: "false",
             }
-          : process.env,
+          : sanitizedChildEnv(),
       timeoutMs: profile.timeoutSeconds * 1_000,
     };
   }
@@ -115,6 +117,19 @@ export class GrokAdapter implements AgentAdapter {
   async doctor(options: AdapterDoctorOptions): Promise<DoctorCheck[]> {
     return await runAdapterDoctor(this, options, doctorSpec);
   }
+}
+
+/**
+ * `grok` is the CLI name, not a model id. Bare `grok` / `inherit` must not be
+ * forwarded as `--model grok`, or they override the user's Grok CLI default
+ * (currently grok-4.6) and hit a 503 alias.
+ */
+export function resolveGrokModelId(model: string | undefined): string | undefined {
+  const value = model?.trim();
+  if (!value || value === "inherit" || value === "grok") {
+    return undefined;
+  }
+  return value;
 }
 
 const doctorSpec: AdapterDoctorSpec = {

@@ -29,12 +29,15 @@ import {
   EvolutionDomainError,
   parseEvolutionProposal,
   parsePromotionRecord,
+  type ArchiveRecord,
   type AuditRecord,
+  type DeletionRecord,
   type EvolutionProposal,
   type EvolutionTrustContext,
   type PromotionRecord,
   type RejectionRecord,
   type RollbackRecord,
+  type UnarchiveRecord,
 } from "./domain.js";
 
 /** Durable evolution catalog document version. */
@@ -453,6 +456,53 @@ export class DurableEvolutionCatalog {
     return { ...result, committedRevision };
   }
 
+  async archive(
+    proposalId: string,
+    decision: unknown,
+    writer?: object,
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: ArchiveRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.archive(proposalId, decision),
+    );
+    return { ...result, committedRevision };
+  }
+
+  async unarchive(
+    proposalId: string,
+    decision: unknown,
+    writer?: object,
+  ): Promise<{
+    proposal: EvolutionProposal;
+    record: UnarchiveRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.unarchive(proposalId, decision),
+    );
+    return { ...result, committedRevision };
+  }
+
+  async deleteProposal(
+    proposalId: string,
+    decision: unknown,
+    writer?: object,
+  ): Promise<{
+    record: DeletionRecord;
+    committedRevision: number;
+  }> {
+    this.#assertWriter(writer);
+    const { result, committedRevision } = await this.#mutate((working) =>
+      working.deleteProposal(proposalId, decision),
+    );
+    return { ...result, committedRevision };
+  }
+
   async rollback(
     proposalId: string,
     decision: unknown,
@@ -784,16 +834,6 @@ function restoreFromDocument(
     proposals.push(proposal);
   }
 
-  const reconstructedRevision = proposals.reduce(
-    (total, proposal) => total + 1 + proposal.transitions.length,
-    0,
-  );
-  if (record.revision !== reconstructedRevision) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: revision ${record.revision} does not match ${reconstructedRevision} recorded mutation(s)`,
-    );
-  }
-
   const promotionRecords: PromotionRecord[] = [];
   const storedPromotionById = new Map<string, PromotionRecord>();
   for (const [index, raw] of payloadRecord.promotionRecords.entries()) {
@@ -838,6 +878,25 @@ function restoreFromDocument(
       );
     }
     auditRecords.push(parsed.data);
+  }
+
+  // Every mutation bumps the revision once. Live proposals contribute their
+  // creation plus lifecycle transitions; archive/unarchive markers contribute
+  // one each; each deletion tombstone accounts for the deleted proposal's own
+  // mutations (creation + the fixed 3 transitions on the only path to
+  // 'rejected') plus the deletion itself.
+  const archivalMutations = auditRecords.filter(
+    (audit) => audit.kind === "archive" || audit.kind === "unarchive",
+  ).length;
+  const deletions = auditRecords.filter((audit) => audit.kind === "delete").length;
+  const reconstructedRevision =
+    proposals.reduce((total, proposal) => total + 1 + proposal.transitions.length, 0) +
+    archivalMutations +
+    deletions * DELETED_PROPOSAL_REVISION_WEIGHT;
+  if (record.revision !== reconstructedRevision) {
+    throw new EvolutionPersistenceValidationError(
+      `Invalid durable evolution catalog at ${filePath}: revision ${record.revision} does not match ${reconstructedRevision} recorded mutation(s)`,
+    );
   }
 
   const replayed = replayAuditHistory(auditRecords, proposalById, filePath);
@@ -923,6 +982,14 @@ type AuditReplayResult = {
   activeByTarget: Map<string, string>;
 };
 
+/**
+ * Revision weight of a deletion tombstone: the deleted proposal was necessarily
+ * rejected first, and the only lifecycle path to 'rejected' is
+ * proposed → evaluating → evaluated → rejected, so its removal hides exactly
+ * 1 (creation) + 3 (transitions) recorded mutations; +1 for the deletion.
+ */
+const DELETED_PROPOSAL_REVISION_WEIGHT = 5;
+
 function replayAuditHistory(
   auditRecords: readonly AuditRecord[],
   proposalById: ReadonlyMap<string, EvolutionProposal>,
@@ -935,29 +1002,58 @@ function replayAuditHistory(
     { promotion: number; rejection: number; rollback: number }
   >();
   const applicationCommandIds = new Set<string>();
+  const archivalStates = new Map<string, { archived: boolean; at: string | null }>();
+  const deletedTrails = new Map<string, Array<{ index: number; audit: AuditRecord }>>();
 
   for (const [index, audit] of auditRecords.entries()) {
     const proposal = proposalById.get(audit.proposalId);
     if (!proposal) {
-      throw invalidHistory(filePath, index, `references missing proposal '${audit.proposalId}'`);
+      // Only the retained trail of a deleted proposal (its rejection, any
+      // archival markers, and the deletion tombstone) may reference a proposal
+      // that is no longer present.
+      if (
+        audit.kind !== "rejection" &&
+        audit.kind !== "archive" &&
+        audit.kind !== "unarchive" &&
+        audit.kind !== "delete"
+      ) {
+        throw invalidHistory(filePath, index, `references missing proposal '${audit.proposalId}'`);
+      }
+      const trail = deletedTrails.get(audit.proposalId) ?? [];
+      trail.push({ index, audit });
+      deletedTrails.set(audit.proposalId, trail);
+      continue;
     }
+    if (audit.kind === "delete") {
+      throw invalidHistory(filePath, index, `deletes live proposal '${proposal.id}'`);
+    }
+    const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
+    if (commandId !== undefined) {
+      if (applicationCommandIds.has(commandId)) {
+        throw invalidHistory(filePath, index, `duplicates application command '${commandId}'`);
+      }
+      applicationCommandIds.add(commandId);
+    }
+
+    if (audit.kind === "archive" || audit.kind === "unarchive") {
+      const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
+      if (audit.kind === "archive") {
+        if (state.archived) {
+          throw invalidHistory(filePath, index, `duplicates archive for '${proposal.id}'`);
+        }
+        archivalStates.set(proposal.id, { archived: true, at: audit.at });
+      } else {
+        if (!state.archived) {
+          throw invalidHistory(filePath, index, `unarchives non-archived proposal '${proposal.id}'`);
+        }
+        archivalStates.set(proposal.id, { archived: false, at: null });
+      }
+      continue;
+    }
+
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     count[audit.kind] += 1;
     counts.set(proposal.id, count);
-    if (
-      audit.kind !== "rejection" &&
-      audit.applicationCommandId !== undefined &&
-      applicationCommandIds.has(audit.applicationCommandId)
-    ) {
-      throw invalidHistory(
-        filePath,
-        index,
-        `duplicates application command '${audit.applicationCommandId}'`,
-      );
-    }
-    if (audit.kind !== "rejection" && audit.applicationCommandId !== undefined) {
-      applicationCommandIds.add(audit.applicationCommandId);
-    }
     const targetKey = candidateTargetKey(proposal.candidate);
 
     if (audit.kind === "promotion") {
@@ -1053,6 +1149,22 @@ function replayAuditHistory(
     }
   }
 
+  for (const [proposalId, trail] of deletedTrails) {
+    assertDeletedAuditTrail(filePath, proposalId, trail);
+  }
+
+  for (const proposal of proposalById.values()) {
+    const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
+    if (
+      state.archived !== (proposal.archivedAt !== undefined) ||
+      (state.archived && proposal.archivedAt !== state.at)
+    ) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid durable evolution catalog at ${filePath}: archival state for proposal '${proposal.id}' does not match audit history`,
+      );
+    }
+  }
+
   for (const proposal of proposalById.values()) {
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     const expected =
@@ -1071,6 +1183,58 @@ function replayAuditHistory(
   }
 
   return { promotionByProposal, activeByTarget };
+}
+
+/**
+ * Validate the retained audit trail of a deleted proposal: exactly one
+ * rejection first, exactly one deletion tombstone last, and alternating
+ * archive/unarchive markers in between.
+ */
+function assertDeletedAuditTrail(
+  filePath: string,
+  proposalId: string,
+  trail: ReadonlyArray<{ index: number; audit: AuditRecord }>,
+): void {
+  if (trail[0]?.audit.kind !== "rejection") {
+    throw invalidHistory(
+      filePath,
+      trail[0]?.index ?? 0,
+      `begins the retained history of deleted proposal '${proposalId}' without its rejection`,
+    );
+  }
+  const last = trail[trail.length - 1]!;
+  if (last.audit.kind !== "delete") {
+    throw invalidHistory(filePath, last.index, `references missing proposal '${proposalId}'`);
+  }
+  let archived = false;
+  for (const [position, { index, audit }] of trail.entries()) {
+    if (audit.kind === "rejection" && position !== 0) {
+      throw invalidHistory(filePath, index, `duplicates rejection for deleted proposal '${proposalId}'`);
+    }
+    if (audit.kind === "delete" && position !== trail.length - 1) {
+      throw invalidHistory(
+        filePath,
+        index,
+        `continues the history of deleted proposal '${proposalId}' after its deletion`,
+      );
+    }
+    if (audit.kind === "archive") {
+      if (archived) {
+        throw invalidHistory(filePath, index, `duplicates archive for deleted proposal '${proposalId}'`);
+      }
+      archived = true;
+    }
+    if (audit.kind === "unarchive") {
+      if (!archived) {
+        throw invalidHistory(
+          filePath,
+          index,
+          `unarchives non-archived deleted proposal '${proposalId}'`,
+        );
+      }
+      archived = false;
+    }
+  }
 }
 
 function assertAuditTransitionAt(

@@ -24,6 +24,8 @@ import {
   parseHumanDecision,
   parsePromotionRecord,
   promoteProposal,
+  archiveProposal,
+  deleteProposal,
   rejectProposal,
   rollbackProposal,
   rolePromptCandidateSchema,
@@ -1446,5 +1448,37 @@ describe("persisted proposal and audit reopen validation", () => {
     );
     expect(ok.status).toBe("evaluated");
     expect(ok.evaluation?.at).toBe("2026-08-11T01:02:00.000Z");
+  });
+});
+
+describe("evolution archival and rejected-only deletion", () => {
+  it("archives a reviewed proposal without changing lifecycle status", () => {
+    const archived = archiveProposal({
+      proposal: toEvaluated(),
+      decision: { actor: "operator", decidedAt: "2026-08-11T03:00:00.000Z" },
+    });
+    expect(archived.proposal.status).toBe("evaluated");
+    expect(archived.proposal.archivedAt).toBe("2026-08-11T03:00:00.000Z");
+    expect(archived.record.kind).toBe("archive");
+  });
+
+  it("refuses to delete reviewed proposals that are not rejected", () => {
+    expect(() =>
+      deleteProposal({
+        proposal: toEvaluated(),
+        decision: humanDecision({ reason: "should not erase an evaluated candidate" }),
+      }),
+    ).toThrow(/rejected/);
+
+    const rejected = rejectProposal({
+      proposal: toEvaluated(),
+      decision: humanDecision({ reason: "Do not ship", decidedAt: "2026-08-11T03:00:00.000Z" }),
+    }).proposal;
+    const deleted = deleteProposal({
+      proposal: rejected,
+      decision: humanDecision({ reason: "Clear leftover", decidedAt: "2026-08-11T03:01:00.000Z" }),
+    });
+    expect(deleted.record.kind).toBe("delete");
+    expect(deleted.record.proposalId).toBe(rejected.id);
   });
 });

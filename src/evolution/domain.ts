@@ -123,6 +123,19 @@ const statusesRequiringEvaluation = new Set<EvolutionLifecycleStatus>([
 ]);
 
 /**
+ * Statuses whose proposals may be archived (hidden from default listings).
+ * Archival is a presentation marker only; it never alters lifecycle status,
+ * active pointers, or audit history. Proposals still under review
+ * (`proposed`/`evaluating`) cannot be archived.
+ */
+const archivableStatuses = new Set<EvolutionLifecycleStatus>([
+  "evaluated",
+  "promoted",
+  "rejected",
+  "rolled-back",
+]);
+
+/**
  * Non-sensitive transitions permitted by {@link transitionProposal}.
  * Promotion, rejection, and rollback require dedicated guarded operations.
  */
@@ -463,6 +476,17 @@ export const humanDecisionSchema = z
 
 export type HumanDecision = z.infer<typeof humanDecisionSchema>;
 
+/** Human decision for archive/unarchive curation; the reason is optional. */
+export const archivalDecisionSchema = z
+  .object({
+    actor: z.string().trim().min(1).max(200),
+    reason: z.string().trim().min(1).max(2_000).optional(),
+    decidedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export type ArchivalDecision = z.infer<typeof archivalDecisionSchema>;
+
 export const promotionRecordSchema = z
   .object({
     kind: z.literal("promotion"),
@@ -539,15 +563,62 @@ export const rollbackRecordSchema = z
   })
   .strict();
 
+export const archiveRecordSchema = z
+  .object({
+    kind: z.literal("archive"),
+    proposalId: proposalIdSchema,
+    actor: z.string().trim().min(1).max(200),
+    reason: z.string().trim().min(1).max(2_000).optional(),
+    at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const unarchiveRecordSchema = z
+  .object({
+    kind: z.literal("unarchive"),
+    proposalId: proposalIdSchema,
+    actor: z.string().trim().min(1).max(200),
+    reason: z.string().trim().min(1).max(2_000).optional(),
+    at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/**
+ * Tombstone retained after physically deleting a rejected proposal. The
+ * proposal document is gone, so the record keeps the proposal id, candidate
+ * target key, and candidate digest for audit replay.
+ */
+export const deletionRecordSchema = z
+  .object({
+    kind: z.literal("delete"),
+    proposalId: proposalIdSchema,
+    actor: z.string().trim().min(1).max(200),
+    reason: z.string().trim().min(1).max(2_000),
+    at: z.string().datetime({ offset: true }),
+    targetKey: z
+      .string()
+      .min(1)
+      .max(768)
+      .regex(/^(strategy-blueprint|role-prompt):.+$/, "Invalid candidate target key"),
+    candidateDigest: contentDigestSchema,
+  })
+  .strict();
+
 export const auditRecordSchema = z.discriminatedUnion("kind", [
   promotionRecordSchema,
   rejectionRecordSchema,
   rollbackRecordSchema,
+  archiveRecordSchema,
+  unarchiveRecordSchema,
+  deletionRecordSchema,
 ]);
 
 export type PromotionRecord = z.infer<typeof promotionRecordSchema>;
 export type RejectionRecord = z.infer<typeof rejectionRecordSchema>;
 export type RollbackRecord = z.infer<typeof rollbackRecordSchema>;
+export type ArchiveRecord = z.infer<typeof archiveRecordSchema>;
+export type UnarchiveRecord = z.infer<typeof unarchiveRecordSchema>;
+export type DeletionRecord = z.infer<typeof deletionRecordSchema>;
 export type AuditRecord = z.infer<typeof auditRecordSchema>;
 
 export const lifecycleTransitionSchema = z
@@ -574,6 +645,11 @@ const evolutionProposalObjectSchema = z
     createdAt: z.string().datetime({ offset: true }),
     status: z.enum(evolutionLifecycleStatuses),
     origin: z.literal("automatic-controller-v1").optional(),
+    /**
+     * Presentation-only archival marker (ISO time). Optional so durable
+     * documents written before archival existed still validate fail-closed.
+     */
+    archivedAt: z.string().datetime({ offset: true }).optional(),
     policy: evolutionPolicySchema,
     candidate: evolutionCandidateSchema,
     transitions: z.array(lifecycleTransitionSchema).default([]),
@@ -829,6 +905,15 @@ export function parseEvolutionEvidence(input: unknown): EvolutionEvidence {
 export function parseHumanDecision(input: unknown): HumanDecision {
   rejectForbiddenPayload(input, "decision");
   const parsed = humanDecisionSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new EvolutionValidationError(formatIssues("decision", parsed.error.issues));
+  }
+  return deepFreeze(structuredClone(parsed.data));
+}
+
+export function parseArchivalDecision(input: unknown): ArchivalDecision {
+  rejectForbiddenPayload(input, "decision");
+  const parsed = archivalDecisionSchema.safeParse(input);
   if (!parsed.success) {
     throw new EvolutionValidationError(formatIssues("decision", parsed.error.issues));
   }
@@ -1193,6 +1278,107 @@ export function rollbackProposal(input: {
   return { proposal, record };
 }
 
+/**
+ * Mark an evaluated/promoted/rejected/rolled-back proposal as archived.
+ * Archival is presentation-only: status, transitions, active pointers, and
+ * audit history are untouched, so rollback chains keep replaying identically.
+ */
+export function archiveProposal(input: {
+  proposal: EvolutionProposal;
+  decision: unknown;
+}): { proposal: EvolutionProposal; record: ArchiveRecord } {
+  const decision = parseArchivalDecision(input.decision);
+  const { proposal } = input;
+  if (!archivableStatuses.has(proposal.status)) {
+    throw new EvolutionLifecycleError(
+      `Proposal '${proposal.id}' must be evaluated, promoted, rejected, or rolled-back before archival (current: '${proposal.status}')`,
+    );
+  }
+  if (proposal.archivedAt !== undefined) {
+    throw new EvolutionLifecycleError(`Proposal '${proposal.id}' is already archived`);
+  }
+
+  assertTransitionTimestamp(proposal, decision.decidedAt);
+  const next: EvolutionProposal = {
+    ...structuredClone(proposal),
+    archivedAt: decision.decidedAt,
+  };
+  const archived = deepFreeze(evolutionProposalSchema.parse(next));
+
+  const record = deepFreeze(
+    archiveRecordSchema.parse({
+      kind: "archive",
+      proposalId: proposal.id,
+      actor: decision.actor,
+      ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      at: decision.decidedAt,
+    }),
+  );
+
+  return { proposal: archived, record };
+}
+
+/** Clear the archival marker of an archived proposal. */
+export function unarchiveProposal(input: {
+  proposal: EvolutionProposal;
+  decision: unknown;
+}): { proposal: EvolutionProposal; record: UnarchiveRecord } {
+  const decision = parseArchivalDecision(input.decision);
+  const { proposal } = input;
+  if (proposal.archivedAt === undefined) {
+    throw new EvolutionLifecycleError(`Proposal '${proposal.id}' is not archived`);
+  }
+
+  assertTransitionTimestamp(proposal, decision.decidedAt);
+  const { archivedAt: _dropped, ...rest } = structuredClone(proposal);
+  const restored = deepFreeze(evolutionProposalSchema.parse(rest));
+
+  const record = deepFreeze(
+    unarchiveRecordSchema.parse({
+      kind: "unarchive",
+      proposalId: proposal.id,
+      actor: decision.actor,
+      ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      at: decision.decidedAt,
+    }),
+  );
+
+  return { proposal: restored, record };
+}
+
+/**
+ * Physically delete a rejected proposal, producing a tombstone audit record
+ * that retains the proposal id, candidate target key, candidate digest, actor,
+ * reason, and timestamp. Rejected proposals hold no active pointer or
+ * promotion provenance, so deletion cannot corrupt a rollback chain.
+ */
+export function deleteProposal(input: {
+  proposal: EvolutionProposal;
+  decision: unknown;
+}): { record: DeletionRecord } {
+  const decision = parseHumanDecision(input.decision);
+  const { proposal } = input;
+  if (proposal.status !== "rejected") {
+    throw new EvolutionLifecycleError(
+      `Proposal '${proposal.id}' must be in 'rejected' status before deletion (current: '${proposal.status}')`,
+    );
+  }
+
+  const record = deepFreeze(
+    deletionRecordSchema.parse({
+      kind: "delete",
+      proposalId: proposal.id,
+      actor: decision.actor,
+      reason: decision.reason,
+      at: decision.decidedAt,
+      targetKey: candidateTargetKey(proposal.candidate),
+      candidateDigest: computeCandidateDigest(proposal.candidate),
+    }),
+  );
+
+  return { record };
+}
+
 /** Validate a repository-relative role-prompt path without touching the filesystem. */
 export function assertSafePromptPath(
   pathValue: string,
@@ -1266,6 +1452,7 @@ function refineProposalInvariants(
     id: string;
     createdAt: string;
     status: EvolutionLifecycleStatus;
+    archivedAt?: string | undefined;
     policy: EvolutionPolicy;
     candidate: EvolutionCandidate;
     transitions: LifecycleTransition[];
@@ -1300,6 +1487,24 @@ function refineProposalInvariants(
       message: "Invalid createdAt timestamp",
     });
     return;
+  }
+
+  if (proposal.archivedAt !== undefined) {
+    if (!archivableStatuses.has(proposal.status)) {
+      context.addIssue({
+        code: "custom",
+        path: ["archivedAt"],
+        message: `Proposal status '${proposal.status}' cannot be archived`,
+      });
+    }
+    const archivedAtMs = Date.parse(proposal.archivedAt);
+    if (Number.isNaN(archivedAtMs) || archivedAtMs < createdAtMs) {
+      context.addIssue({
+        code: "custom",
+        path: ["archivedAt"],
+        message: "archivedAt must be a valid timestamp not preceding proposal creation",
+      });
+    }
   }
 
   if (proposal.status === "proposed") {
@@ -1503,6 +1708,13 @@ function assertEvidenceBoundToProposal(
       `Evidence candidate digest does not match proposal '${proposal.id}' candidate`,
     );
   }
+}
+
+function candidateTargetKey(candidate: EvolutionCandidate): string {
+  if (candidate.kind === "strategy-blueprint") {
+    return `strategy-blueprint:${candidate.name}`;
+  }
+  return `role-prompt:${candidate.path}`;
 }
 
 function assertTransitionTimestamp(proposal: EvolutionProposal, at: string): void {

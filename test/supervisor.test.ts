@@ -38,9 +38,9 @@ describe("run supervisor", () => {
     expect(starts).toBe(1);
 
     const completed = supervisor.wait(first.runId);
-    expect(supervisor.cancel(first.runId)).toBe(true);
+    expect(await supervisor.cancel(first.runId)).toBe(true);
     await expect(completed).resolves.toMatchObject({ status: "cancelled" });
-    expect(supervisor.cancel(first.runId)).toBe(false);
+    expect(await supervisor.cancel(first.runId)).toBe(false);
     await supervisor.close();
     events.close();
   });
@@ -85,7 +85,7 @@ describe("run supervisor", () => {
     const retry = await supervisor.retry(source.id, "retry-source");
     expect(retry.runId).not.toBe(source.id);
     expect(retriedParent).toBe(source.id);
-    supervisor.cancel(retry.runId);
+    await supervisor.cancel(retry.runId);
     await supervisor.close();
     events.close();
   });
@@ -119,6 +119,35 @@ describe("run supervisor", () => {
       status: "ready-to-merge",
       approvals: [{ status: "approved", response: { actor: "release-owner" } }],
     });
+    await supervisor.close();
+    events.close();
+  });
+
+  it("re-materializes desktop runtime profiles before plan continuation", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeApprovalState("runtime-worker-plan", "plan");
+    state.profileOverrides = {
+      worker: "runtime/worker/grok/grok-4.6/high",
+    };
+    await states.save(state);
+    const supervisor = new RunSupervisor(loaded, events, {
+      resumeWorkflow: async (resumed) => resumed,
+    });
+    const workerRole = loaded.config.roles.worker!;
+    expect(workerRole.allowedProfiles).not.toContain("runtime/worker/grok/grok-4.6/high");
+
+    const action = await supervisor.respondApproval(state.id, {
+      requestId: state.approvals![0]!.id,
+      decision: "approved",
+      actor: "tech-lead",
+      reason: "Continue with the desktop picker worker",
+    });
+    expect(action.status).toBe("resuming");
+    expect(loaded.config.roles.worker!.allowedProfiles).not.toContain(
+      "runtime/worker/grok/grok-4.6/high",
+    );
     await supervisor.close();
     events.close();
   });
@@ -242,24 +271,65 @@ describe("run supervisor", () => {
     events.close();
   });
 
-  it("leaves active runs without a supervisorId untouched during reconciliation", async () => {
+  it("reconciles active runs with foreign or missing supervisor ownership", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
     const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
     const cliRun = fakeState("cli-run", "Started by agent-team run", "implementing");
     const foreignRun = fakeState("foreign-run", "Started by another service", "implementing");
     foreignRun.supervisorId = randomUUID();
-    await Promise.all([states.save(cliRun), states.save(foreignRun)]);
+    const exploringRun = fakeState("exploring-run", "Crashed while exploring", "exploring");
+    exploringRun.supervisorId = randomUUID();
+    await Promise.all([states.save(cliRun), states.save(foreignRun), states.save(exploringRun)]);
     const supervisor = new RunSupervisor(loaded, events);
 
-    expect(await supervisor.reconcileInterruptedRuns()).toBe(1);
+    // The startup lease guarantees no other live supervisor, so both the
+    // foreign-owned run and the legacy run without a supervisorId are dead.
+    expect(await supervisor.reconcileInterruptedRuns()).toBe(3);
     await expect(supervisor.get(cliRun.id)).resolves.toMatchObject({
-      status: "implementing",
+      status: "interrupted",
+      error: "The owning control service stopped before the run completed",
     });
     await expect(supervisor.get(foreignRun.id)).resolves.toMatchObject({
       status: "interrupted",
       error: "The owning control service stopped before the run completed",
     });
+    await expect(supervisor.get(exploringRun.id)).resolves.toMatchObject({
+      status: "interrupted",
+      error: "The owning control service stopped before the run completed",
+    });
+    await supervisor.close();
+    events.close();
+  });
+
+  it("pauses an active run and rejects runs parked at a human gate", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const parked = fakeApprovalState("gate-run", "final");
+    await states.save(parked);
+    const supervisor = new RunSupervisor(loaded, events, {
+      runWorkflow: async (request, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return fakeState(context.runId, request.goal, "interrupted");
+      },
+    });
+    const started = supervisor.start({ goal: "Pause me", profileOverrides: {} });
+    const completed = supervisor.wait(started.runId);
+
+    // An actively executing run accepts the pause request.
+    await expect(
+      supervisor.pause(started.runId, { actor: "owner", reason: "going home" }),
+    ).resolves.toBe(true);
+    const settled = await completed;
+    expect(settled.status).toBe("interrupted");
+
+    // A run parked at a human gate cannot be paused.
+    await expect(
+      supervisor.pause(parked.id, { actor: "owner", reason: "pause" }),
+    ).rejects.toThrow("cannot be paused");
     await supervisor.close();
     events.close();
   });
@@ -281,7 +351,7 @@ describe("run supervisor", () => {
       "Project has an active run or run action",
     );
 
-    expect(supervisor.cancel(run.runId)).toBe(true);
+    expect(await supervisor.cancel(run.runId)).toBe(true);
     await expect(supervisor.wait(run.runId)).resolves.toMatchObject({ status: "cancelled" });
     const release = supervisor.beginEvolutionMutation();
     release();
@@ -523,7 +593,7 @@ describe("run supervisor", () => {
 
     const evaluation = automation.start({ goal: "isolated evaluation", profileOverrides: {} });
     expect(() => automation.release()).toThrow("cannot release project ownership");
-    expect(() => supervisor.cancel(evaluation.runId)).toThrow(
+    await expect(supervisor.cancel(evaluation.runId)).rejects.toThrow(
       "Automatic evolution owns run cancellation",
     );
     finishRun();

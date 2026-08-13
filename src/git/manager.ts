@@ -1,6 +1,6 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import { minimatch } from "minimatch";
+import { pathMatchesOwnedPath } from "../domain/owned-paths.js";
 import { runProcess, type ProcessResult } from "../process/run.js";
 
 export interface WorktreeInfo {
@@ -61,8 +61,8 @@ export class GitManager {
     readonly worktreesRoot: string,
   ) {}
 
-  async assertReady(): Promise<void> {
-    const topLevel = await this.git(["rev-parse", "--show-toplevel"], this.root);
+  async assertReady(signal?: AbortSignal): Promise<void> {
+    const topLevel = await this.git(["rev-parse", "--show-toplevel"], this.root, 120_000, undefined, signal);
     const [gitRoot, configuredRoot] = await Promise.all([
       realpath(topLevel.stdout.trim()),
       realpath(this.root),
@@ -70,7 +70,7 @@ export class GitManager {
     if (gitRoot !== configuredRoot) {
       throw new Error(`Configuration root '${this.root}' must be the Git repository root`);
     }
-    if (!(await this.isClean(this.root))) {
+    if (!(await this.isClean(this.root, signal))) {
       throw new Error("The primary Git worktree must be clean before starting a run");
     }
   }
@@ -79,32 +79,66 @@ export class GitManager {
     return (await this.git(["rev-parse", ref], this.root)).stdout.trim();
   }
 
-  async createWorktree(branch: string, startPoint: string, directory: string): Promise<WorktreeInfo> {
+  async createWorktree(
+    branch: string,
+    startPoint: string,
+    directory: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreeInfo> {
     this.assertManagedPath(directory);
     await mkdir(path.dirname(directory), { recursive: true });
-    await this.git(["worktree", "add", "-b", branch, directory, startPoint], this.root);
+    await this.git(["worktree", "add", "-b", branch, directory, startPoint], this.root, 120_000, undefined, signal);
     return { path: directory, branch };
   }
 
-  async removeWorktree(directory: string): Promise<void> {
+  async removeWorktree(directory: string, signal?: AbortSignal): Promise<void> {
     this.assertManagedPath(directory);
-    await this.git(["worktree", "remove", directory], this.root);
+    await this.git(["worktree", "remove", "--force", directory], this.root, 120_000, undefined, signal);
   }
 
-  async stage(directory: string): Promise<void> {
-    await this.git(["add", "--all"], directory);
+  /** Drop stale worktree registrations whose directories are already gone. */
+  async pruneWorktrees(signal?: AbortSignal): Promise<void> {
+    await this.git(["worktree", "prune"], this.root, 120_000, undefined, signal);
   }
 
-  async changedFiles(directory: string): Promise<string[]> {
+  async listBranches(pattern: string, signal?: AbortSignal): Promise<string[]> {
+    const result = await this.git(
+      ["branch", "--list", "--format=%(refname:short)", pattern],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+    );
+    return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
+  async deleteBranch(branch: string, signal?: AbortSignal): Promise<void> {
+    await this.git(["branch", "-D", branch], this.root, 120_000, undefined, signal);
+  }
+
+  async stage(directory: string, signal?: AbortSignal): Promise<void> {
+    await this.git(["add", "--all"], directory, 120_000, undefined, signal);
+  }
+
+  async changedFiles(directory: string, signal?: AbortSignal): Promise<string[]> {
     const result = await this.git(
       ["diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB", "-z"],
       directory,
+      120_000,
+      undefined,
+      signal,
     );
     return parseNulFields(result.stdout);
   }
 
-  async stagedDiff(directory: string, maxCharacters = 160_000): Promise<string> {
-    const result = await this.git(["diff", "--cached", "--no-ext-diff", "--unified=60"], directory);
+  async stagedDiff(directory: string, maxCharacters = 160_000, signal?: AbortSignal): Promise<string> {
+    const result = await this.git(
+      ["diff", "--cached", "--no-ext-diff", "--unified=60"],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
     if (result.stdout.length <= maxCharacters) {
       return result.stdout;
     }
@@ -113,16 +147,16 @@ export class GitManager {
 
   assertOwnedPaths(files: string[], patterns: string[]): void {
     const violations = files.filter(
-      (file) => !patterns.some((pattern) => minimatch(file, pattern, { dot: true })),
+      (file) => !patterns.some((pattern) => pathMatchesOwnedPath(file, pattern)),
     );
     if (violations.length > 0) {
       throw new Error(`Changed files outside task ownership: ${violations.join(", ")}`);
     }
   }
 
-  async commit(directory: string, message: string): Promise<string> {
-    await this.git(["commit", "-m", message], directory);
-    return (await this.git(["rev-parse", "HEAD"], directory)).stdout.trim();
+  async commit(directory: string, message: string, signal?: AbortSignal): Promise<string> {
+    await this.git(["commit", "-m", message], directory, 120_000, undefined, signal);
+    return (await this.git(["rev-parse", "HEAD"], directory, 120_000, undefined, signal)).stdout.trim();
   }
 
   /**
@@ -335,9 +369,14 @@ export class GitManager {
     });
   }
 
-  async merge(integrationDirectory: string, branch: string, message: string): Promise<string> {
-    await this.git(["merge", "--no-ff", branch, "-m", message], integrationDirectory);
-    return (await this.git(["rev-parse", "HEAD"], integrationDirectory)).stdout.trim();
+  async merge(
+    integrationDirectory: string,
+    branch: string,
+    message: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    await this.git(["merge", "--no-ff", branch, "-m", message], integrationDirectory, 120_000, undefined, signal);
+    return (await this.git(["rev-parse", "HEAD"], integrationDirectory, 120_000, undefined, signal)).stdout.trim();
   }
 
   async diffSummary(directory: string, baseRef: string): Promise<string> {
@@ -366,14 +405,71 @@ export class GitManager {
     };
   }
 
-  async currentCommit(directory: string): Promise<string> {
-    return (await this.git(["rev-parse", "HEAD"], directory)).stdout.trim();
+  async currentCommit(directory: string, signal?: AbortSignal): Promise<string> {
+    return (await this.git(["rev-parse", "HEAD"], directory, 120_000, undefined, signal)).stdout.trim();
   }
 
-  async isClean(directory: string): Promise<boolean> {
+  /**
+   * First-parent commits reachable from `toRef` but not from `fromExclusive`
+   * (`rev-list --first-parent from..to`): the commits by which the branch
+   * itself advanced, excluding commits pulled in through merged branches.
+   */
+  async commitsBetween(
+    directory: string,
+    fromExclusive: string,
+    toRef: string,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const result = await this.git(
+      ["rev-list", "--first-parent", `${fromExclusive}..${toRef}`],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * Map of commit hash -> subject for first-parent commits after
+   * `fromExclusive` up to `toRef`. Used to recognize the deterministic merge
+   * commits (`merge: <taskId> <title>`) after a crash between a task merge
+   * and its state save.
+   */
+  async commitSubjects(
+    directory: string,
+    fromExclusive: string,
+    toRef: string,
+    signal?: AbortSignal,
+  ): Promise<Map<string, string>> {
+    const result = await this.git(
+      ["log", "--first-parent", "--format=%H%x00%s", `${fromExclusive}..${toRef}`],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    const subjects = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+      const separator = line.indexOf("\0");
+      if (separator <= 0) {
+        continue;
+      }
+      subjects.set(line.slice(0, separator), line.slice(separator + 1));
+    }
+    return subjects;
+  }
+
+  async isClean(directory: string, signal?: AbortSignal): Promise<boolean> {
     const status = await this.git(
       ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
       directory,
+      120_000,
+      undefined,
+      signal,
     );
     return status.stdout.length === 0;
   }
@@ -572,6 +668,7 @@ export class GitManager {
     cwd: string,
     timeoutMs = 120_000,
     stdin?: string,
+    signal?: AbortSignal,
   ): Promise<ProcessResult> {
     const result = await runProcess({
       command: "git",
@@ -579,6 +676,7 @@ export class GitManager {
       cwd,
       timeoutMs,
       ...(stdin === undefined ? {} : { stdin }),
+      ...(signal === undefined ? {} : { signal }),
     });
     if (result.exitCode !== 0) {
       throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`);

@@ -6,7 +6,7 @@ import type { RoleAgentService, TextRoleInvocationOptions } from "../src/agents/
 import { createDefaultConfig } from "../src/config/defaults.js";
 import type { LoadedConfig } from "../src/config/load.js";
 import { GithubClient } from "../src/github/client.js";
-import { GithubRepairRunner } from "../src/github/repair.js";
+import { GithubRepairRunner, type RepairPushSummary } from "../src/github/repair.js";
 import type { ProcessRequest, ProcessResult } from "../src/process/run.js";
 import { runProcess } from "../src/process/run.js";
 import { RunStateStore } from "../src/state/store.js";
@@ -58,6 +58,58 @@ describe("GithubRepairRunner", () => {
     const statuses = fixture.state.history.map((entry) => entry.status);
     expect(statuses).toContain("repairing");
     expect(statuses.at(-1)).toBe("waiting-ci");
+  });
+
+  it("pushes only after the operator confirms the commit summary", async () => {
+    const fixture = await createFixture();
+    const summaries: RepairPushSummary[] = [];
+    const agent = stubAgent({
+      runText: async (options) => {
+        await writeFile(path.join(options.cwd!, "app.txt"), "repaired\n", "utf8");
+      },
+    });
+    const runner = new GithubRepairRunner(fixture.loaded, fixture.store, fixture.client, agent, {
+      confirmPush: async (summary) => {
+        summaries.push(summary);
+        return true;
+      },
+    });
+
+    const result = await runner.repair(fixture.state);
+
+    expect(result.status).toBe("waiting-ci");
+    expect(summaries).toHaveLength(1);
+    const summary = summaries[0]!;
+    expect(summary.commitMessage).toBe("fix: repair GitHub checks for repair-run");
+    expect(summary.remote).toBe(fixture.loaded.config.github.remote);
+    expect(summary.branch).toBe(integrationBranch);
+    expect(summary.changedFiles).toContain("app.txt");
+    expect(summary.additions).toBeGreaterThan(0);
+    expect(
+      (await git(fixture.remoteDir, ["rev-parse", integrationBranch])).exitCode,
+    ).toBe(0);
+  });
+
+  it("keeps the commit local and fails the attempt when the operator declines the push", async () => {
+    const fixture = await createFixture();
+    const agent = stubAgent({
+      runText: async (options) => {
+        await writeFile(path.join(options.cwd!, "app.txt"), "repaired\n", "utf8");
+      },
+    });
+    const runner = new GithubRepairRunner(fixture.loaded, fixture.store, fixture.client, agent, {
+      confirmPush: async () => false,
+    });
+
+    const result = await runner.repair(fixture.state);
+
+    expect(result.status).toBe("ci-failed");
+    expect(result.error).toContain("push declined by operator");
+    // The commit exists locally but nothing reached the remote.
+    expect((await git(fixture.worktree, ["rev-list", "--count", "HEAD"])).stdout.trim()).toBe("2");
+    expect(
+      (await git(fixture.remoteDir, ["rev-parse", integrationBranch])).exitCode,
+    ).not.toBe(0);
   });
 
   it("aborts the repair when a quality command fails", async () => {

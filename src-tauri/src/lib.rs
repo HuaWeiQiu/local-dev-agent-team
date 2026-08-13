@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +15,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROCESS_DETAIL: usize = 16 * 1024;
+const SERVICE_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+const SERVICE_RESTART_BACKOFF: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
 struct DesktopRuntime(Arc<Mutex<RuntimeState>>);
@@ -22,6 +25,7 @@ struct DesktopRuntime(Arc<Mutex<RuntimeState>>);
 struct RuntimeState {
     service: Option<ManagedService>,
     pending_project: Option<PathBuf>,
+    watch_cancel: Option<Arc<AtomicBool>>,
 }
 
 struct ManagedService {
@@ -178,7 +182,7 @@ async fn desktop_remove_project(
             open_registered_workspace_sync(&app, &runtime, Some(active))
         } else {
             let mut state = lock_runtime(&runtime);
-            stop_service(&mut state.service);
+            stop_service_locked(&mut state);
             drop(state);
             Ok(with_projects(needs_project_status(), &settings))
         }
@@ -260,12 +264,17 @@ fn boot_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
                     return status;
                 }
                 Ok(Some(exit)) => {
-                    state.service = None;
-                    return error_status(
-                        "上次的工作台已经停止",
-                        None,
-                        format!("控制服务退出状态：{exit}"),
+                    let project_root = service.project_root.clone();
+                    let focus = state.pending_project.clone().unwrap_or(project_root);
+                    stop_service_locked(&mut state);
+                    drop(state);
+                    eprintln!(
+                        "Agent Team desktop: 控制服务已退出（{exit}），正在重新拉起工作台"
                     );
+                    return match open_registered_workspace_sync(app, runtime, Some(focus)) {
+                        Ok(status) => status,
+                        Err(detail) => error_status("控制服务已停止，重新启动失败", None, detail),
+                    };
                 }
                 Err(error) => {
                     return error_status("无法检查工作台状态", None, error.to_string());
@@ -309,7 +318,7 @@ fn open_project_sync(app: &AppHandle, runtime: &DesktopRuntime, root: PathBuf) -
     let project_name = project_name(&root);
     if discover_project_config(&root).is_none() && discover_config(&root).is_none() {
         let mut state = lock_runtime(runtime);
-        stop_service(&mut state.service);
+        stop_service_locked(&mut state);
         state.pending_project = Some(root.clone());
         let settings = remember_project(app, &root).unwrap_or_default();
         return with_projects(
@@ -348,7 +357,7 @@ fn open_registered_workspace_sync(
     }
     if settings.project_roots.is_empty() {
         let mut state = lock_runtime(runtime);
-        stop_service(&mut state.service);
+        stop_service_locked(&mut state);
         return Ok(with_projects(needs_project_status(), &settings));
     }
 
@@ -360,7 +369,7 @@ fn open_registered_workspace_sync(
     let focus_name = project_name(&focus_root);
 
     let mut state = lock_runtime(runtime);
-    stop_service(&mut state.service);
+    stop_service_locked(&mut state);
     state.pending_project = Some(focus_root.clone());
     let paths = resolve_runtime_paths(app)
         .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
@@ -373,11 +382,14 @@ fn open_registered_workspace_sync(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "无法定位桌面配置目录".to_string())?;
+    let token_path = session_token_path(app)
+        .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
     match start_service(
         &paths,
         &service_root,
         &config,
         Some(&workspace_bundle.registry_path),
+        &token_path,
     ) {
         Ok(mut service) => {
             service.project_root = focus_root.clone();
@@ -391,6 +403,7 @@ fn open_registered_workspace_sync(
             state.service = Some(service);
             state.pending_project = None;
             drop(state);
+            start_service_watch(app, runtime);
             navigate_to(app, &bootstrap_url)?;
             Ok(status)
         }
@@ -444,8 +457,10 @@ fn start_service(
     root: &Path,
     config: &SelectedConfig,
     registry_path: Option<&Path>,
+    token_path: &Path,
 ) -> Result<ManagedService, String> {
     let token = random_session_token();
+    write_session_token_file(token_path, &token)?;
     let mut command = Command::new(&paths.node);
     command
         .arg(&paths.cli)
@@ -460,7 +475,10 @@ fn start_service(
         })
         .arg(&config.path)
         .current_dir(root)
-        .env("AGENT_TEAM_SESSION_TOKEN", &token)
+        // 令牌经 0600 文件传递，env 里只出现路径：同 uid 进程用 ps eww
+        // 看不到令牌值，也避免令牌随环境变量被子进程继承。
+        .env("AGENT_TEAM_SESSION_TOKEN_FILE", token_path)
+        .env_remove("AGENT_TEAM_SESSION_TOKEN")
         // GUI apps on macOS often inherit a tiny PATH without Homebrew.
         // Ensure codex/grok CLIs remain resolvable for multi-agent workers.
         .env("PATH", desktop_path_env())
@@ -489,10 +507,15 @@ fn start_service(
     let stdout = child.stdout.take().ok_or("无法读取控制服务启动状态")?;
     let stderr = child.stderr.take().ok_or("无法读取控制服务错误信息")?;
     let (line_sender, line_receiver) = mpsc::channel::<String>();
+    // Keep draining stdout for the life of the child. Dropping the pipe after
+    // the first URL makes Node see EPIPE / SIGPIPE on later writes.
     thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if line_sender.send(line).is_err() {
-                break;
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    let _ = line_sender.send(line);
+                }
+                Err(_) => break,
             }
         }
     });
@@ -761,6 +784,32 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn session_token_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join("runtime").join("session-token"))
+        .map_err(|error| error.to_string())
+}
+
+/// Write the session token to a 0600 file. Every startup rewrites the file,
+/// so a stale token from a previous run is simply overwritten.
+fn write_session_token_file(path: &Path, token: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建会话令牌目录 {}：{error}", parent.to_string_lossy()))?;
+    }
+    fs::write(path, token)
+        .map_err(|error| format!("无法写入会话令牌文件 {}：{error}", path.to_string_lossy()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // set_permissions 也修正已存在文件的过宽权限（create 时的 mode 只对新建生效）。
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("无法设置会话令牌文件权限：{error}"))?;
+    }
+    Ok(())
+}
+
 fn load_settings(app: &AppHandle) -> Result<Option<DesktopSettings>, String> {
     let path = settings_path(app)?;
     let contents = match fs::read(&path) {
@@ -830,10 +879,14 @@ fn project_entries_from_settings(settings: &DesktopSettings) -> Vec<DesktopProje
 
 fn project_entry_for_root(root: &Path, used_ids: &mut HashSet<String>) -> DesktopProjectEntry {
     let id = unique_project_id(root, used_ids);
-    let lease = read_control_lease(root);
+    // A malformed lock is shown as busy/stale so the launcher offers release,
+    // which then fails closed with an explanatory error instead of killing.
+    let lease_read = read_control_lease(root);
+    let corrupt = lease_read.is_err();
+    let lease = lease_read.ok().flatten();
     let lease_alive = lease
         .as_ref()
-        .map(|entry| process_is_alive(entry.pid))
+        .map(|entry| lease_owner_is_alive(entry))
         .unwrap_or(false);
     let ours = lease
         .as_ref()
@@ -841,6 +894,7 @@ fn project_entry_for_root(root: &Path, used_ids: &mut HashSet<String>) -> Deskto
         .unwrap_or(false);
     let has_active_run = project_has_active_run(root);
     let (busy, occupancy) = match (&lease, lease_alive, ours) {
+        (_, _, _) if corrupt => (true, "stale"),
         (None, _, _) => (false, "free"),
         (Some(_), false, _) => (true, "stale"),
         (Some(_), true, true) => (false, "ours"),
@@ -867,21 +921,110 @@ fn project_entry_for_root(root: &Path, used_ids: &mut HashSet<String>) -> Deskto
 struct ControlLeaseInfo {
     pid: u32,
     token: String,
+    started: Option<String>,
 }
 
-fn read_control_lease(root: &Path) -> Option<ControlLeaseInfo> {
+/// Reads and validates a project `control.lock`, mirroring the Node-side
+/// lease rules (pid range, UUID token, optional 1-64 char start stamp, no
+/// unexpected fields). A missing file is `Ok(None)`; malformed or incomplete
+/// content is `Err` so callers fail closed instead of treating
+/// attacker-influenceable bytes as a removable lock.
+fn read_control_lease(root: &Path) -> Result<Option<ControlLeaseInfo>, String> {
     let lock_path = root.join(".agent-team").join("control.lock");
-    let text = fs::read_to_string(lock_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let pid = value.get("pid")?.as_u64()?;
-    let token = value.get("token")?.as_str()?.to_string();
+    let text = match fs::read_to_string(&lock_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read lock: {error}")),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("invalid lock JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "lock must be a JSON object".to_string())?;
+    let pid = object
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "missing or invalid pid".to_string())?;
     if pid == 0 || pid > u64::from(u32::MAX) {
+        return Err(format!("pid out of range: {pid}"));
+    }
+    let token = object
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing token".to_string())?;
+    if !is_uuid_token(token) {
+        return Err("token is not a UUID".to_string());
+    }
+    let started = match object.get("started") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let started = value
+                .as_str()
+                .ok_or_else(|| "invalid started field".to_string())?;
+            if started.is_empty() || started.len() > 64 {
+                return Err("started field must be 1-64 characters".to_string());
+            }
+            Some(started.to_string())
+        }
+    };
+    let expected_keys = if started.is_some() { 3 } else { 2 };
+    if object.len() != expected_keys {
+        return Err("unexpected lock fields".to_string());
+    }
+    Ok(Some(ControlLeaseInfo {
+        pid: pid as u32,
+        token: token.to_string(),
+        started,
+    }))
+}
+
+fn is_uuid_token(token: &str) -> bool {
+    token.len() == 36
+        && token
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            })
+}
+
+/// Whether a parsed lease's owner is really alive: dead PIDs never count,
+/// and a recorded start stamp that no longer matches the live process means
+/// the PID was reused and the lock is a leftover.
+fn lease_owner_is_alive(lease: &ControlLeaseInfo) -> bool {
+    if !process_is_alive(lease.pid) {
+        return false;
+    }
+    let Some(started) = &lease.started else {
+        return true;
+    };
+    match process_start_token(lease.pid) {
+        None => true, // ps unavailable: degrade to PID aliveness
+        Some(current) => current == *started,
+    }
+}
+
+#[cfg(unix)]
+fn process_start_token(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    Some(ControlLeaseInfo {
-        pid: pid as u32,
-        token,
-    })
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_start_token(_pid: u32) -> Option<String> {
+    None
 }
 
 fn is_our_control_pid(pid: u32) -> bool {
@@ -925,6 +1068,7 @@ fn project_has_active_run(root: &Path) -> bool {
         "created",
         "orchestrating",
         "architecting",
+        "exploring",
         "planned",
         "implementing",
         "reviewing-testing",
@@ -956,14 +1100,26 @@ fn project_has_active_run(root: &Path) -> bool {
 
 fn release_project_lease(root: &Path, force: bool) -> Result<(), String> {
     let lock_path = root.join(".agent-team").join("control.lock");
-    let Some(lease) = read_control_lease(root) else {
-        let _ = fs::remove_file(&lock_path);
-        return Ok(());
+    let lease = match read_control_lease(root) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => {
+            let _ = fs::remove_file(&lock_path);
+            return Ok(());
+        }
+        Err(detail) => {
+            // Fail closed: never kill or delete based on bytes we could not
+            // fully validate. The lock may be half-written while a service is
+            // still running.
+            return Err(format!(
+                "锁文件内容损坏或不完整（{detail}）。为安全起见拒绝释放；请先确认该项目的控制服务与 Agent 进程已停止，再手动删除 {}",
+                lock_path.display()
+            ));
+        }
     };
     if is_our_control_pid(lease.pid) {
         return Err("不能释放当前窗口自己持有的控制权".into());
     }
-    if process_is_alive(lease.pid) {
+    if lease_owner_is_alive(&lease) {
         if project_has_active_run(root) && !force {
             return Err("仍有进行中的任务，已拒绝释放".into());
         }
@@ -984,10 +1140,12 @@ fn release_project_lease(root: &Path, force: bool) -> Result<(), String> {
         }
     }
     // Only remove lock if it still points at the same token/pid we inspected.
-    if let Some(current) = read_control_lease(root) {
-        if current.pid == lease.pid && current.token == lease.token {
+    match read_control_lease(root) {
+        Ok(Some(current)) if current.pid == lease.pid && current.token == lease.token => {
             fs::remove_file(&lock_path).map_err(|error| error.to_string())?;
         }
+        Ok(_) => {}
+        Err(_) => return Err("锁文件在释放过程中损坏，已停止后续操作".into()),
     }
     Ok(())
 }
@@ -999,7 +1157,10 @@ fn terminate_pid(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        // Graceful tree termination; the escalation path force-kills after.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .output();
     }
 }
 
@@ -1010,7 +1171,9 @@ fn force_kill_pid(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
     }
 }
 
@@ -1081,10 +1244,10 @@ fn write_desktop_workspace_manifest(
     for root in roots {
         let id = unique_project_id(root, &mut used_ids);
         let name = project_name(root);
-        let lease = read_control_lease(root);
+        let lease = read_control_lease(root).ok().flatten();
         let lease_alive = lease
             .as_ref()
-            .map(|entry| process_is_alive(entry.pid))
+            .map(|entry| lease_owner_is_alive(entry))
             .unwrap_or(false);
         let foreign = lease_alive
             && lease
@@ -1165,24 +1328,105 @@ fn chrono_like_now() -> String {
     format!("{}", duration.as_secs())
 }
 
-/// True when another live process already owns this project's control.lock.
-fn project_has_foreign_control_lease(root: &Path) -> bool {
-    let Some(lease) = read_control_lease(root) else {
-        return false;
-    };
-    process_is_alive(lease.pid) && !is_our_control_pid(lease.pid)
-}
-
 fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        !process_is_zombie(pid)
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        // `tasklist /FI "PID eq <pid>"` reports whether a process with that
+        // id currently exists; zombies are not a distinct state on Windows.
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let quoted = format!("\"{pid}\"");
+                text.contains(&quoted)
+            }
+            _ => false,
+        }
     }
+}
+
+#[cfg(unix)]
+fn process_is_zombie(pid: u32) -> bool {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).contains('Z')
+        }
+        _ => false,
+    }
+}
+
+fn start_service_watch(app: &AppHandle, runtime: &DesktopRuntime) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut state = lock_runtime(runtime);
+        if let Some(previous) = state.watch_cancel.replace(Arc::clone(&cancel)) {
+            previous.store(true, Ordering::SeqCst);
+        }
+    }
+    let app = app.clone();
+    let runtime = runtime.clone();
+    thread::spawn(move || {
+        while !cancel.load(Ordering::SeqCst) {
+            thread::sleep(SERVICE_WATCH_INTERVAL);
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let exited = {
+                let mut state = lock_runtime(&runtime);
+                match state.service.as_mut() {
+                    Some(service) => match service.child.try_wait() {
+                        Ok(Some(status)) => Some(status.to_string()),
+                        Ok(None) => None,
+                        Err(error) => Some(error.to_string()),
+                    },
+                    None => {
+                        break;
+                    }
+                }
+            };
+            let Some(detail) = exited else {
+                continue;
+            };
+            eprintln!(
+                "Agent Team desktop: 控制服务已退出（{detail}），正在重新拉起工作台"
+            );
+            thread::sleep(SERVICE_RESTART_BACKOFF);
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let focus = {
+                let mut state = lock_runtime(&runtime);
+                let focus = state.pending_project.clone().or_else(|| {
+                    state.service.as_ref().map(|service| service.project_root.clone())
+                });
+                // Reap the zombie handle so the next start can claim the lock.
+                if let Some(mut service) = state.service.take() {
+                    let _ = service.child.try_wait();
+                }
+                focus
+            };
+            if let Err(error) = open_registered_workspace_sync(&app, &runtime, focus) {
+                eprintln!("Agent Team desktop: 控制服务重启失败：{error}");
+                break;
+            }
+            break;
+        }
+    });
 }
 
 fn yaml_quote(value: &str) -> String {
@@ -1190,7 +1434,11 @@ fn yaml_quote(value: &str) -> String {
 }
 
 fn desktop_path_env() -> String {
+    let separator = if cfg!(target_os = "windows") { ';' } else { ':' };
     let mut parts: Vec<String> = Vec::new();
+    // The Homebrew candidates only make sense on macOS; other platforms keep
+    // the parent PATH intact (joined with their own separator).
+    #[cfg(target_os = "macos")]
     for candidate in [
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
@@ -1205,13 +1453,13 @@ fn desktop_path_env() -> String {
         }
     }
     if let Ok(existing) = std::env::var("PATH") {
-        for part in existing.split(':') {
+        for part in existing.split(separator) {
             if !part.is_empty() && !parts.iter().any(|value| value == part) {
                 parts.push(part.to_string());
             }
         }
     }
-    parts.join(":")
+    parts.join(&separator.to_string())
 }
 
 fn should_remember_project(root: &Path) -> bool {
@@ -1312,8 +1560,11 @@ fn lock_runtime(runtime: &DesktopRuntime) -> std::sync::MutexGuard<'_, RuntimeSt
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn stop_service(service: &mut Option<ManagedService>) {
-    if let Some(mut service) = service.take() {
+fn stop_service_locked(state: &mut RuntimeState) {
+    if let Some(cancel) = state.watch_cancel.take() {
+        cancel.store(true, Ordering::SeqCst);
+    }
+    if let Some(mut service) = state.service.take() {
         terminate_child(&mut service.child);
     }
 }
@@ -1431,7 +1682,7 @@ pub fn run() {
             tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
         ) {
             if let Some(runtime) = app.try_state::<DesktopRuntime>() {
-                stop_service(&mut lock_runtime(&runtime).service);
+                stop_service_locked(&mut lock_runtime(&runtime));
             }
         }
     });
@@ -1440,7 +1691,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use tempfile::tempdir;
 
@@ -1485,6 +1736,24 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn writes_session_token_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir().unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+
+        write_session_token_file(&token_path, "first-token").unwrap();
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "first-token");
+        assert_eq!(fs::metadata(&token_path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // 重启重写：即使旧文件权限被放宽，重写后也必须回到 0600。
+        fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_session_token_file(&token_path, "second-token").unwrap();
+        assert_eq!(fs::read_to_string(&token_path).unwrap(), "second-token");
+        assert_eq!(fs::metadata(&token_path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn presents_an_existing_control_service_as_a_busy_project() {
         let status = service_start_error_status(
@@ -1494,6 +1763,89 @@ mod tests {
         assert_eq!(status.state, "busy");
         assert_eq!(status.project_name.as_deref(), Some("fixture"));
         assert!(status.message.contains("正在运行的任务不会受到影响"));
+    }
+
+    #[test]
+    fn parses_only_well_formed_control_locks() {
+        let root = tempdir().unwrap();
+        let lock_path = root.path().join(".agent-team").join("control.lock");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+
+        // Missing lock -> Ok(None).
+        assert!(matches!(read_control_lease(root.path()), Ok(None)));
+
+        // Well-formed lock with the optional start stamp.
+        let token = "01234567-89ab-4cde-8f01-23456789abcd";
+        fs::write(
+            &lock_path,
+            format!(
+                "{{\"pid\": 1234, \"token\": \"{token}\", \"started\": \"Mon Jan  1 00:00:00 2026\"}}\n"
+            ),
+        )
+        .unwrap();
+        let lease = read_control_lease(root.path()).unwrap().unwrap();
+        assert_eq!(lease.pid, 1234);
+        assert_eq!(lease.token, token);
+        assert_eq!(lease.started.as_deref(), Some("Mon Jan  1 00:00:00 2026"));
+
+        // Malformed tokens and fields must fail closed.
+        for (name, contents) in [
+            ("invalid-token", format!("{{\"pid\": 1, \"token\": \"{token}extra\"}}\n")),
+            ("missing-pid", format!("{{\"token\": \"{token}\"}}\n")),
+            ("zero-pid", format!("{{\"pid\": 0, \"token\": \"{token}\"}}\n")),
+            ("extra-fields", format!("{{\"pid\": 1, \"token\": \"{token}\", \"evil\": true}}\n")),
+            ("not-json", "garbage".to_string()),
+            ("empty-started", format!("{{\"pid\": 1, \"token\": \"{token}\", \"started\": \"\"}}\n")),
+        ] {
+            fs::write(&lock_path, contents).unwrap();
+            assert!(
+                read_control_lease(root.path()).is_err(),
+                "lock variant {name} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_release_a_malformed_control_lock() {
+        let root = tempdir().unwrap();
+        let lock_path = root.path().join(".agent-team").join("control.lock");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        fs::write(&lock_path, "{\"pid\": 1, \"token\": \"not-a-uuid\"}\n").unwrap();
+
+        let error = release_project_lease(root.path(), true).unwrap_err();
+        assert!(error.contains("损坏或不完整"), "unexpected error: {error}");
+        // Fail closed: the unreadable lock must not be deleted.
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn releases_a_stale_well_formed_control_lock_without_killing() {
+        let root = tempdir().unwrap();
+        let lock_path = root.path().join(".agent-team").join("control.lock");
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        // A dead PID (nobody reaps nothing) with a valid UUID token: the lock
+        // is a leftover and release only removes the file.
+        fs::write(&lock_path, "{\"pid\": 4194303, \"token\": \"01234567-89ab-4cde-8f01-23456789abcd\"}\n")
+            .unwrap();
+
+        release_project_lease(root.path(), false).unwrap();
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn joins_path_entries_with_the_platform_separator() {
+        let path_env = desktop_path_env();
+        assert!(!path_env.is_empty());
+        #[cfg(target_os = "macos")]
+        {
+            // Homebrew prefix is injected and the existing PATH is preserved.
+            assert!(path_env.contains("/opt/homebrew/bin"));
+            assert!(path_env.contains("/usr/bin"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        assert!(!path_env.split(':').any(|entry| entry.contains(';')));
+        #[cfg(target_os = "windows")]
+        assert!(!path_env.split(';').any(|entry| entry.contains(':')));
     }
 
     #[test]
@@ -1562,7 +1914,8 @@ mod tests {
             process_output_detail(&init.stdout, &init.stderr)
         );
         let config = discover_config(root.path()).unwrap();
-        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+        let mut service = start_service(&paths, root.path(), &config, None, &token_path).unwrap();
 
         let unauthorized = http_get(&service.url, "/api/health", None);
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
@@ -1580,6 +1933,83 @@ mod tests {
 
         terminate_child(&mut service.child);
         assert!(service.child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_is_alive_treats_zombie_as_dead() {
+        let mut holder = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0 & echo $!; exec sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid: u32 = line.trim().parse().expect("zombie child pid");
+        // The child may take a moment to exit on loaded CI runners, so poll
+        // for the zombie state instead of racing a fixed sleep.
+        let mut zombie = false;
+        for _ in 0..100 {
+            if process_is_zombie(pid) {
+                zombie = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let alive = process_is_alive(pid);
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert!(zombie, "child should remain a zombie while the parent holds it");
+        assert!(!alive, "zombie PID must not count as a live lease owner");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_service_keeps_stdout_open_after_ready() {
+        let root = tempdir().unwrap();
+        let script = root.path().join("keep-writing.js");
+        fs::write(
+            &script,
+            r#"
+            const fs = require("fs");
+            const path = require("path");
+            console.log("control service: http://127.0.0.1:4318");
+            setTimeout(() => {
+              try {
+                process.stdout.write("later-line\n");
+                fs.writeFileSync(path.join(__dirname, "wrote.txt"), "ok");
+              } catch (error) {
+                fs.writeFileSync(path.join(__dirname, "wrote.txt"), String(error));
+                process.exit(1);
+              }
+            }, 150);
+            setInterval(() => {}, 1000);
+            "#,
+        )
+        .unwrap();
+        let paths = RuntimePaths {
+            node: PathBuf::from("node"),
+            cli: script,
+        };
+        let config = SelectedConfig {
+            path: root.path().join("agent-team.yaml"),
+            kind: ConfigKind::Project,
+        };
+        let token_path = root.path().join("runtime").join("session-token");
+        let mut service = start_service(&paths, root.path(), &config, None, &token_path).unwrap();
+        let marker = root.path().join("wrote.txt");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !marker.is_file() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let contents = fs::read_to_string(&marker).unwrap_or_default();
+        terminate_child(&mut service.child);
+        assert_eq!(contents.trim(), "ok", "sidecar stdout write after ready failed: {contents}");
     }
 
     #[cfg(unix)]
@@ -1613,7 +2043,8 @@ mod tests {
             path: root.path().join("agent-team.yaml"),
             kind: ConfigKind::Project,
         };
-        let mut service = start_service(&paths, root.path(), &config, None).unwrap();
+        let token_path = root.path().join("runtime").join("session-token");
+        let mut service = start_service(&paths, root.path(), &config, None, &token_path).unwrap();
 
         // start_service 用 process_group(0) 让服务独立成组。
         let pid = service.child.id() as libc::pid_t;

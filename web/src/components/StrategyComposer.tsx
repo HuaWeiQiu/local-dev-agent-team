@@ -30,7 +30,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useFlowPalette } from "../flow-theme";
 import { STRATEGY_STAGE_GRID } from "../graph";
-import { agentRoleLabel, profileDisplayName, strategyDisplayName, topologyDisplayName } from "../presentation";
+import { agentRoleLabel, orderedRoles, profileDisplayName, strategyDisplayName, topologyDisplayName } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type {
   CompiledStrategyStage,
@@ -43,13 +43,16 @@ import type {
 } from "../types";
 
 const nodeTypes = { strategyStage: StrategyStageNode };
-const roleOrder = ["orchestrator", "architect", "worker", "reviewer", "tester"];
 
 interface StrategyDraft {
   mode: StrategyTopologyMode;
   maxParallel: number;
   maxReworkAttempts: number;
   maxAgentInvocations: number;
+  executionTimeoutSeconds: number;
+  approvalTimeoutSeconds: number;
+  maxProcessOutputBytes: number;
+  maxArtifactBytes: number;
   planApproval: boolean;
   exploreEnabled: boolean;
   swarmMaxConcurrency: number;
@@ -145,7 +148,9 @@ export function StrategyComposer({
   };
 
   const updateNumber = (
-    field: "maxParallel" | "maxReworkAttempts" | "maxAgentInvocations",
+    field: "maxParallel" | "maxReworkAttempts" | "maxAgentInvocations"
+      | "executionTimeoutSeconds" | "approvalTimeoutSeconds"
+      | "maxProcessOutputBytes" | "maxArtifactBytes",
     value: number,
   ) => updateDraft((current) => ({ ...current, [field]: value }));
 
@@ -406,6 +411,38 @@ export function StrategyComposer({
               disabled={submitting}
               onChange={(value) => updateNumber("maxAgentInvocations", value)}
             />
+            <NumberField
+              label="执行超时（秒）"
+              value={draft.executionTimeoutSeconds}
+              min={60}
+              max={172_800}
+              disabled={submitting}
+              onChange={(value) => updateNumber("executionTimeoutSeconds", value)}
+            />
+            <NumberField
+              label="审批超时（秒）"
+              value={draft.approvalTimeoutSeconds}
+              min={60}
+              max={604_800}
+              disabled={submitting}
+              onChange={(value) => updateNumber("approvalTimeoutSeconds", value)}
+            />
+            <NumberField
+              label="输出上限（字节）"
+              value={draft.maxProcessOutputBytes}
+              min={65_536}
+              max={104_857_600}
+              disabled={submitting}
+              onChange={(value) => updateNumber("maxProcessOutputBytes", value)}
+            />
+            <NumberField
+              label="产物上限（字节）"
+              value={draft.maxArtifactBytes}
+              min={1_048_576}
+              max={10_737_418_240}
+              disabled={submitting}
+              onChange={(value) => updateNumber("maxArtifactBytes", value)}
+            />
           </section>
           <section className="composer-form-section">
             <label className="policy-toggle">
@@ -429,7 +466,7 @@ export function StrategyComposer({
           </section>
           <section className="composer-form-section role-policy-list">
             <h3>角色配置</h3>
-            {roleOrder.map((role) => {
+            {orderedRoles(Object.keys(config.roles)).map((role) => {
               const policy = config.roles[role];
               if (!policy) return null;
               return (
@@ -535,6 +572,10 @@ function createDraft(definition: StrategyDefinition, config: PublicConfig): Stra
     maxParallel,
     maxReworkAttempts: definition.maxReworkAttempts ?? 0,
     maxAgentInvocations: definition.maxAgentInvocations ?? 64,
+    executionTimeoutSeconds: definition.executionTimeoutSeconds ?? 14_400,
+    approvalTimeoutSeconds: definition.approvalTimeoutSeconds ?? 86_400,
+    maxProcessOutputBytes: definition.maxProcessOutputBytes ?? 1_048_576,
+    maxArtifactBytes: definition.maxArtifactBytes ?? 1_073_741_824,
     planApproval: definition.approvalGates?.includes("plan") ?? false,
     exploreEnabled: definition.taskMorphology?.explore?.enabled === true,
     swarmMaxConcurrency: Math.min(swarm, maxParallel),
@@ -557,6 +598,10 @@ function buildBlueprintDefinition(
     maxParallel,
     maxReworkAttempts: draft.maxReworkAttempts,
     maxAgentInvocations: draft.maxAgentInvocations,
+    executionTimeoutSeconds: draft.executionTimeoutSeconds,
+    approvalTimeoutSeconds: draft.approvalTimeoutSeconds,
+    maxProcessOutputBytes: draft.maxProcessOutputBytes,
+    maxArtifactBytes: draft.maxArtifactBytes,
     roleProfiles: { ...draft.roleProfiles },
     approvalGates: draft.planApproval ? ["plan", "final"] : ["final"],
     taskMorphology: {
@@ -587,6 +632,10 @@ function sameDraft(left: StrategyDraft, right: StrategyDraft): boolean {
     left.maxParallel !== right.maxParallel ||
     left.maxReworkAttempts !== right.maxReworkAttempts ||
     left.maxAgentInvocations !== right.maxAgentInvocations ||
+    left.executionTimeoutSeconds !== right.executionTimeoutSeconds ||
+    left.approvalTimeoutSeconds !== right.approvalTimeoutSeconds ||
+    left.maxProcessOutputBytes !== right.maxProcessOutputBytes ||
+    left.maxArtifactBytes !== right.maxArtifactBytes ||
     left.planApproval !== right.planApproval ||
     left.exploreEnabled !== right.exploreEnabled ||
     left.swarmMaxConcurrency !== right.swarmMaxConcurrency

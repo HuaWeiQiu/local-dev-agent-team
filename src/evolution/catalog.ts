@@ -1,7 +1,9 @@
 import {
+  archiveProposal,
   assertPromotionRecordMatchesProposal,
   auditRecordSchema,
   createEvolutionProposal,
+  deleteProposal,
   evaluateProposal,
   EvolutionDomainError,
   EvolutionValidationError,
@@ -11,7 +13,10 @@ import {
   rejectProposal,
   rollbackProposal,
   transitionProposal,
+  unarchiveProposal,
+  type ArchiveRecord,
   type AuditRecord,
+  type DeletionRecord,
   type EvolutionCandidate,
   type EvolutionEvaluationSource,
   type EvolutionProposal,
@@ -19,6 +24,7 @@ import {
   type PromotionRecord,
   type RejectionRecord,
   type RollbackRecord,
+  type UnarchiveRecord,
 } from "./domain.js";
 
 /** In-memory evolution catalog snapshot version. */
@@ -149,6 +155,17 @@ export class EvolutionCatalog {
       if (this.#proposals.has(proposal.id)) {
         throw new EvolutionCatalogConflictError(
           `Proposal id '${proposal.id}' is already present in the catalog`,
+        );
+      }
+      // A tombstoned id stays reserved so audit replay never sees a live
+      // proposal and a deletion tombstone for the same id.
+      if (
+        this.#auditRecords.some(
+          (record) => record.kind === "delete" && record.proposalId === proposal.id,
+        )
+      ) {
+        throw new EvolutionCatalogConflictError(
+          `Proposal id '${proposal.id}' belongs to a deleted proposal and cannot be reused`,
         );
       }
 
@@ -330,6 +347,75 @@ export class EvolutionCatalog {
     });
   }
 
+  /**
+   * Human-gated archival of a terminal-ish proposal. Presentation-only: the
+   * lifecycle status, transitions, and active pointers are left untouched.
+   */
+  archive(
+    proposalId: string,
+    decision: unknown,
+  ): { proposal: EvolutionProposal; record: ArchiveRecord } {
+    return this.#runMutation(() => {
+      const current = this.#requireProposal(proposalId);
+      const { proposal, record } = archiveProposal({
+        proposal: current,
+        decision,
+      });
+
+      return this.#commit((state) => {
+        state.proposals.set(proposal.id, proposal);
+        state.auditRecords.push(record);
+        return {
+          proposal: isolate(proposal),
+          record: isolate(record),
+        };
+      });
+    });
+  }
+
+  /** Human-gated removal of a proposal's archival marker. */
+  unarchive(
+    proposalId: string,
+    decision: unknown,
+  ): { proposal: EvolutionProposal; record: UnarchiveRecord } {
+    return this.#runMutation(() => {
+      const current = this.#requireProposal(proposalId);
+      const { proposal, record } = unarchiveProposal({
+        proposal: current,
+        decision,
+      });
+
+      return this.#commit((state) => {
+        state.proposals.set(proposal.id, proposal);
+        state.auditRecords.push(record);
+        return {
+          proposal: isolate(proposal),
+          record: isolate(record),
+        };
+      });
+    });
+  }
+
+  /**
+   * Human-gated physical deletion of a rejected proposal. The proposal document
+   * is dropped; a tombstone audit record keeps its id, target key, and digest.
+   */
+  deleteProposal(proposalId: string, decision: unknown): { record: DeletionRecord } {
+    return this.#runMutation(() => {
+      const current = this.#requireProposal(proposalId);
+      const { record } = deleteProposal({
+        proposal: current,
+        decision,
+      });
+
+      return this.#commit((state) => {
+        state.proposals.delete(current.id);
+        state.auditRecords.push(record);
+        return { record: isolate(record) };
+      });
+    });
+  }
+
   /** Return an isolated copy of a stored proposal, if present. */
   getProposal(proposalId: string): EvolutionProposal | undefined {
     const proposal = this.#proposals.get(proposalId);
@@ -463,9 +549,19 @@ export class EvolutionCatalog {
     const auditRecords: AuditRecord[] = [];
     for (const record of material.auditRecords) {
       if (!proposals.has(record.proposalId)) {
-        throw new EvolutionCatalogError(
-          `Audit record references missing proposal '${record.proposalId}'`,
-        );
+        // Tombstone trails (rejection/archival/deletion of a deleted proposal)
+        // legitimately reference proposals no longer present; replayRestoreAudit
+        // already validated their shape and ordering.
+        if (
+          record.kind !== "rejection" &&
+          record.kind !== "archive" &&
+          record.kind !== "unarchive" &&
+          record.kind !== "delete"
+        ) {
+          throw new EvolutionCatalogError(
+            `Audit record references missing proposal '${record.proposalId}'`,
+          );
+        }
       }
       auditRecords.push(isolate(record));
     }
@@ -714,29 +810,66 @@ function replayRestoreAudit(
   const activeByTarget = new Map<string, string>();
   const counts = new Map<string, { promotion: number; rejection: number; rollback: number }>();
   const applicationCommandIds = new Set<string>();
+  const archivalStates = new Map<string, { archived: boolean; at: string | null }>();
+  const deletedTrails = new Map<string, AuditRecord[]>();
 
   for (const audit of auditRecords) {
     const proposal = proposalById.get(audit.proposalId);
     if (!proposal) {
+      // Only the retained trail of a deleted proposal (its rejection, any
+      // archival markers, and the deletion tombstone) may reference a proposal
+      // that is no longer present.
+      if (
+        audit.kind !== "rejection" &&
+        audit.kind !== "archive" &&
+        audit.kind !== "unarchive" &&
+        audit.kind !== "delete"
+      ) {
+        throw new EvolutionCatalogError(
+          `Audit record references missing proposal '${audit.proposalId}'`,
+        );
+      }
+      const trail = deletedTrails.get(audit.proposalId) ?? [];
+      trail.push(audit);
+      deletedTrails.set(audit.proposalId, trail);
+      continue;
+    }
+    if (audit.kind === "delete") {
       throw new EvolutionCatalogError(
-        `Audit record references missing proposal '${audit.proposalId}'`,
+        `Deletion audit references live proposal '${proposal.id}'`,
       );
     }
+    const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
+    if (commandId !== undefined) {
+      if (applicationCommandIds.has(commandId)) {
+        throw new EvolutionCatalogError(
+          `Application command '${commandId}' owns multiple audit records`,
+        );
+      }
+      applicationCommandIds.add(commandId);
+    }
+
+    if (audit.kind === "archive" || audit.kind === "unarchive") {
+      const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
+      if (audit.kind === "archive") {
+        if (state.archived) {
+          throw new EvolutionCatalogError(`Duplicate archive audit for '${proposal.id}'`);
+        }
+        archivalStates.set(proposal.id, { archived: true, at: audit.at });
+      } else {
+        if (!state.archived) {
+          throw new EvolutionCatalogError(
+            `Unarchive audit for '${proposal.id}' is out of order`,
+          );
+        }
+        archivalStates.set(proposal.id, { archived: false, at: null });
+      }
+      continue;
+    }
+
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     count[audit.kind] += 1;
     counts.set(proposal.id, count);
-    if (
-      audit.kind !== "rejection" &&
-      audit.applicationCommandId !== undefined &&
-      applicationCommandIds.has(audit.applicationCommandId)
-    ) {
-      throw new EvolutionCatalogError(
-        `Application command '${audit.applicationCommandId}' owns multiple audit records`,
-      );
-    }
-    if (audit.kind !== "rejection" && audit.applicationCommandId !== undefined) {
-      applicationCommandIds.add(audit.applicationCommandId);
-    }
     const targetKey = candidateTargetKey(proposal.candidate);
 
     if (audit.kind === "promotion") {
@@ -811,6 +944,22 @@ function replayRestoreAudit(
     }
   }
 
+  for (const [proposalId, trail] of deletedTrails) {
+    assertDeletedAuditTrail(proposalId, trail);
+  }
+
+  for (const proposal of proposalById.values()) {
+    const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
+    if (
+      state.archived !== (proposal.archivedAt !== undefined) ||
+      (state.archived && proposal.archivedAt !== state.at)
+    ) {
+      throw new EvolutionCatalogError(
+        `Archival state for '${proposal.id}' does not match restore audit history`,
+      );
+    }
+  }
+
   for (const proposal of proposalById.values()) {
     const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
     const expected =
@@ -829,6 +978,51 @@ function replayRestoreAudit(
   }
 
   return { promotionByProposal, activeByTarget };
+}
+
+/**
+ * Validate the retained audit trail of a deleted proposal: exactly one
+ * rejection first, exactly one deletion tombstone last, and alternating
+ * archive/unarchive markers in between.
+ */
+function assertDeletedAuditTrail(proposalId: string, trail: readonly AuditRecord[]): void {
+  if (trail[0]?.kind !== "rejection") {
+    throw new EvolutionCatalogError(
+      `Audit history for deleted proposal '${proposalId}' must begin with its rejection`,
+    );
+  }
+  if (trail[trail.length - 1]?.kind !== "delete") {
+    throw new EvolutionCatalogError(`Audit record references missing proposal '${proposalId}'`);
+  }
+  let archived = false;
+  for (const [index, record] of trail.entries()) {
+    if (record.kind === "rejection" && index !== 0) {
+      throw new EvolutionCatalogError(
+        `Duplicate rejection audit for deleted proposal '${proposalId}'`,
+      );
+    }
+    if (record.kind === "delete" && index !== trail.length - 1) {
+      throw new EvolutionCatalogError(
+        `Audit history for deleted proposal '${proposalId}' continues after its deletion`,
+      );
+    }
+    if (record.kind === "archive") {
+      if (archived) {
+        throw new EvolutionCatalogError(
+          `Duplicate archive audit for deleted proposal '${proposalId}'`,
+        );
+      }
+      archived = true;
+    }
+    if (record.kind === "unarchive") {
+      if (!archived) {
+        throw new EvolutionCatalogError(
+          `Unarchive audit for deleted proposal '${proposalId}' is out of order`,
+        );
+      }
+      archived = false;
+    }
+  }
 }
 
 function assertRestoreTransitionAt(

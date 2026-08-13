@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { Command } from "commander";
 import { stringify as stringifyYaml } from "yaml";
@@ -16,10 +16,12 @@ import { SqliteEventStore } from "./events/store.js";
 import { filterRunEvents, renderLogLines } from "./logs/render.js";
 import type { RunLogFilter } from "./logs/render.js";
 import { GithubPublisher } from "./github/publish.js";
-import { GithubRepairRunner } from "./github/repair.js";
+import { GithubRepairRunner, type RepairPushSummary } from "./github/repair.js";
 import type { LoadedConfig } from "./config/load.js";
 import { startControlService } from "./server/start.js";
+import { resolveSessionToken } from "./server/session-token.js";
 import { startProjectRuntime } from "./server/project-runtime.js";
+import { resolveLayeredRoleBindings } from "./desktop/project-role-settings.js";
 import { loadWorkspace } from "./workspace/load.js";
 import { startWorkspaceControlService } from "./workspace/service.js";
 import { assertDiagnosticProfilePermission } from "./security/permissions.js";
@@ -30,6 +32,15 @@ program
   .name("agent-team")
   .description("Local-first orchestration for software-development agents")
   .version("0.1.0");
+
+/**
+ * CLI assembly point: explicitly enable full validation (adapter conformance +
+ * evaluation suite parsing) on every config load. The config package itself
+ * only produces a LoadedConfig; cross-package validation is opted into here.
+ */
+function loadValidatedConfig(configPath?: string): Promise<LoadedConfig> {
+  return loadConfig(process.cwd(), configPath, { validation: "full" });
+}
 
 program
   .command("init")
@@ -66,7 +77,7 @@ program
       process.stdout.write(`Valid: ${workspace.path} (${workspace.projects.length} projects)\n`);
       return;
     }
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     process.stdout.write(`Valid: ${loaded.path}\n`);
   });
 
@@ -76,7 +87,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const output = Object.entries(loaded.config.roles).map(([role, policy]) => ({
       role,
       defaultProfile: policy.defaultProfile,
@@ -100,7 +111,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const manifest = buildInteropManifest(loaded.config);
     if (options.json) {
       process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -133,7 +144,7 @@ program
       probeModels: boolean;
       json: boolean;
     }) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const checks = await runDoctor(loaded, {
         probeModel: options.probeModels,
         ...(options.profile ? { profileName: options.profile } : {}),
@@ -169,7 +180,7 @@ program
       schema?: string;
       config?: string;
     }) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const resolved = resolveProfile(loaded.config, options.role, options.profile);
       assertDiagnosticProfilePermission(
         options.role,
@@ -220,12 +231,21 @@ program
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const loaded = await loadValidatedConfig(options.config);
+      const runtime = await startProjectRuntime(loaded);
       try {
+        const roleBindings = Object.keys(profileOverrides).length > 0
+          ? undefined
+          : await resolveLayeredRoleBindings({
+              root: loaded.root,
+              stateDirectory: loaded.config.project.stateDirectory,
+              knownRoles: Object.keys(loaded.config.roles),
+            });
         const started = runtime.supervisor.start({
           goal: options.goal,
           profileOverrides,
           ...(options.strategy ? { strategy: options.strategy } : {}),
+          ...(roleBindings ? { roleBindings } : {}),
         });
         const state = await runtime.supervisor.wait(started.runId);
         if (!state) throw new Error(`Run '${started.runId}' stopped without a final state`);
@@ -254,13 +274,13 @@ program
   .action(async (options: { host: string; port: string; config?: string; workspace?: string }) => {
     assertExclusiveConfigOptions(options);
     const port = parsePort(options.port);
-    const sessionToken = process.env.AGENT_TEAM_SESSION_TOKEN ?? randomBytes(32).toString("hex");
+    const sessionToken = await resolveSessionToken();
     const service = options.workspace
       ? await startWorkspaceControlService(
           await loadWorkspace(process.cwd(), options.workspace),
           { host: options.host, port, sessionToken },
         )
-      : await startControlService(await loadConfig(process.cwd(), options.config), {
+      : await startControlService(await loadValidatedConfig(options.config), {
           host: options.host,
           port,
           sessionToken,
@@ -308,7 +328,7 @@ program
       options.expectedRevision,
       "--expected-revision",
     );
-    const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+    const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
     try {
       const promptContent = options.promptFile
         ? await readFile(path.resolve(options.promptFile))
@@ -355,7 +375,7 @@ program
       if (options.decision !== "approved" && options.decision !== "rejected") {
         throw new Error("--decision must be 'approved' or 'rejected'");
       }
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
       try {
         const result = await runtime.supervisor.respondApproval(runId, {
           requestId: options.request,
@@ -386,7 +406,7 @@ program
       runId: string,
       options: { actor: string; reason: string; config?: string },
     ) => {
-      const runtime = await startProjectRuntime(await loadConfig(process.cwd(), options.config));
+      const runtime = await startProjectRuntime(await loadValidatedConfig(options.config));
       try {
         await runtime.supervisor.resume(runId, {
           actor: options.actor,
@@ -408,7 +428,7 @@ program
   .option("-c, --config <path>", "configuration path")
   .option("--json", "emit JSON", false)
   .action(async (runId: string | undefined, options: { config?: string; json: boolean }) => {
-    const loaded = await loadConfig(process.cwd(), options.config);
+    const loaded = await loadValidatedConfig(options.config);
     const runsDirectory = path.resolve(
       loaded.root,
       loaded.config.project.stateDirectory,
@@ -473,7 +493,7 @@ program
         tail?: string;
       },
     ) => {
-      const loaded = await loadConfig(process.cwd(), options.config);
+      const loaded = await loadValidatedConfig(options.config);
       const databasePath = path.join(
         path.resolve(loaded.root, loaded.config.project.stateDirectory),
         "control.sqlite",
@@ -549,10 +569,13 @@ program
   .description("Run one bounded local repair for failed GitHub checks")
   .argument("<run-id>", "run identifier")
   .option("-c, --config <path>", "configuration path")
-  .action(async (runId: string, options: { config?: string }) => {
+  .option("--yes", "push the repair commit without interactive confirmation", false)
+  .action(async (runId: string, options: { config?: string; yes: boolean }) => {
     const { loaded, store } = await loadRunContext(options.config);
     const state = await store.load(runId);
-    await new GithubRepairRunner(loaded, store).repair(state);
+    await new GithubRepairRunner(loaded, store, undefined, undefined, {
+      confirmPush: (summary) => confirmRepairPush(summary, options.yes),
+    }).repair(state);
     process.stdout.write(`${state.id}\t${state.status}\n`);
     if (state.status === "ci-failed") {
       process.exitCode = 1;
@@ -600,7 +623,7 @@ async function loadRunContext(configPath?: string): Promise<{
   loaded: LoadedConfig;
   store: RunStateStore;
 }> {
-  const loaded = await loadConfig(process.cwd(), configPath);
+  const loaded = await loadValidatedConfig(configPath);
   const runsDirectory = path.resolve(
     loaded.root,
     loaded.config.project.stateDirectory,
@@ -616,6 +639,39 @@ function printChecks(checks: Array<{ bucket: string; name: string; state: string
   }
   for (const check of checks) {
     process.stdout.write(`${check.bucket.toUpperCase().padEnd(8)} ${check.name}: ${check.state}\n`);
+  }
+}
+
+/**
+ * Human gate before a repair commit is pushed. Interactive sessions review the
+ * commit summary and confirm; non-interactive sessions must pass --yes.
+ */
+async function confirmRepairPush(summary: RepairPushSummary, yes: boolean): Promise<boolean> {
+  process.stdout.write(
+    [
+      "GitHub repair is ready to push:",
+      `  remote: ${summary.remote}/${summary.branch}`,
+      `  commit: ${summary.commitMessage}`,
+      `  changes: ${summary.changedFiles.length} file(s), +${summary.additions} -${summary.deletions}`,
+      ...summary.changedFiles.map((file) => `    ${file}`),
+      "",
+    ].join("\n"),
+  );
+  if (yes) {
+    return true;
+  }
+  if (!process.stdin.isTTY) {
+    process.stderr.write(
+      "Refusing to push without confirmation in a non-interactive session; re-run with --yes.\n",
+    );
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question("Push this repair commit? [y/N] ");
+    return ["y", "yes"].includes(answer.trim().toLowerCase());
+  } finally {
+    rl.close();
   }
 }
 

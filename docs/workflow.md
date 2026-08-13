@@ -2,22 +2,37 @@
 
 ## Lifecycle
 
-1. The controller turns the goal into a structured intake: scope, constraints,
-   risks, and acceptance criteria.
-2. The architect produces a validated dependency DAG with owned paths,
-   acceptance commands, and optional worker profile choices.
-3. The scheduler selects a dependency-ready wave whose paths do not overlap.
-4. Each worker receives its own branch and Git worktree from the current
-   integration commit.
-5. Project checks run as deterministic processes. Reviewer and tester agents
-   independently inspect the staged diff and recorded results.
-6. Failed gates produce bounded feedback for the same worker. Escalation or an
-   exhausted retry budget blocks the run.
-7. Passing task commits merge into the integration branch in stable task-ID
-   order. Final project checks and the supervising controller run once more.
-8. A passing run creates a durable final approval request and stops at
-   `awaiting-human`. Approval moves it to `ready-to-merge`; publication, CI
-   observation, repair, and completion remain separate explicit commands.
+1. If the goal already names `T1`–`Tn` (or `P0.x`) and a concrete path for
+   each, the controller builds that DAG itself and skips the architect.
+   Otherwise the controller turns the goal into a structured intake.
+2. Optional explore stage: the **researcher** (技术研究员) performs read-only
+   technical research and injects a structured summary into planning.
+3. The architect produces a validated dependency DAG with owned paths and
+   optional worker profile choices. A rejected plan is retried once, then
+   replaced by a deterministic fallback when the goal is explicit enough.
+   A vague “根据交接文档完成任务” expands into a Photoshop / HANDOFF packet
+   only when this repository actually contains that handover.
+4. Human plan approval runs only when the strategy gates `plan`. Agent-authored
+   `acceptanceCommands` do not force an extra stop.
+5. The scheduler selects a dependency-ready wave whose paths do not overlap.
+   A sibling failure does not abort work that already passed quality gates.
+6. Each worker receives its own branch and Git worktree from the current
+   integration commit. Isolated worktrees install dependencies only when a
+   lockfile is present.
+7. Project checks run as deterministic processes. Reviewer and tester agents
+   independently inspect the staged diff and recorded results. Placeholder
+   verdicts are retried once; a second placeholder, or an escalate on a
+   docs-only task, yields to a passing quality gate.
+8. Failed gates produce bounded feedback for the same worker. Escalation with a
+   failed quality gate, or an exhausted retry budget, blocks that task only.
+9. Passing task commits merge into the integration branch in stable task-ID
+   order. Remaining blocked tasks do not discard already merged work. Final
+   project checks and the supervising controller run once more; a final
+   escalate cannot veto merged work when the integration quality gate passed.
+10. A passing or partially successful run creates a durable final approval
+    request and stops at `awaiting-human`. Approval moves it to
+    `ready-to-merge`; publication, CI observation, repair, and completion
+    remain separate explicit commands.
 
 ## Git Layout
 
@@ -70,11 +85,21 @@ outside the workstation.
 An interrupted run can resume only from a matching checkpoint. A partial wave
 is abandoned as evidence and its incomplete tasks restart on new branches.
 Cancelled or blocked runs can still be retried as new linked runs. Neither path
-claims that a killed CLI process continued in place.
+claims that a killed CLI process continued in place. Execution time and
+per-task rework attempts accumulate across resume segments: the timeout is
+prorated against the recorded elapsed time (an exhausted budget blocks the
+resume), and a task that already consumed its rework limit stays blocked
+instead of being granted a fresh budget.
 
 Approval requests and responses are persisted in the run snapshot and emitted
 to the ordered event ledger. A response records decision, actor, reason, and
 time. The actor is a local audit assertion, not authenticated identity.
+
+Plan approval is required exactly when the selected strategy gates `plan`.
+`acceptanceCommands` do not add a forced plan stop: they are deterministic
+commands from the operator's project configuration, and the quality gates
+already refuse to trust any LLM verdict that contradicts their exit codes.
+The approval summary states which tasks the gate covers.
 
 ## Publication Lifecycle
 

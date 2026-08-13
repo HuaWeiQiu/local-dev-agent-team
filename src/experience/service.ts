@@ -247,6 +247,13 @@ export class ExperienceService {
     return this.project.reject(experienceId, actor, reason);
   }
 
+  async retire(experienceId: string, actor: string, reason: string): Promise<ExperienceEntry> {
+    if (await this.shared.has(experienceId)) {
+      return this.shared.retire(experienceId, actor, reason);
+    }
+    return this.project.retire(experienceId, actor, reason);
+  }
+
   async share(experienceId: string, actor: string, reason: string): Promise<ExperienceEntry> {
     const entry = (await this.project.list()).find((item) => item.id === experienceId);
     if (!entry) {
@@ -272,9 +279,17 @@ export class ExperienceService {
     });
   }
 
-  async retrieveForPlanning(goal: string): Promise<ExperiencePlanningBundle | undefined> {
+  async retrieveForPlanning(
+    goal: string,
+    options: { preview?: boolean } = {},
+  ): Promise<ExperiencePlanningBundle | undefined> {
     if (!this.options.enabled || !this.options.injectIntoPlanning) return undefined;
-    const bundle = await this.retrieveVerifiedBundle(goal, "planning", this.options.maxInjected);
+    const bundle = await this.retrieveVerifiedBundle(
+      goal,
+      "planning",
+      this.options.maxInjected,
+      options.preview === true,
+    );
     const hints = this.options.writeStrategyHints
       ? await new StrategyHintStore(StrategyHintStore.pathFor(this.stateRoot)).list()
       : [];
@@ -325,6 +340,7 @@ export class ExperienceService {
     query: string,
     purpose: "planning" | "rework",
     limit: number,
+    preview = false,
   ): Promise<ExperiencePlanningBundle | undefined> {
     if (limit <= 0) return undefined;
     const actor = purpose === "rework" ? "system:rework" : "system:planning";
@@ -338,6 +354,7 @@ export class ExperienceService {
       reason,
       query,
       limit,
+      recordHit: !preview,
     });
     const remaining = Math.max(0, limit - shared.length);
     const project =
@@ -347,6 +364,7 @@ export class ExperienceService {
             reason,
             query,
             limit: remaining,
+            recordHit: !preview,
           })
         : [];
 

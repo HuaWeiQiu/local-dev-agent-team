@@ -225,6 +225,37 @@ export class ExperienceCatalog {
   }
 
   /**
+   * Retire a verified experience: kept for audit, excluded from retrieval.
+   * There is no un-retire action in the v1 audit model.
+   */
+  async retire(
+    experienceId: string,
+    actor: string,
+    reason: string,
+  ): Promise<ExperienceEntry> {
+    const doc = await this.load();
+    const entry = requireEntry(doc, experienceId);
+    if (entry.status !== "verified") {
+      throw new Error(
+        `Experience '${experienceId}' cannot be retired from status '${entry.status}'`,
+      );
+    }
+    const timestamp = new Date(this.now()).toISOString();
+    entry.status = "retired";
+    entry.updatedAt = timestamp;
+    doc.audit.push({
+      id: randomUUID(),
+      at: timestamp,
+      actor,
+      action: "retire",
+      experienceId,
+      reason,
+    });
+    await this.save(doc);
+    return { ...entry };
+  }
+
+  /**
    * Import an already-verified experience (e.g. into the shared catalog).
    * Keeps a new id so project and shared copies remain independent.
    */
@@ -281,7 +312,8 @@ export class ExperienceCatalog {
 
   /**
    * Retrieve only verified experiences. Candidate entries are never returned.
-   * Records a retrieve audit entry for transparency.
+   * Records a retrieve audit entry for transparency unless `recordHit` is false
+   * (read-only previews, e.g. UI retrieval preview, must not inflate hitCount).
    */
   async retrieveVerified(
     options: {
@@ -289,6 +321,7 @@ export class ExperienceCatalog {
       reason?: string;
       query?: string;
       limit?: number;
+      recordHit?: boolean;
     } = {},
   ): Promise<ExperienceEntry[]> {
     const doc = await this.load();
@@ -315,7 +348,7 @@ export class ExperienceCatalog {
       .slice(0, limit)
       .map((entry) => ({ ...entry }));
 
-    if (selected.length > 0) {
+    if (selected.length > 0 && options.recordHit !== false) {
       const timestamp = new Date(this.now()).toISOString();
       for (const entry of selected) {
         const live = requireEntry(doc, entry.id);

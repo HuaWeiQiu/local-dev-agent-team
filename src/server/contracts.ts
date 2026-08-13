@@ -2,14 +2,43 @@ import { z } from "zod";
 import { namedStrategySchema } from "../config/schema.js";
 import { strategyBlueprintNameSchema } from "../strategies/catalog.js";
 
+export const roleBindingSchema = z.object({
+  cli: z.enum(["codex", "grok", "kimi", "claude"]),
+  model: z.string().trim().min(1).max(200).optional(),
+  reasoning: z.string().trim().min(1).max(64).optional(),
+});
+
 export const startRunRequestSchema = z.object({
   goal: z.string().trim().min(1).max(20_000),
   strategy: z.string().trim().min(1).optional(),
   profileOverrides: z.record(z.string().min(1), z.string().min(1)).default({}),
+  /** Global CLI picker: per-role CLI / model / reasoning for this run. */
+  roleBindings: z.record(z.string().min(1), roleBindingSchema).optional(),
   parentRunId: z.string().min(1).optional(),
 });
 
 export type StartRunRequest = z.infer<typeof startRunRequestSchema>;
+export type RoleBindingRequest = z.infer<typeof roleBindingSchema>;
+
+export const desktopSettingsUpdateSchema = z.object({
+  defaults: z.object({
+    roles: z.record(z.string().min(1), roleBindingSchema).default({}),
+  }).default({ roles: {} }),
+  ui: z.object({
+    showCliPickerInRunLauncher: z.boolean().default(true),
+    autoDetectCliConfig: z.boolean().default(true),
+    autoDetectOnFocus: z.boolean().default(true),
+  }).default({
+    showCliPickerInRunLauncher: true,
+    autoDetectCliConfig: true,
+    autoDetectOnFocus: true,
+  }),
+});
+
+/** Per-project role overrides. Omit a role (or set null) to inherit the global default. */
+export const projectRoleSettingsUpdateSchema = z.object({
+  roles: z.record(z.string().min(1), roleBindingSchema.nullable()).default({}),
+});
 
 export const strategyBlueprintRequestSchema = z.object({
   definition: namedStrategySchema,
@@ -28,6 +57,11 @@ export const approvalResponseRequestSchema = z.object({
 });
 
 export const resumeRunRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(2_000),
+});
+
+export const pauseRunRequestSchema = z.object({
   actor: z.string().trim().min(1).max(200),
   reason: z.string().trim().min(1).max(2_000),
 });
@@ -66,6 +100,18 @@ export const evolutionReasonRequestSchema = z
   .object({ reason: z.string().trim().min(1).max(2_000) })
   .strict();
 
+export const evolutionArchiveRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
+
+export const evolutionDeleteRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+
 export const evolutionPreviewRequestSchema = z
   .object({ expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) })
   .strict();
@@ -101,5 +147,6 @@ export const experienceReasonRequestSchema = z
 
 export type ApprovalResponseRequest = z.infer<typeof approvalResponseRequestSchema>;
 export type ResumeRunRequest = z.infer<typeof resumeRunRequestSchema>;
+export type PauseRunRequest = z.infer<typeof pauseRunRequestSchema>;
 export type CleanupPreviewRequest = z.infer<typeof cleanupPreviewRequestSchema>;
 export type CleanupRunRequest = z.infer<typeof cleanupRunRequestSchema>;

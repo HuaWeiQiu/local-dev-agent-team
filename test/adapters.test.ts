@@ -6,6 +6,7 @@ import { ClaudeAdapter } from "../src/adapters/claude.js";
 import { CodexAdapter } from "../src/adapters/codex.js";
 import { CodexActivityParser } from "../src/adapters/codex-events.js";
 import { GrokAdapter } from "../src/adapters/grok.js";
+import { KimiAdapter } from "../src/adapters/kimi.js";
 import { AgentInvocationError, invokeAgent } from "../src/adapters/invoke.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
 import type { AgentProfile } from "../src/config/schema.js";
@@ -247,6 +248,38 @@ describe("Codex adapter", () => {
   });
 });
 
+describe("Kimi adapter", () => {
+  it("keeps the CLI prompt argument and still satisfies the stdin contract", () => {
+    const invocation = new KimiAdapter().buildInvocation(
+      { ...readOnlyProfile, adapter: "kimi", model: "kimi-code" },
+      { cwd: "/tmp/repo", prompt: "Review the tester verdict" },
+    );
+    expect(invocation.command).toBe("kimi");
+    expect(invocation.args).toContain("--prompt");
+    const promptIndex = invocation.args.indexOf("--prompt");
+    expect(invocation.args[promptIndex + 1]).toContain("Review the tester verdict");
+    expect(invocation.args).toContain("--output-format");
+    expect(invocation.args).toContain("stream-json");
+    expect(invocation.args).toContain("kimi-code");
+    expect(invocation.stdin).toBe("Review the tester verdict");
+  });
+
+  it("embeds a JSON schema in the CLI prompt while stdin stays the original request", () => {
+    const invocation = new KimiAdapter().buildInvocation(
+      { ...readOnlyProfile, adapter: "kimi" },
+      {
+        cwd: "/tmp/repo",
+        prompt: "Return the verdict",
+        outputSchema: { type: "object", properties: { verdict: { type: "string" } } },
+      },
+    );
+    const promptIndex = invocation.args.indexOf("--prompt");
+    expect(invocation.args[promptIndex + 1]).toContain("JSON Schema");
+    expect(invocation.args[promptIndex + 1]).toContain("verdict");
+    expect(invocation.stdin).toBe("Return the verdict");
+  });
+});
+
 describe("Claude adapter", () => {
   it("maps read-only profiles to plan mode", () => {
     const invocation = new ClaudeAdapter().buildInvocation(
@@ -299,7 +332,7 @@ describe("Claude adapter", () => {
 describe("Grok adapter", () => {
   const workerProfile: AgentProfile = {
     adapter: "grok",
-    model: "grok",
+    model: "grok-4.6",
     reasoning: "high",
     permission: "workspace-write",
     externalTools: "deny",
@@ -316,7 +349,8 @@ describe("Grok adapter", () => {
     });
 
     expect(invocation.command).toBe("grok");
-    expect(invocation.args).toContain("grok");
+    expect(invocation.args).toContain("--model");
+    expect(invocation.args).toContain("grok-4.6");
     expect(invocation.args).toContain("workspace");
     expect(invocation.args).toContain("--always-approve");
     expect(invocation.args).not.toContain("acceptEdits");
@@ -353,6 +387,19 @@ describe("Grok adapter", () => {
     expect(invocation.args).toContain("read-only");
     expect(invocation.args).toContain("plan");
     expect(invocation.args).not.toContain("--always-approve");
+  });
+
+  it("does not forward the CLI name grok as a model id", () => {
+    const inherited = new GrokAdapter().buildInvocation(
+      { ...workerProfile, model: "inherit" },
+      { cwd: "/tmp/repo", prompt: "Implement", promptFile: "/tmp/managed-prompt.txt" },
+    );
+    const aliased = new GrokAdapter().buildInvocation(
+      { ...workerProfile, model: "grok" },
+      { cwd: "/tmp/repo", prompt: "Implement", promptFile: "/tmp/managed-prompt.txt" },
+    );
+    expect(inherited.args).not.toContain("--model");
+    expect(aliased.args).not.toContain("--model");
   });
 
   it("parses structured output and token usage from the Grok JSON envelope", async () => {
@@ -404,6 +451,16 @@ describe("Grok adapter", () => {
         fixtureProcess(JSON.stringify({ text: "", stopReason: "EndTurn" })),
       ),
     ).rejects.toThrow("Grok returned no completion text or structured output");
+    await expect(
+      adapter.parseResult(
+        invocation,
+        fixtureProcess(JSON.stringify({
+          text: '{"ok":true}',
+          structuredOutput: { ok: true },
+          stopReason: "end_turn",
+        })),
+      ),
+    ).resolves.toMatchObject({ structured: { ok: true } });
     await expect(adapter.parseResult(invocation, fixtureProcess(""))).rejects.toThrow(
       "Grok returned no JSON output",
     );

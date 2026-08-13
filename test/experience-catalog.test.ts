@@ -68,6 +68,66 @@ describe("ExperienceCatalog v1", () => {
     const rejected = await catalog.list("rejected");
     expect(rejected[0]?.failureReason).toContain("Not generalizable");
   });
+
+  it("retires verified experiences, excludes them from retrieval, and forbids other statuses", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-experience-"));
+    const catalog = new ExperienceCatalog(
+      path.join(root, "catalog.json"),
+      () => Date.parse("2026-08-12T00:00:00.000Z"),
+    );
+    const entry = await catalog.extract({
+      project: "demo",
+      summary: "Prefer pnpm over npm in this monorepo",
+      sourceRunId: "run-3",
+    });
+    await expect(catalog.retire(entry.id, "operator", "too early")).rejects.toThrow(
+      /cannot be retired/,
+    );
+
+    await catalog.promote(entry.id, "operator", "Validated on evaluation suite");
+    expect(await catalog.retrieveVerified({ query: "pnpm" })).toHaveLength(1);
+
+    const retired = await catalog.retire(entry.id, "operator", "Superseded by workspace policy");
+    expect(retired.status).toBe("retired");
+    expect(await catalog.retrieveVerified({ query: "pnpm" })).toEqual([]);
+    expect(await catalog.list("verified")).toHaveLength(0);
+    expect(await catalog.list("retired")).toHaveLength(1);
+    // audit keeps both the retire action and the reason
+    const doc = await catalog.load();
+    expect(doc.audit).toContainEqual(
+      expect.objectContaining({
+        action: "retire",
+        experienceId: entry.id,
+        actor: "operator",
+        reason: "Superseded by workspace policy",
+      }),
+    );
+    await expect(catalog.retire(entry.id, "operator", "again")).rejects.toThrow(
+      /cannot be retired/,
+    );
+  });
+
+  it("preview retrieval stays read-only (no hitCount or audit growth)", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-experience-"));
+    const catalog = new ExperienceCatalog(ExperienceCatalog.defaultPath(root));
+    const entry = await catalog.extract({
+      project: "demo",
+      summary: "Retry flaky docker pulls with backoff",
+      sourceRunId: "run-4",
+    });
+    await catalog.promote(entry.id, "operator", "ok");
+
+    const before = await catalog.load();
+    const hits = await catalog.retrieveVerified({ query: "docker", recordHit: false });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.hitCount).toBe(0);
+    const after = await catalog.load();
+    expect(after.entries[0]?.hitCount).toBe(0);
+    expect(after.audit.length).toBe(before.audit.length);
+
+    const counted = await catalog.retrieveVerified({ query: "docker" });
+    expect(counted[0]?.hitCount).toBe(1);
+  });
 });
 
 describe("experience extract + shared service", () => {

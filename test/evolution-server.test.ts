@@ -468,6 +468,89 @@ describe("evolution HTTP control surface", () => {
     });
   });
 
+  it("archives, unarchives, and deletes with the session operator, not a client actor", async () => {
+    const service = await startFixtureService("archive-delete-operator");
+    const cookie = await bootstrapSession(service.url);
+    const created = await postStrategy(
+      service.url,
+      cookie,
+      "archive-delete-candidate",
+      { name: "archive-delete-candidate", definition: strategyDefinition },
+    );
+    const proposalId = (await expectJson<ProposalResponse>(created)).proposal.id;
+    expect((await postEvolutionAction(service.url, cookie, proposalId, "evaluate", {})).status).toBe(200);
+    expect((await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "reject",
+      { reason: "Not shipping this candidate" },
+    )).status).toBe(200);
+
+    const forgedArchive = await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "archive",
+      { actor: "spoofed-operator", reason: "hide it" },
+    );
+    expect(forgedArchive.status).toBe(400);
+
+    const archived = await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "archive",
+      {},
+      "archive-command",
+    );
+    expect(archived.status).toBe(200);
+    const archivedBody = await expectJson<{ record: { actor: string; kind: string } }>(archived);
+    expect(archivedBody).toMatchObject({ record: { kind: "archive" } });
+    expect(archivedBody.record.actor).not.toBe("spoofed-operator");
+
+    const hidden = await expectJson<EvolutionSnapshot>(
+      await fetch(`${service.url}/api/evolution`, { headers: { cookie } }),
+    );
+    expect(hidden.proposals.map((item) => item.id)).not.toContain(proposalId);
+    const listed = await expectJson<EvolutionSnapshot>(
+      await fetch(`${service.url}/api/evolution?includeArchived=true`, { headers: { cookie } }),
+    );
+    expect(listed.proposals.some((item) => item.id === proposalId)).toBe(true);
+
+    expect((await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "unarchive",
+      {},
+      "unarchive-command",
+    )).status).toBe(200);
+
+    const forgedDelete = await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "delete",
+      { actor: "spoofed-operator", reason: "erase it" },
+    );
+    expect(forgedDelete.status).toBe(400);
+
+    const deleted = await postEvolutionAction(
+      service.url,
+      cookie,
+      proposalId,
+      "delete",
+      { reason: "erase rejected leftover" },
+      "delete-command",
+    );
+    expect(deleted.status).toBe(200);
+    const afterDelete = await expectJson<EvolutionSnapshot>(
+      await fetch(`${service.url}/api/evolution?includeArchived=true`, { headers: { cookie } }),
+    );
+    expect(afterDelete.proposals.map((item) => item.id)).not.toContain(proposalId);
+  });
+
   it("keeps evolution proposals scoped to their workspace project", async () => {
     const workspaceRoot = await createTemporaryRoot("workspace");
     await createGitProject(path.join(workspaceRoot, "alpha"), "alpha");

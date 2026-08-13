@@ -47,6 +47,14 @@ export interface TaskRunState {
   branch?: string;
   worktree?: string;
   commit?: string;
+  /** Integration-branch merge commit produced when this task was merged. */
+  mergeCommit?: string;
+  /**
+   * Crash-window marker: set to the task branch just before `git merge` so a
+   * crash between the merge and the next save can be recognized during
+   * recovery by matching the deterministic merge-commit subject.
+   */
+  merging?: string;
   profile?: string;
   quality?: QualityReport;
   review?: ReviewVerdict;
@@ -131,10 +139,21 @@ export interface RunSummary {
   updatedAt: string;
   taskCounts: Record<TaskStatus, number>;
   error?: string;
+  parentRunId?: string;
+}
+
+export interface RunRoleBinding {
+  cli: "codex" | "grok" | "kimi" | "claude";
+  model?: string;
+  reasoning?: string;
+  /** Ephemeral profile materialized for this run. */
+  profileName: string;
 }
 
 export interface RunState {
   id: string;
+  /** Persisted document schema version; legacy files without it are treated as 1. */
+  version?: number;
   traceId?: string;
   goal: string;
   root: string;
@@ -147,6 +166,8 @@ export interface RunState {
   createdAt: string;
   updatedAt: string;
   profileOverrides: Record<string, string>;
+  /** CLI/model/reasoning actually bound per role (global picker or evolution defaults). */
+  roleBindings?: Record<string, RunRoleBinding>;
   strategy: ResolvedStrategy;
   supervisorId?: string;
   parentRunId?: string;
@@ -160,6 +181,13 @@ export interface RunState {
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  /**
+   * Wall-clock execution time consumed by run/resume segments, accumulated
+   * across pauses and interruptions. Resume prorates the strategy's
+   * execution timeout against this figure instead of restarting the full
+   * budget; a run whose accumulated time reached the limit is blocked.
+   */
+  executionElapsedMs?: number;
   usage?: RunUsage;
   pullRequestUrl?: string;
   pullRequestNumber?: number;

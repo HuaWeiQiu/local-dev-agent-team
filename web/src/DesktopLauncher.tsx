@@ -107,10 +107,14 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
     await runCommand("desktop_open_project", setStatus, setBusy, { projectPath });
   }
 
-  async function removeRegisteredProject(projectPath: string) {
+  async function removeRegisteredProject(project: DesktopProjectEntry) {
     if (previewState) return;
+    const ok = window.confirm(
+      `项目：${project.name}\n路径：${project.path}\n\n仅从项目坞移除，不会删除磁盘上的任何文件。\n\n确定移除？`,
+    );
+    if (!ok) return;
     setStatus({ state: "starting", message: "正在更新项目列表" });
-    await runCommand("desktop_remove_project", setStatus, setBusy, { projectPath });
+    await runCommand("desktop_remove_project", setStatus, setBusy, { projectPath: project.path });
   }
 
   async function releaseProjectLease(project: DesktopProjectEntry) {
@@ -238,7 +242,7 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
                         className="launcher-project-remove"
                         disabled={busy}
                         aria-label={`移除 ${project.name}`}
-                        onClick={() => void removeRegisteredProject(project.path)}
+                        onClick={() => void removeRegisteredProject(project)}
                       >
                         移除
                       </button>

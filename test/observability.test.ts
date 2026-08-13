@@ -9,6 +9,42 @@ import { RunStateStore } from "../src/state/store.js";
 import type { RunState } from "../src/state/types.js";
 
 describe("run observability", () => {
+  it("numbers concurrent invocations sequentially without gaps or duplicates", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-budget-race-"));
+    const events = new SqliteEventStore(path.join(root, "events.sqlite"));
+    const store = new RunStateStore(path.join(root, "runs"), events);
+    const state = fakeState();
+    state.strategy.maxAgentInvocations = 50;
+    const budget = new RunBudgetTracker(state, store);
+    const observation = {
+      runId: state.id,
+      role: "reviewer",
+      profile: "grok-reviewer",
+      adapter: "grok",
+      model: "inherit",
+      permission: "read-only",
+      externalTools: "deny",
+      artifactKey: "tasks/api/review",
+    };
+
+    // Reviewer + tester (and parallel wave workers) invoke concurrently:
+    // every claim must still get its own sequential number.
+    const invocationIds = await Promise.all(
+      Array.from({ length: 20 }, () => budget.beforeInvocation(observation)),
+    );
+    expect(new Set(invocationIds).size).toBe(20);
+    expect(state.usage!.agentInvocations).toBe(20);
+
+    const started = events
+      .listAfter(0, state.id)
+      .filter((event) => event.type === "agent.invocation.started");
+    expect(started).toHaveLength(20);
+    const numbers = started
+      .map((event) => (event.payload as { invocation: number }).invocation)
+      .sort((left, right) => left - right);
+    expect(numbers).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+  });
+
   it("enforces invocation and artifact budgets while recording reported usage", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-budget-"));
     const events = new SqliteEventStore(path.join(root, "events.sqlite"));

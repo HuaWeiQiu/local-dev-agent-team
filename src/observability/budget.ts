@@ -32,6 +32,13 @@ const defaultArtifactBytesCacheTtlMs = 2_000;
 export class RunBudgetTracker implements AgentInvocationObserver {
   readonly maxProcessOutputBytes: number;
   private artifactBytesCache?: { measuredAt: number; bytes: number };
+  /**
+   * Serializes the invocation-counter read-modify-write: reviewer, tester,
+   * and wave workers invoke concurrently (Promise.all), so an unsynchronized
+   * increment would give duplicate invocation numbers and undercount the
+   * persisted total against the actual number of calls.
+   */
+  private incrementChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly state: RunState,
@@ -54,28 +61,47 @@ export class RunBudgetTracker implements AgentInvocationObserver {
   ): Promise<string> {
     await this.refreshArtifactBytes();
     this.assertArtifactBudget();
-    const usage = this.state.usage!;
-    if (usage.agentInvocations >= this.state.strategy.maxAgentInvocations) {
-      throw new RunBudgetExceededError(
-        `Agent invocation budget of ${this.state.strategy.maxAgentInvocations} exhausted`,
-      );
-    }
-    usage.agentInvocations += 1;
     const invocationId = randomUUID();
-    await this.store.save(this.state);
-    this.store.emit(this.state.id, "agent.invocation.started", {
-      invocationId,
-      role: observation.role,
-      profile: observation.profile,
-      adapter: observation.adapter,
-      model: observation.model,
-      permission: observation.permission,
-      externalTools: observation.externalTools,
-      artifactKey: observation.artifactKey,
-      invocation: usage.agentInvocations,
-      limit: this.state.strategy.maxAgentInvocations,
-    });
+    await this.serializeInvocationNumber(observation, invocationId);
     return invocationId;
+  }
+
+  private serializeInvocationNumber(
+    observation: Omit<
+      AgentInvocationObservation,
+      "invocationId" | "durationMs" | "result" | "error"
+    >,
+    invocationId: string,
+  ): Promise<void> {
+    // The chain always settles, so one rejected claim (budget exhausted)
+    // cannot poison the numbering of later invocations.
+    const claim = this.incrementChain.then(async () => {
+      const usage = this.state.usage!;
+      if (usage.agentInvocations >= this.state.strategy.maxAgentInvocations) {
+        throw new RunBudgetExceededError(
+          `Agent invocation budget of ${this.state.strategy.maxAgentInvocations} exhausted`,
+        );
+      }
+      usage.agentInvocations += 1;
+      await this.store.save(this.state);
+      this.store.emit(this.state.id, "agent.invocation.started", {
+        invocationId,
+        role: observation.role,
+        profile: observation.profile,
+        adapter: observation.adapter,
+        model: observation.model,
+        permission: observation.permission,
+        externalTools: observation.externalTools,
+        artifactKey: observation.artifactKey,
+        invocation: usage.agentInvocations,
+        limit: this.state.strategy.maxAgentInvocations,
+      });
+    });
+    this.incrementChain = claim.then(
+      () => undefined,
+      () => undefined,
+    );
+    return claim;
   }
 
   async afterInvocation(observation: AgentInvocationObservation): Promise<void> {
