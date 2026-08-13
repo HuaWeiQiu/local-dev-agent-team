@@ -572,6 +572,61 @@ describe("local workflow", () => {
     expect(state.history.some((entry) => entry.message.includes("终裁 escalate 已降级"))).toBe(true);
   }, 30_000);
 
+  it("does not let a final escalate veto when every task already merged", async () => {
+    class AllMergedEscalateFinalService extends FakeAgentService {
+      override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
+        const context = options.context as { task?: { id?: string } };
+        if (options.role === "reviewer" && context.task?.id === "T1") {
+          const value = {
+            verdict: "escalate",
+            summary: "Need to inspect the actual file independently before issuing a verdict.",
+            findings: [],
+          };
+          return {
+            value: options.schema.parse(value),
+            profileName: "fake",
+            usedFallback: false,
+            text: JSON.stringify(value),
+          };
+        }
+        if (options.role === "orchestrator" && options.promptKey === "orchestrator-final") {
+          const value = {
+            decision: "escalate",
+            reason: "T1 independent review verdict is escalate, so the run cannot be declared ready",
+          };
+          return {
+            value: options.schema.parse(value),
+            profileName: "fake",
+            usedFallback: false,
+            text: JSON.stringify(value),
+          };
+        }
+        return super.runStructured(options);
+      }
+    }
+    const { loaded } = await createFixture("all-merged-final", (config) => {
+      config.strategies!.definitions.demo = {
+        maxParallel: 2,
+        maxReworkAttempts: 0,
+        roleProfiles: {},
+        approvalGates: ["final"],
+      };
+    });
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new AllMergedEscalateFinalService(),
+    }).run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
+      strategyName: "demo",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.map((task) => [task.task.id, task.status])).toEqual([
+      ["T1", "merged"],
+      ["T2", "merged"],
+      ["T3", "merged"],
+    ]);
+    expect(state.history.some((entry) => entry.message.includes("终裁 escalate 已降级"))).toBe(true);
+  }, 30_000);
+
   it("rejects an incomplete architect plan before approval or work starts", async () => {
     class ThinPlanAgentService extends FakeAgentService {
       override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {

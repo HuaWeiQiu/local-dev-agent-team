@@ -545,17 +545,15 @@ export class LocalWorkflowRunner {
     state.finalDecision = finalDecision.value;
 
     const mergedTasks = state.tasks.filter((task) => task.status === "merged");
-    const blockedTasks = state.tasks.filter((task) => task.status === "blocked");
-    const qualityAllowsPartial =
-      state.finalQuality.passed && mergedTasks.length > 0 && blockedTasks.length > 0;
-    if (!state.finalQuality.passed || (finalDecision.value.decision !== "ready" && !qualityAllowsPartial)) {
+    const qualityPassedWithMergedWork = state.finalQuality.passed && mergedTasks.length > 0;
+    if (!state.finalQuality.passed || (finalDecision.value.decision !== "ready" && !qualityPassedWithMergedWork)) {
       throw new Error(
         !state.finalQuality.passed
           ? formatQualityFailure("Integration quality commands failed", state.finalQuality)
           : `Supervising agent escalated: ${finalDecision.value.reason}`,
       );
     }
-    if (qualityAllowsPartial && finalDecision.value.decision !== "ready") {
+    if (qualityPassedWithMergedWork && finalDecision.value.decision !== "ready") {
       state.history.push({
         at: new Date().toISOString(),
         status: "final-checks",
