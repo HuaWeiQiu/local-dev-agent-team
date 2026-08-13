@@ -1938,21 +1938,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_is_alive_treats_zombie_as_dead() {
-        let mut holder = Command::new("sh")
-            .arg("-c")
-            .arg("exit 0 & echo $!; exec sleep 30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(holder.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
-        let pid: u32 = line.trim().parse().expect("zombie child pid");
-        // The child may take a moment to exit on loaded CI runners, so poll
-        // for the zombie state instead of racing a fixed sleep.
+        // Fork a child that exits immediately and is never waited on by this
+        // process until the end of the test: a deterministic zombie that does
+        // not depend on shell subshell scheduling (which was flaky on CI).
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::_exit(0);
+            }
+        }
+        let pid = pid as u32;
+        // After _exit the child is unreaped and must read as a zombie. Keep a
+        // bounded poll for slow runners, but no shell startup is involved.
         let mut zombie = false;
         for _ in 0..100 {
             if process_is_zombie(pid) {
@@ -1962,8 +1960,11 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         let alive = process_is_alive(pid);
-        let _ = holder.kill();
-        let _ = holder.wait();
+        // Reap the zombie so the test process does not leak it.
+        unsafe {
+            let mut status: libc::c_int = 0;
+            libc::waitpid(pid as libc::pid_t, &mut status, 0);
+        }
         assert!(zombie, "child should remain a zombie while the parent holds it");
         assert!(!alive, "zombie PID must not count as a live lease owner");
     }
