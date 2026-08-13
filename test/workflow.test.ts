@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -69,7 +69,9 @@ class FakeAgentService implements RoleAgentService {
 
   async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
     const context = options.context as { task: { id: string; ownedPaths: string[] } };
-    await writeFile(path.join(options.cwd!, context.task.ownedPaths[0]!), `${context.task.id}\n`);
+    const target = path.join(options.cwd!, context.task.ownedPaths[0]!);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, `${context.task.id}\n`);
     return { text: "implemented", profileName: "fake-worker", usedFallback: false };
   }
 }
@@ -421,36 +423,192 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
-  it("forces plan approval when any planned task defines acceptanceCommands", async () => {
+  it("does not force plan approval just because tasks define acceptanceCommands", async () => {
     const { loaded } = await createFixture("acceptance-gate");
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new AcceptanceCommandAgentService(),
     });
-    // The default strategy gates only "final", but alpha carries
-    // acceptanceCommands, so the plan itself must be approved first.
     const state = await runner.run({ goal: "Create alpha and beta files" });
     expect(state.status).toBe("awaiting-human");
-    expect(state.approvals).toHaveLength(1);
-    expect(state.approvals![0]).toMatchObject({ gate: "plan", status: "pending" });
-    expect(state.approvals![0]!.summary).toContain("acceptanceCommands");
-    expect(state.approvals![0]!.summary).toContain("alpha");
-    expect(state.tasks.every((task) => task.status === "pending")).toBe(true);
+    expect(state.approvals?.at(-1)).toMatchObject({ gate: "final", status: "pending" });
+    expect(state.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
+  }, 30_000);
 
-    state.approvals![0]!.status = "approved";
-    state.approvals![0]!.response = {
-      decision: "approved",
-      actor: "tech-lead",
-      reason: "Acceptance commands reviewed",
-      respondedAt: new Date().toISOString(),
-    };
-    const continued = await runner.resume(state, {
-      mode: "approval",
-      actor: "tech-lead",
-      reason: "Plan approved",
+  it("builds a deterministic DAG from named paths without calling the architect", async () => {
+    class FailIfArchitectService extends FakeAgentService {
+      override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
+        if (options.role === "architect") {
+          throw new Error("architect should not run when the goal already names paths");
+        }
+        return super.runStructured(options);
+      }
+    }
+    const { loaded } = await createFixture("named-paths");
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FailIfArchitectService(),
+    }).run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
     });
-    expect(continued.status).toBe("awaiting-human");
-    expect(continued.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
-    expect(continued.approvals?.at(-1)).toMatchObject({ gate: "final", status: "pending" });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.plan?.summary).toContain("Deterministic DAG");
+    expect(state.tasks.map((task) => task.task.id)).toEqual(["T1", "T2", "T3"]);
+    expect(state.tasks.map((task) => task.status)).toEqual(["merged", "merged", "merged"]);
+    expect(state.history.some((entry) => entry.message.includes("不调用架构模型"))).toBe(true);
+  }, 30_000);
+
+  it("keeps merged work when a sibling docs task blocks", async () => {
+    class ChangelogFailAgentService extends FakeAgentService {
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        const context = options.context as { task: { id: string; ownedPaths: string[] } };
+        if (context.task.id === "T3") {
+          throw new Error("changelog worker cancelled");
+        }
+        return super.runText(options);
+      }
+    }
+    const { loaded } = await createFixture("partial-success", (config) => {
+      config.strategies!.definitions.demo = {
+        maxParallel: 2,
+        maxReworkAttempts: 0,
+        roleProfiles: {},
+        approvalGates: ["final"],
+      };
+    });
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new ChangelogFailAgentService(),
+    }).run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
+      strategyName: "demo",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.map((task) => [task.task.id, task.status])).toEqual([
+      ["T1", "merged"],
+      ["T2", "merged"],
+      ["T3", "blocked"],
+    ]);
+    expect(state.approvals?.at(-1)?.summary).toContain("T3 remain blocked");
+    expect(await readFile(path.join(state.integrationWorktree, "src/greet.js"), "utf8")).toBe("T1\n");
+    expect(await readFile(path.join(state.integrationWorktree, "test/greet.test.js"), "utf8")).toBe("T2\n");
+  }, 30_000);
+
+  it("accepts a docs task when quality passed and specialists escalate", async () => {
+    class DocsEscalateAgentService extends FakeAgentService {
+      override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
+        if (options.role === "reviewer" || options.role === "tester") {
+          const task = (options.context as { task: { ownedPaths: string[] } }).task;
+          const docs = task.ownedPaths.every((item) => item.endsWith(".md"));
+          if (docs) {
+            const value = options.role === "reviewer"
+              ? { verdict: "escalate", summary: "Need host evidence", findings: [] }
+              : { verdict: "escalate", summary: "Need more tests", missingTests: ["host"] };
+            return {
+              value: options.schema.parse(value),
+              profileName: "fake",
+              usedFallback: false,
+              text: JSON.stringify(value),
+            };
+          }
+        }
+        return super.runStructured(options);
+      }
+    }
+    const { loaded } = await createFixture("docs-escalate");
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new DocsEscalateAgentService(),
+    }).run({
+      goal: "Implement T1-T2. T1 add src/greet.js. T2 write CHANGELOG.md.",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.map((task) => [task.task.id, task.status])).toEqual([
+      ["T1", "merged"],
+      ["T2", "merged"],
+    ]);
+    expect(state.tasks[1]?.review?.verdict).toBe("escalate");
+    expect(await readFile(path.join(state.integrationWorktree, "CHANGELOG.md"), "utf8")).toBe("T2\n");
+  }, 30_000);
+
+  it("does not let a final escalate veto merged work when quality passed", async () => {
+    class PartialEscalateFinalService extends FakeAgentService {
+      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+        const context = options.context as { task: { id: string } };
+        if (context.task.id === "T3") {
+          throw new Error("changelog worker cancelled");
+        }
+        return super.runText(options);
+      }
+
+      override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
+        if (options.role === "orchestrator" && options.promptKey === "orchestrator-final") {
+          const value = { decision: "escalate", reason: "T3 is blocked" };
+          return {
+            value: options.schema.parse(value),
+            profileName: "fake",
+            usedFallback: false,
+            text: JSON.stringify(value),
+          };
+        }
+        return super.runStructured(options);
+      }
+    }
+    const { loaded } = await createFixture("partial-final", (config) => {
+      config.strategies!.definitions.demo = {
+        maxParallel: 2,
+        maxReworkAttempts: 0,
+        roleProfiles: {},
+        approvalGates: ["final"],
+      };
+    });
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new PartialEscalateFinalService(),
+    }).run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
+      strategyName: "demo",
+    });
+    expect(state.status).toBe("awaiting-human");
+    expect(state.tasks.filter((task) => task.status === "merged").map((task) => task.task.id)).toEqual([
+      "T1",
+      "T2",
+    ]);
+    expect(state.history.some((entry) => entry.message.includes("终裁 escalate 已降级"))).toBe(true);
+  }, 30_000);
+
+  it("rejects an incomplete architect plan before approval or work starts", async () => {
+    class ThinPlanAgentService extends FakeAgentService {
+      override async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
+        if (options.role === "architect") {
+          const value = {
+            summary: "Read the handover first",
+            tasks: [
+              {
+                id: "inspect-handoff",
+                title: "Inspect handover",
+                description: "read-only inspect of the handover",
+                dependsOn: [],
+                ownedPaths: ["docs/HANDOFF.md"],
+                acceptanceCommands: [],
+                profile: null,
+              },
+            ],
+          };
+          return {
+            value: options.schema.parse(value),
+            profileName: "fake",
+            usedFallback: false,
+            text: JSON.stringify(value),
+          };
+        }
+        return super.runStructured(options);
+      }
+    }
+    const { loaded } = await createFixture("thin-plan");
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new ThinPlanAgentService(),
+    }).run({ goal: "Implement T1-T4 from the handover" });
+    expect(state.status).toBe("blocked");
+    expect(state.error).toContain("Plan completeness rejected");
+    expect(state.error).toContain("缺 T1");
+    expect(state.tasks).toEqual([]);
+    expect(state.approvals ?? []).toEqual([]);
   }, 30_000);
 
   it("propagates budget exhaustion instead of spinning it into rework attempts", async () => {
@@ -490,7 +648,7 @@ describe("local workflow", () => {
     expect(branches).toEqual([state.integrationBranch]);
   }, 60_000);
 
-  it("aborts sibling tasks when a wave task fails hard", async () => {
+  it("keeps sibling tasks running when a wave task fails hard", async () => {
     const { loaded } = await createFixture("wave-abort", (config) => {
       config.strategies!.definitions.swarm = {
         maxParallel: 2,
@@ -514,47 +672,15 @@ describe("local workflow", () => {
         return { ...event, sequence: events.length, traceId: "trace", spanId: "span" };
       },
     };
-    let waveSignal: AbortSignal | undefined;
-    let alphaAborted = false;
-    class BlockingAgentService extends FakeAgentService {
-      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
-        const context = options.context as { task: { id: string } };
-        if (context.task.id === "alpha") {
-          await new Promise<never>((_, reject) => {
-            const onAbort = (): void => {
-              alphaAborted = true;
-              reject(
-                waveSignal?.reason instanceof Error
-                  ? waveSignal.reason
-                  : new Error("wave aborted"),
-              );
-            };
-            if (waveSignal?.aborted) {
-              onAbort();
-            } else {
-              waveSignal?.addEventListener("abort", onAbort, { once: true });
-            }
-          });
-        }
-        return super.runText(options);
-      }
-    }
     const state = await new LocalWorkflowRunner(loaded, {
-      createAgentService: (_store, _overrides, signal) => {
-        waveSignal = signal;
-        return new BlockingAgentService();
-      },
+      createAgentService: () => new FakeAgentService(),
       eventSink,
     }).run({ goal: "Create alpha and beta files", strategyName: "swarm" });
 
     expect(state.status).toBe("blocked");
     expect(state.error).toContain("Artifact budget");
-    expect(alphaAborted).toBe(true);
-    // Alpha was aborted mid-flight, never merged.
-    expect(state.tasks.find((task) => task.task.id === "alpha")?.status).not.toBe("merged");
     const waveEvents = events.filter((event) => event.type === "run.wave.completed");
-    expect(waveEvents).toHaveLength(1);
-    expect(waveEvents[0]!.payload).toMatchObject({ status: "failed" });
+    expect(waveEvents.length).toBeGreaterThan(0);
   }, 30_000);
 
   it("keeps tasks merged after the latest checkpoint as completed during recovery", async () => {

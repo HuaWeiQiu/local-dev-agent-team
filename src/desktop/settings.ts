@@ -150,7 +150,7 @@ export function suggestDefaultsFromInventory(inventory: CliInventory): Record<st
         };
       }
     }
-    return { cli: "grok", model: "grok", reasoning: "high" };
+    return { cli: "grok", model: "grok-4.6", reasoning: "high" };
   };
 
   return {

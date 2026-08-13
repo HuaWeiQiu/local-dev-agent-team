@@ -2,24 +2,37 @@
 
 ## Lifecycle
 
-1. The controller turns the goal into a structured intake: scope, constraints,
-   risks, and acceptance criteria.
+1. If the goal already names `T1`–`Tn` (or `P0.x`) and a concrete path for
+   each, the controller builds that DAG itself and skips the architect.
+   Otherwise the controller turns the goal into a structured intake.
 2. Optional explore stage: the **researcher** (技术研究员) performs read-only
    technical research and injects a structured summary into planning.
-3. The architect produces a validated dependency DAG with owned paths,
-   acceptance commands, and optional worker profile choices.
-4. The scheduler selects a dependency-ready wave whose paths do not overlap.
-5. Each worker receives its own branch and Git worktree from the current
-   integration commit.
-6. Project checks run as deterministic processes. Reviewer and tester agents
-   independently inspect the staged diff and recorded results.
-7. Failed gates produce bounded feedback for the same worker. Escalation or an
-   exhausted retry budget blocks the run.
-8. Passing task commits merge into the integration branch in stable task-ID
-   order. Final project checks and the supervising controller run once more.
-9. A passing run creates a durable final approval request and stops at
-   `awaiting-human`. Approval moves it to `ready-to-merge`; publication, CI
-   observation, repair, and completion remain separate explicit commands.
+3. The architect produces a validated dependency DAG with owned paths and
+   optional worker profile choices. A rejected plan is retried once, then
+   replaced by a deterministic fallback when the goal is explicit enough.
+   A vague “根据交接文档完成任务” expands into a Photoshop / HANDOFF packet
+   only when this repository actually contains that handover.
+4. Human plan approval runs only when the strategy gates `plan`. Agent-authored
+   `acceptanceCommands` do not force an extra stop.
+5. The scheduler selects a dependency-ready wave whose paths do not overlap.
+   A sibling failure does not abort work that already passed quality gates.
+6. Each worker receives its own branch and Git worktree from the current
+   integration commit. Isolated worktrees install dependencies only when a
+   lockfile is present.
+7. Project checks run as deterministic processes. Reviewer and tester agents
+   independently inspect the staged diff and recorded results. Placeholder
+   verdicts are retried once; a second placeholder, or an escalate on a
+   docs-only task, yields to a passing quality gate.
+8. Failed gates produce bounded feedback for the same worker. Escalation with a
+   failed quality gate, or an exhausted retry budget, blocks that task only.
+9. Passing task commits merge into the integration branch in stable task-ID
+   order. Remaining blocked tasks do not discard already merged work. Final
+   project checks and the supervising controller run once more; a final
+   escalate cannot veto merged work when the integration quality gate passed.
+10. A passing or partially successful run creates a durable final approval
+    request and stops at `awaiting-human`. Approval moves it to
+    `ready-to-merge`; publication, CI observation, repair, and completion
+    remain separate explicit commands.
 
 ## Git Layout
 

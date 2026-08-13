@@ -1,5 +1,12 @@
 import { CheckCircle2, Clock3, FileCode2, Gauge, GitBranch, History, ShieldAlert, TerminalSquare, UserRound } from "lucide-react";
 import { memo } from "react";
+import {
+  acceptanceSummary,
+  completenessBarCopy,
+  planCompletenessForRun,
+  taskKind,
+  taskKindLabel,
+} from "../plan-completeness";
 import { agentRoleLabel, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
@@ -19,18 +26,28 @@ export const TaskInspector = memo(function TaskInspector({ run, task }: TaskInsp
         </div>
         {task ? <TaskStatusBadge status={task.status} /> : run ? <RunStatusBadge status={run.status} /> : null}
       </div>
-      {task ? <TaskDetail task={task} /> : run ? <RunDetail run={run} /> : <div className="inspector-empty">未选择运行</div>}
+      {task && run ? <TaskDetail task={task} run={run} /> : task ? <TaskDetail task={task} /> : run ? <RunDetail run={run} /> : <div className="inspector-empty">未选择运行</div>}
     </aside>
   );
 });
 
-function TaskDetail({ task }: { task: TaskRunState }) {
+function TaskDetail({ task, run }: { task: TaskRunState; run?: RunState }) {
+  const kind = taskKind(task.task);
   return (
     <div className="inspector-scroll">
       <section className="detail-section">
         <code className="detail-id">{task.task.id}</code>
         <h3>{task.task.title}</h3>
         <p>{task.task.description}</p>
+      </section>
+      <section className="detail-section">
+        <h4><FileCode2 size={15} />计划合同</h4>
+        <dl className="detail-list">
+          <div><dt>类型</dt><dd>{taskKindLabel(kind)}</dd></div>
+          <div><dt>依赖</dt><dd>{task.task.dependsOn.length > 0 ? task.task.dependsOn.join(", ") : "无"}</dd></div>
+          <div><dt>验收</dt><dd>{acceptanceSummary(task.task)}</dd></div>
+          <div><dt>证据</dt><dd>{task.task.evidenceKind === "host-evidence" ? "实机证据" : "仓库命令 / 审查"}</dd></div>
+        </dl>
       </section>
       <section className="detail-section">
         <h4><GitBranch size={15} />执行</h4>
@@ -77,6 +94,9 @@ function TaskDetail({ task }: { task: TaskRunState }) {
         </section>
       )}
       {task.error && <p className="inline-error">{humanizeFailure(task.error)}</p>}
+      {run?.error && run.error !== task.error ? (
+        <p className="inline-error">{describeRunFailure(run)}</p>
+      ) : null}
     </div>
   );
 }
@@ -91,6 +111,7 @@ function checkpointLabel(stage: string): string {
 }
 
 function RunDetail({ run }: { run: RunState }) {
+  const planReport = planCompletenessForRun(run);
   return (
     <div className="inspector-scroll">
       <section className="detail-section">
@@ -98,6 +119,28 @@ function RunDetail({ run }: { run: RunState }) {
         <h3>{run.goal}</h3>
         {run.plan && <p>{run.plan.summary}</p>}
       </section>
+      {planReport ? (
+        <section className="detail-section">
+          <h4><CheckCircle2 size={15} />计划完备</h4>
+          <p className={`completeness-inline tone-${completenessBarCopy(planReport).tone}`}>
+            {completenessBarCopy(planReport).title}
+          </p>
+          {planReport.namedDeliverables.length > 0 && (
+            <p className="muted">覆盖 {planReport.coveredDeliverables.join(", ") || "无"} / {planReport.namedDeliverables.join(", ")}</p>
+          )}
+          {planReport.issues.length > 0 && (
+            <ul className="completeness-issues">
+              {planReport.issues.map((issue) => <li key={issue}>{issue}</li>)}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {run.finalQuality && !run.finalQuality.passed ? (
+        <section className="detail-section">
+          <h4><ShieldAlert size={15} />集成质量门</h4>
+          <p className="inline-error">{describeRunFailure(run)}</p>
+        </section>
+      ) : null}
       <section className="detail-section">
         <h4><GitBranch size={15} />策略</h4>
         <dl className="detail-list">
@@ -188,6 +231,19 @@ function RunDetail({ run }: { run: RunState }) {
       {run.error && <p className="inline-error">{humanizeFailure(run.error)}</p>}
     </div>
   );
+}
+
+function describeRunFailure(run: RunState): string {
+  const failed = run.finalQuality?.commands?.find((command) => command.exitCode !== 0);
+  const detail = [failed?.stderr, failed?.stdout].find((chunk) => chunk?.trim());
+  if (run.error?.startsWith("Integration quality commands failed") || (run.finalQuality && !run.finalQuality.passed)) {
+    const hint = detail?.replace(/\s+/g, " ").trim();
+    if (hint) {
+      return `任务已合并，集成质量门失败：${hint.slice(0, 240)}`;
+    }
+    return "任务已合并，集成质量门失败（请检查 integration worktree 是否缺依赖）";
+  }
+  return humanizeFailure(run.error);
 }
 
 function formatDuration(milliseconds: number): string {

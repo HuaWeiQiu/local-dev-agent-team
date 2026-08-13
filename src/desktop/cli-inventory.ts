@@ -182,7 +182,15 @@ async function probeGrok(home: string): Promise<CliProbeResult> {
   if (await exists(configPath)) {
     configPaths.push(configPath);
     const text = await readFile(configPath, "utf8");
-    defaultModel = matchTomlString(text, "default", "models") ?? matchTomlString(text, "model", "model.grok") ?? "grok";
+    defaultModel =
+      matchTomlString(text, "default", "models")
+      ?? matchTomlString(text, "model", 'model."grok-4.6"')
+      ?? matchTomlString(text, "model", "model.grok-4.6")
+      ?? matchTomlString(text, "model", "model.grok")
+      ?? undefined;
+    if (defaultModel === "grok") {
+      defaultModel = "grok-4.6";
+    }
     const hasKey = /api_key\s*=\s*["']?[^"'\s]+/i.test(text);
     auth = hasKey
       ? { status: "present", detail: "config.toml 中已配置 api_key（未读取内容）" }
@@ -195,13 +203,13 @@ async function probeGrok(home: string): Promise<CliProbeResult> {
       });
     }
     if (models.length === 0) {
-      models.push({ id: "grok", label: "grok", reasoningOptions: [...GROK_REASONING] });
+      models.push({ id: "grok-4.6", label: "Grok 4.6", reasoningOptions: [...GROK_REASONING] });
     }
   } else {
     auth = binary
       ? { status: "missing", detail: "未找到 ~/.grok/config.toml" }
       : { status: "missing", detail: "未安装 grok" };
-    models.push({ id: "grok", label: "grok", reasoningOptions: [...GROK_REASONING] });
+    models.push({ id: "grok-4.6", label: "Grok 4.6", reasoningOptions: [...GROK_REASONING] });
   }
 
   return {
@@ -212,7 +220,7 @@ async function probeGrok(home: string): Promise<CliProbeResult> {
     auth,
     configPaths,
     models,
-    ...(defaultModel ? { defaultModel } : { defaultModel: "grok" }),
+    ...(defaultModel ? { defaultModel } : { defaultModel: "grok-4.6" }),
     defaultReasoning: "high",
     runtimeSupported: true,
   };

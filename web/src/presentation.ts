@@ -272,7 +272,21 @@ export function humanizeFailure(message: string | undefined | null): string {
   if (/not valid JSON|invalid structured/i.test(text)) {
     return "模型返回格式无效，未能解析为结构化结果";
   }
-  if (text.length > 120) return `${text.slice(0, 119)}…`;
+  if (/Plan completeness rejected/i.test(text)) {
+    return `计划不完备，已打回架构：${text.replace(/^Plan completeness rejected:\s*/i, "")}`;
+  }
+  if (/Integration quality commands failed/i.test(text)) {
+    const detail = text.replace(/^Integration quality commands failed:?\s*/i, "");
+    const envHint = /node_modules missing|tsc: command not found/i.test(text) ? "（缺依赖）" : "";
+    return detail
+      ? `任务已合并，集成质量门失败${envHint}：${detail}`
+      : `任务已合并，集成质量门失败${envHint}`;
+  }
+  if (/node_modules missing|tsc: command not found/i.test(text)) {
+    const short = text.length > 160 ? `${text.slice(0, 159)}…` : text;
+    return `环境门禁失败（缺依赖）：${short}`;
+  }
+  if (text.length > 160) return `${text.slice(0, 159)}…`;
   return text;
 }
 
@@ -338,7 +352,7 @@ export function canvasEmptyCopy(run: {
       || run.status === "created"
     ) {
       return {
-        title: "正在规划任务",
+        title: "架构正在拆任务图",
         detail: run.status === "exploring"
           ? "只读探索完成后，架构会拆分任务依赖图"
           : "总控与架构完成后，任务依赖图会实时出现在这里",

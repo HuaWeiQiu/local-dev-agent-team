@@ -1092,6 +1092,52 @@ code {
   box-shadow: var(--shadow-1);
 }
 
+.canvas-completeness {
+  margin: 0 16px 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink-2);
+  font-size: var(--text-12);
+}
+
+.canvas-completeness summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.canvas-completeness summary::-webkit-details-marker {
+  display: none;
+}
+
+.canvas-completeness.tone-success {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--line));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface-1));
+}
+
+.canvas-completeness.tone-warning,
+.canvas-failure-banner.tone-warning {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--line));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-1));
+}
+
+.canvas-completeness.tone-danger {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-1));
+}
+
+.canvas-completeness ul,
+.completeness-issues,
+.approval-completeness ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
 .canvas-failure-banner {
   display: flex;
   flex-direction: column;
@@ -1140,8 +1186,8 @@ code {
 }
 
 .task-node {
-  width: 252px;
-  min-height: 108px;
+  width: 268px;
+  min-height: 132px;
   padding: 14px 14px 13px;
   border: 1px solid var(--line-strong);
   border-top: 3px solid var(--muted);
@@ -1191,8 +1237,30 @@ code {
 .task-node > strong {
   display: block;
   overflow: hidden;
-  margin: 12px 0;
+  margin: 10px 0 8px;
   font-size: var(--text-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-node-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.task-node-chips span {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: var(--text-11);
+}
+
+.task-node-meta span:last-child {
+  max-width: 140px;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3096,11 +3164,16 @@ button.palette-item:disabled {
   box-shadow: var(--focus-ring);
 }
 
-.run-goal-experience-preview {
+.run-goal-experience-preview,
+.run-goal-hint {
   margin: 6px 0 0;
   color: var(--muted);
   font-size: var(--text-11);
   line-height: 1.5;
+}
+
+.run-goal-hint.is-preview {
+  color: var(--ink-2);
 }
 
 .strategy-fieldset {
@@ -3327,6 +3400,34 @@ button.palette-item:disabled {
   font-size: var(--text-11);
   line-height: 1.45;
 }
+
+.approval-completeness {
+  margin: -8px 0 16px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-12);
+}
+
+.approval-completeness.tone-success {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--line));
+}
+
+.approval-completeness.tone-warning,
+.approval-completeness.tone-danger {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--line));
+}
+
+.ack-incomplete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.completeness-inline.tone-success { color: var(--success); }
+.completeness-inline.tone-warning { color: var(--warning); }
+.completeness-inline.tone-danger { color: var(--danger); }
 
 /* --------------------------------------------------------- 受控演进工作台 */
 

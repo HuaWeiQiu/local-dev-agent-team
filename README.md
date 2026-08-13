@@ -340,7 +340,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny

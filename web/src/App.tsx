@@ -364,6 +364,7 @@ export default function App() {
       <RunActionDialog
         mode={runAction?.mode}
         {...(runAction?.approval ? { approval: runAction.approval } : {})}
+        {...(run ? { run } : {})}
         busy={busy}
         {...(error ? { error } : {})}
         onClose={() => actions.setRunAction(undefined)}

@@ -153,7 +153,7 @@ function defaultModelForCli(cli: string): string {
     case "codex":
       return "gpt-5.6-sol";
     case "grok":
-      return "grok";
+      return "grok-4.6";
     case "claude":
       return "sonnet";
     case "kimi":

@@ -239,6 +239,7 @@ export interface Task {
   acceptanceCommands: Array<{ command: string; args: string[] }>;
   profile: string | null;
   batchKey?: string | null;
+  evidenceKind?: "commands" | "host-evidence" | null;
 }
 
 export interface Finding {
@@ -317,7 +318,17 @@ export interface RunState {
   plan?: { summary: string; tasks: Task[] };
   tasks: TaskRunState[];
   history: Array<{ at: string; status: RunStatus; message: string }>;
-  finalQuality?: { passed: boolean };
+  finalQuality?: {
+    passed: boolean;
+    commands?: Array<{
+      spec: { command: string; args: string[] };
+      exitCode: number | null;
+      durationMs?: number;
+      timedOut?: boolean;
+      stdout?: string;
+      stderr?: string;
+    }>;
+  };
   finalDecision?: { decision: "ready" | "escalate"; reason: string };
   checkpoints?: RunCheckpoint[];
   approvals?: ApprovalRequest[];

@@ -149,11 +149,9 @@ const contracts: ContractPair[] = [
     zod: taskPlanSchema,
     json: taskPlanJsonSchema,
     validSamples: [
-      { summary: "s", tasks: [task] },
-      // args carries a zod default: omittable in both validators.
-      { summary: "s", tasks: [{ ...task, acceptanceCommands: [{ command: "pnpm" }] }] },
-      // batchKey is optional-nullable.
-      { summary: "s", tasks: [{ ...task, batchKey: "wave-1" }] },
+      { summary: "s", tasks: [{ ...task, batchKey: null, evidenceKind: null }] },
+      { summary: "s", tasks: [{ ...task, batchKey: "wave-1", evidenceKind: null }] },
+      { summary: "s", tasks: [{ ...task, batchKey: null, evidenceKind: "host-evidence" }] },
     ],
     invalidSamples: [
       { summary: "s", tasks: [] },
@@ -170,8 +168,14 @@ const contracts: ContractPair[] = [
     zod: exploreSummarySchema,
     json: exploreSummaryJsonSchema,
     validSamples: [
-      // 带 default 的数组字段在两侧都应可省略（手写 schema 曾把它们误列 required）。
-      { summary: "s" },
+      {
+        summary: "s",
+        modules: [],
+        riskPaths: [],
+        suggestedAcceptanceCommands: [],
+        forbiddenPaths: [],
+        notes: [],
+      },
       {
         summary: "s",
         modules: ["m"],
@@ -284,15 +288,25 @@ describe("generated JSON schemas stay coherent with the zod contracts", () => {
     }
   });
 
-  it("never lists a defaulted property as required (zod input semantics)", () => {
+  it("still lets zod fill omitted defaults that Codex schemas must list", () => {
+    expect(taskPlanSchema.safeParse({
+      summary: "s",
+      tasks: [{ ...task, acceptanceCommands: [{ command: "pnpm" }] }],
+    }).success).toBe(true);
+    expect(exploreSummarySchema.safeParse({ summary: "s" }).success).toBe(true);
+  });
+
+  it("lists every object property in required (Codex structured-output contract)", () => {
     const explore = exploreSummaryJsonSchema;
-    expect(explore.required).toEqual(["summary"]);
+    expect(explore.required).toEqual(
+      expect.arrayContaining(["summary", "modules", "riskPaths", "suggestedAcceptanceCommands", "forbiddenPaths", "notes"]),
+    );
     const commandItems = (
       ((taskPlanJsonSchema.properties as JsonSchema).tasks as JsonSchema).items as JsonSchema
     );
     const commands = ((commandItems.properties as JsonSchema).acceptanceCommands as JsonSchema)
       .items as JsonSchema;
-    expect(commands.required).toEqual(["command"]);
+    expect(commands.required).toEqual(expect.arrayContaining(["command", "args"]));
   });
 
   it("documents the one intentional asymmetry: zod strips unknown keys, the JSON schema forbids them", () => {

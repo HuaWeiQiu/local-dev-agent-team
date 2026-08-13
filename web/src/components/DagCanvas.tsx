@@ -17,6 +17,14 @@ import {
   TASK_NODE_GRID_COMPACT,
   type TaskNodeData,
 } from "../graph";
+import {
+  acceptanceSummary,
+  completenessBarCopy,
+  planCompletenessForRun,
+  taskKind,
+  taskKindLabel,
+  taskPhaseLabel,
+} from "../plan-completeness";
 import { canvasEmptyCopy, humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type { RunState, TaskRunState } from "../types";
@@ -47,13 +55,22 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
               y: (node.position.x / TASK_NODE_GRID.columnWidth) * TASK_NODE_GRID_COMPACT.rowHeight,
             }
           : node.position,
-        data: { ...node.data, compactLayout },
+        data: { ...node.data, compactLayout, runStatus: run?.status },
         selected: node.id === selectedTaskId,
       })),
-    [compactLayout, graph, selectedTaskId],
+    [compactLayout, graph, run?.status, selectedTaskId],
   );
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
   const emptyCopy = canvasEmptyCopy(run);
+  const completeness = run ? planCompletenessForRun(run) : undefined;
+  const completenessCopy = completeness ? completenessBarCopy(completeness) : undefined;
+  const thinReconWarning = Boolean(
+    completeness
+    && completeness.namedDeliverables.length > 0
+    && run
+    && run.tasks.length === 1
+    && taskKind(run.tasks[0]!.task) === "recon",
+  );
 
   return (
     <main className="workspace-canvas" aria-label="任务依赖图">
@@ -73,6 +90,31 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
           </div>
         )}
       </div>
+      {completeness && completenessCopy ? (
+        <details className={`canvas-completeness tone-${completenessCopy.tone}`} open={completeness.status !== "complete"}>
+          <summary>
+            <strong>{completenessCopy.title}</strong>
+            <span>
+              {completeness.namedDeliverables.length > 0
+                ? `覆盖 ${completeness.coveredDeliverables.length}/${completeness.namedDeliverables.length}`
+                : `${run?.tasks.length ?? 0} 条任务`}
+            </span>
+          </summary>
+          {completeness.issues.length > 0 ? (
+            <ul>
+              {completeness.issues.map((issue) => <li key={issue}>{issue}</li>)}
+            </ul>
+          ) : (
+            <p>目标编号已覆盖，无只读独苗。</p>
+          )}
+        </details>
+      ) : null}
+      {thinReconWarning && completeness?.status !== "rejected" ? (
+        <div className="canvas-failure-banner tone-warning" role="status">
+          <strong>计划可能不完整</strong>
+          <span>目标含 {completeness?.namedDeliverables.join(" / ")}，图上只有一条只读侦察。</span>
+        </div>
+      ) : null}
       {run?.error ? (
         <div className="canvas-failure-banner" role="status">
           <strong>失败原因</strong>
@@ -118,6 +160,8 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
 function TaskNode({ data, selected }: NodeProps) {
   const nodeData = data as TaskNodeData;
   const { task } = nodeData;
+  const kind = taskKind(task.task);
+  const phase = taskPhaseLabel(task, nodeData.runStatus ?? "implementing");
   return (
     <div className={`task-node tone-border-${statusTone(task.status)} ${selected ? "is-selected" : ""}`}>
       <Handle type="target" position={nodeData.compactLayout ? Position.Top : Position.Left} />
@@ -126,9 +170,13 @@ function TaskNode({ data, selected }: NodeProps) {
         <TaskStatusBadge status={task.status} />
       </div>
       <strong>{task.task.title}</strong>
+      <div className="task-node-chips">
+        <span>{taskKindLabel(kind)}</span>
+        {phase ? <span>{phase}</span> : null}
+      </div>
       <div className="task-node-meta">
-        <span>{task.profile ?? task.task.profile ?? "策略分配"}</span>
-        <span>尝试 {task.attempts}</span>
+        <span>{task.task.dependsOn.length > 0 ? `depends: ${task.task.dependsOn.join(", ")}` : "无依赖"}</span>
+        <span>{acceptanceSummary(task.task)}</span>
       </div>
       <Handle type="source" position={nodeData.compactLayout ? Position.Bottom : Position.Right} />
     </div>

@@ -1,10 +1,12 @@
 import { Check, History, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import type { ApprovalRequest } from "../types";
+import { completenessBarCopy, planCompletenessForRun } from "../plan-completeness";
+import type { ApprovalRequest, RunState } from "../types";
 
 interface RunActionDialogProps {
   mode: "approval" | "resume" | undefined;
   approval?: ApprovalRequest;
+  run?: RunState;
   busy: boolean;
   error?: string;
   onClose(): void;
@@ -18,6 +20,7 @@ interface RunActionDialogProps {
 export function RunActionDialog({
   mode,
   approval,
+  run,
   busy,
   error,
   onClose,
@@ -25,18 +28,24 @@ export function RunActionDialog({
 }: RunActionDialogProps) {
   const [actor, setActor] = useState("");
   const [reason, setReason] = useState("");
+  const [ackIncomplete, setAckIncomplete] = useState(false);
 
   useEffect(() => {
     if (mode) {
       setActor("");
       setReason("");
+      setAckIncomplete(false);
     }
   }, [mode]);
 
   if (!mode) return null;
+  const completeness = run && approval?.gate === "plan" ? planCompletenessForRun(run) : undefined;
+  const incomplete = completeness !== undefined && completeness.status !== "complete";
+  const approveBlocked = incomplete && !ackIncomplete;
 
   const execute = async (decision?: "approved" | "rejected") => {
     if (!actor.trim() || !reason.trim()) return;
+    if (decision === "approved" && approveBlocked) return;
     await onSubmit({
       ...(decision ? { decision } : {}),
       actor: actor.trim(),
@@ -69,6 +78,28 @@ export function RunActionDialog({
               <span>截止 {new Date(approval.expiresAt).toLocaleString("zh-CN")}</span>
             </div>
           )}
+          {completeness ? (
+            <div className={`approval-completeness tone-${completenessBarCopy(completeness).tone}`}>
+              <strong>{completenessBarCopy(completeness).title}</strong>
+              {completeness.issues.length > 0 ? (
+                <ul>
+                  {completeness.issues.map((issue) => <li key={issue}>{issue}</li>)}
+                </ul>
+              ) : (
+                <span>目标编号已覆盖。</span>
+              )}
+              {incomplete ? (
+                <label className="ack-incomplete">
+                  <input
+                    type="checkbox"
+                    checked={ackIncomplete}
+                    onChange={(event) => setAckIncomplete(event.target.checked)}
+                  />
+                  我知道计划不完整
+                </label>
+              ) : null}
+            </div>
+          ) : null}
           <label className="field-label" htmlFor="action-actor">操作者</label>
           <input
             id="action-actor"
@@ -100,7 +131,7 @@ export function RunActionDialog({
                 <X size={16} />拒绝
               </button>
             )}
-            <button type="submit" className="button primary" disabled={busy || !actor.trim() || !reason.trim()}>
+            <button type="submit" className="button primary" disabled={busy || !actor.trim() || !reason.trim() || approveBlocked}>
               {mode === "approval" ? <Check size={16} /> : <History size={16} />}
               {busy ? "提交中" : mode === "approval" ? "批准" : "恢复"}
             </button>

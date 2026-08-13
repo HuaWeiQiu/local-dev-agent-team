@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../web/src/api.js";
 import { buildTaskGraph } from "../web/src/graph.js";
+import { assessPlanCompleteness, namedDeliverablesInGoal } from "../web/src/plan-completeness.js";
 import {
   agentRoleLabel,
   canvasEmptyCopy,
@@ -102,7 +103,7 @@ describe("web workbench projections", () => {
       }),
     ).toContain("找不到 Codex");
     expect(canvasEmptyCopy({ status: "blocked", error: "boom", tasks: [] }).title).toBe("运行已阻塞");
-    expect(canvasEmptyCopy({ status: "orchestrating", tasks: [] }).title).toBe("正在规划任务");
+    expect(canvasEmptyCopy({ status: "orchestrating", tasks: [] }).title).toBe("架构正在拆任务图");
     expect(formatExperienceCondition("status=blocked")).toBe("状态：已阻塞");
     expect(formatExperienceCondition("topology=parallel-dag")).toBe("拓扑：依赖并行");
     expect(formatExperienceTag("failure")).toBe("失败");
@@ -125,7 +126,7 @@ describe("web workbench projections", () => {
       }),
     ).toContain("找不到 Codex");
     expect(canvasEmptyCopy({ status: "blocked", error: "boom", tasks: [] }).title).toBe("运行已阻塞");
-    expect(canvasEmptyCopy({ status: "orchestrating", tasks: [] }).title).toBe("正在规划任务");
+    expect(canvasEmptyCopy({ status: "orchestrating", tasks: [] }).title).toBe("架构正在拆任务图");
     expect(formatExperienceCondition("status=blocked")).toBe("状态：已阻塞");
     expect(formatExperienceCondition("topology=parallel-dag")).toBe("拓扑：依赖并行");
     expect(formatExperienceTag("failure")).toBe("失败");
@@ -161,6 +162,29 @@ describe("web workbench projections", () => {
     expect(runActionErrorMessage(new Error("Approval request 'a1' expired at 2026-01-01"))).toContain("审批已过期");
     expect(runActionErrorMessage(new Error("Cleanup preview is missing or expired; create a new preview"))).toContain("清理预览");
     expect(runActionErrorMessage(new Error("something entirely unexpected"))).toBe("something entirely unexpected");
+  });
+
+  it("projects plan completeness and named deliverables for the canvas", () => {
+    expect(namedDeliverablesInGoal("Implement T1-T4")).toEqual(["T1", "T2", "T3", "T4"]);
+    expect(namedDeliverablesInGoal("根据交接文档完成任务")).toEqual([]);
+    expect(humanizeFailure("Plan completeness rejected: 缺 T2 / 缺 T3")).toContain("计划不完备");
+    expect(humanizeFailure("Integration quality commands failed: tsc: command not found")).toContain("集成质量门失败");
+    const report = assessPlanCompleteness(
+      {
+        tasks: [{
+          id: "inspect-handoff",
+          title: "Inspect handover",
+          description: "read-only",
+          dependsOn: [],
+          ownedPaths: ["docs/HANDOFF.md"],
+          acceptanceCommands: [],
+          profile: null,
+        }],
+      },
+      "Implement T1-T4",
+    );
+    expect(report.status).toBe("rejected");
+    expect(report.issues.some((issue) => issue.includes("缺 T1"))).toBe(true);
   });
 });
 

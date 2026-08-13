@@ -1,7 +1,8 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { ensureWorktreeNodeModules } from "../src/quality/install.js";
 import { runQualityCommands } from "../src/quality/run.js";
 
 describe("runQualityCommands", () => {
@@ -96,5 +97,62 @@ describe("runQualityCommands", () => {
         controller.signal,
       ),
     ).rejects.toThrow("deadline exceeded");
+  });
+});
+
+describe("ensureWorktreeNodeModules", () => {
+  it("skips when package.json is absent or node_modules already exists", async () => {
+    const empty = await mkdtemp(path.join(tmpdir(), "agent-team-install-empty-"));
+    expect(await ensureWorktreeNodeModules(empty, { timeoutSeconds: 5 })).toBeUndefined();
+
+    const ready = await mkdtemp(path.join(tmpdir(), "agent-team-install-ready-"));
+    await writeFile(path.join(ready, "package.json"), "{}\n");
+    await writeFile(path.join(ready, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    await mkdir(path.join(ready, "node_modules"));
+    expect(await ensureWorktreeNodeModules(ready, { timeoutSeconds: 5 })).toBeUndefined();
+  });
+
+  it("skips install when package.json has no lockfile", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "agent-team-install-nolock-"));
+    await writeFile(path.join(cwd, "package.json"), "{}\n");
+    const marker = path.join(cwd, "installed.txt");
+    expect(
+      await ensureWorktreeNodeModules(cwd, {
+        timeoutSeconds: 10,
+        installer: {
+          command: process.execPath,
+          args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`],
+        },
+      }),
+    ).toBeUndefined();
+    await expect(readFile(marker, "utf8")).rejects.toThrow();
+  });
+
+  it("runs the installer when package.json exists without node_modules", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "agent-team-install-run-"));
+    await writeFile(path.join(cwd, "package.json"), "{}\n");
+    await writeFile(path.join(cwd, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    const marker = path.join(cwd, "installed.txt");
+    const result = await ensureWorktreeNodeModules(cwd, {
+      timeoutSeconds: 10,
+      installer: {
+        command: process.execPath,
+        args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ok')`],
+      },
+    });
+    expect(result?.exitCode).toBe(0);
+    expect(await readFile(marker, "utf8")).toBe("ok");
+  });
+
+  it("fails loudly when the installer exits non-zero", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "agent-team-install-fail-"));
+    await writeFile(path.join(cwd, "package.json"), "{}\n");
+    await writeFile(path.join(cwd, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    await expect(
+      ensureWorktreeNodeModules(cwd, {
+        timeoutSeconds: 10,
+        installer: { command: process.execPath, args: ["-e", "process.exit(2)"] },
+      }),
+    ).rejects.toThrow(/node_modules missing/);
   });
 });

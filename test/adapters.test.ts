@@ -332,7 +332,7 @@ describe("Claude adapter", () => {
 describe("Grok adapter", () => {
   const workerProfile: AgentProfile = {
     adapter: "grok",
-    model: "grok",
+    model: "grok-4.6",
     reasoning: "high",
     permission: "workspace-write",
     externalTools: "deny",
@@ -349,7 +349,8 @@ describe("Grok adapter", () => {
     });
 
     expect(invocation.command).toBe("grok");
-    expect(invocation.args).toContain("grok");
+    expect(invocation.args).toContain("--model");
+    expect(invocation.args).toContain("grok-4.6");
     expect(invocation.args).toContain("workspace");
     expect(invocation.args).toContain("--always-approve");
     expect(invocation.args).not.toContain("acceptEdits");
@@ -386,6 +387,19 @@ describe("Grok adapter", () => {
     expect(invocation.args).toContain("read-only");
     expect(invocation.args).toContain("plan");
     expect(invocation.args).not.toContain("--always-approve");
+  });
+
+  it("does not forward the CLI name grok as a model id", () => {
+    const inherited = new GrokAdapter().buildInvocation(
+      { ...workerProfile, model: "inherit" },
+      { cwd: "/tmp/repo", prompt: "Implement", promptFile: "/tmp/managed-prompt.txt" },
+    );
+    const aliased = new GrokAdapter().buildInvocation(
+      { ...workerProfile, model: "grok" },
+      { cwd: "/tmp/repo", prompt: "Implement", promptFile: "/tmp/managed-prompt.txt" },
+    );
+    expect(inherited.args).not.toContain("--model");
+    expect(aliased.args).not.toContain("--model");
   });
 
   it("parses structured output and token usage from the Grok JSON envelope", async () => {
@@ -437,6 +451,16 @@ describe("Grok adapter", () => {
         fixtureProcess(JSON.stringify({ text: "", stopReason: "EndTurn" })),
       ),
     ).rejects.toThrow("Grok returned no completion text or structured output");
+    await expect(
+      adapter.parseResult(
+        invocation,
+        fixtureProcess(JSON.stringify({
+          text: '{"ok":true}',
+          structuredOutput: { ok: true },
+          stopReason: "end_turn",
+        })),
+      ),
+    ).resolves.toMatchObject({ structured: { ok: true } });
     await expect(adapter.parseResult(invocation, fixtureProcess(""))).rejects.toThrow(
       "Grok returned no JSON output",
     );

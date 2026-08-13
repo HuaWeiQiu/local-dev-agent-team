@@ -18,7 +18,7 @@ profiles:
 
   grok-orchestrator:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -35,7 +35,7 @@ profiles:
 
   grok-architect:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -52,7 +52,7 @@ profiles:
 
   grok-researcher:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -61,7 +61,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -70,7 +70,7 @@ profiles:
 
   grok-worker-fast:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: medium
     permission: workspace-write
     externalTools: deny
@@ -95,7 +95,7 @@ profiles:
 
   grok-reviewer:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -112,7 +112,7 @@ profiles:
 
   grok-tester:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny

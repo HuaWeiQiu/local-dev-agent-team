@@ -400,6 +400,10 @@ function extractTrailingJsonObject(text: string): string | undefined {
   return text.slice(start, end + 1);
 }
 
+function isGrokCompletedStop(stopReason: string): boolean {
+  return stopReason.replace(/[_-]/g, "").toLowerCase() === "endturn";
+}
+
 export function parseGrokJson(process: ProcessResult): AgentRunResult {
   const rawText = process.stdout.trim();
   if (!rawText) {
@@ -414,7 +418,7 @@ export function parseGrokJson(process: ProcessResult): AgentRunResult {
     const text = typeof envelope.text === "string" ? envelope.text : rawText;
     const stopReason =
       typeof envelope.stopReason === "string" ? envelope.stopReason : undefined;
-    if (stopReason && stopReason !== "EndTurn") {
+    if (stopReason && !isGrokCompletedStop(stopReason)) {
       throw new Error(`Grok stopped without completing: ${stopReason}`);
     }
     if (!text && structured === undefined) {

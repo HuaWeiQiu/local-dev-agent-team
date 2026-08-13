@@ -31,7 +31,7 @@ describe("cli inventory and role bindings", () => {
     await mkdir(path.join(home, ".grok"), { recursive: true });
     await writeFile(
       path.join(home, ".grok", "config.toml"),
-      `[model.grok]\nmodel = "grok"\napi_key = "xai-secret"\n`,
+      `[models]\ndefault = "grok-4.6"\n[model."grok-4.6"]\nmodel = "grok-4.6"\napi_key = "xai-secret"\n`,
       "utf8",
     );
 
@@ -48,6 +48,7 @@ describe("cli inventory and role bindings", () => {
     const grok = inventory.clis.find((cli) => cli.id === "grok");
     expect(grok?.auth.status).toBe("present");
     expect(grok?.auth.detail).toMatch(/api_key/);
+    expect(grok?.defaultModel).toBe("grok-4.6");
   });
 
   it("materializes roleBindings into ephemeral profiles", () => {

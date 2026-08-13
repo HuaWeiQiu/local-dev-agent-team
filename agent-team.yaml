@@ -24,7 +24,7 @@ profiles:
 
   grok-orchestrator:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -34,7 +34,7 @@ profiles:
   # —— 架构（只读）——
   grok-architect:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -58,7 +58,7 @@ profiles:
   # —— 技术研究员（只读调研）——
   grok-researcher:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -82,7 +82,7 @@ profiles:
   # —— 审查（只读）——
   grok-reviewer:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -106,7 +106,7 @@ profiles:
   # —— 测试（只读）——
   grok-tester:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: read-only
     externalTools: deny
@@ -130,7 +130,7 @@ profiles:
   # —— 执行者（可写）——
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -139,7 +139,7 @@ profiles:
 
   grok-worker-fast:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: medium
     permission: workspace-write
     externalTools: deny
@@ -148,7 +148,7 @@ profiles:
 
   grok-worker-heavy:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny

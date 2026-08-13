@@ -12,26 +12,24 @@ import {
  * Structured-output JSON Schemas sent to agent CLIs, generated from the zod
  * contracts in contracts.ts so the two can no longer drift apart.
  *
- * Two minimal post-processing steps keep the emitted draft close to the
- * hand-written schemas the CLIs were validated against:
- * - the draft-2020-12 `$schema` marker is dropped; CLIs receive a bare schema
- *   object (the previous hand-written schemas had no `$schema` either);
- * - properties carrying a zod `.default()` are removed from `required`, because
- *   zod treats them as optional on input and fills the default. The previous
- *   hand-written exploreSummary schema incorrectly listed its defaulted array
- *   fields as required; the zod semantics are authoritative here.
+ * Two post-processing steps keep the emitted draft CLI-compatible:
+ * - the draft-2020-12 `$schema` marker is dropped;
+ * - every object `properties` key is listed in `required`. Codex / OpenAI
+ *   structured output rejects schemas that omit a property from `required`
+ *   (for example `acceptanceCommands.items.args` after a zod `.default()`).
+ * Zod still applies defaults when parsing the model payload.
  */
 function toCliJsonSchema(schema: z.ZodType): Record<string, unknown> {
   const generated = z.toJSONSchema(schema) as Record<string, unknown>;
   delete generated.$schema;
-  unrequireDefaultedProperties(generated);
+  requireAllObjectProperties(generated);
   return generated;
 }
 
-function unrequireDefaultedProperties(node: unknown): void {
+function requireAllObjectProperties(node: unknown): void {
   if (Array.isArray(node)) {
     for (const item of node) {
-      unrequireDefaultedProperties(item);
+      requireAllObjectProperties(item);
     }
     return;
   }
@@ -40,19 +38,11 @@ function unrequireDefaultedProperties(node: unknown): void {
   }
   const record = node as Record<string, unknown>;
   const properties = record.properties;
-  if (Array.isArray(record.required) && properties && typeof properties === "object") {
-    const declarations = properties as Record<string, unknown>;
-    record.required = record.required.filter((key) => {
-      const declaration = declarations[key as string];
-      return !(
-        declaration &&
-        typeof declaration === "object" &&
-        "default" in (declaration as Record<string, unknown>)
-      );
-    });
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    record.required = Object.keys(properties as Record<string, unknown>);
   }
   for (const value of Object.values(record)) {
-    unrequireDefaultedProperties(value);
+    requireAllObjectProperties(value);
   }
 }
 

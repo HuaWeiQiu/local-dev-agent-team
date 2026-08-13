@@ -61,7 +61,7 @@ profiles:
 
   grok-worker:
     adapter: grok
-    model: grok
+    model: grok-4.6
     reasoning: high
     permission: workspace-write
     externalTools: deny
@@ -123,8 +123,10 @@ Responses HTTPS transport.
 Grok headless mode receives prompts through a private owner-only temporary file,
 because its headless CLI does not consume piped stdin. The control plane creates
 and removes that file for each invocation; profiles cannot override its path.
-Use `model: grok` for a Grok profile. A Codex model name such as
-`gpt-5.6-sol` is never passed to Grok.
+Use a real Grok model id such as `grok-4.6` or `grok-4.5-latest`. Bare
+`model: grok` is treated as inherit (the Grok CLI default) because `grok` is
+the CLI name, not a model id. A Codex model name such as `gpt-5.6-sol` is
+never passed to Grok.
 
 The Grok adapter uses `maxTurns` when configured and otherwise defaults one
 invocation to 24 turns. Scope and workflow behavior belong in the worker role's

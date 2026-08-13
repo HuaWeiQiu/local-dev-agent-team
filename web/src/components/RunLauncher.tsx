@@ -1,6 +1,7 @@
 import { ChevronDown, Play, ShieldAlert, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { retrieveExperience } from "../api";
+import { namedDeliverablesInGoal } from "../plan-completeness";
 import {
   agentRoleLabel,
   morphologySummary,
@@ -195,6 +196,14 @@ export function RunLauncher({
             autoFocus
             required
           />
+          <p className="run-goal-hint">
+            大改动请列出 T1–Tn、路径和验收。只写「根据文档执行」通常只会得到一条读文档任务。
+          </p>
+          {namedDeliverablesInGoal(goal).length > 0 && (
+            <p className="run-goal-hint is-preview">
+              将校验计划是否覆盖 {namedDeliverablesInGoal(goal).join("、")}。
+            </p>
+          )}
           {experiencePreview && experiencePreview.items.length > 0 && (
             <p className="run-goal-experience-preview">
               将注入 {experiencePreview.items.length} 条已验证经验：
