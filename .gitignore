@@ -15,3 +15,8 @@ coverage/
 !.env.example
 .agent-team/
 *.log
+# Third-party repo snapshots used for offline analysis — never publish these.
+.analysis/
+# Written by scripts/write-desktop-latest.mjs on every desktop build; it
+# embeds this machine's absolute app path.
+desktop-latest.json
