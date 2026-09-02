@@ -1196,16 +1196,23 @@ describe("local workflow", () => {
     // Wait until the first wave is mid-execution with a persisted worktree.
     const store = new RunStateStore(path.join(root, ".agent-team", "runs"));
     let current: RunState | undefined;
-    const deadline = Date.now() + 10_000;
+    let lastSeen = "no run state";
+    // Poll to just under the it() timeout: under full-suite load this fixture
+    // can take well over 10s to reach the first wave, which made a short
+    // deadline fail the assertion while the run was still healthy.
+    const deadline = Date.now() + 25_000;
     while (Date.now() < deadline) {
       const states = await store.list();
+      lastSeen = states
+        .map((state) => `${state.status}/[${state.tasks.map((task) => task.status).join(",")}]`)
+        .join(" ") || lastSeen;
       current = states.find(
         (state) => state.status === "implementing" && state.tasks.some((task) => task.status === "working" && task.worktree),
       );
       if (current) break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    expect(current).toBeDefined();
+    expect(current, `run never reached implementing/working within 25s; last seen: ${lastSeen}`).toBeDefined();
     const worktree = current!.tasks.find((task) => task.status === "working")!.worktree!;
     expect(await pathExists(worktree)).toBe(true);
 
@@ -1218,7 +1225,7 @@ describe("local workflow", () => {
     // The task worktree survives the pause so resume can reuse the work.
     expect(await pathExists(worktree)).toBe(true);
     expect(settled.history.some((entry) => entry.status === "interrupted")).toBe(true);
-  }, 30_000);
+  }, 60_000);
 
   it("blocks a resume whose accumulated execution time budget is exhausted", async () => {
     const { root, loaded } = await createFixture("time-budget", (config) => {
