@@ -4,6 +4,9 @@ import { buildTaskGraph } from "../web/src/graph.js";
 import { assessPlanCompleteness, namedDeliverablesInGoal } from "../web/src/plan-completeness.js";
 import {
   agentRoleLabel,
+  compactBranchPair,
+  compactHeadBranch,
+  buildLifecyclePhases,
   canvasEmptyCopy,
   formatExperienceCondition,
   formatExperienceTag,
@@ -42,6 +45,39 @@ describe("web workbench projections", () => {
     expect(docs.position.x).toBe(ui.position.x);
     expect(docs.position.y).not.toBe(ui.position.y);
     expect(graph.edges).toHaveLength(2);
+  });
+
+  it("projects a run into the full lifecycle phase rail", () => {
+    const phases = buildLifecyclePhases({
+      status: "implementing",
+      strategy: { explore: { enabled: false } },
+      stageSummaries: [
+        { id: "1", stage: "orchestrating", at: "2026-01-01T00:00:00.000Z", title: "目标分析", summary: "已拆出退款幂等目标" },
+        { id: "2", stage: "planned", at: "2026-01-01T00:01:00.000Z", title: "已规划", summary: "拆成 3 个任务" },
+        { id: "3", stage: "implementing", at: "2026-01-01T00:02:00.000Z", title: "执行波次", summary: "正在实现退款接口" },
+      ],
+    } as never);
+    expect(phases.map((phase) => phase.id)).toEqual([
+      "intake",
+      "plan",
+      "execute",
+      "verify",
+      "approve",
+      "publish",
+      "done",
+    ]);
+    expect(phases.find((phase) => phase.id === "intake")?.tone).toBe("done");
+    expect(phases.find((phase) => phase.id === "execute")?.tone).toBe("current");
+    expect(phases.find((phase) => phase.id === "execute")?.summary).toBe("正在实现退款接口");
+    expect(phases.find((phase) => phase.id === "publish")?.tone).toBe("pending");
+    expect(phases.find((phase) => phase.id === "explore")).toBeUndefined();
+    expect(phases.find((phase) => phase.id === "approve")?.tone).toBe("pending");
+  });
+
+  it("compacts agent-team head branches for the top bar", () => {
+    expect(compactHeadBranch("agent-team/20260813t154344z-goal-bac3bc/integration")).toBe("工作分支");
+    expect(compactBranchPair("main", "agent-team/20260813t154344z-goal-bac3bc/integration")).toBe("main ← 工作分支");
+    expect(compactHeadBranch("feature/refund")).toBe("feature/refund");
   });
 
   it("maps execution states to stable labels and semantic tones", () => {

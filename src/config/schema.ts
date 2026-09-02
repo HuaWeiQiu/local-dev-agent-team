@@ -334,6 +334,8 @@ export const configSchema = z
       checkTimeoutSeconds: z.number().int().positive(),
       maxRepairAttempts: z.number().int().min(0).max(5),
       repairForbiddenPaths: z.array(z.string().min(1)),
+      /** When non-empty, origin must belong to one of these GitHub owners/hosts. */
+      allowedOwners: z.array(z.string().min(1)).default([]),
     }),
   })
   .superRefine((config, context) => {

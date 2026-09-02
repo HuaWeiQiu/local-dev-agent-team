@@ -14,6 +14,7 @@ import type {
 } from "../evidence/types.js";
 import type { SqliteEventStore } from "../events/store.js";
 import { GitManager } from "../git/manager.js";
+import { InquiryStore } from "../inquiry/store.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState, RunUsage } from "../state/types.js";
 import { branchSegment } from "../workflow/id.js";
@@ -209,7 +210,11 @@ export class RunRetention {
           throw error;
         }
         await this.stateStore.removeQuarantined(quarantined);
-        await this.removeRunGitArtifacts(candidate.id);
+        await this.removeRunGitArtifacts(
+          candidate.id,
+          currentById.get(candidate.id)?.managedBranches ?? [],
+        );
+        await this.removeRunInquiries(candidate.id);
         deletedRunIds.push(candidate.id);
         reclaimedBytes += candidate.bytes;
       }
@@ -251,7 +256,8 @@ export class RunRetention {
         throw error;
       }
       await this.stateStore.removeQuarantined(quarantined);
-      await this.removeRunGitArtifacts(runId);
+      await this.removeRunGitArtifacts(runId, state.managedBranches ?? []);
+      await this.removeRunInquiries(runId);
       return { deletedRunIds: [runId], reclaimedBytes: bytes };
     });
   }
@@ -302,7 +308,7 @@ export class RunRetention {
    * terminal and deleted, so failures only warn — they never resurrect or
    * block the deletion.
    */
-  private async removeRunGitArtifacts(runId: string): Promise<number> {
+  private async removeRunGitArtifacts(runId: string, managedBranches: string[] = []): Promise<number> {
     const worktreesRoot = path.resolve(
       this.loaded.root,
       this.loaded.config.project.stateDirectory,
@@ -335,11 +341,14 @@ export class RunRetention {
         }
       }
       const prefix = `agent-team/${branchSegment(runId)}/`;
-      const branches = await git.listBranches(`${prefix}*`);
+      const prefixBranches = await git.listBranches(`${prefix}*`);
+      const branches = new Set([...managedBranches, ...prefixBranches]);
       for (const branch of branches) {
         try {
-          await git.deleteBranch(branch);
-          branchesRemoved += 1;
+          if (await git.branchExists(branch)) {
+            await git.deleteBranch(branch);
+            branchesRemoved += 1;
+          }
         } catch (error) {
           console.warn(
             `[agent-team] failed to delete branch '${branch}': ${errorMessage(error)}`,
@@ -366,6 +375,20 @@ export class RunRetention {
       );
     }
     return branchesRemoved;
+  }
+
+  /** Best-effort cascade for side-session inquiries owned by a deleted run. */
+  private async removeRunInquiries(runId: string): Promise<void> {
+    try {
+      await new InquiryStore(
+        this.loaded.root,
+        this.loaded.config.project.stateDirectory,
+      ).deleteForRun(runId);
+    } catch (error) {
+      console.warn(
+        `[agent-team] failed to delete inquiries for run '${runId}': ${errorMessage(error)}`,
+      );
+    }
   }
 
   private async integrationDiff(state: RunState): Promise<IntegrationDiffEvidence> {

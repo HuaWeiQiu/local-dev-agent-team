@@ -19,7 +19,7 @@ import {
  *   (for example `acceptanceCommands.items.args` after a zod `.default()`).
  * Zod still applies defaults when parsing the model payload.
  */
-function toCliJsonSchema(schema: z.ZodType): Record<string, unknown> {
+export function toCliJsonSchema(schema: z.ZodType): Record<string, unknown> {
   const generated = z.toJSONSchema(schema) as Record<string, unknown>;
   delete generated.$schema;
   requireAllObjectProperties(generated);

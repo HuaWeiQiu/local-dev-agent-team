@@ -9,8 +9,12 @@ import type {
   RunEvidence,
 } from "../evidence/types.js";
 import { SqliteEventStore } from "../events/store.js";
+import { InquiryCoordinator } from "../inquiry/coordinator.js";
+import type { InquiryRecord } from "../inquiry/domain.js";
 import {
   GithubPublisher,
+  type PublishOptions,
+  type PublishPreview,
 } from "../github/publish.js";
 import {
   materializeRoleBindings,
@@ -117,6 +121,7 @@ export class RunSupervisor {
   private readonly evidenceStore: LocalEvidenceStore;
   private readonly retention: RunRetention;
   private readonly recovery: RunRecovery;
+  readonly inquiries: InquiryCoordinator;
   private evolutionMutationActive = false;
   private evolutionOperationsSealed = false;
   private evolutionMutationFinished: Promise<void> = Promise.resolve();
@@ -132,6 +137,7 @@ export class RunSupervisor {
       path.resolve(loaded.root, loaded.config.project.stateDirectory, "runs"),
       events,
     );
+    this.inquiries = new InquiryCoordinator(loaded, this.stateStore);
     this.evidenceStore = new LocalEvidenceStore(this.stateStore);
     this.retention = new RunRetention(this.loaded, this.stateStore, this.evidenceStore, events, {
       get: async (runId) => await this.get(runId),
@@ -250,6 +256,10 @@ export class RunSupervisor {
               signal: controller.signal,
               supervisorId: this.id,
               ...(purpose ? { purpose } : {}),
+              ...(request.baseBranch ? { baseBranch: request.baseBranch } : {}),
+              ...(request.headBranchName ? { headBranchName: request.headBranchName } : {}),
+              ...(request.syncDefaultFirst ? { syncDefaultFirst: request.syncDefaultFirst } : {}),
+              ...(request.stashIfDirty ? { stashIfDirty: true } : {}),
             },
           )
         : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events }).run({
@@ -262,6 +272,10 @@ export class RunSupervisor {
             supervisorId: this.id,
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
             ...(purpose ? { purpose } : {}),
+            ...(request.baseBranch ? { baseBranch: request.baseBranch } : {}),
+            ...(request.headBranchName ? { headBranchName: request.headBranchName } : {}),
+            ...(request.syncDefaultFirst ? { syncDefaultFirst: request.syncDefaultFirst } : {}),
+            ...(request.stashIfDirty ? { stashIfDirty: true } : {}),
           });
       this.track(
         runId,
@@ -431,6 +445,9 @@ export class RunSupervisor {
           profileOverrides: source.profileOverrides,
           ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
           ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
+          // Keep the same PR target but always use a fresh internal head branch:
+          // the previous custom head branch may already exist and carries old history.
+          baseBranch: source.baseBranch,
           parentRunId: source.id,
         },
         idempotencyKey,
@@ -602,12 +619,34 @@ export class RunSupervisor {
     return await this.retention.deleteRun(runId);
   }
 
+  async publishPreview(runId: string): Promise<PublishPreview> {
+    const state = await this.requireRun(runId);
+    const publisher = new GithubPublisher(this.loaded, this.stateStore);
+    return await publisher.preview(state);
+  }
+
+  askInquiry(runId: string, question: string, stage?: string): Promise<InquiryRecord> {
+    return this.inquiries.ask(runId, question, stage);
+  }
+
+  listInquiries(runId: string): Promise<InquiryRecord[]> {
+    return this.inquiries.list(runId);
+  }
+
+  getInquiry(runId: string, inquiryId: string): Promise<InquiryRecord> {
+    return this.inquiries.get(runId, inquiryId);
+  }
+
+  deleteInquiry(runId: string, inquiryId: string): Promise<void> {
+    return this.inquiries.delete(runId, inquiryId);
+  }
+
   /**
    * Publish a final-approved run: push the integration branch and create or
    * find its pull request. GitHub-related failures are classified into
    * distinguishable prompts (see github/errors.ts).
    */
-  async publish(runId: string): Promise<{
+  async publish(runId: string, options: PublishOptions = {}): Promise<{
     runId: string;
     status: string;
     pullRequestUrl?: string;
@@ -615,7 +654,7 @@ export class RunSupervisor {
     return await this.serializeAction(runId, async () => {
       const state = await this.requireRun(runId);
       const publisher = new GithubPublisher(this.loaded, this.stateStore);
-      const published = await publisher.publish(state);
+      const published = await publisher.publish(state, options);
       return {
         runId,
         status: published.status,
@@ -686,6 +725,7 @@ export class RunSupervisor {
     this.evolutionOperationsSealed = true;
     await this.evolutionMutationFinished;
     await Promise.all([...new Set(this.actionQueues.values())]);
+    await this.inquiries.close();
     this.retention.clearPreviews();
     for (const [runId, active] of this.active) {
       this.events.emit(runId, "run.cancel-requested", {

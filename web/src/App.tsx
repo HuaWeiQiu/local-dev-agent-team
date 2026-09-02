@@ -1,9 +1,11 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { Activity, Ban, BookMarked, Bot, Check, CircleDot, Copy, ExternalLink, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
+import { Activity, Ban, BookMarked, Bot, Check, CircleDot, Copy, ExternalLink, FileCheck2, FlaskConical, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, MessageCircleQuestion, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getWorkspace } from "./api";
+import { getControlPlaneVersion, getGitStatus, getWorkspace } from "./api";
 import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
 import { ExperienceWorkbench } from "./components/ExperienceWorkbench";
+import { PublishDialog } from "./components/PublishDialog";
+import { InquiryDrawer } from "./components/InquiryDrawer";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunDashboard, type MonitorPanel } from "./components/RunDashboard";
 import { RunLauncher } from "./components/RunLauncher";
@@ -16,9 +18,9 @@ import { useDesktopSettings } from "./hooks/useDesktopSettings";
 import { useRunActions } from "./hooks/useRunActions";
 import { latestPendingApproval, useRunEvents } from "./hooks/useRunEvents";
 import { useThemeMode } from "./hooks/useThemeMode";
-import { activeRunStatuses, preferredMonitorPanel, runActionErrorMessage } from "./presentation";
+import { activeRunStatuses, compactBranchPair, preferredMonitorPanel, runActionErrorMessage } from "./presentation";
 import { themeModeLabel } from "./theme";
-import type { ProjectScope, TaskRunState, WorkspaceInfo } from "./types";
+import type { ControlPlaneVersion, GitEnvironmentStatus, ProjectScope, TaskRunState, WorkspaceInfo } from "./types";
 
 const retryableStatuses = new Set(["blocked", "cancelled", "interrupted"]);
 
@@ -28,6 +30,12 @@ export default function App() {
   const [prCopied, setPrCopied] = useState(false);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [launcherStrategy, setLauncherStrategy] = useState<string>();
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [inquiryOpen, setInquiryOpen] = useState(false);
+  const [gitStatus, setGitStatus] = useState<GitEnvironmentStatus>();
+  const [controlVersion, setControlVersion] = useState<ControlPlaneVersion>();
+  const [labMenuOpen, setLabMenuOpen] = useState(false);
+  const [labMenuTop, setLabMenuTop] = useState(180);
   const [workspaceMode, setWorkspaceMode] = useState<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">("monitor");
   const [monitorPanel, setMonitorPanel] = useState<MonitorPanel>("graph");
   const [mobileView, setMobileView] = useState<"runs" | "design" | "evolution" | "experience" | "project" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">("flow");
@@ -68,6 +76,12 @@ export default function App() {
   const addDesktopProject = useDesktopProject({ desktopShell, setBusy: actions.setBusy, setError });
 
   useEffect(() => {
+    void getControlPlaneVersion()
+      .then(setControlVersion)
+      .catch(() => setControlVersion(undefined));
+  }, []);
+
+  useEffect(() => {
     void getWorkspace()
       .then((nextWorkspace) => {
         setWorkspace(nextWorkspace);
@@ -75,6 +89,24 @@ export default function App() {
       })
       .catch((requestError: unknown) => setError(runActionErrorMessage(requestError)));
   }, [setError]);
+
+  useEffect(() => {
+    if (!scope) {
+      setGitStatus(undefined);
+      return;
+    }
+    let cancelled = false;
+    getGitStatus(scope)
+      .then((status) => {
+        if (!cancelled) setGitStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) setGitStatus(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scope]);
 
   const openLauncher = useCallback((strategy?: string) => {
     setError(undefined);
@@ -106,6 +138,17 @@ export default function App() {
 
   const pendingApproval = latestPendingApproval(run);
 
+  useEffect(() => {
+    if (!labMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".nav-lab")) return;
+      setLabMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [labMenuOpen]);
+
   if (!workspace || !selectedProjectId) {
     return <div className="boot-screen"><CircleDot className="boot-mark" size={28} /><strong>Agent Team</strong><span>{error ?? "连接控制服务"}</span></div>;
   }
@@ -134,24 +177,61 @@ export default function App() {
           >
             <Workflow size={20} /><span>编排</span>
           </button>
-          <button
-            className={workspaceMode === "evolution" ? "is-active" : ""}
-            onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }}
-            aria-label="演进工作台"
-            title="演进工作台"
-            disabled={!config}
-          >
-            <Sparkles size={20} /><span>演进</span>
-          </button>
-          <button
-            className={workspaceMode === "experience" ? "is-active" : ""}
-            onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }}
-            aria-label="经验库"
-            title="经验库"
-            disabled={!config}
-          >
-            <BookMarked size={20} /><span>经验</span>
-          </button>
+          <div className="nav-lab">
+            <button
+              className={workspaceMode === "evolution" || workspaceMode === "experience" || labMenuOpen ? "is-active" : ""}
+              onClick={(event) => {
+                const next = !labMenuOpen;
+                setLabMenuOpen(next);
+                if (next) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setLabMenuTop(Math.round(rect.top));
+                }
+              }}
+              aria-expanded={labMenuOpen}
+              aria-haspopup="menu"
+              title="演进和经验"
+              disabled={!config}
+            >
+              <FlaskConical size={20} /><span>实验室</span>
+            </button>
+            {labMenuOpen ? (
+              <div className="nav-lab-menu" role="menu" style={{ top: labMenuTop }}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={workspaceMode === "evolution" ? "is-active" : ""}
+                  onClick={() => {
+                    setWorkspaceMode("evolution");
+                    setMobileView("evolution");
+                    setLabMenuOpen(false);
+                  }}
+                >
+                  <Sparkles size={15} />
+                  <span>
+                    <strong>演进</strong>
+                    <small>策略候选与评测</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={workspaceMode === "experience" ? "is-active" : ""}
+                  onClick={() => {
+                    setWorkspaceMode("experience");
+                    setMobileView("experience");
+                    setLabMenuOpen(false);
+                  }}
+                >
+                  <BookMarked size={15} />
+                  <span>
+                    <strong>经验</strong>
+                    <small>已验证经验库</small>
+                  </span>
+                </button>
+              </div>
+            ) : null}
+          </div>
           <button
             className={workspaceMode === "project" ? "is-active" : ""}
             onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }}
@@ -173,6 +253,7 @@ export default function App() {
         <span className={`navigation-stream ${connected ? "is-connected" : ""}`} title={connected ? "事件流已连接" : "事件流未连接"}>
           <Radio size={18} />
         </span>
+        <BuildIdentity control={controlVersion} />
       </aside>
 
       <header className="topbar">
@@ -213,7 +294,10 @@ export default function App() {
             >
               {workspace.projects.map((project) => (
                 <option key={project.id} value={project.id}>
-                  {project.name} ({project.defaultBranch})
+                  {project.name}
+                  {project.id === selectedProjectId && gitStatus?.githubAccount?.repoNameWithOwner
+                    ? ` · ${gitStatus.githubAccount.repoNameWithOwner}`
+                    : ""} ({project.defaultBranch})
                 </option>
               ))}
             </select>
@@ -235,10 +319,31 @@ export default function App() {
               网页模式请用工作区配置接入
             </span>
           )}
-          <span className="project-branch"><GitBranch size={13} />{selectedProject?.defaultBranch}</span>
+          <button
+            type="button"
+            className="project-branch"
+            onClick={() => { setWorkspaceMode("project"); setMobileView("project"); }}
+            title={run
+              ? `${run.baseBranch} ← ${run.integrationBranch}`
+              : gitStatus?.githubAccount?.repoNameWithOwner
+                ? `${gitStatus.githubAccount.repoNameWithOwner} · 打开项目 Git / Changes`
+                : "打开项目 Git：连接 GitHub、Changes、选择或同步分支"}
+            aria-label="打开项目 Git 面板"
+          >
+            <GitBranch size={13} />
+            {run
+              ? compactBranchPair(run.baseBranch, run.integrationBranch)
+              : (gitStatus?.currentBranch ?? gitStatus?.remoteDefaultBranch ?? selectedProject?.defaultBranch ?? "未检测")}
+            {!run && gitStatus?.changeSummary && gitStatus.changeSummary.files > 0 && (
+              <span className="topbar-change-stat">
+                <span className="changes-stat is-plus">+{gitStatus.changeSummary.insertions}</span>
+                <span className="changes-stat is-minus">-{gitStatus.changeSummary.deletions}</span>
+              </span>
+            )}
+          </button>
         </div>
         <div className="topbar-run">
-          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : workspaceMode === "experience" ? <><span className="topbar-context-label">经验库</span><strong>候选晋升与跨项目共享</strong></> : workspaceMode === "project" ? <><span className="topbar-context-label">项目设置</span><strong>当前项目角色覆盖</strong></> : workspaceMode === "settings" ? <><span className="topbar-context-label">全局设置</span><strong>本机 CLI 与角色默认</strong></> : run ? (
+          {workspaceMode === "design" ? <><span className="topbar-context-label">策略工作室</span><strong>拓扑与执行政策</strong></> : workspaceMode === "evolution" ? <><span className="topbar-context-label">演进工作台</span><strong>候选、预检与人工门禁</strong></> : workspaceMode === "experience" ? <><span className="topbar-context-label">经验库</span><strong>候选晋升与跨项目共享</strong></> : workspaceMode === "project" ? <><span className="topbar-context-label">项目设置</span><strong>连接 GitHub、Changes 与角色覆盖</strong></> : workspaceMode === "settings" ? <><span className="topbar-context-label">全局设置</span><strong>本机 CLI 与角色默认</strong></> : run ? (
             <>
               <RunStatusBadge status={run.status} />
               <strong>{run.goal}</strong>
@@ -271,12 +376,6 @@ export default function App() {
           ) : <span>本地 Agent 控制台</span>}
         </div>
         <div className="topbar-actions">
-          {workspaceMode !== "evolution" && workspaceMode !== "experience" && (
-            <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("evolution"); setMobileView("evolution"); }} disabled={!config} aria-label="演进工作台" title="演进工作台"><Sparkles size={17} /><span>演进</span></button>
-          )}
-          {workspaceMode !== "experience" && (
-            <button className="button secondary mobile-evolution-entry" onClick={() => { setWorkspaceMode("experience"); setMobileView("experience"); }} disabled={!config} aria-label="经验库" title="经验库"><BookMarked size={17} /><span>经验</span></button>
-          )}
           {workspaceMode === "monitor" && pendingApproval && (
             <button
               className="button secondary"
@@ -292,19 +391,29 @@ export default function App() {
               className="button primary"
               onClick={() => actions.setRunAction({ mode: "resume" })}
               disabled={busy}
-              title="从最近任务边界检查点继续（推荐）"
+              title="从上次已合并的波次继续；未完成任务会新开分支重做，不会假装原 Agent 进程还活着"
             >
-              <History size={16} /><span>从检查点继续</span>
+              <History size={16} /><span>从上次已合并波次继续</span>
             </button>
           ) : null}
           {workspaceMode === "monitor" && run && ["ready-to-merge", "ci-failed"].includes(run.status) && (
             <button
               className="button primary"
-              onClick={() => void actions.publish()}
+              onClick={() => setPublishOpen(true)}
               disabled={busy}
-              title="推送集成分支并创建 Pull Request"
+              title="预览并创建 Pull Request"
             >
               <GitPullRequest size={16} /><span>发布</span>
+            </button>
+          )}
+          {workspaceMode === "monitor" && run && (
+            <button
+              className="button secondary"
+              onClick={() => setInquiryOpen(true)}
+              disabled={busy}
+              title="对当前阶段发起只读旁路提问（不影响运行）"
+            >
+              <MessageCircleQuestion size={16} /><span>问进度</span>
             </button>
           )}
           {workspaceMode === "monitor" && run && activeRunStatuses.has(run.status) && (
@@ -385,6 +494,7 @@ export default function App() {
             pane="project"
             scope={scope}
             {...(selectedProject?.name ? { projectName: selectedProject.name } : {})}
+            {...(selectedProject?.defaultBranch ? { configDefaultBranch: selectedProject.defaultBranch } : {})}
             onOpenGlobal={() => { setWorkspaceMode("settings"); setMobileView("settings"); }}
             onSaved={() => void refreshDesktopSettings()}
           />
@@ -442,6 +552,29 @@ export default function App() {
         onClose={() => actions.setRunAction(undefined)}
         onSubmit={actions.submitRunAction}
       />
+      {scope && (
+        <PublishDialog
+          open={publishOpen}
+          scope={scope}
+          {...(run ? { run } : {})}
+          busy={busy}
+          onClose={() => setPublishOpen(false)}
+          onPublished={(url) => {
+            setPublishOpen(false);
+            void monitor.refreshRuns();
+            if (run) void monitor.refreshRun(run.id);
+            if (url) window.open(url, "_blank", "noopener");
+          }}
+        />
+      )}
+      {scope && (
+        <InquiryDrawer
+          open={inquiryOpen}
+          scope={scope}
+          {...(run ? { run } : {})}
+          onClose={() => setInquiryOpen(false)}
+        />
+      )}
       <RunCleanupDialog
         open={cleanupOpen}
         preview={cleanupPreview}
@@ -453,6 +586,24 @@ export default function App() {
         onClose={() => { actions.setCleanupOpen(false); actions.setCleanupPreview(undefined); actions.setCleanupError(undefined); }}
       />
     </div>
+  );
+}
+
+function BuildIdentity({ control }: { control?: ControlPlaneVersion | undefined }) {
+  const frontendBuild = __APP_BUILD_ID__;
+  const frontendVersion = __APP_VERSION__;
+  const mismatch = Boolean(control && control.build !== frontendBuild);
+  return (
+    <span
+      className={`build-identity ${mismatch ? "is-mismatch" : ""}`}
+      title={
+        mismatch
+          ? `前端 ${frontendVersion} (${frontendBuild}) 与控制服务 ${control?.version} (${control?.build}) 不一致。改 UI 后请重装桌面 App，或用 pnpm desktop:dev。`
+          : `前端 ${frontendVersion} · ${frontendBuild}${control ? ` · 服务 ${control.version}` : ""}`
+      }
+    >
+      {mismatch ? "旧前端" : `v${frontendVersion}`}
+    </span>
   );
 }
 

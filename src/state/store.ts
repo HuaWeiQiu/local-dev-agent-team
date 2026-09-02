@@ -1,7 +1,7 @@
 import type { Dirent } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
-import type { RunState, RunStatus } from "./types.js";
+import type { RunState, RunStatus, StageSummary } from "./types.js";
 import type { PendingRunEvent, RunEventSink } from "../events/types.js";
 import { randomUUID } from "node:crypto";
 import { traceIdForRun } from "../events/store.js";
@@ -90,9 +90,33 @@ export class RunStateStore {
     this.eventSink?.append(event);
   }
 
-  async transition(state: RunState, status: RunStatus, message: string): Promise<void> {
+  async transition(
+    state: RunState,
+    status: RunStatus,
+    message: string,
+    extra?: { highlights?: string[] },
+  ): Promise<void> {
+    const changed = state.status !== status;
     state.status = status;
-    state.history.push({ at: new Date().toISOString(), status, message });
+    const at = new Date().toISOString();
+    state.history.push({ at, status, message });
+    if (changed) {
+      const summary: StageSummary = {
+        id: randomUUID(),
+        stage: status,
+        at,
+        title: stageTitle(status),
+        summary: boundText(message, 200),
+        ...(extra?.highlights?.length
+          ? {
+              highlights: [...new Set(extra.highlights)]
+                .slice(0, 4)
+                .map((highlight) => boundText(highlight, 80)),
+            }
+          : {}),
+      };
+      state.stageSummaries = [...(state.stageSummaries ?? []), summary].slice(-64);
+    }
     await this.save(state);
   }
 
@@ -217,9 +241,42 @@ export function summarizeRun(state: RunState): import("./types.js").RunSummary {
   };
 }
 
+const stageTitles: Record<RunStatus, string> = {
+  created: "已创建",
+  orchestrating: "目标分析",
+  exploring: "代码探索",
+  architecting: "任务规划",
+  planned: "已规划",
+  implementing: "执行波次",
+  "reviewing-testing": "审查测试",
+  reworking: "返工",
+  integrating: "集成",
+  "final-checks": "最终检查",
+  "awaiting-human": "等待确认",
+  publishing: "发布",
+  "waiting-ci": "等待 CI",
+  "ci-failed": "CI 失败",
+  repairing: "修复",
+  "ready-to-merge": "可合并",
+  completed: "已完成",
+  cancelled: "已取消",
+  interrupted: "已中断",
+  blocked: "已阻塞",
+};
+
+function stageTitle(status: RunStatus): string {
+  return stageTitles[status];
+}
+
+function boundText(value: string, maxCharacters: number): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length <= maxCharacters
+    ? compact
+    : `${compact.slice(0, maxCharacters - 1)}…`;
+}
+
 /** Mirrors the directory-fsync discipline of src/evolution/persistence.ts. */
-async function syncDirectory(directoryPath: string): Promise<void> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+async function syncDirectory(directoryPath: string): Promise<void> {  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(directoryPath, "r");
     await handle.sync();

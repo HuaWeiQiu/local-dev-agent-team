@@ -63,14 +63,14 @@ export function RunActionDialog({
         <header>
           <div>
             <span className="section-kicker">
-              {mode === "approval" ? "人工门禁" : mode === "pause" ? "运行控制" : "检查点"}
+              {mode === "approval" ? "人工门禁" : mode === "pause" ? "运行控制" : "续跑"}
             </span>
             <h2 id="run-action-title">
               {mode === "approval"
                 ? (approval?.gate === "plan" ? "审批执行计划" : "审批交付结果")
                 : mode === "pause"
                   ? "暂停运行"
-                  : "恢复运行"}
+                  : "从上次已合并波次继续"}
             </h2>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭">
@@ -78,6 +78,11 @@ export function RunActionDialog({
           </button>
         </header>
         <form onSubmit={submit}>
+          {mode === "resume" && (
+            <p className="run-goal-hint">
+              不会假装原来的 Agent 进程还活着。已合并的任务会保留，未完成的任务会新开分支重做。
+            </p>
+          )}
           {approval && (
             <div className="approval-summary">
               <strong>{approval.summary}</strong>

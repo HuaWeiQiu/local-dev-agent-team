@@ -47,6 +47,8 @@ export interface TaskRunState {
   branch?: string;
   worktree?: string;
   commit?: string;
+  /** One-sentence task conclusion, set when the task passes or blocks. */
+  summary?: string;
   /** Integration-branch merge commit produced when this task was merged. */
   mergeCommit?: string;
   /**
@@ -66,6 +68,18 @@ export interface StateEvent {
   at: string;
   status: RunStatus;
   message: string;
+}
+
+export interface StageSummary {
+  id: string;
+  stage: RunStatus;
+  at: string;
+  title: string;
+  /** One-sentence conclusion, max 200 characters. */
+  summary: string;
+  /** Key artifacts or failures, max 4 entries x 80 characters. */
+  highlights?: string[];
+  error?: string;
 }
 
 export type ApprovalDecision = "approved" | "rejected";
@@ -162,6 +176,10 @@ export interface RunState {
   baseCommit: string;
   integrationBranch: string;
   integrationWorktree: string;
+  /** Head + task branches created by this run; cleanup deletes exactly these. */
+  managedBranches?: string[];
+  /** Concise per-stage conclusions surfaced in the graph and activity log. */
+  stageSummaries?: StageSummary[];
   status: RunStatus;
   createdAt: string;
   updatedAt: string;

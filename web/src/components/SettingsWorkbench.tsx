@@ -31,6 +31,7 @@ import type {
   RoleBindingInput,
 } from "../types";
 import { applyRolePatch, RoleBindingEditor } from "./RoleBindingEditor";
+import { ProjectGitPanel } from "./ProjectGitPanel";
 
 const BUILT_IN_ROLES = [
   "orchestrator",
@@ -51,6 +52,7 @@ export function SettingsWorkbench({
   pane = "global",
   scope,
   projectName,
+  configDefaultBranch,
   onOpenProject,
   onOpenGlobal,
   onSaved,
@@ -58,6 +60,7 @@ export function SettingsWorkbench({
   pane?: "global" | "project";
   scope?: ProjectScope;
   projectName?: string;
+  configDefaultBranch?: string;
   onOpenProject?(): void;
   onOpenGlobal?(): void;
   onSaved?(): void;
@@ -353,10 +356,10 @@ export function SettingsWorkbench({
         <div className="settings-hero-icon">{isProject ? <FolderCog size={22} /> : <Settings2 size={22} />}</div>
         <div>
           <span className="section-kicker">{isProject ? `当前项目${projectName ? ` · ${projectName}` : ""}` : "本机全局"}</span>
-          <h1>{isProject ? "项目角色覆盖" : "Agent CLI 与角色默认"}</h1>
+          <h1>{isProject ? "项目 Git 与角色覆盖" : "Agent CLI 与角色默认"}</h1>
           <p>
             {isProject
-              ? "只改当前项目。某个角色没单独设置时，自动用全局默认；保存后新建运行和重试都会按合并结果选 CLI。"
+              ? "上方连接 GitHub、处理 Changes、管理分支与远端同步；下方只覆盖本项目角色。某个角色没单独设置时，自动用全局默认。"
               : "检索本机 Codex / Grok / Kimi / Claude 的配置与授权状态，设置默认模型与思考深度。项目没有单独覆盖的角色会用这里的值。"}
           </p>
         </div>
@@ -472,7 +475,7 @@ export function SettingsWorkbench({
             </button>
           </div>
           <p className="settings-detect-hint">
-            监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存全局」。
+            至少需要一种 CLI 已安装并登录才能开工。没有的话先装 Codex / Claude Code / Grok / Kimi，登录后再点「手动检测」。监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。
           </p>
         </div>
       </section>}
@@ -528,6 +531,13 @@ export function SettingsWorkbench({
           ))}
         </div>
       </section>}
+
+      {isProject && scope && (
+        <ProjectGitPanel
+          scope={scope}
+          configDefaultBranch={configDefaultBranch ?? "main"}
+        />
+      )}
 
       <section className="settings-panel">
         <div className="settings-panel-head">

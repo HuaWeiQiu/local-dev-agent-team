@@ -60,7 +60,16 @@ describe("control HTTP server", () => {
       status: response.status,
       body: (await response.json()) as { project: string },
     }));
-    expect(health).toEqual({ status: 200, body: expect.objectContaining({ project: "fixture" }) });
+    expect(health).toEqual({
+      status: 200,
+      body: expect.objectContaining({ project: "fixture", version: "0.1.0", build: expect.any(String) }),
+    });
+    const version = await fetch(`${listening.url}/api/version`).then(async (response) => ({
+      status: response.status,
+      body: await response.json(),
+    }));
+    expect(version.status).toBe(200);
+    expect(version.body).toEqual(expect.objectContaining({ version: "0.1.0", build: expect.any(String) }));
 
     const interop = await fetch(`${listening.url}/api/interop`);
     expect(interop.status).toBe(200);

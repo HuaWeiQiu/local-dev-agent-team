@@ -26,12 +26,14 @@ import { loadWorkspace } from "./workspace/load.js";
 import { startWorkspaceControlService } from "./workspace/service.js";
 import { assertDiagnosticProfilePermission } from "./security/permissions.js";
 import { buildInteropManifest } from "./interop/manifest.js";
+import { GitProjectService } from "./git/project.js";
+import { APP_VERSION } from "./version.js";
 
 const program = new Command();
 program
   .name("agent-team")
   .description("Local-first orchestration for software-development agents")
-  .version("0.1.0");
+  .version(APP_VERSION);
 
 /**
  * CLI assembly point: explicitly enable full validation (adapter conformance +
@@ -222,12 +224,18 @@ program
     [],
   )
   .option("--strategy <name>", "named execution strategy")
+  .option("--base-branch <branch>", "PR target / run base branch")
+  .option("--branch <branch>", "PR head branch name to create for this run")
+  .option("--sync-default", "ff-only sync the remote default branch first", false)
   .option("-c, --config <path>", "configuration path")
   .action(
     async (options: {
       goal: string;
       profile: string[];
       strategy?: string;
+      baseBranch?: string;
+      branch?: string;
+      syncDefault?: boolean;
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
@@ -246,6 +254,9 @@ program
           profileOverrides,
           ...(options.strategy ? { strategy: options.strategy } : {}),
           ...(roleBindings ? { roleBindings } : {}),
+          ...(options.baseBranch ? { baseBranch: options.baseBranch } : {}),
+          ...(options.branch ? { headBranchName: options.branch } : {}),
+          ...(options.syncDefault ? { syncDefaultFirst: true } : {}),
         });
         const state = await runtime.supervisor.wait(started.runId);
         if (!state) throw new Error(`Run '${started.runId}' stopped without a final state`);
@@ -263,6 +274,67 @@ program
       }
     },
   );
+
+const branchCommand = program
+  .command("branch")
+  .description("Inspect, create, or ff-only sync Git branches for the current project");
+
+branchCommand
+  .command("list")
+  .description("List local and remote branches")
+  .option("--remote", "only remote branches", false)
+  .option("-c, --config <path>", "configuration path")
+  .action(async (options: { remote?: boolean; config?: string }) => {
+    const loaded = await loadValidatedConfig(options.config);
+    const service = gitService(loaded);
+    const branches = await service.branches(options.remote ? "remote" : "all");
+    if (branches.length === 0) {
+      process.stdout.write("No branches found\n");
+      return;
+    }
+    for (const branch of branches) {
+      const flags = [
+        branch.kind,
+        branch.isDefault ? "default" : "",
+        branch.isCurrent ? "current" : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      process.stdout.write(`${branch.name}\t${branch.commit.slice(0, 12)}\t${flags}\n`);
+    }
+  });
+
+branchCommand
+  .command("create")
+  .description("Create a local branch without checking it out")
+  .argument("<name>", "branch name")
+  .option("--base <branch>", "base branch (defaults to the remote default)")
+  .option("--no-sync", "do not ff-only sync the default branch first")
+  .option("-c, --config <path>", "configuration path")
+  .action(async (name: string, options: { base?: string; sync?: boolean; config?: string }) => {
+    const loaded = await loadValidatedConfig(options.config);
+    const created = await gitService(loaded).create({
+      name,
+      ...(options.base ? { baseBranch: options.base } : {}),
+      syncFirst: options.sync !== false,
+    });
+    process.stdout.write(`${created.name}\t${created.commit}\n`);
+  });
+
+branchCommand
+  .command("sync")
+  .description("Fast-forward a local branch from the configured remote")
+  .option("--branch <branch>", "branch to sync (defaults to the remote default)")
+  .option("-c, --config <path>", "configuration path")
+  .action(async (options: { branch?: string; config?: string }) => {
+    const loaded = await loadValidatedConfig(options.config);
+    const result = await gitService(loaded).sync({
+      ...(options.branch ? { branch: options.branch } : {}),
+    });
+    process.stdout.write(
+      `${result.branch}\t${result.previousCommit ?? "-"}\t${result.newCommit}\t${result.changed ? "updated" : "unchanged"}\n`,
+    );
+  });
 
 program
   .command("serve")
@@ -630,6 +702,16 @@ async function loadRunContext(configPath?: string): Promise<{
     "runs",
   );
   return { loaded, store: new RunStateStore(runsDirectory) };
+}
+
+function gitService(loaded: LoadedConfig): GitProjectService {
+  return new GitProjectService({
+    root: loaded.root,
+    worktreesRoot: path.resolve(loaded.root, loaded.config.project.stateDirectory, "worktrees"),
+    remote: loaded.config.github.remote,
+    configDefaultBranch: loaded.config.project.defaultBranch,
+    allowedOwners: loaded.config.github.allowedOwners ?? [],
+  });
 }
 
 function printChecks(checks: Array<{ bucket: string; name: string; state: string }>): void {

@@ -13,7 +13,7 @@
   -> 确定性命令 + 审查 Agent + 测试 Agent
   -> 有次数上限的返工
   -> 集成分支
-  -> GitHub 草稿 PR
+  -> GitHub 正式 PR
   -> 人工确认合并
 ```
 
@@ -36,8 +36,11 @@
 - 计划、审查结论、测试结论和最终决策都使用结构化数据协议。
 - 项目测试命令是真实进程和硬性门禁，Agent 不能把失败的测试说成成功。
 - 返工、并发数、进程时间和 CI 修复次数都有明确上限。
-- 可以创建 GitHub 草稿 PR、等待 Actions 检查并执行一次受限修复。
+- **Git 分支闭环**：新建运行可选 base（PR 目标）分支；可按目标自动创建 `feature/<目标slug>` 工作分支；可一键 ff-only 同步远端默认分支后再以它为基地；空仓库/无 git/无 gh 授权等边界都有能力检测与可执行引导。
+- 可以创建 GitHub **正式 PR**（新项目默认；草稿仍可通过配置开关）、等待 Actions 检查并执行一次受限修复；发布前可预览并编辑标准 PR 标题与描述。
 - 不自动合并代码，最终合并必须由人确认。
+- **阶段摘要**：每个阶段落盘一句精简总结（不包含推理过程与原始输出），展示在任务图与活动日志的“阶段”页签。
+- **旁路提问**：运行中可发起只读“问进度”软分支会话，基于当前快照回答、不影响主运行，会话可单独删除。
 - 提供 React/Tauri 演进工作台：人工候选保留结构预检与精确确认；可选的项目级自动策略循环会在固定目标上隔离评测、按确定性分数自动应用更优策略，并受轮数、连续无提升和手动停止硬限制。
 - **经验库**：运行终态抽取候选 → 人工/评测晋升为已验证 → 可共享到本机公共目录；规划与返工会注入已验证经验（默认不注入候选）。
 - **运行历史清理**：支持单条删除终态运行，以及按保留天数批量清理；删除会连同该运行的 Git worktree 与本地分支一起回收，控制服务启动时还会清扫历史遗留的孤儿 worktree 目录。
@@ -58,7 +61,7 @@
 - Node.js 24 或更高版本。
 - pnpm 和 Git。
 - 至少安装并登录一个受支持的 Agent CLI。
-- 使用 GitHub 发布功能时，需要安装并登录 GitHub CLI `gh`。
+- 使用 GitHub 发布功能时，需要安装 GitHub CLI `gh`。可在工作台项目 Git 里点「连接 GitHub」完成浏览器授权，不必先去终端登录。
 
 本项目不会读取、复制或保存模型供应商的 API Key。子进程直接复用各个
 Agent CLI 自己的本地登录状态和配置。
@@ -288,7 +291,8 @@ Worker 开始执行。所有任务、质量命令和审查通过后，还需要�
 的运行并点击“恢复”。系统只会从经过验证的 Git 检查点继续；未完成 Agent 进程不会
 被伪装成仍在运行。
 
-最终审批通过后，可以在终端创建并检查 GitHub 草稿 PR：
+最终审批通过后，工作台“发布”按钮会先打开 **PR 预览**：展示 base/head 分支、
+标准标题与描述（目标/方案/执行/实现/验证），可编辑后创建正式 PR。CLI 等价命令：
 
 ```bash
 agent-team publish <run-id> --wait
@@ -591,7 +595,35 @@ agent-team resume <run-id> \
 会保留为审计证据，任务改用新的 `resume-N` 分支重跑；不会伪装成续接已终止的
 Agent CLI 进程。
 
-创建草稿 PR 并等待 GitHub Actions：
+### 分支选择与远端同步
+
+新建运行时，Git 区块会检测 `git`/`gh`/远端仓库能力，并允许：
+
+- 选择 **base 分支**（PR 目标分支），默认取远端默认分支。
+- 勾选“按目标创建工作分支”，自动生成 `feature/<目标slug>`（可用 fix/chore/docs/refactor 前缀），PR 将使用该分支作为 head。
+- 勾选“先同步远端默认分支”，启动前会执行 **fetch + fast-forward 同步**，再把新分支建在同步后的 commit 上。
+- 空仓库可点“初始化 Git 仓库 / 创建空初始提交”；无 git、无 gh、无权限会显示可执行引导，而不是裸错误。
+
+CLI 等价参数：
+
+```bash
+agent-team run --goal "为用户列表增加游标分页" \
+  --base-branch main \
+  --branch feature/cursor-pagination \
+  --sync-default
+agent-team branch list
+agent-team branch create feature/cursor-pagination --base main --sync
+agent-team branch sync
+```
+
+同步只允许快进（fast-forward）；遇到分叉会拒绝并提示人工处理，绝不 rebase/reset/force push。
+
+### 创建正式 PR 并等待 GitHub Actions
+
+最终审批通过、状态为 `ready-to-merge` 后，工作台点击“发布”会先展示标准
+PR 预览（标题 `feat: <目标摘要>`，描述包含目标/方案/执行/实现/验证/合并策略），
+可编辑后创建 **正式 PR**。新项目默认 `draftPullRequest: false`；已有项目若配置为
+草稿会保持草稿并在预览中提示。
 
 ```bash
 agent-team publish <run-id> --wait
@@ -802,8 +834,14 @@ commands，否则质量门会失败。详细说明见 [可选外部集成](docs/
 经过 Git 验证的任务检查点人工恢复；未完成波次会使用新的分支重新执行。其他
 Agent CLI 需要通过适配器接口接入。
 
+桌面端有三套产物：Tauri 壳、控制服务（`dist/cli.js`）、前端（`web/dist`）。
+改界面后日常用 `pnpm desktop:dev`；给自己用必须重装 App。只刷新窗口看不到更新。
+启动器和工作台会显示版本/构建号，三套不一致时会提示这是旧包。
+
 ## 更多文档
 
+- [完整产品方案](docs/product-plan.zh-CN.md)（定位、原则、主路径、已落地能力、路线图与明确不做的事）
+- [企业内部 × 消费级迭代](docs/internal-consumer-iteration.zh-CN.md)
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
 - [安全模型](docs/security.md)（含受限自演进信任、持久化、应用、控制面与前端边界）

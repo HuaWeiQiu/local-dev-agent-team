@@ -6,7 +6,10 @@ import { createDefaultConfig } from "../src/config/defaults.js";
 import type { LoadedConfig } from "../src/config/load.js";
 import { SqliteEventStore } from "../src/events/store.js";
 import { GithubClient } from "../src/github/client.js";
-import { GithubPublisher } from "../src/github/publish.js";
+import {
+  GithubPublisher,
+  renderPullRequestTitle,
+} from "../src/github/publish.js";
 import { RunStateStore } from "../src/state/store.js";
 import type { RunState } from "../src/state/types.js";
 
@@ -61,6 +64,24 @@ describe("GithubPublisher approval boundary", () => {
     const persisted = await fixture.store.load(state.id);
     expect(persisted.status).toBe("ready-to-merge");
     expect(persisted.error).toContain("gh auth failed");
+    fixture.events.close();
+  });
+});
+
+describe("GithubPublisher PR template", () => {
+  it("derives a conventional title from the head branch prefix and goal summary", () => {
+    const state = fakeRun("ready-to-merge");
+    state.integrationBranch = "feature/cursor-pagination";
+    expect(renderPullRequestTitle(state)).toBe("feat: Publish guarded result");
+
+    state.integrationBranch = "fix/login-timeout";
+    state.goal = "Fix login timeout";
+    expect(renderPullRequestTitle(state)).toBe("fix: Fix login timeout");
+  });
+
+  it("defaults new project configs to formal PRs instead of drafts", async () => {
+    const fixture = await createFixture();
+    expect(fixture.loaded.config.github.draftPullRequest).toBe(false);
     fixture.events.close();
   });
 });

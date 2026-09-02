@@ -6,7 +6,9 @@ Local Dev Agent Team coordinates existing coding agents without becoming a
 model provider or authentication broker. The control plane owns workflow
 state, Git isolation, quality gates, retry limits, and GitHub publication. Agent
 CLIs own model access, authentication, tool execution, and model-specific
-configuration.
+configuration. GitHub identity stays in the local `gh` credential store; the
+control plane can launch a browser login and project a sanitized account
+snapshot, but it is not an OAuth app and does not persist tokens.
 
 The optional local control service is a long-running owner around this core:
 

@@ -25,7 +25,7 @@ import {
   taskKindLabel,
   taskPhaseLabel,
 } from "../plan-completeness";
-import { canvasEmptyCopy, humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
+import { buildLifecyclePhases, canvasEmptyCopy, humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type { RunState, TaskRunState } from "../types";
 import { TaskStatusBadge } from "./StatusBadge";
@@ -38,7 +38,11 @@ interface DagCanvasProps {
   onSelectTask(task: TaskRunState): void;
 }
 
-export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps) {
+export const DagCanvas = memo(function DagCanvas({
+  run,
+  selectedTaskId,
+  onSelectTask,
+}: DagCanvasProps) {
   const compactLayout = useMediaQuery("(max-width: 800px)");
   const palette = useFlowPalette();
   const graph = useMemo(
@@ -121,6 +125,24 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
           <span>{humanizeFailure(run.error)}</span>
         </div>
       ) : null}
+      {run ? (
+        <ol className="canvas-stage-rail" aria-label="运行阶段">
+          {buildLifecyclePhases(run).map((phase) => (
+            <li key={phase.id} className={`canvas-stage-step is-${phase.tone}`}>
+              <strong>{phase.title}</strong>
+              <span>
+                {phase.tone === "current" && phase.id === "publish"
+                  ? "用右上角「发布」创建正式 PR"
+                  : phase.tone === "current" && phase.id === "approve"
+                    ? "用右上角「处理审批」继续"
+                    : run.status === "interrupted" && phase.id === "execute"
+                      ? "用右上角从上次已合并波次继续"
+                      : (phase.summary ?? (phase.tone === "pending" ? "未开始" : phase.tone === "current" ? "进行中" : phaseToneFallback(phase.tone)))}
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
       {nodes.length > 0 ? (
         <div className="flow-stage">
           <ReactFlow
@@ -156,6 +178,13 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
     </main>
   );
 });
+
+function phaseToneFallback(tone: "done" | "current" | "pending" | "failed"): string {
+  if (tone === "done") return "已完成";
+  if (tone === "failed") return "已中止";
+  if (tone === "current") return "进行中";
+  return "未开始";
+}
 
 function TaskNode({ data, selected }: NodeProps) {
   const nodeData = data as TaskNodeData;

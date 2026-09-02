@@ -22,6 +22,7 @@ import {
   cleanupRunRequestSchema,
   experienceReasonRequestSchema,
   projectRoleSettingsUpdateSchema,
+  publishRunRequestSchema,
   resumeRunRequestSchema,
   pauseRunRequestSchema,
   startRunRequestSchema,
@@ -53,6 +54,8 @@ import {
   singleHeader,
 } from "./http-common.js";
 import { streamEvents } from "./http-sse.js";
+import { controlPlaneIdentity } from "../version.js";
+import { buildRunAudit, renderRunAuditMarkdown } from "../audit/export.js";
 
 export const runRoutes: ProjectApiRoute[] = [
   {
@@ -64,6 +67,7 @@ export const runRoutes: ProjectApiRoute[] = [
         project: context.loaded.config.project.name,
         projectId: context.id,
         supervisorId: context.supervisor.id,
+        ...controlPlaneIdentity(),
       });
     },
   },
@@ -460,6 +464,26 @@ export const runRoutes: ProjectApiRoute[] = [
   },
   {
     method: "GET",
+    pattern: "/runs/:runId/audit",
+    handler: async (context, request, response, url, params) => {
+      const run = await context.supervisor.get(decodePathSegment(params.runId!));
+      if (!run) throw new HttpError(404, "Run not found");
+      const audit = buildRunAudit(run, singleHeader(request.headers["x-agent-team-operator"]));
+      if (url.searchParams.get("format") === "md") {
+        const body = renderRunAuditMarkdown(audit);
+        response.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${run.id}-audit.md"`,
+          "Content-Length": Buffer.byteLength(body),
+        });
+        response.end(body);
+        return;
+      }
+      sendJson(response, 200, { audit });
+    },
+  },
+  {
+    method: "GET",
     pattern: "/runs/:runId/evidence",
     handler: async (context, _request, response, _url, params) => {
       const evidence = await context.supervisor.evidence(decodePathSegment(params.runId!));
@@ -511,12 +535,33 @@ export const runRoutes: ProjectApiRoute[] = [
     },
   },
   {
-    method: "POST",
-    pattern: "/runs/:runId/actions/publish",
+    method: "GET",
+    pattern: "/runs/:runId/publish-preview",
     handler: async (context, _request, response, _url, params) => {
       const runId = decodePathSegment(params.runId!);
       try {
-        const result = await context.supervisor.publish(runId);
+        sendJson(response, 200, { preview: await context.supervisor.publishPreview(runId) });
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/publish",
+    handler: async (context, request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      const parsed = publishRunRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        const result = await context.supervisor.publish(runId, {
+          ...(parsed.data.title ? { title: parsed.data.title } : {}),
+          ...(parsed.data.body ? { body: parsed.data.body } : {}),
+          ...(parsed.data.pushBaseBranch ? { pushBaseBranch: true } : {}),
+          ...(parsed.data.draft !== undefined ? { draft: parsed.data.draft } : {}),
+        });
         sendJson(response, 202, result);
       } catch (error) {
         throw runActionHttpError(error);
@@ -683,6 +728,10 @@ export function buildPublicConfig(
     strategies,
     observability: loaded.config.observability,
     interop: buildInteropManifest(loaded.config),
+    github: {
+      enabled: loaded.config.github.enabled,
+      allowedOwners: loaded.config.github.allowedOwners ?? [],
+    },
   };
 }
 

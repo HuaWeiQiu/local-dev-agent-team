@@ -19,6 +19,7 @@ import type {
   RoleBindingInput,
   StartRunInput,
 } from "../types";
+import { GitBranchPicker, type GitSelection } from "./GitBranchPicker";
 
 interface RunLauncherProps {
   open: boolean;
@@ -64,6 +65,8 @@ export function RunLauncher({
   const [bindings, setBindings] = useState<Record<string, RoleBindingInput>>({});
   const [useCliPicker, setUseCliPicker] = useState(true);
   const [experiencePreview, setExperiencePreview] = useState<ExperiencePlanningBundle>();
+  const [gitSelection, setGitSelection] = useState<GitSelection>({});
+  const [trustAck, setTrustAck] = useState(false);
 
   const roles = useMemo(() => orderedRoles(Object.keys(config.roles)), [config.roles]);
 
@@ -124,6 +127,7 @@ export function RunLauncher({
     setUseCliPicker(
       showCliPicker && Boolean(inventory && inventory.clis.some((c) => c.installed && c.runtimeSupported)),
     );
+    setTrustAck(scope ? hasTrustedProject(scope.projectId) : false);
     // 仅在打开瞬间读取最新 props；deps 变化由 initializedRef 拦截
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -163,11 +167,17 @@ export function RunLauncher({
         )
       : undefined;
 
+    if (scope && !hasTrustedProject(scope.projectId) && !trustAck) return;
+    if (scope && trustAck) rememberTrustedProject(scope.projectId);
     const succeeded = await onSubmit({
       goal: trimmedGoal,
       strategy,
       profileOverrides: {},
       ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
+      ...(gitSelection.baseBranch ? { baseBranch: gitSelection.baseBranch } : {}),
+      ...(gitSelection.headBranchName ? { headBranchName: gitSelection.headBranchName } : {}),
+      ...(gitSelection.syncDefaultFirst ? { syncDefaultFirst: true } : {}),
+      ...(gitSelection.stashIfDirty ? { stashIfDirty: true } : {}),
     });
     // 仅启动成功才清空目标文本；失败时保留输入与弹窗
     if (succeeded) setGoal("");
@@ -198,6 +208,9 @@ export function RunLauncher({
           />
           <p className="run-goal-hint">
             大改动请列出 T1–Tn、路径和验收。只写「根据文档执行」通常只会得到一条读文档任务。
+          </p>
+          <p className="run-goal-hint">
+            这次会调用本机已登录的模型，失败重试也会耗额度。单段执行上限约 {formatDuration(strategyDefinition?.executionTimeoutSeconds ?? 14_400)}，旁路「问进度」另算一次调用。
           </p>
           {namedDeliverablesInGoal(goal).length > 0 && (
             <p className="run-goal-hint is-preview">
@@ -244,6 +257,14 @@ export function RunLauncher({
               ))}
             </div>
           </fieldset>
+
+          <GitBranchPicker
+            scope={scope}
+            goal={goal}
+            configDefaultBranch={config.project.defaultBranch}
+            disabled={busy}
+            onChange={setGitSelection}
+          />
 
           <button type="button" className="disclosure-button" onClick={() => setAdvanced((value) => !value)} aria-expanded={advanced}>
             <ChevronDown size={16} className={advanced ? "is-open" : ""} />
@@ -323,10 +344,27 @@ export function RunLauncher({
               })}
             </div>
           )}
+          {usableCliCount(inventory) === 0 && (
+            <p className="policy-notice">
+              <ShieldAlert size={14} />
+              本机还没有可用的 Agent CLI。请先安装并登录其中一种：Codex、Claude Code、Grok 或 Kimi，然后到「设置」里点检测。
+            </p>
+          )}
+          {config.github?.allowedOwners && config.github.allowedOwners.length > 0 && (
+            <p className="run-goal-hint">
+              企业白名单：只允许 {config.github.allowedOwners.join("、")} 下的仓库。
+            </p>
+          )}
+          {scope && !hasTrustedProject(scope.projectId) && (
+            <label className="ack-incomplete">
+              <input type="checkbox" checked={trustAck} onChange={(event) => setTrustAck(event.target.checked)} />
+              我知道 Agent 会用我本机已登录的 CLI 和 GitHub 身份，在这个仓库的隔离分支里改代码，并可能提起 PR。这不是沙箱。
+            </label>
+          )}
           {error && <p className="form-error" role="alert">{error}</p>}
           <footer>
             <button type="button" className="button secondary" onClick={onClose}>取消</button>
-            <button type="submit" className="button primary" disabled={busy || !goal.trim()}>
+            <button type="submit" className="button primary" disabled={busy || !goal.trim() || (Boolean(scope) && !hasTrustedProject(scope!.projectId) && !trustAck)}>
               <Play size={16} fill="currentColor" />
               {busy ? "正在启动" : "启动运行"}
             </button>
@@ -335,6 +373,30 @@ export function RunLauncher({
       </section>
     </div>
   );
+}
+
+function trustStorageKey(projectId: string): string {
+  return `agent-team:trusted-project:${projectId}`;
+}
+
+function hasTrustedProject(projectId: string): boolean {
+  try {
+    return window.localStorage.getItem(trustStorageKey(projectId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberTrustedProject(projectId: string): void {
+  try {
+    window.localStorage.setItem(trustStorageKey(projectId), "1");
+  } catch {
+    // Ignore quota / private-mode failures; the checkbox still gates this submit.
+  }
+}
+
+function usableCliCount(inventory?: CliInventory): number {
+  return inventory?.clis.filter((cli) => cli.installed && cli.runtimeSupported && cli.auth.status !== "missing" && cli.auth.status !== "invalid").length ?? -1;
 }
 
 function formatDuration(seconds: number): string {

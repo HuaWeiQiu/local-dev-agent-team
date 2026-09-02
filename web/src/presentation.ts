@@ -1,5 +1,5 @@
 import { ApiError } from "./api";
-import type { RunStatus, TaskStatus } from "./types";
+import type { RunState, RunStatus, StageSummary, TaskStatus } from "./types";
 
 const runLabels: Record<RunStatus, string> = {
   created: "已创建",
@@ -35,6 +35,19 @@ const taskLabels: Record<TaskStatus, string> = {
 
 export function runStatusLabel(status: RunStatus | string): string {
   return runLabels[status as RunStatus] ?? status;
+}
+
+/** Compact chip for the top bar: keep base, hide agent-team run ids. */
+export function compactBranchPair(baseBranch: string, headBranch: string): string {
+  return `${baseBranch} ← ${compactHeadBranch(headBranch)}`;
+}
+
+export function compactHeadBranch(branch: string): string {
+  if (branch.startsWith("agent-team/")) return "工作分支";
+  const parts = branch.split("/").filter(Boolean);
+  if (parts.length <= 2 && branch.length <= 28) return branch;
+  const last = parts.at(-1) ?? branch;
+  return last.length > 18 ? `${last.slice(0, 16)}…` : last;
 }
 
 export function taskStatusLabel(status: TaskStatus): string {
@@ -278,7 +291,7 @@ export function humanizeFailure(message: string | undefined | null): string {
     return "模型认证失败，请检查登录状态";
   }
   if (/Control service is shutting down|owning control service stopped/i.test(text)) {
-    return "控制服务已关闭，运行被中断；有检查点时可点「从检查点继续」";
+    return "控制服务已关闭，运行被中断；有检查点时可点「从上次已合并波次继续」";
   }
   if (/All profiles failed for role/i.test(text)) {
     const role = text.match(/role '([^']+)'/i)?.[1];
@@ -464,6 +477,83 @@ export function formatExperienceCondition(condition: string): string {
   const role = text.match(/^role=(.+)$/i);
   if (role) return `角色：${agentRoleLabel(role[1]!)}`;
   return text;
+}
+
+export type LifecyclePhaseTone = "done" | "current" | "pending" | "failed";
+
+export interface LifecyclePhaseView {
+  id: string;
+  title: string;
+  statuses: RunStatus[];
+  tone: LifecyclePhaseTone;
+  summary?: string;
+  highlights?: string[];
+  at?: string;
+}
+
+const lifecyclePhases: Array<{
+  id: string;
+  title: string;
+  statuses: RunStatus[];
+}> = [
+  { id: "intake", title: "目标分析", statuses: ["created", "orchestrating"] },
+  { id: "explore", title: "代码探索", statuses: ["exploring"] },
+  { id: "plan", title: "任务规划", statuses: ["architecting", "planned"] },
+  { id: "execute", title: "执行实现", statuses: ["implementing", "reviewing-testing", "reworking", "integrating"] },
+  { id: "verify", title: "审查验证", statuses: ["final-checks"] },
+  { id: "approve", title: "人工确认", statuses: ["awaiting-human"] },
+  { id: "publish", title: "发布", statuses: ["publishing", "waiting-ci", "ci-failed", "repairing", "ready-to-merge"] },
+  { id: "done", title: "完成", statuses: ["completed"] },
+];
+
+const failedStatuses = new Set<RunStatus>(["blocked", "cancelled", "interrupted"]);
+
+export function buildLifecyclePhases(run: RunState | undefined): LifecyclePhaseView[] {
+  const summaries = run?.stageSummaries ?? [];
+  const latestByStatus = new Map<RunStatus, StageSummary>();
+  for (const summary of summaries) {
+    latestByStatus.set(summary.stage, summary);
+  }
+  const visible = lifecyclePhases.filter(
+    (phase) => phase.id !== "explore" || Boolean(run?.strategy.explore?.enabled) || latestByStatus.has("exploring"),
+  );
+  const currentIndex = currentPhaseIndex(run?.status, visible);
+  return visible.map((phase, index) => {
+    const matching = phase.statuses
+      .map((status) => latestByStatus.get(status))
+      .filter((summary): summary is StageSummary => Boolean(summary));
+    const latest = matching.at(-1);
+    const failedHere = Boolean(run && failedStatuses.has(run.status) && currentIndex === index);
+    const tone: LifecyclePhaseTone = failedHere
+      ? "failed"
+      : currentIndex === index
+        ? "current"
+        : currentIndex > index
+          ? "done"
+          : "pending";
+    return {
+      id: phase.id,
+      title: phase.title,
+      statuses: phase.statuses,
+      tone,
+      ...(latest?.summary ? { summary: latest.summary } : {}),
+      ...(latest?.highlights?.length ? { highlights: latest.highlights } : {}),
+      ...(latest?.at ? { at: latest.at } : {}),
+    };
+  });
+}
+
+function currentPhaseIndex(
+  status: RunStatus | undefined,
+  visible: Array<{ id: string; statuses: RunStatus[] }>,
+): number {
+  if (!status) return 0;
+  if (failedStatuses.has(status)) {
+    const execute = visible.findIndex((phase) => phase.id === "execute");
+    return execute >= 0 ? execute : Math.max(0, visible.length - 1);
+  }
+  const index = visible.findIndex((phase) => phase.statuses.includes(status));
+  return index >= 0 ? index : 0;
 }
 
 export function formatExperienceTag(tag: string): string {

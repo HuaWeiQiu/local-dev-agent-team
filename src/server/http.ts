@@ -18,8 +18,11 @@ import {
 } from "./http-common.js";
 import { runRoutes } from "./http-routes-runs.js";
 import { evolutionRoutes } from "./http-routes-evolution.js";
+import { gitRoutes } from "./http-routes-git.js";
+import { inquiryRoutes } from "./http-routes-inquiry.js";
 import { dispatchDesktopApi } from "./http-routes-desktop.js";
 import { serveWebAsset } from "./http-static.js";
+import { clientBuildTooOld, controlPlaneIdentity } from "../version.js";
 
 export type { ProjectHttpContext } from "./http-common.js";
 export { buildPublicConfig } from "./http-routes-runs.js";
@@ -240,6 +243,10 @@ async function handleSingleProjectRequest(
     sendJson(response, 200, workspaceProjection("single", [context]));
     return;
   }
+  if (method === "GET" && url.pathname === "/api/version") {
+    sendJson(response, 200, { ...controlPlaneIdentity(), mode: "single" });
+    return;
+  }
   if (await dispatchDesktopApi(request, response, url, method, serverOrigin, sessionOperator)) {
     return;
   }
@@ -287,7 +294,12 @@ async function handleWorkspaceRequest(
       status: "ok",
       mode: "workspace",
       projectCount: projects.length,
+      ...controlPlaneIdentity(),
     });
+    return;
+  }
+  if (method === "GET" && url.pathname === "/api/version") {
+    sendJson(response, 200, { ...controlPlaneIdentity(), mode: "workspace" });
     return;
   }
   if (await dispatchDesktopApi(request, response, url, method, serverOrigin, sessionOperator)) {
@@ -326,7 +338,7 @@ async function handleWorkspaceRequest(
 // Route matching is unambiguous across slices (no two patterns share method,
 // segment count, and static segments), so concatenation order cannot change
 // which handler a request resolves to.
-const projectApiRoutes: ProjectApiRoute[] = [...runRoutes, ...evolutionRoutes];
+const projectApiRoutes: ProjectApiRoute[] = [...gitRoutes, ...runRoutes, ...evolutionRoutes, ...inquiryRoutes];
 
 async function dispatchProjectApi(
   context: ProjectHttpContext,
@@ -346,6 +358,14 @@ async function dispatchProjectApi(
     if (route.method !== method) continue;
     const params = matchRoutePattern(route.pattern, localPath);
     if (!params) continue;
+    const clientBuild = singleHeader(request.headers["x-agent-team-build"]);
+    if (clientBuildTooOld(clientBuild, localPath)) {
+      throw new HttpError(
+        426,
+        "请更新 Agent Team 桌面应用后再使用分支、发布预览或问进度。当前界面是旧前端。",
+        "CLIENT_UPDATE_REQUIRED",
+      );
+    }
     await route.handler(
       context,
       request,

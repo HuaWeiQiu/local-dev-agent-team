@@ -387,6 +387,26 @@ describe("GitManager exact tracked-file commit", () => {
   );
 });
 
+describe("GitManager selected-path commits", () => {
+  it("stages and commits only the requested dirty path", async () => {
+    const { root, manager } = await createRepo();
+    await writeFile(path.join(root, "README.md"), "readme changed\n", "utf8");
+    await writeFile(path.join(root, "prompts", "worker.md"), "worker changed\n", "utf8");
+    const snapshot = await manager.changeSnapshot(root);
+    expect(snapshot.files.map((file) => file.path).sort()).toEqual(["README.md", "prompts/worker.md"]);
+
+    const result = await manager.commitExactPaths(root, "docs: readme only", ["README.md"]);
+    expect(result.files).toEqual(["README.md"]);
+    const leftover = await manager.changeSnapshot(root);
+    expect(leftover.files.map((file) => file.path)).toEqual(["prompts/worker.md"]);
+  });
+
+  it("rejects a path that is not currently dirty", async () => {
+    const { root, manager } = await createRepo();
+    await expect(manager.commitExactPaths(root, "noop", ["README.md"])).rejects.toBeInstanceOf(GitManagerError);
+  });
+});
+
 describe("GitManager commit subjects and worktree pruning", () => {
   it("maps first-parent commits to their subjects and prunes stale worktrees", async () => {
     const { root, manager } = await createRepo();

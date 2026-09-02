@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathMatchesOwnedPath } from "../domain/owned-paths.js";
 import { runProcess, type ProcessResult } from "../process/run.js";
@@ -13,6 +13,36 @@ export interface GitDiffEvidence {
   changedFiles: string[];
   truncated: boolean;
 }
+
+export interface GitChangeFile {
+  path: string;
+  originalPath?: string;
+  xy: string;
+  status: string;
+  origin: "user" | "agent";
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  insertions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export interface GitChangeSnapshot {
+  files: GitChangeFile[];
+  insertions: number;
+  deletions: number;
+  ahead: number;
+  behind: number;
+}
+
+export interface GitWorktreeDiff {
+  content: string;
+  truncated: boolean;
+  binary?: boolean;
+}
+
+const UNTRACKED_PREVIEW_BYTES = 200_000;
 
 /** Stable structured codes for exact-path primary-worktree mutations. */
 export type GitManagerErrorCode =
@@ -463,6 +493,164 @@ export class GitManager {
     return subjects;
   }
 
+  async dirtyFiles(
+    directory: string,
+    signal?: AbortSignal,
+  ): Promise<Array<{ path: string; status: string; origin: "user" | "agent" }>> {
+    const snapshot = await this.changeSnapshot(directory, signal);
+    return snapshot.files.map((file) => ({
+      path: file.path,
+      status: file.status,
+      origin: file.origin,
+    }));
+  }
+
+  async changeSnapshot(directory: string, signal?: AbortSignal): Promise<GitChangeSnapshot> {
+    const entries = await this.porcelainStatus(directory, signal);
+    const numstat = await this.numstatAgainstHead(directory, signal);
+    const files: GitChangeFile[] = [];
+    for (const entry of entries) {
+      const untracked = entry.xy.includes("?");
+      const staged = /[ACDMR]/.test(entry.xy[0] ?? " ");
+      const unstaged = /[ACDMR?]/.test(entry.xy[1] ?? " ") || (entry.xy[1] !== undefined && entry.xy[1] !== " " && !untracked);
+      const stats = numstat.get(entry.path) ?? (untracked
+        ? await this.untrackedStat(directory, entry.path)
+        : { insertions: 0, deletions: 0, binary: false });
+      files.push({
+        path: entry.path,
+        ...(entry.originalPath ? { originalPath: entry.originalPath } : {}),
+        xy: entry.xy,
+        status: porcelainLabel(entry.xy),
+        origin: changeOrigin(entry.path),
+        staged,
+        unstaged: untracked || unstaged,
+        untracked,
+        insertions: stats.insertions,
+        deletions: stats.deletions,
+        binary: stats.binary,
+      });
+    }
+    const { ahead, behind } = await this.aheadBehind(directory, signal);
+    return {
+      files,
+      insertions: files.reduce((sum, file) => sum + file.insertions, 0),
+      deletions: files.reduce((sum, file) => sum + file.deletions, 0),
+      ahead,
+      behind,
+    };
+  }
+
+  async worktreeDiff(
+    directory: string,
+    maxCharacters = 20_000,
+    signal?: AbortSignal,
+    filePath?: string,
+  ): Promise<GitWorktreeDiff> {
+    if (filePath) {
+      return await this.pathDiff(directory, filePath, maxCharacters, signal);
+    }
+    const result = await this.git(
+      ["diff", "--no-ext-diff", "--unified=40", "HEAD"],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    const untracked = await this.git(
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    const extras = parseNulFields(untracked.stdout)
+      .slice(0, 40)
+      .map((file) => `?? ${file}`)
+      .join("\n");
+    const content = [result.stdout.trim(), extras].filter(Boolean).join("\n\n");
+    const truncated = content.length > maxCharacters;
+    return {
+      content: truncated ? `${content.slice(0, maxCharacters)}\n\n[diff truncated]` : content,
+      truncated,
+    };
+  }
+
+  async commitExactPaths(
+    directory: string,
+    message: string,
+    paths: string[],
+    signal?: AbortSignal,
+  ): Promise<{ commit: string; files: string[] }> {
+    if (typeof message !== "string" || !message.trim()) {
+      throw new GitManagerError("GIT_INVALID_AUTHORIZATION", "Commit message is required");
+    }
+    const normalized = uniqueNormalizedPaths(paths);
+    if (normalized.length === 0) {
+      throw new GitManagerError("GIT_UNSAFE_PATH", "至少勾选一个要提交的文件");
+    }
+    const dirty = new Set((await this.porcelainStatus(directory, signal)).map((entry) => entry.path));
+    const missing = normalized.filter((file) => !dirty.has(file));
+    if (missing.length > 0) {
+      throw new GitManagerError(
+        "GIT_TARGET_NOT_TRACKED",
+        `这些路径当前没有未提交改动：${missing.join("、")}`,
+      );
+    }
+    await this.git(["add", "--", ...normalized], directory, 120_000, undefined, signal);
+    const staged = await this.changedFiles(directory, signal);
+    const unexpected = staged.filter((file) => !normalized.includes(file));
+    if (unexpected.length > 0) {
+      throw new GitManagerError(
+        "GIT_WORKTREE_CONTAMINATED",
+        `暂存区出现未勾选路径，已拒绝提交：${unexpected.join("、")}`,
+      );
+    }
+    if (staged.length === 0) {
+      throw new GitManagerError("GIT_OPERATION_FAILED", "勾选的文件没有可提交的改动");
+    }
+    const commit = await this.commit(directory, message.trim(), signal);
+    return { commit, files: staged };
+  }
+
+  async aheadBehind(
+    directory: string,
+    signal?: AbortSignal,
+  ): Promise<{ ahead: number; behind: number }> {
+    const result = await this.git(
+      ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+      directory,
+      120_000,
+      undefined,
+      signal,
+      [0, 128],
+    );
+    if (result.exitCode !== 0) {
+      return { ahead: 0, behind: 0 };
+    }
+    const match = result.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!match) return { ahead: 0, behind: 0 };
+    return { behind: Number(match[1]), ahead: Number(match[2]) };
+  }
+
+  async committerIdentityConfigured(directory: string, signal?: AbortSignal): Promise<boolean> {
+    const name = await this.git(["config", "--get", "user.name"], directory, 30_000, undefined, signal, [0, 1]);
+    const email = await this.git(["config", "--get", "user.email"], directory, 30_000, undefined, signal, [0, 1]);
+    return name.exitCode === 0 && Boolean(name.stdout.trim())
+      && email.exitCode === 0 && Boolean(email.stdout.trim());
+  }
+
+  async stashPush(directory: string, message: string, signal?: AbortSignal): Promise<string | undefined> {
+    const result = await this.git(
+      ["stash", "push", "--include-untracked", "-m", message],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    const match = result.stdout.match(/Saved working directory and index state (On .+)/);
+    return match?.[1] ?? (result.stdout.includes("No local changes to save") ? undefined : result.stdout.trim() || "stash");
+  }
+
   async isClean(directory: string, signal?: AbortSignal): Promise<boolean> {
     const status = await this.git(
       ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -476,6 +664,147 @@ export class GitManager {
 
   async push(directory: string, remote: string, branch: string): Promise<void> {
     await this.git(["push", "--set-upstream", remote, branch], directory, 300_000);
+  }
+
+  async fetch(remote: string, ref: string, signal?: AbortSignal): Promise<void> {
+    await this.git(["fetch", remote, ref], this.root, 300_000, undefined, signal);
+  }
+
+  /** Initializes a Git repository with the requested initial branch name. */
+  async init(branch: string, signal?: AbortSignal): Promise<void> {
+    await this.git(["init", "-b", branch], this.root, 120_000, undefined, signal);
+  }
+
+  /** Creates an empty initial commit so an unborn branch becomes runnable. */
+  async commitAllowEmpty(message: string, signal?: AbortSignal): Promise<string> {
+    await this.git(
+      ["commit", "--allow-empty", "-m", message],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+    );
+    return await this.resolveCommit("HEAD");
+  }
+
+  /** `git merge-base --is-ancestor`; true when ancestor is reachable from descendant. */
+  async isAncestor(ancestor: string, descendant: string, signal?: AbortSignal): Promise<boolean> {
+    assertGitObjectId(ancestor);
+    assertGitObjectId(descendant);
+    const result = await this.git(
+      ["merge-base", "--is-ancestor", ancestor, descendant],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+      [0, 1],
+    );
+    return result.exitCode === 0;
+  }
+
+  /** Fast-forward-only merge, used to sync a checked-out default branch after fetch. */
+  async mergeFastForwardOnly(directory: string, commit: string, signal?: AbortSignal): Promise<void> {
+    assertGitObjectId(commit);
+    await this.git(["merge", "--ff-only", commit], directory, 120_000, undefined, signal);
+  }
+
+  /** Advances `refs/heads/<branch>` only while it still points at `expectedOld`. */
+  async updateRefFastForward(
+    branch: string,
+    newCommit: string,
+    expectedOld: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    assertGitObjectId(newCommit);
+    assertGitObjectId(expectedOld);
+    await this.git(
+      ["update-ref", `refs/heads/${branch}`, newCommit, expectedOld],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+    );
+  }
+
+  /** Creates a branch without checking it out (worktree creation happens separately). */
+  async createBranch(name: string, startPoint: string, signal?: AbortSignal): Promise<void> {
+    await this.git(["branch", name, startPoint], this.root, 120_000, undefined, signal);
+  }
+
+  async branchExists(name: string, signal?: AbortSignal): Promise<boolean> {
+    const result = await this.git(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${name}`],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+      [0, 1],
+    );
+    return result.exitCode === 0;
+  }
+
+  /** Validates a branch name with `git check-ref-format --branch`. */
+  async assertValidBranchName(name: string, signal?: AbortSignal): Promise<void> {
+    const result = await this.git(
+      ["check-ref-format", "--branch", name],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+      [0, 1],
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Invalid Git branch name '${name}'`);
+    }
+  }
+
+  /** Attached branch of the primary worktree; undefined when detached. */
+  async currentBranchName(signal?: AbortSignal): Promise<string | undefined> {
+    const result = await this.git(
+      ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+      [0, 1],
+    );
+    return result.exitCode === 0 ? result.stdout.trim() : undefined;
+  }
+
+  /**
+   * Resolves the remote default branch via `git ls-remote --symref <remote> HEAD`,
+   * e.g. `ref: refs/heads/main\tHEAD`. Returns undefined when unresolvable.
+   */
+  async remoteDefaultBranch(remote: string, signal?: AbortSignal): Promise<string | undefined> {
+    const result = await this.git(
+      ["ls-remote", "--symref", remote, "HEAD"],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+    );
+    const match = result.stdout.match(/^ref: refs\/heads\/(.+?)\tHEAD$/m);
+    return match?.[1];
+  }
+
+  /** Remote branch names mapped to their object ids (without `refs/heads/`). */
+  async remoteBranches(remote: string, signal?: AbortSignal): Promise<Map<string, string>> {
+    const result = await this.git(
+      ["ls-remote", "--heads", remote],
+      this.root,
+      120_000,
+      undefined,
+      signal,
+    );
+    const branches = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+      const [commit, ref] = line.trim().split(/\s+/);
+      if (!commit || !ref || !ref.startsWith("refs/heads/")) {
+        continue;
+      }
+      branches.set(ref.slice("refs/heads/".length), commit);
+    }
+    return branches;
   }
 
   private assertValidAuthorization(authorization: ExactTrackedFileCommitAuthorization): void {
@@ -619,12 +948,113 @@ export class GitManager {
     }
   }
 
+  private async pathDiff(
+    directory: string,
+    filePath: string,
+    maxCharacters: number,
+    signal?: AbortSignal,
+  ): Promise<GitWorktreeDiff> {
+    const normalized = normalizeRepositoryRelativePath(filePath);
+    const entries = await this.porcelainStatus(directory, signal);
+    const entry = entries.find((item) => item.path === normalized);
+    if (!entry) {
+      return { content: "这个文件当前没有未提交改动。", truncated: false };
+    }
+    if (entry.xy.includes("?")) {
+      const stats = await this.untrackedStat(directory, normalized);
+      if (stats.binary) {
+        return { content: "二进制文件，不显示 diff", truncated: false, binary: true };
+      }
+      try {
+        const raw = await readFile(path.join(directory, ...normalized.split("/")), "utf8");
+        const truncated = raw.length > maxCharacters;
+        return {
+          content: truncated ? `${raw.slice(0, maxCharacters)}\n\n[diff truncated]` : raw,
+          truncated,
+        };
+      } catch {
+        return { content: "无法读取未跟踪文件。", truncated: false };
+      }
+    }
+    const result = await this.git(
+      ["diff", "--no-ext-diff", "--unified=40", "HEAD", "--", normalized],
+      directory,
+      120_000,
+      undefined,
+      signal,
+    );
+    if (result.stdout.includes("Binary files") || result.stdout.includes("GIT binary patch")) {
+      return { content: "二进制文件，不显示 diff", truncated: false, binary: true };
+    }
+    const truncated = result.stdout.length > maxCharacters;
+    return {
+      content: truncated ? `${result.stdout.slice(0, maxCharacters)}\n\n[diff truncated]` : result.stdout,
+      truncated,
+    };
+  }
+
+  private async numstatAgainstHead(
+    directory: string,
+    signal?: AbortSignal,
+  ): Promise<Map<string, { insertions: number; deletions: number; binary: boolean }>> {
+    const result = await this.git(
+      ["diff", "--numstat", "HEAD"],
+      directory,
+      120_000,
+      undefined,
+      signal,
+      [0, 128],
+    );
+    const stats = new Map<string, { insertions: number; deletions: number; binary: boolean }>();
+    if (result.exitCode !== 0) return stats;
+    for (const line of result.stdout.split("\n")) {
+      const match = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+      if (!match) continue;
+      const filePath = match[3]!.includes(" => ")
+        ? match[3]!.split(" => ").at(-1)!.replace(/[{}]/g, "")
+        : match[3]!;
+      const binary = match[1] === "-" || match[2] === "-";
+      stats.set(filePath, {
+        insertions: binary ? 0 : Number(match[1]),
+        deletions: binary ? 0 : Number(match[2]),
+        binary,
+      });
+    }
+    return stats;
+  }
+
+  private async untrackedStat(
+    directory: string,
+    filePath: string,
+  ): Promise<{ insertions: number; deletions: number; binary: boolean }> {
+    try {
+      const absolute = path.join(directory, ...filePath.split("/"));
+      const info = await lstat(absolute);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > UNTRACKED_PREVIEW_BYTES) {
+        return { insertions: 0, deletions: 0, binary: true };
+      }
+      const raw = await readFile(absolute);
+      if (raw.includes(0)) {
+        return { insertions: 0, deletions: 0, binary: true };
+      }
+      const text = raw.toString("utf8");
+      const lines = text === "" ? 0 : text.split(/\r?\n/).length - (text.endsWith("\n") ? 1 : 0);
+      return { insertions: Math.max(lines, text ? 1 : 0), deletions: 0, binary: false };
+    } catch {
+      return { insertions: 0, deletions: 0, binary: false };
+    }
+  }
+
   private async porcelainStatus(
     directory: string,
+    signal?: AbortSignal,
   ): Promise<Array<{ xy: string; path: string; originalPath?: string }>> {
     const result = await this.git(
       ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
       directory,
+      120_000,
+      undefined,
+      signal,
     );
     const entries: Array<{ xy: string; path: string; originalPath?: string }> = [];
     const fields = parseNulFields(result.stdout);
@@ -669,6 +1099,7 @@ export class GitManager {
     timeoutMs = 120_000,
     stdin?: string,
     signal?: AbortSignal,
+    allowedExitCodes: number[] = [0],
   ): Promise<ProcessResult> {
     const result = await runProcess({
       command: "git",
@@ -678,14 +1109,14 @@ export class GitManager {
       ...(stdin === undefined ? {} : { stdin }),
       ...(signal === undefined ? {} : { signal }),
     });
-    if (result.exitCode !== 0) {
+    if (result.exitCode === null || !allowedExitCodes.includes(result.exitCode)) {
       throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim() || result.stdout.trim()}`);
     }
     return result;
   }
 }
 
-function normalizeRepositoryRelativePath(input: string): string {
+export function normalizeRepositoryRelativePath(input: string): string {
   if (typeof input !== "string" || !input.trim()) {
     throw new GitManagerError("GIT_UNSAFE_PATH", "Repository-relative path is required");
   }
@@ -724,6 +1155,34 @@ function normalizeRepositoryRelativePath(input: string): string {
     );
   }
   return segments.join("/");
+}
+
+function uniqueNormalizedPaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of paths) {
+    const next = normalizeRepositoryRelativePath(item);
+    if (seen.has(next)) continue;
+    seen.add(next);
+    normalized.push(next);
+  }
+  return normalized;
+}
+
+function changeOrigin(filePath: string): "user" | "agent" {
+  return filePath.startsWith("agent-team/") || filePath.includes("/.agent-team/") ? "agent" : "user";
+}
+
+function porcelainLabel(xy: string): string {
+  const code = xy.replace(/ /g, "");
+  if (xy.includes("?")) return "未跟踪";
+  if (xy.includes("A")) return "新增";
+  if (xy.includes("D")) return "删除";
+  if (xy.includes("R")) return "重命名";
+  if (xy.includes("C")) return "复制";
+  if (xy.includes("U") || xy === "DD" || xy === "AA") return "冲突";
+  if (xy.includes("M")) return "已修改";
+  return code || "已改动";
 }
 
 function formatStatusEntries(

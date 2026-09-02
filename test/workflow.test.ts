@@ -177,6 +177,28 @@ describe("local workflow", () => {
     );
   }, 30_000);
 
+  it("uses a selected base branch and creates a goal-named head branch", async () => {
+    const { root, loaded } = await createFixture("custom-branch-workflow");
+    await git(root, ["branch", "develop"]);
+
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new FakeAgentService(),
+    }).run({
+      goal: "Create alpha and beta files",
+      baseBranch: "develop",
+      headBranchName: "feature/custom-head",
+    });
+
+    expect(state.status).toBe("awaiting-human");
+    expect(state.baseBranch).toBe("develop");
+    expect(state.integrationBranch).toBe("feature/custom-head");
+    expect(state.managedBranches).toEqual(
+      expect.arrayContaining(["feature/custom-head", `agent-team/${branchSegment(state.id)}/alpha`, `agent-team/${branchSegment(state.id)}/beta`]),
+    );
+    const heads = (await gitOut(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).stdout;
+    expect(heads).toContain("feature/custom-head");
+  }, 30_000);
+
   it("persists a terminal state when startup fails on a dirty primary worktree", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-dirty-workflow-"));
     await git(root, ["init", "-b", "main"]);

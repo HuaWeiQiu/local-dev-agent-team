@@ -1,4 +1,4 @@
-import { Activity, Bot, CornerDownRight, Download, Radio, TerminalSquare } from "lucide-react";
+import { Activity, Bot, CornerDownRight, Download, ListChecks, Radio, TerminalSquare } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   agentRoleLabel,
@@ -6,7 +6,7 @@ import {
   deriveAgentActivity,
   type AgentDisplayStatus,
 } from "../agent-activity";
-import { formatTimestamp, runStatusLabel } from "../presentation";
+import { buildLifecyclePhases, formatTimestamp, runStatusLabel } from "../presentation";
 import type { RunEvent, RunState } from "../types";
 
 interface EventConsoleProps {
@@ -18,7 +18,7 @@ interface EventConsoleProps {
 }
 
 export const EventConsole = memo(function EventConsole({ run, events, connected, exporting, onExport }: EventConsoleProps) {
-  const [tab, setTab] = useState<"agents" | "activity" | "output">("agents");
+  const [tab, setTab] = useState<"stages" | "agents" | "activity" | "output">("stages");
   const scrollRef = useRef<HTMLDivElement>(null);
   const outputEvents = useMemo(
     () => events.filter((event) => event.type === "agent.stdout" || event.type === "agent.stderr"),
@@ -49,6 +49,10 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
     <section className="event-console" aria-label="运行事件和日志">
       <header>
         <div className="console-tabs" role="tablist">
+          <button className={tab === "stages" ? "is-active" : ""} onClick={() => setTab("stages")} role="tab" aria-selected={tab === "stages"}>
+            <ListChecks size={15} />阶段
+            {run?.stageSummaries?.length ? <span>{run.stageSummaries.length}</span> : null}
+          </button>
           <button className={tab === "agents" ? "is-active" : ""} onClick={() => setTab("agents")} role="tab" aria-selected={tab === "agents"}>
             <Bot size={15} />角色
             {agentActivity.length > 0 && <span>{activeAgents || agentActivity.length}</span>}
@@ -77,7 +81,24 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
         </div>
       </header>
       <div className="console-body" ref={scrollRef}>
-        {tab === "agents" ? (
+        {tab === "stages" ? (
+          <div className="stage-summary-list">
+            {run
+              ? buildLifecyclePhases(run).map((phase) => (
+                <div className={`stage-summary-card is-${phase.tone}`} key={phase.id}>
+                  {phase.at ? <time>{formatTimestamp(phase.at)}</time> : <time>待开始</time>}
+                  <strong>{phase.title}</strong>
+                  <p>{phase.summary ?? (phase.tone === "pending" ? "还没到这一步。" : phase.tone === "current" ? "正在进行。" : phase.tone === "failed" ? "这一步中止了。" : "已完成。")}</p>
+                  {phase.highlights?.length ? (
+                    <ul>
+                      {phase.highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}
+                    </ul>
+                  ) : null}
+                </div>
+              ))
+              : <span className="console-empty">选择运行后显示阶段总结</span>}
+          </div>
+        ) : tab === "agents" ? (
           <div className="agent-activity-list">
             {agentActivity.map((invocation) => (
               <div className="agent-activity-group" key={invocation.id}>

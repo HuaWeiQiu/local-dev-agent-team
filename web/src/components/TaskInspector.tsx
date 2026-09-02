@@ -7,7 +7,7 @@ import {
   taskKind,
   taskKindLabel,
 } from "../plan-completeness";
-import { agentRoleLabel, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
+import { agentRoleLabel, buildLifecyclePhases, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
 
@@ -39,6 +39,7 @@ function TaskDetail({ task, run }: { task: TaskRunState; run?: RunState }) {
         <code className="detail-id">{task.task.id}</code>
         <h3>{task.task.title}</h3>
         <p>{task.task.description}</p>
+        {task.summary ? <p className="task-summary-line">{task.summary}</p> : null}
       </section>
       <section className="detail-section">
         <h4><FileCode2 size={15} />计划合同</h4>
@@ -118,6 +119,17 @@ function RunDetail({ run }: { run: RunState }) {
         <code className="detail-id">{run.id}</code>
         <h3>{run.goal}</h3>
         {run.plan && <p>{run.plan.summary}</p>}
+      </section>
+      <section className="detail-section">
+        <h4><Clock3 size={15} />阶段</h4>
+        <ol className="inspector-stage-list">
+          {buildLifecyclePhases(run).map((phase) => (
+            <li key={phase.id} className={`is-${phase.tone}`}>
+              <strong>{phase.title}</strong>
+              <span>{phase.summary ?? (phase.tone === "pending" ? "未开始" : phase.tone === "current" ? "进行中" : phase.tone === "failed" ? "已中止" : "已完成")}</span>
+            </li>
+          ))}
+        </ol>
       </section>
       {planReport ? (
         <section className="detail-section">

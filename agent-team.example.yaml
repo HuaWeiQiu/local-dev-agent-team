@@ -257,10 +257,13 @@ quality:
 github:
   enabled: true
   remote: origin
-  draftPullRequest: true
+  # false = 创建正式 PR；true = 草稿 PR（发布预览中会提示）
+  draftPullRequest: false
   autoMerge: false
   checkTimeoutSeconds: 1800
   maxRepairAttempts: 1
   repairForbiddenPaths:
     - .github/workflows/**
     - agent-team.yaml
+  # 企业内部可写成公司 org；空数组表示不强制拦截
+  allowedOwners: []

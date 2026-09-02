@@ -16,6 +16,7 @@ import type {
   RunRoleBinding,
   RunState,
   RunUsage,
+  StageSummary,
 } from "./types.js";
 
 /** Schema version written into new state.json documents; legacy files without it are treated as 1. */
@@ -67,6 +68,16 @@ const stateEventSchema = z.looseObject({
   message: z.string(),
 });
 
+const stageSummarySchema = z.looseObject({
+  id: z.string().min(1),
+  stage: runStatusSchema,
+  at: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  highlights: z.array(z.string()).optional(),
+  error: z.string().optional(),
+});
+
 const taskRunStateSchema = z.looseObject({
   task: nested<Task>(),
   status: taskStatusSchema,
@@ -74,6 +85,7 @@ const taskRunStateSchema = z.looseObject({
   branch: z.string().optional(),
   worktree: z.string().optional(),
   commit: z.string().optional(),
+  summary: z.string().optional(),
   mergeCommit: z.string().optional(),
   profile: z.string().optional(),
   quality: nested<QualityReport>().optional(),
@@ -112,6 +124,8 @@ export const runStateSchema = z.looseObject({
   baseCommit: z.string(),
   integrationBranch: z.string(),
   integrationWorktree: z.string(),
+  managedBranches: z.array(z.string().min(1)).optional(),
+  stageSummaries: z.array(stageSummarySchema).optional(),
   status: runStatusSchema,
   createdAt: z.string(),
   updatedAt: z.string(),

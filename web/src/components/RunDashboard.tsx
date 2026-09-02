@@ -1,6 +1,6 @@
 import { FileCheck2, Gauge, ScrollText, Workflow } from "lucide-react";
 import { useMemo } from "react";
-import { humanizeFailure, strategyDisplayName, summarizeGoal } from "../presentation";
+import { compactBranchPair, humanizeFailure, strategyDisplayName, summarizeGoal } from "../presentation";
 import type { RunMonitor } from "../hooks/useRunEvents";
 import type {
   EvidenceFilePreview,
@@ -83,6 +83,7 @@ export function RunDashboard({
               {run && (
                 <span>
                   {strategyDisplayName(run.strategy.name)} · {completedTasks}/{run.tasks.length} 任务完成
+                  <code className="run-branch-pair" title={`${run.baseBranch} ← ${run.integrationBranch}`}> · {compactBranchPair(run.baseBranch, run.integrationBranch)}</code>
                   {run.error ? ` · ${humanizeFailure(run.error)}` : ""}
                 </span>
               )}

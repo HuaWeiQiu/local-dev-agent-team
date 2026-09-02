@@ -114,11 +114,12 @@ export function createDefaultConfig(projectName: string): AgentTeamConfig {
     github: {
       enabled: true,
       remote: "origin",
-      draftPullRequest: true,
+      draftPullRequest: false,
       autoMerge: false,
       checkTimeoutSeconds: 1_800,
       maxRepairAttempts: 1,
       repairForbiddenPaths: [".github/workflows/**", "agent-team.yaml"],
+      allowedOwners: [],
     },
   };
 }

@@ -1,9 +1,18 @@
 import type {
   AutomaticEvolutionSnapshot,
+  BranchInfo,
+  BranchSyncResult,
   ExperienceEntry,
   ExperiencePlanningBundle,
   ExperienceSnapshot,
   ExperienceStatus,
+  ControlPlaneVersion,
+  GitCommitResult,
+  GitChangesSnapshot,
+  GitEnvironmentStatus,
+  GitPushResult,
+  GithubConnectSession,
+  InquiryRecord,
   ProjectScope,
   PublicConfig,
   DesktopSettingsResponse,
@@ -13,6 +22,7 @@ import type {
   EvolutionPreviewResponse,
   EvolutionProposal,
   EvolutionSnapshot,
+  PublishPreview,
   RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
@@ -89,6 +99,122 @@ export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {
   return await request<PublicConfig>(`${apiRoot(scope)}/config`);
 }
 
+export async function getControlPlaneVersion(): Promise<ControlPlaneVersion> {
+  return await request<ControlPlaneVersion>("/api/version");
+}
+
+export async function getGitStatus(scope: ProjectScope): Promise<GitEnvironmentStatus> {
+  return await request<GitEnvironmentStatus>(`${apiRoot(scope)}/git/status`);
+}
+
+export async function getWorktreeDiff(
+  scope: ProjectScope,
+  filePath?: string,
+): Promise<{ content: string; truncated: boolean; binary?: boolean }> {
+  const suffix = filePath ? `?path=${encodeURIComponent(filePath)}` : "";
+  return await request<{ content: string; truncated: boolean; binary?: boolean }>(
+    `${apiRoot(scope)}/git/diff${suffix}`,
+  );
+}
+
+export async function getGitChanges(scope: ProjectScope): Promise<GitChangesSnapshot> {
+  return await request<GitChangesSnapshot>(`${apiRoot(scope)}/git/changes`);
+}
+
+export async function getGithubConnect(scope: ProjectScope): Promise<GithubConnectSession> {
+  return await request<GithubConnectSession>(`${apiRoot(scope)}/git/connect`);
+}
+
+export async function startGithubConnect(
+  scope: ProjectScope,
+  action: "login" | "refresh" | "cancel" = "login",
+): Promise<GithubConnectSession> {
+  return await request<GithubConnectSession>(`${apiRoot(scope)}/git/connect`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+}
+
+export async function commitGitPaths(
+  scope: ProjectScope,
+  input: { message: string; paths: string[] },
+): Promise<GitCommitResult> {
+  return await request<GitCommitResult>(`${apiRoot(scope)}/git/commit`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function pushCurrentBranch(scope: ProjectScope): Promise<GitPushResult> {
+  return await request<GitPushResult>(`${apiRoot(scope)}/git/push`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function stashWorktree(scope: ProjectScope): Promise<{ created: boolean; ref?: string }> {
+  return await request<{ created: boolean; ref?: string }>(`${apiRoot(scope)}/git/stash`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function getBranches(
+  scope: ProjectScope,
+  branchScope: "local" | "remote" | "all" = "all",
+): Promise<BranchInfo[]> {
+  return (
+    await request<{ branches: BranchInfo[] }>(
+      `${apiRoot(scope)}/branches?scope=${encodeURIComponent(branchScope)}`,
+    )
+  ).branches;
+}
+
+export async function createBranch(
+  scope: ProjectScope,
+  input: { name: string; baseBranch?: string; syncFirst?: boolean },
+): Promise<BranchInfo> {
+  return (
+    await request<{ branch: BranchInfo }>(`${apiRoot(scope)}/branches`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  ).branch;
+}
+
+export async function cleanupTemporaryBranches(
+  scope: ProjectScope,
+): Promise<{ deleted: string[]; skipped: string[] }> {
+  return await request<{ deleted: string[]; skipped: string[] }>(
+    `${apiRoot(scope)}/branches/cleanup-temporary`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function syncBranch(
+  scope: ProjectScope,
+  input: { branch?: string } = {},
+): Promise<BranchSyncResult> {
+  return await request<BranchSyncResult>(`${apiRoot(scope)}/branches/sync`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function initializeGit(scope: ProjectScope): Promise<{ initialized: boolean }> {
+  return await request<{ initialized: boolean }>(`${apiRoot(scope)}/git/init`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function createInitialCommit(scope: ProjectScope): Promise<{ commit: string }> {
+  return await request<{ commit: string }>(`${apiRoot(scope)}/git/initial-commit`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function getProjectRoleSettings(scope: ProjectScope): Promise<ProjectRoleSettingsView> {
   return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`);
 }
@@ -121,6 +247,53 @@ export async function getRunEvidence(scope: ProjectScope, runId: string): Promis
       `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/evidence`,
     )
   ).evidence;
+}
+
+export async function askInquiry(
+  scope: ProjectScope,
+  runId: string,
+  input: { question: string; stage?: string },
+): Promise<InquiryRecord> {
+  return (
+    await request<{ inquiry: InquiryRecord }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/inquiries`,
+      { method: "POST", body: JSON.stringify(input) },
+    )
+  ).inquiry;
+}
+
+export async function getInquiries(
+  scope: ProjectScope,
+  runId: string,
+): Promise<InquiryRecord[]> {
+  return (
+    await request<{ inquiries: InquiryRecord[] }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/inquiries`,
+    )
+  ).inquiries;
+}
+
+export async function getInquiry(
+  scope: ProjectScope,
+  runId: string,
+  inquiryId: string,
+): Promise<InquiryRecord> {
+  return (
+    await request<{ inquiry: InquiryRecord }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/inquiries/${encodeURIComponent(inquiryId)}`,
+    )
+  ).inquiry;
+}
+
+export async function deleteInquiry(
+  scope: ProjectScope,
+  runId: string,
+  inquiryId: string,
+): Promise<void> {
+  await request(
+    `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/inquiries/${encodeURIComponent(inquiryId)}`,
+    { method: "DELETE" },
+  );
 }
 
 export async function getEvidenceFile(
@@ -212,13 +385,25 @@ export async function pauseRun(
   });
 }
 
+export async function getPublishPreview(
+  scope: ProjectScope,
+  runId: string,
+): Promise<PublishPreview> {
+  return (
+    await request<{ preview: PublishPreview }>(
+      `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/publish-preview`,
+    )
+  ).preview;
+}
+
 export async function publishRun(
   scope: ProjectScope,
   runId: string,
+  input: { title?: string; body?: string; pushBaseBranch?: boolean; draft?: boolean } = {},
 ): Promise<{ runId: string; status: string; pullRequestUrl?: string }> {
   return await request<{ runId: string; status: string; pullRequestUrl?: string }>(
     `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/publish`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(input) },
   );
 }
 
@@ -561,6 +746,7 @@ async function request<T = unknown>(url: string, init?: RequestInit): Promise<T>
     ...init,
     headers: {
       Accept: "application/json",
+      "X-Agent-Team-Build": typeof __APP_BUILD_ID__ === "string" ? __APP_BUILD_ID__ : "2026.08.17-github-changes",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },

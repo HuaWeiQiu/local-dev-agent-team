@@ -386,7 +386,8 @@ the approval lifecycle.
 github:
   enabled: true
   remote: origin
-  draftPullRequest: true
+  # false = 正式 PR；true = 草稿 PR
+  draftPullRequest: false
   autoMerge: false
   checkTimeoutSeconds: 1800
   maxRepairAttempts: 1
@@ -398,4 +399,6 @@ github:
 `autoMerge` must remain `false`. Repair is available only after failed checks,
 is bounded, reruns local gates plus reviewer/tester verdicts, and refuses to
 commit protected paths. GitHub operations use the locally authenticated `gh`
-CLI.
+CLI. New projects default to formal (non-draft) PRs; projects that explicitly
+set `draftPullRequest: true` keep draft behavior and the publish preview warns
+about it.

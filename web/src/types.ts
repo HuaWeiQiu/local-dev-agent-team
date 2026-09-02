@@ -217,6 +217,10 @@ export interface PublicConfig {
       externalTools: "deny" | "inherit";
     }>;
   };
+  github?: {
+    enabled: boolean;
+    allowedOwners: string[];
+  };
 }
 
 export interface RunSummary {
@@ -258,6 +262,7 @@ export interface TaskRunState {
   branch?: string;
   worktree?: string;
   commit?: string;
+  summary?: string;
   profile?: string;
   quality?: {
     passed: boolean;
@@ -281,11 +286,25 @@ export interface TaskRunState {
   error?: string;
 }
 
+export interface StageSummary {
+  id: string;
+  stage: RunStatus;
+  at: string;
+  title: string;
+  summary: string;
+  highlights?: string[];
+  error?: string;
+}
+
 export interface RunState {
   id: string;
   traceId?: string;
   goal: string;
   status: RunStatus;
+  baseBranch: string;
+  baseCommit: string;
+  integrationBranch: string;
+  integrationWorktree: string;
   strategy: {
     name: string;
     maxParallel: number;
@@ -319,6 +338,8 @@ export interface RunState {
   plan?: { summary: string; tasks: Task[] };
   tasks: TaskRunState[];
   history: Array<{ at: string; status: RunStatus; message: string }>;
+  managedBranches?: string[];
+  stageSummaries?: StageSummary[];
   finalQuality?: {
     passed: boolean;
     commands?: Array<{
@@ -444,6 +465,186 @@ export interface StartRunInput {
   strategy?: string;
   profileOverrides: Record<string, string>;
   roleBindings?: Record<string, RoleBindingInput>;
+  baseBranch?: string;
+  headBranchName?: string;
+  syncDefaultFirst?: boolean;
+  stashIfDirty?: boolean;
+}
+
+export type GitBlocker =
+  | "git-missing"
+  | "not-a-repository"
+  | "root-mismatch"
+  | "dirty-worktree"
+  | "no-commits"
+  | "no-remote"
+  | "remote-unreachable"
+  | "gh-missing"
+  | "gh-not-authenticated"
+  | "gh-no-repo-access";
+
+export interface GitEnvironmentStatus {
+  gitInstalled: boolean;
+  gitVersion?: string;
+  isRepository: boolean;
+  repoRootMatches: boolean;
+  worktreeClean: boolean;
+  hasCommits: boolean;
+  currentBranch?: string;
+  remote: string;
+  remoteConfigured: boolean;
+  remoteAccessible: boolean;
+  localDefaultBranch?: string;
+  remoteDefaultBranch?: string;
+  defaultBranchSource: "gh" | "git" | "config";
+  ghInstalled: boolean;
+  ghAuthenticated: boolean;
+  ghRepoAccess: boolean;
+  canSync: boolean;
+  canPublish: boolean;
+  blockers: GitBlocker[];
+  dirtyFiles: DirtyWorktreeFile[];
+  dirtyReason?: string;
+  remoteUrl?: string;
+  remoteOwner?: string;
+  remoteAllowed: boolean;
+  remotePolicyReason?: string;
+  githubAccount?: GithubAccountSnapshot;
+  changeSummary?: {
+    files: number;
+    insertions: number;
+    deletions: number;
+  };
+  canCommit?: boolean;
+  canPushBranch?: boolean;
+  aheadBehind?: { ahead: number; behind: number };
+}
+
+export interface GithubAccountSnapshot {
+  host: string;
+  login?: string;
+  state: "missing-cli" | "logged-out" | "logged-in" | "insufficient" | "error";
+  scopes: string[];
+  tokenSource?: "keyring" | "env" | "plaintext" | "unknown";
+  gitProtocol?: "https" | "ssh";
+  repoNameWithOwner?: string;
+  canLogin: boolean;
+  canPush: boolean;
+  canPublish: boolean;
+  detail?: string;
+}
+
+export interface GitChangeFile {
+  path: string;
+  originalPath?: string;
+  xy: string;
+  status: string;
+  origin: "user" | "agent";
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  insertions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+export interface GitChangesSnapshot {
+  branch?: string;
+  files: GitChangeFile[];
+  insertions: number;
+  deletions: number;
+  canCommit: boolean;
+  canPush: boolean;
+  ahead: number;
+  behind: number;
+  identityConfigured: boolean;
+  identityReason?: string;
+}
+
+export interface GithubConnectSession {
+  id?: string;
+  action?: "login" | "refresh";
+  host?: string;
+  status: "idle" | "starting" | "waiting-browser" | "succeeded" | "failed" | "cancelled";
+  startedAt?: string;
+  finishedAt?: string;
+  login?: string;
+  error?: string;
+}
+
+export interface GitCommitResult {
+  commit: string;
+  branch?: string;
+  files: string[];
+}
+
+export interface GitPushResult {
+  remote: string;
+  branch: string;
+  commit: string;
+  setUpstream: boolean;
+}
+
+export interface DirtyWorktreeFile {
+  path: string;
+  status: string;
+  origin: "user" | "agent";
+}
+
+export interface ControlPlaneVersion {
+  version: string;
+  build: string;
+  mode?: string;
+}
+
+export interface BranchInfo {
+  name: string;
+  kind: "local" | "remote";
+  commit: string;
+  isDefault: boolean;
+  isCurrent: boolean;
+  temporary?: boolean;
+}
+
+export interface BranchSyncResult {
+  branch: string;
+  previousCommit?: string;
+  newCommit: string;
+  changed: boolean;
+}
+
+export interface PublishPreview {
+  eligible: boolean;
+  reason?: string;
+  repository?: string;
+  baseBranch: string;
+  headBranch: string;
+  draft: boolean;
+  title: string;
+  body: string;
+  warnings: string[];
+  checks: {
+    ghAuthenticated: boolean;
+    repoAccess: boolean;
+    baseOnRemote: boolean;
+    headAheadOfBase: boolean;
+  };
+}
+
+export interface InquiryRecord {
+  id: string;
+  version: 1;
+  runId: string;
+  stage: string;
+  runStatusAtAsk: string;
+  question: string;
+  answer?: string;
+  keyPoints?: string[];
+  status: "running" | "completed" | "failed" | "cancelled";
+  error?: string;
+  usage?: { durationMs: number; profileName?: string };
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CliModelInfo {

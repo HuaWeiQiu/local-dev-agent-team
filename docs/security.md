@@ -76,7 +76,11 @@ a security boundary.
 
 The project neither requests nor persists model-provider tokens. Codex, Grok,
 and Claude Code inherit their own local authentication. GitHub commands inherit the
-current `gh` login. Do not put tokens, environment dumps, or secrets in
+current `gh` login. The workbench may start `gh auth login --web` or
+`gh auth refresh` after an explicit user gesture; it never reads `--show-token`,
+never stores the token in project configuration, desktop settings, SQLite, or
+run state, and strips any `token` field from `gh auth status --json` before
+logging. Do not put tokens, environment dumps, or secrets in
 `agent-team.yaml`, prompts, goals, or tracked files.
 
 Agent child processes still inherit the parent process environment. Launch the

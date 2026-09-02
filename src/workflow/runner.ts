@@ -38,6 +38,7 @@ import {
   validateTaskPlan,
 } from "../domain/plan.js";
 import { GitManager } from "../git/manager.js";
+import { GitProjectService } from "../git/project.js";
 import { ensureWorktreeNodeModules, formatQualityFailure } from "../quality/install.js";
 import {
   deduplicateCommands,
@@ -87,6 +88,14 @@ export interface WorkflowRunOptions {
   supervisorId?: string;
   parentRunId?: string;
   purpose?: "evolution-evaluation";
+  /** PR target / run base branch; defaults to project.defaultBranch. */
+  baseBranch?: string;
+  /** PR head branch name; the runner creates it from the resolved base commit. */
+  headBranchName?: string;
+  /** ff-only sync the remote default branch before resolving the base commit. */
+  syncDefaultFirst?: boolean;
+  /** Stash a dirty primary worktree before asserting it is clean. */
+  stashIfDirty?: boolean;
 }
 
 export interface WorkflowDependencies {
@@ -129,7 +138,16 @@ export class LocalWorkflowRunner {
     const runId = options.runId ?? createRunId(options.goal);
     const store = new RunStateStore(this.runsDirectory, this.dependencies.eventSink);
     const git = new GitManager(this.loaded.root, this.worktreesDirectory);
-    const integrationBranch = `agent-team/${branchSegment(runId)}/integration`;
+    const baseBranch = options.baseBranch?.trim() || this.loaded.config.project.defaultBranch;
+    const integrationBranch =
+      options.headBranchName?.trim() || `agent-team/${branchSegment(runId)}/integration`;
+    const gitProject = new GitProjectService({
+      root: this.loaded.root,
+      worktreesRoot: this.worktreesDirectory,
+      remote: this.loaded.config.github.remote,
+      configDefaultBranch: this.loaded.config.project.defaultBranch,
+      allowedOwners: this.loaded.config.github.allowedOwners ?? [],
+    });
     const integrationWorktree = path.join(this.worktreesDirectory, runId, "integration");
     const now = new Date().toISOString();
     const persistedBindings = options.roleBindings
@@ -149,8 +167,20 @@ export class LocalWorkflowRunner {
       : undefined;
     let baseCommit: string;
     try {
+      const gitStatus = await gitProject.status();
+      if (gitStatus.remoteAllowed === false) {
+        throw new Error(gitStatus.remotePolicyReason ?? "远端不在企业仓库白名单");
+      }
+      if (options.stashIfDirty && !gitStatus.worktreeClean) {
+        await gitProject.stashWorktree(`agent-team: auto-stash before ${runId}`);
+      }
       await git.assertReady();
-      baseCommit = await git.resolveCommit(this.loaded.config.project.defaultBranch);
+      if (options.headBranchName?.trim()) {
+        await gitProject.assertHeadBranchAvailable(integrationBranch);
+      }
+      baseCommit = await gitProject.resolveBaseCommit(baseBranch, {
+        syncDefaultFirst: options.syncDefaultFirst === true,
+      });
     } catch (error) {
       // Failures before the first save (e.g. dirty primary worktree) must still
       // persist a terminal state, otherwise the run vanishes from the run list.
@@ -162,10 +192,11 @@ export class LocalWorkflowRunner {
         goal: options.goal,
         root: this.loaded.root,
         configPath: this.loaded.path,
-        baseBranch: this.loaded.config.project.defaultBranch,
+        baseBranch,
         baseCommit: "",
         integrationBranch,
         integrationWorktree,
+        managedBranches: [integrationBranch],
         status: terminal,
         createdAt: now,
         updatedAt: now,
@@ -193,10 +224,11 @@ export class LocalWorkflowRunner {
       goal: options.goal,
       root: this.loaded.root,
       configPath: this.loaded.path,
-      baseBranch: this.loaded.config.project.defaultBranch,
+      baseBranch,
       baseCommit,
       integrationBranch,
       integrationWorktree,
+      managedBranches: [integrationBranch],
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -1056,6 +1088,7 @@ export class LocalWorkflowRunner {
             taskState.worktree = worktree;
             taskState.status = "working";
             await git.createWorktree(branch, integrationCommit, worktree, waveSignal);
+            state.managedBranches = [...new Set([...(state.managedBranches ?? []), branch])];
             await this.prepareWorktreeDependencies(
               worktree,
               waveSignal,
@@ -1293,6 +1326,7 @@ export class LocalWorkflowRunner {
     if (startAttempt > maxAttempts) {
       taskState.status = "blocked";
       taskState.error = `Rework attempts exhausted: ${priorAttempts} attempt(s) against limit ${state.strategy.maxReworkAttempts}`;
+      taskState.summary = `阻塞：${taskState.error}`;
       await store.save(state);
       return;
     }
@@ -1403,6 +1437,7 @@ export class LocalWorkflowRunner {
         if (feedback.startsWith("Specialist escalated")) {
           taskState.status = "blocked";
           taskState.error = feedback;
+          taskState.summary = `阻塞：${compactText(feedback, 120)}`;
           await store.save(state);
           return;
         }
@@ -1411,6 +1446,7 @@ export class LocalWorkflowRunner {
 
     taskState.status = "blocked";
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
+    taskState.summary = `阻塞：${compactText(taskState.error, 120)}`;
     await store.save(state);
   }
 
@@ -1653,6 +1689,10 @@ export class LocalWorkflowRunner {
       signal,
     );
     taskState.status = "passed";
+    const verdict = taskState.review?.summary ?? taskState.test?.summary ?? "";
+    taskState.summary =
+      `实现 ${taskState.task.title}，提交 ${taskState.commit.slice(0, 8)}` +
+      (verdict ? `；${compactText(verdict, 120)}` : "");
     await store.save(state);
   }
 
@@ -2133,6 +2173,13 @@ function compactQuality(report: QualityReport): unknown {
       stderr: command.stderr.slice(-20_000),
     })),
   };
+}
+
+function compactText(value: string, maxCharacters: number): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length <= maxCharacters
+    ? compact
+    : `${compact.slice(0, maxCharacters - 1)}…`;
 }
 
 /**

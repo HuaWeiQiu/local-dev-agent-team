@@ -15,10 +15,58 @@ export const startRunRequestSchema = z.object({
   /** Global CLI picker: per-role CLI / model / reasoning for this run. */
   roleBindings: z.record(z.string().min(1), roleBindingSchema).optional(),
   parentRunId: z.string().min(1).optional(),
+  /** PR target / run base branch. Defaults to project.defaultBranch. */
+  baseBranch: z.string().trim().min(1).max(200).optional(),
+  /** Custom PR head branch name; the runner creates it from baseCommit. */
+  headBranchName: z.string().trim().min(1).max(240).optional(),
+  /** ff-only sync the remote default branch before resolving the base commit. */
+  syncDefaultFirst: z.boolean().optional(),
+  stashIfDirty: z.boolean().optional(),
 });
 
 export type StartRunRequest = z.infer<typeof startRunRequestSchema>;
 export type RoleBindingRequest = z.infer<typeof roleBindingSchema>;
+
+export const branchCreateRequestSchema = z.object({
+  name: z.string().trim().min(1).max(240),
+  baseBranch: z.string().trim().min(1).max(200).optional(),
+  syncFirst: z.boolean().optional(),
+});
+
+export const branchSyncRequestSchema = z.object({
+  branch: z.string().trim().min(1).max(200).optional(),
+});
+
+export const gitConnectRequestSchema = z.object({
+  action: z.enum(["login", "refresh", "cancel"]).optional(),
+});
+
+export const gitCommitRequestSchema = z.object({
+  message: z.string().trim().min(1).max(2_000),
+  paths: z.array(z.string().trim().min(1).max(500)).min(1).max(200),
+});
+
+export type GitConnectRequest = z.infer<typeof gitConnectRequestSchema>;
+export type GitCommitRequest = z.infer<typeof gitCommitRequestSchema>;
+
+export type BranchCreateRequest = z.infer<typeof branchCreateRequestSchema>;
+export type BranchSyncRequest = z.infer<typeof branchSyncRequestSchema>;
+
+export const publishRunRequestSchema = z.object({
+  title: z.string().trim().min(1).max(120).optional(),
+  body: z.string().trim().min(1).max(20_000).optional(),
+  pushBaseBranch: z.boolean().optional(),
+  draft: z.boolean().optional(),
+});
+
+export type PublishRunRequest = z.infer<typeof publishRunRequestSchema>;
+
+export const inquiryRequestSchema = z.object({
+  question: z.string().trim().min(1).max(2_000),
+  stage: z.string().trim().min(1).max(40).optional(),
+});
+
+export type InquiryRequest = z.infer<typeof inquiryRequestSchema>;
 
 export const desktopSettingsUpdateSchema = z.object({
   defaults: z.object({
