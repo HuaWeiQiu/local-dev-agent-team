@@ -1,5 +1,10 @@
 import type { ProcessRequest, ProcessResult } from "../process/run.js";
 import { runProcess } from "../process/run.js";
+import {
+  githubAuthStatusArgs,
+  parseGithubAuthHosts,
+  type GithubAccountSnapshot,
+} from "./auth.js";
 
 export interface RepositoryInfo {
   nameWithOwner: string;
@@ -12,6 +17,7 @@ export interface PullRequestInfo {
   url: string;
   state: string;
   mergedAt: string | null;
+  isDraft: boolean;
 }
 
 export interface GithubCheck {
@@ -36,6 +42,46 @@ export class GithubClient {
 
   async authStatus(cwd: string): Promise<void> {
     await this.gh(["auth", "status"], cwd);
+  }
+
+  async authSnapshot(
+    cwd: string,
+    host: string,
+  ): Promise<Pick<GithubAccountSnapshot, "login" | "scopes" | "tokenSource" | "gitProtocol"> & {
+    authenticated: boolean;
+    installed: boolean;
+  }> {
+    const version = await this.runner({
+      command: this.executable,
+      args: ["--version"],
+      cwd,
+      timeoutMs: 30_000,
+    });
+    if (version.exitCode !== 0) {
+      return { installed: false, authenticated: false, scopes: [] };
+    }
+    const status = await this.runner({
+      command: this.executable,
+      args: githubAuthStatusArgs(host),
+      cwd,
+      timeoutMs: 30_000,
+    });
+    if (status.exitCode !== 0 || !status.stdout.trim()) {
+      return { installed: true, authenticated: false, scopes: [] };
+    }
+    try {
+      const parsed = parseGithubAuthHosts(status.stdout, host);
+      return {
+        installed: true,
+        authenticated: parsed.authenticated,
+        scopes: parsed.scopes,
+        ...(parsed.login ? { login: parsed.login } : {}),
+        ...(parsed.tokenSource ? { tokenSource: parsed.tokenSource } : {}),
+        ...(parsed.gitProtocol ? { gitProtocol: parsed.gitProtocol } : {}),
+      };
+    } catch {
+      return { installed: true, authenticated: false, scopes: [] };
+    }
   }
 
   async repository(cwd: string): Promise<RepositoryInfo> {
@@ -68,7 +114,7 @@ export class GithubClient {
         "--repo",
         repository,
         "--json",
-        "number,url,state,mergedAt",
+        "number,url,state,mergedAt,isDraft",
       ],
       cwd,
       [0, 1],
@@ -78,7 +124,7 @@ export class GithubClient {
     }
     return parseGhJson(
       result.stdout,
-      `gh pr view ${branch} --json number,url,state,mergedAt`,
+      `gh pr view ${branch} --json number,url,state,mergedAt,isDraft`,
     ) as PullRequestInfo;
   }
 
@@ -125,14 +171,22 @@ export class GithubClient {
         "--repo",
         repository,
         "--json",
-        "number,url,state,mergedAt",
+        "number,url,state,mergedAt,isDraft",
       ],
       cwd,
     );
     return parseGhJson(
       result.stdout,
-      `gh pr view ${target} --json number,url,state,mergedAt`,
+      `gh pr view ${target} --json number,url,state,mergedAt,isDraft`,
     ) as PullRequestInfo;
+  }
+
+  /** Promotes an existing draft PR to a reviewable (non-draft) PR. */
+  async markPullRequestReady(cwd: string, repository: string, target: string): Promise<void> {
+    await this.gh(
+      ["pr", "ready", target, "--repo", repository],
+      cwd,
+    );
   }
 
   async checks(cwd: string, repository: string, target: string): Promise<GithubCheck[]> {

@@ -39,6 +39,7 @@ describe("GithubClient", () => {
           url: "https://github.com/acme/repo/pull/7",
           state: "OPEN",
           mergedAt: null,
+          isDraft: false,
         }),
       );
     });
@@ -57,6 +58,57 @@ describe("GithubClient", () => {
     expect(requests[0]?.command).toBe("gh");
     expect(requests[0]?.args).toContain("--draft");
     expect(requests[0]?.args).toContain("agent-team/run/integration");
+  });
+
+  it("omits --draft for formal pull requests", async () => {
+    const requests: ProcessRequest[] = [];
+    const client = new GithubClient(async (request) => {
+      requests.push(request);
+      if (request.args[1] === "create") {
+        return result(request, "https://github.com/acme/repo/pull/8\n");
+      }
+      return result(
+        request,
+        JSON.stringify({
+          number: 8,
+          url: "https://github.com/acme/repo/pull/8",
+          state: "OPEN",
+          mergedAt: null,
+          isDraft: false,
+        }),
+      );
+    });
+
+    await client.createPullRequest({
+      cwd: "/tmp/repo",
+      repository: "acme/repo",
+      base: "main",
+      head: "feature/goal",
+      title: "Formal PR",
+      bodyFile: "/tmp/body.md",
+      draft: false,
+    });
+
+    expect(requests[0]?.args).not.toContain("--draft");
+  });
+
+  it("marks an existing draft PR ready without a shell", async () => {
+    const requests: ProcessRequest[] = [];
+    const client = new GithubClient(async (request) => {
+      requests.push(request);
+      return result(request, "");
+    });
+
+    await client.markPullRequestReady("/tmp/repo", "acme/repo", "https://github.com/acme/repo/pull/9");
+
+    expect(requests[0]?.command).toBe("gh");
+    expect(requests[0]?.args).toEqual([
+      "pr",
+      "ready",
+      "https://github.com/acme/repo/pull/9",
+      "--repo",
+      "acme/repo",
+    ]);
   });
 
   it("summarizes check buckets conservatively", () => {
@@ -91,11 +143,48 @@ describe("GithubClient", () => {
     expect(message.length).toBeLessThan(polluted.length + 200);
 
     await expect(client.pullRequest("/tmp/repo", "acme/repo", "7")).rejects.toThrow(
-      /gh pr view 7 --json number,url,state,mergedAt returned invalid JSON/,
+      /gh pr view 7 --json number,url,state,mergedAt,isDraft returned invalid JSON/,
     );
     await expect(client.checks("/tmp/repo", "acme/repo", "7")).rejects.toThrow(
       /gh pr checks 7 .* returned invalid JSON/,
     );
+  });
+
+  it("reads an account snapshot without requesting the token", async () => {
+    const requests: ProcessRequest[] = [];
+    const client = new GithubClient(async (request) => {
+      requests.push(request);
+      if (request.args[0] === "--version") return result(request, "gh 2.0.0\n");
+      return result(
+        request,
+        JSON.stringify({
+          hosts: {
+            "github.com": [
+              {
+                state: "success",
+                active: true,
+                login: "octo",
+                token: "ghp_hidden",
+                scopes: ["repo"],
+                tokenSource: "keyring",
+                gitProtocol: "https",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    const snapshot = await client.authSnapshot("/tmp/repo", "github.com");
+    expect(snapshot).toMatchObject({
+      installed: true,
+      authenticated: true,
+      login: "octo",
+      scopes: ["repo"],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("ghp_");
+    expect(requests[1]?.args).toEqual(["auth", "status", "--hostname", "github.com", "--json", "hosts"]);
+    expect(requests[1]?.args).not.toContain("--show-token");
   });
 
   it("parses well-formed gh JSON output unchanged", () => {

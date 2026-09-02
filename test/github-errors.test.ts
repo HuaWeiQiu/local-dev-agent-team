@@ -27,8 +27,8 @@ describe("GitHub failure classification", () => {
   it("renders distinct, actionable Chinese prompts", () => {
     const cases: Array<[string, string]> = [
       ["github-disabled", "已关闭 GitHub 集成"],
-      ["not-logged-in", "未登录 GitHub CLI"],
-      ["no-saved-account", "未保存 GitHub 账户信息"],
+      ["not-logged-in", "连接 GitHub"],
+      ["no-saved-account", "连接 GitHub"],
       ["no-git-identity", "未配置提交者身份"],
       ["token-permissions", "权限不足"],
       ["network", "无法连接 GitHub"],

@@ -12,6 +12,7 @@ export type GithubFailureKind =
   | "no-git-identity"
   | "token-permissions"
   | "network"
+  | "base-missing"
   | "other";
 
 export class GithubActionError extends Error {
@@ -69,15 +70,17 @@ function githubFailureMessage(kind: GithubFailureKind, detail: string): string {
     case "github-disabled":
       return "项目配置已关闭 GitHub 集成（agent-team.yaml 的 github.enabled: false），无法发布。可在配置中开启后重试。";
     case "not-logged-in":
-      return "未登录 GitHub CLI：请在本机终端运行 gh auth login 登录后重试发布。";
+      return "还没连接 GitHub。请在项目 Git 里点「连接 GitHub」，在打开的浏览器里授权本机 gh 后再试。";
     case "no-saved-account":
-      return "本地未保存 GitHub 账户信息：请运行 gh auth login 绑定账户后重试发布。";
+      return "本机还没有可用的 GitHub 账号。请在项目 Git 里点「连接 GitHub」绑定后再试。";
     case "no-git-identity":
       return "Git 未配置提交者身份：请设置 git config --global user.name 与 user.email 后重试。";
     case "token-permissions":
-      return "GitHub Token 权限不足：无法推送分支或创建 PR，请在 gh auth login（或 Token 设置）中授予 repo 与 PR 权限后重试。";
+      return "GitHub 权限不足：无法推送分支或创建 PR。请在项目 Git 里点「补授权」，或确认这个账号有该仓库的 repo / PR 权限。";
     case "network":
       return "无法连接 GitHub：请检查网络后重试发布。";
+    case "base-missing":
+      return `PR 目标分支不在远端：${detail}。可在发布预览中确认并推送 base 分支后重试。`;
     case "other":
       return `发布失败：${detail}`;
   }
