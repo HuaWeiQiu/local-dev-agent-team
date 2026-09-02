@@ -40,7 +40,7 @@
     "test:e2e": "pnpm build && playwright test --config web/playwright.config.ts",
     "desktop:prepare": "pnpm build && node scripts/prepare-desktop-runtime.mjs",
     "desktop:dev": "pnpm desktop:prepare && tauri dev --no-watch",
-    "desktop:build": "tauri build",
+    "desktop:build": "tauri build && node scripts/write-desktop-latest.mjs",
     "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "dev": "tsx src/cli.ts",
     "dev:web": "vite --config web/vite.config.ts",

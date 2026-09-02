@@ -46,6 +46,27 @@ struct DesktopStatus {
     /// Registered projects for the multi-project dock (MRU order).
     #[serde(skip_serializing_if = "Option::is_none")]
     projects: Option<Vec<DesktopProjectEntry>>,
+    /// Product version of this desktop shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell_version: Option<String>,
+    /// Control-plane build this shell expects the served UI to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_build: Option<String>,
+    /// true when the binary was launched via `tauri dev` / cargo, not an installed app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopUpdateInfo {
+    current_build: String,
+    latest_build: Option<String>,
+    latest_version: Option<String>,
+    app_path: Option<String>,
+    available: bool,
+    development: bool,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +122,16 @@ struct SelectedConfig {
 struct RuntimePaths {
     node: PathBuf,
     cli: PathBuf,
+}
+
+#[tauri::command]
+async fn desktop_check_update() -> Result<DesktopUpdateInfo, String> {
+    Ok(check_desktop_update())
+}
+
+#[tauri::command]
+async fn desktop_install_update() -> Result<DesktopUpdateInfo, String> {
+    install_desktop_update()
 }
 
 #[tauri::command]
@@ -233,6 +264,9 @@ async fn desktop_release_project_lease(
                     project_name: Some(inspection.name.clone()),
                     technical_detail: None,
                     projects: None,
+                    shell_version: None,
+                    expected_build: None,
+                    development: None,
                 },
                 &settings,
             ));
@@ -328,6 +362,9 @@ fn open_project_sync(app: &AppHandle, runtime: &DesktopRuntime, root: PathBuf) -
                 project_name: Some(project_name),
                 technical_detail: Some("未找到 agent-team.yaml".into()),
                 projects: None,
+                shell_version: None,
+                expected_build: None,
+                development: None,
             },
             &settings,
         );
@@ -1179,7 +1216,116 @@ fn force_kill_pid(pid: u32) {
 
 fn with_projects(mut status: DesktopStatus, settings: &DesktopSettings) -> DesktopStatus {
     status.projects = Some(project_entries_from_settings(settings));
+    decorate_desktop_identity(&mut status);
     status
+}
+
+fn decorate_desktop_identity(status: &mut DesktopStatus) {
+    status.shell_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    status.expected_build = Some(expected_desktop_build().into());
+    status.development = Some(cfg!(debug_assertions));
+}
+
+fn expected_desktop_build() -> &'static str {
+    "2026.08.17-github-changes"
+}
+
+fn check_desktop_update() -> DesktopUpdateInfo {
+    let current = expected_desktop_build().to_string();
+    let development = cfg!(debug_assertions);
+    let Some((manifest, _path)) = read_latest_desktop_manifest() else {
+        return DesktopUpdateInfo {
+            current_build: current,
+            latest_build: None,
+            latest_version: None,
+            app_path: None,
+            available: false,
+            development,
+            message: "还没有发现本机新构建。打包后会在仓库写出 desktop-latest.json。".into(),
+        };
+    };
+    let latest_build = manifest
+        .get("build")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let latest_version = manifest
+        .get("version")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let app_path = manifest
+        .get("appPath")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let available = !latest_build.is_empty() && latest_build != current && app_path.as_ref().is_some_and(|item| Path::new(item).exists());
+    DesktopUpdateInfo {
+        current_build: current.clone(),
+        latest_build: Some(latest_build.clone()),
+        latest_version,
+        app_path,
+        available,
+        development,
+        message: if development {
+            "当前是开发壳，界面走源码；安装包更新请用正式 App。".into()
+        } else if available {
+            format!("发现本机新构建 {latest_build}。安装后请完全退出再打开。")
+        } else if latest_build == current {
+            "已经是本机最新构建。".into()
+        } else {
+            "找到了版本清单，但新的 App 包还不存在。请先 pnpm desktop:build。".into()
+        },
+    }
+}
+
+fn install_desktop_update() -> Result<DesktopUpdateInfo, String> {
+    let info = check_desktop_update();
+    if !info.available {
+        return Ok(info);
+    }
+    let source = PathBuf::from(info.app_path.clone().ok_or("没有可安装的 App 路径")?);
+    if !source.exists() {
+        return Err("新的 App 包不存在，请先重新打包".into());
+    }
+    let destination = PathBuf::from("/Applications/Agent Team.app");
+    let status = Command::new("ditto")
+        .arg(&source)
+        .arg(&destination)
+        .status()
+        .map_err(|error| format!("无法安装新构建：{error}"))?;
+    if !status.success() {
+        return Err("安装新构建失败，ditto 没有成功结束".into());
+    }
+    Ok(DesktopUpdateInfo {
+        message: "已安装到「应用程序」。请完全退出 Agent Team 再打开。".into(),
+        available: false,
+        ..info
+    })
+}
+
+fn read_latest_desktop_manifest() -> Option<(serde_json::Value, PathBuf)> {
+    for candidate in desktop_latest_manifest_candidates() {
+        let Ok(contents) = fs::read_to_string(&candidate) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+            continue;
+        };
+        return Some((value, candidate));
+    }
+    None
+}
+
+fn desktop_latest_manifest_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".agent-team/desktop-latest.json"));
+    }
+    paths.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop-latest.json"));
+    paths.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src-tauri/target/release/bundle/macos/latest.json"),
+    );
+    paths
 }
 
 fn discover_project_config(root: &Path) -> Option<PathBuf> {
@@ -1486,7 +1632,7 @@ fn navigate_to(app: &AppHandle, destination: &str) -> Result<(), String> {
 }
 
 fn ready_status(service: &ManagedService) -> DesktopStatus {
-    DesktopStatus {
+    let mut status = DesktopStatus {
         state: "ready",
         message: "项目已就绪".into(),
         project_name: Some(service.project_name.clone()),
@@ -1496,17 +1642,27 @@ fn ready_status(service: &ManagedService) -> DesktopStatus {
             service.url
         )),
         projects: None,
-    }
+        shell_version: None,
+        expected_build: None,
+        development: None,
+    };
+    decorate_desktop_identity(&mut status);
+    status
 }
 
 fn needs_project_status() -> DesktopStatus {
-    DesktopStatus {
+    let mut status = DesktopStatus {
         state: "needsProject",
         message: "选择一个代码项目开始，可添加多个项目并在工作台切换".into(),
         project_name: None,
         technical_detail: None,
         projects: None,
-    }
+        shell_version: None,
+        expected_build: None,
+        development: None,
+    };
+    decorate_desktop_identity(&mut status);
+    status
 }
 
 fn error_status(
@@ -1516,25 +1672,35 @@ fn error_status(
 ) -> DesktopStatus {
     let detail = detail.into();
     eprintln!("Agent Team desktop error: {detail}");
-    DesktopStatus {
+    let mut status = DesktopStatus {
         state: "error",
         message: message.into(),
         project_name,
         technical_detail: Some(detail),
         projects: None,
-    }
+        shell_version: None,
+        expected_build: None,
+        development: None,
+    };
+    decorate_desktop_identity(&mut status);
+    status
 }
 
 fn service_start_error_status(project_name: String, detail: String) -> DesktopStatus {
     if detail.contains("Another control service is already running with PID") {
         eprintln!("Agent Team desktop project busy: {detail}");
-        return DesktopStatus {
+        let mut status = DesktopStatus {
             state: "busy",
             message: "这个项目已由另一个 Agent Team 进程管理，正在运行的任务不会受到影响".into(),
             project_name: Some(project_name),
             technical_detail: Some(detail),
             projects: None,
+            shell_version: None,
+            expected_build: None,
+            development: None,
         };
+        decorate_desktop_identity(&mut status);
+        return status;
     }
     error_status("这个项目暂时无法打开", Some(project_name), detail)
 }
@@ -1671,7 +1837,9 @@ pub fn run() {
             desktop_list_projects,
             desktop_remove_project,
             desktop_inspect_project_lease,
-            desktop_release_project_lease
+            desktop_release_project_lease,
+            desktop_check_update,
+            desktop_install_update
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Agent Team desktop application");
@@ -1694,6 +1862,30 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use tempfile::tempdir;
+
+    #[test]
+    fn desktop_status_advertises_shell_identity() {
+        let status = needs_project_status();
+        assert_eq!(status.shell_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(status.expected_build.as_deref(), Some("2026.08.17-github-changes"));
+        assert_eq!(status.development, Some(true));
+    }
+
+    #[test]
+    fn desktop_update_check_reads_local_manifest() {
+        let root = tempdir().unwrap();
+        let manifest = root.path().join("desktop-latest.json");
+        fs::write(
+            &manifest,
+            r#"{"version":"0.1.0","build":"2099.01.01-next","appPath":"/tmp/missing.app"}"#,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&fs::read_to_string(manifest).unwrap()).unwrap();
+        assert_eq!(parsed["build"], "2099.01.01-next");
+        let info = check_desktop_update();
+        assert_eq!(info.current_build, "2026.08.17-github-changes");
+        assert!(info.message.contains("构建") || info.message.contains("开发"));
+    }
 
     #[test]
     fn discovers_workspace_before_project_config() {

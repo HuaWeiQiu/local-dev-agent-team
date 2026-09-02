@@ -37,6 +37,9 @@ interface DesktopStatus {
   projectName?: string;
   technicalDetail?: string;
   projects?: DesktopProjectEntry[];
+  shellVersion?: string;
+  expectedBuild?: string;
+  development?: boolean;
 }
 
 interface DesktopLauncherProps {
@@ -53,6 +56,12 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
     previewState ? previewStatus(previewState) : initialStatus,
   );
   const [busy, setBusy] = useState(!previewState);
+  const [updateInfo, setUpdateInfo] = useState<{
+    available: boolean;
+    message: string;
+    latestBuild?: string;
+    development?: boolean;
+  }>();
 
   useEffect(() => {
     applyTheme(getInitialTheme());
@@ -61,6 +70,9 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
   useEffect(() => {
     if (previewState) return;
     void runCommand("desktop_boot", setStatus, setBusy);
+    void invoke("desktop_check_update")
+      .then((value) => setUpdateInfo(value as { available: boolean; message: string; latestBuild?: string; development?: boolean }))
+      .catch(() => undefined);
   }, [previewState]);
 
   const checks = useMemo(() => launcherChecks(status), [status]);
@@ -179,8 +191,33 @@ export default function DesktopLauncher({ previewState }: DesktopLauncherProps) 
           <span className="launcher-brand-icon"><Bot size={20} strokeWidth={2.2} /></span>
           <strong>Agent Team</strong>
         </div>
-        <span className="launcher-edition">桌面端</span>
+        <span className="launcher-edition">
+          桌面端 · {status.shellVersion ?? __APP_VERSION__}
+          {status.development ? " · 开发" : ""}
+        </span>
       </header>
+      {status.expectedBuild && status.expectedBuild !== __APP_BUILD_ID__ && (
+        <p className="launcher-version-warn" role="status">
+          壳期望前端 {status.expectedBuild}，当前界面是 {__APP_BUILD_ID__}。这是旧包，请完全退出后重装 App，或用 pnpm desktop:dev。
+        </p>
+      )}
+      {updateInfo?.available && (
+        <div className="launcher-update" role="status">
+          <p>{updateInfo.message}</p>
+          <button
+            type="button"
+            className="launcher-secondary"
+            disabled={busy}
+            onClick={() => {
+              void invoke("desktop_install_update")
+                .then((value) => setUpdateInfo(value as { available: boolean; message: string }))
+                .catch((error: unknown) => setUpdateInfo({ available: true, message: errorMessage(error) }));
+            }}
+          >
+            安装本机新构建
+          </button>
+        </div>
+      )}
 
       <main className="launcher-main">
         <section className="launcher-content" aria-live="polite">
@@ -407,6 +444,11 @@ function launcherChecks(status: DesktopStatus) {
       label: "配置",
       detail: configured ? "已识别" : status.state === "needsSetup" ? "需要初始化" : "自动检查",
       state: configured ? "done" : opening && hasProject ? "active" : "waiting",
+    },
+    {
+      label: "本机 Agent CLI",
+      detail: "打开工作台后可在「设置」检测 Codex / Claude / Grok / Kimi。至少登录一种才能开工。",
+      state: status.state === "ready" || configured ? "done" : "waiting",
     },
     {
       label: "工作台",
