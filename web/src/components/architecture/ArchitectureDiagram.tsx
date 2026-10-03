@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   ARCHITECTURE_KIND_LABEL,
   ARCHITECTURE_RELATION_LABEL,
@@ -8,12 +8,14 @@ import {
 } from "../../architecture";
 import type { ArchitectureDesign, TaskRunState } from "../../types";
 import { cn } from "../../ui/cn";
+import { SequenceDiagram } from "./SequenceDiagram";
 
 interface ArchitectureDiagramProps {
   tasks: TaskRunState[];
   design?: ArchitectureDesign;
   selectedModuleId?: string;
   onSelectModule(id: string): void;
+  onClearModule?(): void;
 }
 
 const STATUS_LABEL: Record<ModuleStatus, string> = {
@@ -39,12 +41,25 @@ const SOURCE_HINT = {
 } as const;
 
 /** System map and main-flow sequence. Both are views of the same design. */
-export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectModule }: ArchitectureDiagramProps) {
+export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectModule, onClearModule }: ArchitectureDiagramProps) {
   const presentation = useMemo(() => presentArchitecture(tasks, design), [tasks, design]);
+  const [view, setView] = useState<"structure" | "sequence">("structure");
   const diagram = presentation.diagram;
   if (diagram.boxes.length === 0) return null;
   const boxOf = new Map(diagram.boxes.map((box) => [box.id, box]));
   const nameOf = (id: string) => boxOf.get(id)?.label ?? id;
+  const focused = selectedModuleId && boxOf.has(selectedModuleId) ? selectedModuleId : undefined;
+  const neighborhood = new Set<string>();
+  if (focused) {
+    neighborhood.add(focused);
+    for (const edge of diagram.edges) {
+      if (edge.from === focused) neighborhood.add(edge.to);
+      if (edge.to === focused) neighborhood.add(edge.from);
+    }
+  }
+  const steps = focused
+    ? presentation.sequence.filter((step) => neighborhood.has(step.from) || neighborhood.has(step.to))
+    : presentation.sequence;
   return (
     <section aria-label="系统架构图" className="bd-b bg-surface px-4 py-3 md:px-6">
       <div className="flex flex-wrap items-center gap-2">
@@ -52,7 +67,40 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
         <span className="rounded-full bg-surface-2 px-2 py-0.5 text-2xs text-muted">{ARCHITECTURE_SOURCE_LABEL[presentation.source]}</span>
       </div>
       {presentation.summary && <p className="m-0 mt-1 text-xs text-ink-2">{presentation.summary}</p>}
-      <p className="m-0 mt-1 mb-3 text-xs text-muted">{SOURCE_HINT[presentation.source]}</p>
+      {presentation.source !== "architect" && (
+        <p className="m-0 mt-1 text-xs text-muted">{SOURCE_HINT[presentation.source]}</p>
+      )}
+      <div className="mb-3 mt-2 flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-lg bg-surface-2 p-0.5" role="group" aria-label="架构视图">
+          {(["structure", "sequence"] as const).map((item) => (
+            <button
+              key={item}
+              type="button"
+              aria-pressed={view === item}
+              onClick={() => setView(item)}
+              className={cn(
+                "cursor-pointer rounded-md px-3 py-1 text-xs focus-ring",
+                view === item ? "bg-surface font-medium text-ink shadow-sm" : "border-0 bg-transparent text-muted",
+              )}
+            >
+              {item === "structure" ? "结构" : "时序"}
+            </button>
+          ))}
+        </div>
+        {focused && (
+          <span className="text-xs text-ink-2">
+            下钻 {nameOf(focused)}
+            {onClearModule && (
+              <button type="button" onClick={onClearModule} className="ml-2 cursor-pointer border-0 bg-transparent p-0 text-accent-ink hover:underline focus-ring">
+                看整个系统
+              </button>
+            )}
+          </span>
+        )}
+      </div>
+      {view === "sequence" ? (
+        <SequenceDiagram steps={steps} nameOf={nameOf} onSelect={onSelectModule} />
+      ) : (
       <div className="scroll-thin overflow-x-auto">
         <div className="relative" style={{ width: diagram.width, height: diagram.height }}>
           <svg aria-hidden className="pointer-events-none absolute inset-0" width={diagram.width} height={diagram.height}>
@@ -65,6 +113,7 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
               const from = boxOf.get(edge.from);
               const to = boxOf.get(edge.to);
               if (!from || !to) return null;
+              const faded = focused && (!neighborhood.has(edge.from) || !neighborhood.has(edge.to));
               const x1 = from.x + from.width / 2;
               const y1 = from.y + from.height;
               const x2 = to.x + to.width / 2;
@@ -72,7 +121,7 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
               const mid = (y1 + y2) / 2;
               const caption = edge.label ?? (edge.kind ? ARCHITECTURE_RELATION_LABEL[edge.kind] : undefined);
               return (
-                <g key={`${edge.from}-${edge.to}-${edge.kind ?? "link"}`}>
+                <g key={`${edge.from}-${edge.to}-${edge.kind ?? "link"}`} opacity={faded ? 0.25 : 1}>
                   <path
                     d={`M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2 - 2}`}
                     fill="none"
@@ -91,6 +140,7 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
           </svg>
           {diagram.boxes.map((box) => {
             const selected = selectedModuleId === box.id;
+            const faded = focused && !neighborhood.has(box.id);
             return (
               <button
                 key={box.id}
@@ -102,6 +152,7 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
                   selected && "border-accent outline-2 outline-offset-2 outline-accent",
                   box.status === "blocked" && "border-danger/40",
                   box.status === "working" && "border-accent/50",
+                  faded && "opacity-30",
                 )}
                 style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
               >
@@ -109,37 +160,15 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
                   <span aria-hidden className={cn("size-2 shrink-0 rounded-full", STATUS_DOT[box.status])} />
                   <span className="min-w-0 flex-1 truncate text-xs font-semibold text-ink">{box.label}</span>
                 </span>
-                <span className="text-2xs text-muted">
-                  {box.kind ? `${ARCHITECTURE_KIND_LABEL[box.kind]} · ` : ""}
-                  {STATUS_LABEL[box.status]} · {box.tasks.length} 个任务
+                <span className="line-clamp-2 text-2xs leading-snug text-ink-2">
+                  {box.responsibility ?? `${box.kind ? `${ARCHITECTURE_KIND_LABEL[box.kind]} · ` : ""}${STATUS_LABEL[box.status]}`}
                 </span>
-                <span className="text-2xs text-accent-ink">点击查看</span>
+                <span className="text-2xs text-muted">{STATUS_LABEL[box.status]} · {box.tasks.length} 个任务</span>
               </button>
             );
           })}
         </div>
       </div>
-      {presentation.sequence.length > 0 && (
-        <div className="mt-4">
-          <h4 className="m-0 text-xs font-medium text-ink-2">主流程</h4>
-          <ol className="scroll-thin m-0 mt-2 flex list-none gap-2 overflow-x-auto p-0">
-            {presentation.sequence.map((step) => (
-              <li key={`${step.order}-${step.from}-${step.to}`}>
-                <button
-                  type="button"
-                  onClick={() => onSelectModule(step.to)}
-                  className="flex h-full w-56 cursor-pointer flex-col items-start gap-1 rounded-lg border border-solid border-line bg-surface-2 px-3 py-2 text-left hover:bg-surface focus-ring"
-                >
-                  <span className="text-2xs text-muted">第 {step.order} 步</span>
-                  <span className="text-xs text-ink">
-                    {nameOf(step.from)} → {nameOf(step.to)}
-                  </span>
-                  <span className="text-2xs text-ink-2">{step.action}</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-        </div>
       )}
     </section>
   );

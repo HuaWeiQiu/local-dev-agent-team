@@ -31,6 +31,12 @@ export interface StageArtifact {
   body: string;
 }
 
+export interface StageLedgerEntry {
+  at: string;
+  label: string;
+  detail?: string;
+}
+
 export interface StageBrief {
   stage: StageView;
   headline: string;
@@ -39,6 +45,11 @@ export interface StageBrief {
   agents: Array<{ role: string; label: string; status: "running" | "done" | "failed"; note?: string }>;
   liveText?: string;
   artifact?: StageArtifact;
+  /** What this step received. A click is a snapshot of that step, not the whole run. */
+  input?: string;
+  /** Extra attempts, flaky reruns, and triage events on this step. */
+  retries?: number;
+  ledger: StageLedgerEntry[];
   tasks: TaskRunState[];
 }
 
@@ -108,6 +119,92 @@ function stageArtifact(run: RunState, stageId: StageId): StageArtifact | undefin
   return undefined;
 }
 
+const STAGE_EVENT_TYPES: Partial<Record<StageId, string[]>> = {
+  build: ["run.wave.started", "run.wave.completed"],
+  review: ["run.advisor.consulted", "flow.triage", "quality.flaky"],
+  approval: ["approval.requested", "approval.resolved"],
+  gates: ["quality.flaky"],
+  ship: ["run.updated"],
+};
+
+function stageInput(run: RunState, stageId: StageId): string | undefined {
+  if (stageId === "intake") return run.goal;
+  if (stageId === "explore") return run.intake?.instructionsForArchitect ?? run.goal;
+  if (stageId === "plan") return run.explore?.summary ?? run.intake?.goalSummary ?? run.goal;
+  if (stageId === "build" || stageId === "review" || stageId === "integrate") {
+    const titles = run.tasks.filter((task) => task.status !== "pending").map((task) => task.task.title);
+    return titles.length > 0 ? titles.join("\n") : undefined;
+  }
+  if (stageId === "gates") {
+    const commands = run.finalQuality?.commands?.map((command) => [command.spec.command, ...command.spec.args].join(" "));
+    return commands && commands.length > 0 ? commands.join("\n") : undefined;
+  }
+  if (stageId === "approval") {
+    return run.approvals?.find((approval) => approval.status === "pending")?.summary ?? run.finalDecision?.reason;
+  }
+  if (stageId === "ship") return run.pullRequestUrl ?? run.finalDecision?.reason;
+  return undefined;
+}
+
+function stageRetries(run: RunState, stageId: StageId, events: RunEvent[]): number {
+  if (stageId !== "build" && stageId !== "review") return 0;
+  const attempts = run.tasks.reduce((total, task) => total + Math.max(0, task.attempts - 1) + (task.quality?.reruns ?? 0), 0);
+  const signals = events.filter((event) => event.type === "quality.flaky" || event.type === "flow.triage").length;
+  return attempts + signals;
+}
+
+function ledgerDetail(event: RunEvent): { label: string; detail?: string } {
+  const payload = record(event.payload);
+  const role = text(payload?.role);
+  const roleLabel = role ? agentRoleLabel(role) : "智能体";
+  if (event.type === "agent.invocation.started") {
+    const profile = text(payload?.profile);
+    return { label: `${roleLabel} 开始`, ...(profile ? { detail: profile } : {}) };
+  }
+  if (event.type === "agent.invocation.completed") {
+    const profile = text(payload?.profile);
+    return {
+      label: `${roleLabel} ${payload?.success === false ? "失败" : "完成"}`,
+      ...(profile ? { detail: profile } : {}),
+    };
+  }
+  if (event.type === "agent.stdout" || event.type === "agent.stderr") {
+    const chunk = text(payload?.text)?.replace(/\s+/g, " ").slice(0, 160);
+    return { label: event.type === "agent.stderr" ? "错误输出" : "输出", ...(chunk ? { detail: chunk } : {}) };
+  }
+  if (event.type === "run.wave.started" || event.type === "run.wave.completed") {
+    const ids = Array.isArray(payload?.taskIds) ? payload.taskIds.filter((id): id is string => typeof id === "string") : [];
+    const status = text(payload?.status);
+    const detail = [ids.join("、"), status].filter(Boolean).join(" · ");
+    return { label: event.type === "run.wave.started" ? "开始一批任务" : "这一批结束", ...(detail ? { detail } : {}) };
+  }
+  if (event.type === "run.advisor.consulted" || event.type === "flow.triage") {
+    const summary = text(payload?.summary) ?? text(payload?.recommendation);
+    return { label: "重试或请教", ...(summary ? { detail: summary } : {}) };
+  }
+  if (event.type === "quality.flaky") return { label: "不稳定命令重跑" };
+  if (event.type === "approval.requested" || event.type === "approval.resolved") {
+    const gate = text(payload?.gate);
+    return { label: event.type === "approval.requested" ? "请求审批" : "审批结果", ...(gate ? { detail: gate } : {}) };
+  }
+  return { label: event.type };
+}
+
+function stageLedger(events: RunEvent[], stageId: StageId, roles: string[]): StageLedgerEntry[] {
+  const types = new Set(STAGE_EVENT_TYPES[stageId] ?? []);
+  return events
+    .filter((event) => {
+      const role = invocationRole(event);
+      if (role && roles.includes(role)) return true;
+      return types.has(event.type);
+    })
+    .slice(-8)
+    .map((event) => {
+      const line = ledgerDetail(event);
+      return { at: event.occurredAt, ...line };
+    });
+}
+
 export function describeStage(run: RunState, stageId: StageId, events: RunEvent[] = []): StageBrief {
   const stage = deriveStages(run).find((item) => item.id === stageId) ?? {
     id: stageId,
@@ -148,6 +245,9 @@ export function describeStage(run: RunState, stageId: StageId, events: RunEvent[
   });
   const liveText = lastStdout(events, roles);
   const artifact = stageArtifact(run, stageId);
+  const input = stageInput(run, stageId);
+  const retries = stageRetries(run, stageId, events);
+  const ledger = stageLedger(events, stageId, roles);
   const latest = history.at(-1)?.message;
   const headline =
     stage.state === "current"
@@ -167,6 +267,9 @@ export function describeStage(run: RunState, stageId: StageId, events: RunEvent[
     agents,
     ...(liveText ? { liveText } : {}),
     ...(artifact ? { artifact } : {}),
+    ...(input ? { input } : {}),
+    ...(retries > 0 ? { retries } : {}),
+    ledger,
     tasks: stageId === "plan" || stageId === "build" || stageId === "review" ? tasks : tasks.filter((task) => task.status !== "pending"),
   };
 }
@@ -213,7 +316,7 @@ export interface ArchitectureDiagram {
 }
 
 const BOX_WIDTH = 176;
-const BOX_HEIGHT = 78;
+const BOX_HEIGHT = 92;
 const GAP_X = 40;
 const GAP_Y = 64;
 const PAD = 16;

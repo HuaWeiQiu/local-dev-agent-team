@@ -1,4 +1,4 @@
-import { Bot, FileText, ListChecks, MessageSquareText, Route } from "lucide-react";
+import { Bot, FileText, ListChecks, MessageSquareText, Repeat2, Route, ScrollText, TextCursorInput } from "lucide-react";
 import type { StageBrief } from "../../architecture";
 import type { TaskRunState } from "../../types";
 import { formatRelative } from "../../time";
@@ -20,7 +20,7 @@ interface StageDetailProps {
 }
 
 export function StageDetail({ brief, onSelectTask }: StageDetailProps) {
-  const { stage, headline, hint, history, agents, liveText, artifact, tasks } = brief;
+  const { stage, headline, hint, history, agents, liveText, artifact, input, retries, ledger, tasks } = brief;
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <section className="bd-b px-4 py-4">
@@ -29,9 +29,31 @@ export function StageDetail({ brief, onSelectTask }: StageDetailProps) {
         <p className="m-0 mt-2 text-sm leading-relaxed text-ink-2">{headline}</p>
         <p className="m-0 mt-2 text-xs leading-relaxed text-muted">{hint}</p>
       </section>
+      {input && (
+        <InspectorSection icon={TextCursorInput} title="输入">
+          <p className="m-0 whitespace-pre-wrap text-xs leading-relaxed text-ink-2">{input}</p>
+        </InspectorSection>
+      )}
       {artifact && (
-        <InspectorSection icon={FileText} title={artifact.title}>
+        <InspectorSection icon={FileText} title={`结果 · ${artifact.title}`}>
           <p className="m-0 whitespace-pre-wrap text-xs leading-relaxed text-ink-2">{artifact.body}</p>
+        </InspectorSection>
+      )}
+      {retries !== undefined && retries > 0 && (
+        <InspectorSection icon={Repeat2} title="重试">
+          <p className="m-0 text-xs text-ink-2">这一步额外尝试了 {retries} 次（返工、不稳定重跑，或请教之后再试）。</p>
+        </InspectorSection>
+      )}
+      {ledger.length > 0 && (
+        <InspectorSection icon={ScrollText} title="这一步的事件">
+          <DefinitionList>
+            {ledger.map((entry) => (
+              <Definition key={`${entry.at}-${entry.label}-${entry.detail ?? ""}`} term={formatRelative(entry.at)}>
+                <span className="text-ink">{entry.label}</span>
+                {entry.detail ? <span className="mt-0.5 block text-muted">{entry.detail}</span> : null}
+              </Definition>
+            ))}
+          </DefinitionList>
         </InspectorSection>
       )}
       {liveText && (
@@ -54,7 +76,7 @@ export function StageDetail({ brief, onSelectTask }: StageDetailProps) {
           </ul>
         </InspectorSection>
       )}
-      {history.length > 0 && (
+      {ledger.length === 0 && history.length > 0 && (
         <InspectorSection icon={Route} title="过程记录">
           <DefinitionList>
             {history.map((entry) => (

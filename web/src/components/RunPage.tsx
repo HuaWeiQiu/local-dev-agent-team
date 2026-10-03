@@ -175,6 +175,10 @@ export function RunPage({
                 {...(stageBrief && !selectedModuleId ? { stage: stageBrief } : {})}
                 {...(selectedModuleId ? { moduleId: selectedModuleId } : {})}
                 onSelectModule={setSelectedModuleId}
+                onClearModule={() => {
+                  setSelectedModuleId(undefined);
+                  onMonitorPanelChange("graph");
+                }}
                 onSelectTask={(task) => {
                   setSelectedStageId(stageForTask(task));
                   setSelectedModuleId(undefined);
@@ -210,6 +214,7 @@ export function RunPage({
                   onSelectTask(undefined);
                   if (!wide) onMonitorPanelChange("details");
                 }}
+                onClearModule={() => setSelectedModuleId(undefined)}
               />
             )}
           </Panel>
@@ -236,6 +241,7 @@ export function RunPage({
             {...(stageBrief && !selectedModuleId ? { stage: stageBrief } : {})}
             {...(selectedModuleId ? { moduleId: selectedModuleId } : {})}
             onSelectModule={setSelectedModuleId}
+            onClearModule={() => setSelectedModuleId(undefined)}
             onSelectTask={(task) => {
               setSelectedStageId(stageForTask(task));
               setSelectedModuleId(undefined);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildArchitectureDiagram, moduleKey, presentArchitecture } from "../../web/src/architecture.js";
-import type { ArchitectureDesign } from "../../web/src/types.js";
+import { buildArchitectureDiagram, describeStage, moduleKey, presentArchitecture } from "../../web/src/architecture.js";
+import type { ArchitectureDesign, RunEvent, RunState } from "../../web/src/types.js";
 import type { Task, TaskRunState } from "../../web/src/types.js";
 
 function task(id: string, dependsOn: string[], path: string, status: TaskRunState["status"] = "pending"): TaskRunState {
@@ -59,5 +59,44 @@ describe("architecture diagram", () => {
     expect(presented.diagram.boxes.map((box) => box.label).sort()).toEqual(["导出接口", "导出核心"]);
     expect(presented.diagram.edges).toEqual([{ from: "export", to: "api", kind: "calls", label: "接口取 CSV" }]);
     expect(presentArchitecture(tasks).source).toBe("inferred");
+  });
+
+  it("snapshots one stage: its input, extra attempts, and only that step's events", () => {
+    const working = task("csv", [], "src/export/csv.ts", "working");
+    working.attempts = 3;
+    const run = {
+      goal: "导出",
+      status: "implementing",
+      history: [{ at: "2026-01-01T00:00:00.000Z", status: "implementing", message: "开始实现" }],
+      tasks: [working],
+    } as RunState;
+    const events: RunEvent[] = [
+      {
+        sequence: 1,
+        id: "e1",
+        schemaVersion: 1,
+        runId: "r",
+        type: "agent.stdout",
+        occurredAt: "2026-01-01T00:01:00.000Z",
+        payload: { role: "worker", invocationId: "w", text: "写入 csv" },
+        traceId: "t",
+        spanId: "s",
+      },
+      {
+        sequence: 2,
+        id: "e2",
+        schemaVersion: 1,
+        runId: "r",
+        type: "agent.stdout",
+        occurredAt: "2026-01-01T00:02:00.000Z",
+        payload: { role: "architect", invocationId: "a", text: "这是规划，不属于实现" },
+        traceId: "t",
+        spanId: "s2",
+      },
+    ];
+    const brief = describeStage(run, "build", events);
+    expect(brief.input).toBe("csv");
+    expect(brief.retries).toBe(2);
+    expect(brief.ledger.map((entry) => entry.detail)).toEqual(["写入 csv"]);
   });
 });

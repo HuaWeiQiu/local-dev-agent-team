@@ -18,9 +18,10 @@ interface ModuleDetailProps {
   moduleId: string;
   onSelectTask(task: TaskRunState): void;
   onSelectModule(id: string): void;
+  onClearModule?(): void;
 }
 
-export function ModuleDetail({ tasks, design, moduleId, onSelectTask, onSelectModule }: ModuleDetailProps) {
+export function ModuleDetail({ tasks, design, moduleId, onSelectTask, onSelectModule, onClearModule }: ModuleDetailProps) {
   const diagram = presentArchitecture(tasks, design).diagram;
   const module = diagram.boxes.find((box) => box.id === moduleId);
   if (!module) return null;
@@ -38,6 +39,11 @@ export function ModuleDetail({ tasks, design, moduleId, onSelectTask, onSelectMo
         <p className="m-0 mt-2 text-xs leading-relaxed text-ink-2">
           {module.responsibility ?? "这个元素来自任务路径的推断。点下面的任务看具体改动、门禁和评审。"}
         </p>
+        {onClearModule && (
+          <button type="button" onClick={onClearModule} className="mt-3 cursor-pointer border-0 bg-transparent p-0 text-xs text-accent-ink hover:underline focus-ring">
+            返回整个系统
+          </button>
+        )}
       </section>
       <InspectorSection icon={FolderTree} title="负责路径">
         <ul className="m-0 flex list-none flex-col gap-1 p-0">

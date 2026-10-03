@@ -14,6 +14,7 @@ interface TaskInspectorProps {
   stage?: StageBrief;
   moduleId?: string;
   onSelectModule?(id: string): void;
+  onClearModule?(): void;
   onSelectTask?(task: TaskRunState): void;
   onLoadDiff?(taskId: string): Promise<TaskDiff>;
   className?: string;
@@ -25,6 +26,7 @@ export const TaskInspector = memo(function TaskInspector({
   stage,
   moduleId,
   onSelectModule,
+  onClearModule,
   onSelectTask,
   onLoadDiff,
   className,
@@ -47,6 +49,7 @@ export const TaskInspector = memo(function TaskInspector({
               {...(run.plan?.design ? { design: run.plan.design } : {})}
               onSelectTask={onSelectTask}
               onSelectModule={onSelectModule}
+              {...(onClearModule ? { onClearModule } : {})}
             />
           ) : stage && onSelectTask ? (
             <StageDetail brief={stage} onSelectTask={onSelectTask} />
