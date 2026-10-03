@@ -295,6 +295,9 @@ class DemoServer {
     if (path === "/experience/retrieve") return ok({ note: "演示数据", items: [] });
     if (path === "/usage") return ok(buildUsage(runs));
     if (path === "/jev/probe") return ok({ ok: false, latencyMs: 0, error: "演示模式不连接本地模型" });
+    if (path === "/onboarding" || path === "/onboarding/quality") {
+      return ok(demoOnboarding(project));
+    }
     if (path === "/role-settings") {
       return ok({ projectId: project, projectName: project, roles: {}, global: demoDesktopSettings.settings.defaults.roles, effective: demoDesktopSettings.settings.defaults.roles, sources: {} });
     }
@@ -413,4 +416,29 @@ export function installDemoMode(): void {
     }
   }
   (window as unknown as { EventSource: unknown }).EventSource = BoundEventSource;
+}
+
+function demoOnboarding(project: string) {
+  return {
+    projectId: project,
+    projectName: project,
+    source: "file" as const,
+    configPath: "agent-team.yaml",
+    needsSetup: false,
+    detection: {
+      root: "/demo",
+      name: project,
+      isGitRepo: true,
+      defaultBranch: "main",
+      ecosystems: ["node"],
+      packageManager: "pnpm",
+      commands: [
+        { role: "typecheck" as const, label: "pnpm run check", command: { command: "pnpm", args: ["run", "check"] }, source: "package.json scripts.check", selected: true },
+        { role: "test" as const, label: "pnpm run test", command: { command: "pnpm", args: ["run", "test"] }, source: "package.json scripts.test", selected: true },
+      ],
+    },
+    current: { commands: [{ command: "pnpm", args: ["run", "test"] }] },
+    clis: [{ id: "codex", installed: true, runtimeSupported: true, version: "demo", authStatus: "present" as const }],
+    recommendedCli: "codex",
+  };
 }

@@ -3,6 +3,7 @@ import type { LoadedConfig } from "../config/load.js";
 import { SqliteEventStore } from "../events/store.js";
 import { EvolutionApplicationCoordinator } from "../evolution/application.js";
 import { DurableEvolutionCatalog } from "../evolution/persistence.js";
+import { ensureStateDirectoryExcluded } from "../onboarding/starter.js";
 import { GitManager } from "../git/manager.js";
 import { StrategyBlueprintCatalog } from "../strategies/catalog.js";
 import { EvolutionProjectService } from "./evolution-service.js";
@@ -26,6 +27,9 @@ export async function startProjectRuntime(loaded: LoadedConfig): Promise<Project
   let supervisor: RunSupervisor | undefined;
   let evolution: EvolutionProjectService | undefined;
   try {
+    if (loaded.source === "detected") {
+      await ensureStateDirectoryExcluded(loaded.root, loaded.config.project.stateDirectory);
+    }
     strategies = await StrategyBlueprintCatalog.open(loaded);
     loaded = strategies.loaded;
     events = new SqliteEventStore(path.join(stateRoot, "control.sqlite"), {

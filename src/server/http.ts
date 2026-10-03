@@ -16,6 +16,7 @@ import {
   sendJson,
   singleHeader,
 } from "./http-common.js";
+import { onboardingRoutes } from "./http-routes-onboarding.js";
 import { runRoutes } from "./http-routes-runs.js";
 import { evolutionRoutes } from "./http-routes-evolution.js";
 import { dispatchDesktopApi } from "./http-routes-desktop.js";
@@ -326,7 +327,7 @@ async function handleWorkspaceRequest(
 // Route matching is unambiguous across slices (no two patterns share method,
 // segment count, and static segments), so concatenation order cannot change
 // which handler a request resolves to.
-const projectApiRoutes: ProjectApiRoute[] = [...runRoutes, ...evolutionRoutes];
+const projectApiRoutes: ProjectApiRoute[] = [...runRoutes, ...evolutionRoutes, ...onboardingRoutes];
 
 async function dispatchProjectApi(
   context: ProjectHttpContext,

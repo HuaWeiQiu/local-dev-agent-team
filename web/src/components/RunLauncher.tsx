@@ -14,6 +14,7 @@ import type {
   CliId,
   CliInventory,
   ExperiencePlanningBundle,
+  FlowTemplateChoice,
   ProjectScope,
   PublicConfig,
   RoleBindingInput,
@@ -43,6 +44,13 @@ interface RunLauncherProps {
   onSubmit(input: StartRunInput): Promise<boolean>;
 }
 
+const TEMPLATE_OPTIONS: Array<{ id: FlowTemplateChoice; label: string; hint: string }> = [
+  { id: "auto", label: "自动选择", hint: "根据目标规模自动选择流程，并在运行中展示理由。" },
+  { id: "quick", label: "快速", hint: "直接实现并校验，重复失败时尽早停下，适合小改动。" },
+  { id: "standard", label: "标准", hint: "规划 → 实现 → 评审 → 交付，适合多数需求。" },
+  { id: "full", label: "完整", hint: "增加调研与更严格的评审，适合大改动或高风险变更。" },
+];
+
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
   grok: "Grok",
@@ -66,6 +74,7 @@ export function RunLauncher({
 }: RunLauncherProps) {
   const [goal, setGoal] = useState("");
   const [strategy, setStrategy] = useState(config.strategies.default);
+  const [template, setTemplate] = useState<FlowTemplateChoice>("auto");
   const [advanced, setAdvanced] = useState(true);
   const [bindings, setBindings] = useState<Record<string, RoleBindingInput>>({});
   const [useCliPicker, setUseCliPicker] = useState(true);
@@ -118,6 +127,7 @@ export function RunLauncher({
     if (initializedRef.current) return;
     initializedRef.current = true;
     if (initialGoal) setGoal(initialGoal);
+    setTemplate("auto");
     setStrategy(
       initialStrategy && config.strategies.definitions[initialStrategy]
         ? initialStrategy
@@ -173,6 +183,7 @@ export function RunLauncher({
     const succeeded = await onSubmit({
       goal: trimmedGoal,
       strategy,
+      ...(template !== "auto" ? { template } : {}),
       profileOverrides: {},
       ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
     });
@@ -272,6 +283,22 @@ export function RunLauncher({
             ))}
           </div>
         </fieldset>
+
+        <Field
+          label="流程模板"
+          htmlFor="run-template"
+          hint={TEMPLATE_OPTIONS.find((option) => option.id === template)?.hint}
+        >
+          <Select
+            id="run-template"
+            value={template}
+            onChange={(event) => setTemplate(event.target.value as FlowTemplateChoice)}
+          >
+            {TEMPLATE_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </Select>
+        </Field>
 
         <div className="flex flex-col gap-3">
           <button

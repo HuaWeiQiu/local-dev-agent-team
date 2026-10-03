@@ -14,6 +14,7 @@ import type {
   EvolutionProposal,
   EvolutionSnapshot,
   JevProbeResult,
+  OnboardingStatus,
   RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
@@ -116,6 +117,20 @@ export async function saveProjectRoleSettings(
   return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`, {
     method: "PUT",
     body: JSON.stringify({ roles }),
+  });
+}
+
+export async function getOnboarding(scope: ProjectScope): Promise<OnboardingStatus> {
+  return await request<OnboardingStatus>(`${apiRoot(scope)}/onboarding`);
+}
+
+export async function saveOnboardingQuality(
+  scope: ProjectScope,
+  commands: Array<{ command: string; args: string[] }>,
+): Promise<OnboardingStatus> {
+  return await request<OnboardingStatus>(`${apiRoot(scope)}/onboarding/quality`, {
+    method: "PUT",
+    body: JSON.stringify({ commands }),
   });
 }
 

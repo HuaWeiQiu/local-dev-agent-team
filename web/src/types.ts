@@ -502,9 +502,12 @@ export interface RoleBindingInput {
   reasoning?: string;
 }
 
+export type FlowTemplateChoice = "auto" | "quick" | "standard" | "full";
+
 export interface StartRunInput {
   goal: string;
   strategy?: string;
+  template?: FlowTemplateChoice;
   profileOverrides: Record<string, string>;
   roleBindings?: Record<string, RoleBindingInput>;
 }
@@ -990,4 +993,40 @@ export interface TaskDiff {
   content?: string;
   truncated: boolean;
   detail?: string;
+}
+
+export type CheckRole = "typecheck" | "lint" | "test" | "build";
+
+export interface DetectedCommand {
+  role: CheckRole;
+  label: string;
+  command: { command: string; args: string[] };
+  source: string;
+  selected: boolean;
+}
+
+export interface OnboardingStatus {
+  projectId: string;
+  projectName: string;
+  source: "file" | "detected";
+  configPath: string;
+  needsSetup: boolean;
+  detection: {
+    root: string;
+    name: string;
+    isGitRepo: boolean;
+    defaultBranch?: string;
+    ecosystems: string[];
+    packageManager?: string;
+    commands: DetectedCommand[];
+  };
+  current: { commands: Array<{ command: string; args: string[] }> };
+  clis: Array<{
+    id: string;
+    installed: boolean;
+    runtimeSupported: boolean;
+    version?: string;
+    authStatus: "unknown" | "present" | "missing" | "invalid";
+  }>;
+  recommendedCli?: string;
 }

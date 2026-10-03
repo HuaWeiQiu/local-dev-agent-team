@@ -1,15 +1,17 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { BookMarked, FolderCog, FolderSync, LayoutGrid, Monitor, Plus, Settings2, Sparkles, Trash2, Workflow } from "lucide-react";
+import { BookMarked, FolderCog, FolderSync, LayoutGrid, Monitor, Plus, Settings2, ShieldCheck, Sparkles, Trash2, Workflow } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
 import { laneOf } from "./board";
 import { BoardPage } from "./components/BoardPage";
 import { RunActionDialog } from "./components/RunActionDialog";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunPage, type MonitorPanel } from "./components/RunPage";
 import { useDesktopProject } from "./hooks/useDesktopProject";
 import { useDesktopSettings } from "./hooks/useDesktopSettings";
+import { useOnboarding } from "./hooks/useOnboarding";
 import { useRunActions } from "./hooks/useRunActions";
 import { latestPendingApproval, useRunEvents } from "./hooks/useRunEvents";
 import { useThemeMode } from "./hooks/useThemeMode";
@@ -82,6 +84,7 @@ export default function App({ demo = false }: { demo?: boolean }) {
   const { busy, runAction, cleanupOpen, cleanupPreview, cleanupError } = actions;
   const { roleDefaults, cliInventory, showCliPicker, refreshDesktopSettings } = useDesktopSettings(scope);
   const addDesktopProject = useDesktopProject({ desktopShell, setBusy: actions.setBusy, setError });
+  const onboarding = useOnboarding(scope);
 
   useEffect(() => {
     void getWorkspace()
@@ -175,6 +178,7 @@ export default function App({ demo = false }: { demo?: boolean }) {
         heading: "操作",
         items: [
           ...(config ? [{ id: "new-run", label: "新建运行", hint: "N", icon: <Plus />, run: () => openLauncher() }] : []),
+          { id: "onboarding", label: "项目初始化向导", icon: <ShieldCheck />, keywords: ["质量", "配置", "onboarding", "setup"], run: onboarding.reopen },
           { id: "cleanup", label: "清理本地运行历史", icon: <Trash2 />, keywords: ["清理", "删除"], run: () => actions.openCleanup() },
           { id: "theme", label: "切换主题", icon: <Monitor />, keywords: ["深色", "浅色", "dark", "light"], run: cycleTheme },
         ],
@@ -216,7 +220,7 @@ export default function App({ demo = false }: { demo?: boolean }) {
           : [],
       },
     ];
-  }, [actions, config, cycleTheme, handleSelectRun, navigate, openLauncher, runs, selectProject, workspace]);
+  }, [actions, config, cycleTheme, handleSelectRun, navigate, onboarding.reopen, openLauncher, runs, selectProject, workspace]);
 
   if (!workspace || !selectedProjectId) {
     return (
@@ -396,6 +400,14 @@ export default function App({ demo = false }: { demo?: boolean }) {
           onConfirm={actions.confirmCleanup}
           onResetPreview={() => { actions.setCleanupPreview(undefined); actions.setCleanupError(undefined); }}
           onClose={() => { actions.setCleanupOpen(false); actions.setCleanupPreview(undefined); actions.setCleanupError(undefined); }}
+        />
+        <OnboardingWizard
+          open={onboarding.open && !launcherOpen}
+          status={onboarding.status}
+          busy={onboarding.busy}
+          error={onboarding.error}
+          onSave={onboarding.save}
+          onSkip={onboarding.skip}
         />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} groups={paletteGroups} />
       </div>
