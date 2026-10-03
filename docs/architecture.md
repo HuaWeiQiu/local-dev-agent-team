@@ -143,6 +143,33 @@ Authority is split deliberately:
   target agent before acting, and sessions stay an optimization on top of
   Git-verified recovery.
 
+## Module Layout And Layering
+
+`src/` packages are layered; `test/architecture.test.ts` fails when a runtime
+import breaks the rules (type-only imports and lazy `import()` are ignored):
+
+- no runtime import cycles between packages;
+- foundation packages (`domain`, `process`, `security`, `events`, `state`,
+  `git`, `quality`, `config`) never import agents, sessions, workflow, server,
+  evolution or the desktop shell;
+- only `server`, `workspace` and the CLI entry import `server`/`workspace`, and
+  only `server` imports `evolution`;
+- the run engine (`workflow`, `flow`, `sessions`, `agents`, `interventions`,
+  `reliability`, `visibility`) never imports `desktop`, `evolution`, `server`
+  or `onboarding`;
+- `adapters`, `sessions`, `providers` and `process` know nothing about
+  workflow policy.
+
+`src/workflow/` is split by responsibility behind a shared read-only
+`RunnerEnv`: `runner.ts` owns `run`/`resume` and the flow wiring;
+`planning.ts`, `decision.ts`, `checkpoints.ts` (checkpoint/approval/recovery),
+`scheduler.ts` (dependency waves), `task-attempt.ts` (one task: work, quality,
+review, commit), `advisor.ts` (architect/Jev consultation) and `agents.ts`
+(role agent construction) are small services wired in the runner constructor.
+HTTP routes under `src/server/` are likewise one file per concern
+(`http-routes-{project,runs,interventions,insights,experience,strategies,
+evolution,onboarding}.ts`).
+
 ## Workflow State
 
 ```text

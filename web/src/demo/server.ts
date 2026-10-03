@@ -419,12 +419,13 @@ export function installDemoMode(): void {
 }
 
 function demoOnboarding(project: string) {
+  const firstRun = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("onboarding") === "1";
   return {
     projectId: project,
     projectName: project,
-    source: "file" as const,
+    source: firstRun ? ("detected" as const) : ("file" as const),
     configPath: "agent-team.yaml",
-    needsSetup: false,
+    needsSetup: firstRun,
     detection: {
       root: "/demo",
       name: project,
