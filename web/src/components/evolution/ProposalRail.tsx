@@ -105,8 +105,8 @@ export function ProposalRail({
                     disabled={busy}
                     onClick={() => onSelect(proposal.id)}
                     className={cn(
-                      "grid w-full cursor-pointer grid-cols-[2rem_minmax(0,1fr)_auto] items-start gap-x-3 border-0 bg-transparent px-4 py-3 text-left text-ink transition-colors hover:bg-surface focus-ring disabled:cursor-wait disabled:opacity-70",
-                      singlePane && "grid-cols-[2rem_minmax(0,1fr)_auto_1rem]",
+                      "grid w-full cursor-pointer grid-cols-[2rem_minmax(0,1fr)_5.5rem] items-center gap-x-3 border-0 bg-transparent px-4 py-3 text-left text-ink transition-colors hover:bg-surface focus-ring disabled:cursor-wait disabled:opacity-70",
+                      singlePane && "grid-cols-[2rem_minmax(0,1fr)_5.5rem_1rem]",
                       selected && "bg-surface shadow-[inset_2px_0_0_var(--accent)]",
                     )}
                   >
@@ -116,7 +116,7 @@ export function ProposalRail({
                       <small className="truncate text-xs text-muted">{proposalTarget(proposal)}</small>
                       <time className="text-2xs text-muted">{formatDate(proposal.createdAt)}</time>
                     </span>
-                    <Badge tone={tone} className="mt-0.5">
+                    <Badge tone={tone} className="justify-self-start">
                       <StatusDot tone={tone} pulse={tone === "active"} className="size-1.5" />
                       {proposalStatusLabel(proposal)}
                     </Badge>

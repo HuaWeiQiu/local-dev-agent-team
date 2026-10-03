@@ -32,8 +32,15 @@ export function RoleBindingEditor({
 }) {
   const clisById = new Map((inventory?.clis ?? []).map((cli) => [cli.id, cli]));
 
+  const columns = "md:grid-cols-[7.5rem_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.7fr)]";
   return (
     <div className="role-default-grid bd divide-y overflow-hidden rounded-lg bg-surface">
+      <div className={cn("hidden px-3 py-2 text-2xs font-medium text-muted md:grid md:gap-3", columns)}>
+        <span>角色</span>
+        <span>Agent CLI</span>
+        <span>模型</span>
+        <span>思考深度</span>
+      </div>
       {roleNames.map((role) => {
         const binding = roles[role] ?? { cli: "grok" as CliId, reasoning: "high" };
         const cli = clisById.get(binding.cli);
@@ -48,14 +55,20 @@ export function RoleBindingEditor({
           <div
             key={role}
             className={cn(
-              "grid gap-3 px-3 py-3 md:grid-cols-[7.5rem_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.7fr)] md:items-end",
+              "grid gap-3 px-3 py-3 md:items-center md:gap-3",
+              columns,
               source === "project" && "bg-accent-soft/40",
             )}
           >
-            <div className="flex items-center gap-2 md:h-9">
+            <div className="flex flex-wrap items-center gap-2">
               <strong className="text-sm font-semibold text-ink">{agentRoleLabel(role)}</strong>
               {sources && (
                 <Badge tone={source === "project" ? "active" : "neutral"}>{source === "project" ? "项目" : "全局"}</Badge>
+              )}
+              {onClear && source === "project" && (
+                <Button size="sm" disabled={disabled} onClick={() => onClear(role)}>
+                  恢复全局
+                </Button>
               )}
             </div>
             <Labeled label="Agent CLI">
@@ -98,11 +111,6 @@ export function RoleBindingEditor({
                 ))}
               </Select>
             </Labeled>
-            {onClear && source === "project" && (
-              <Button size="sm" className="md:col-start-2" disabled={disabled} onClick={() => onClear(role)}>
-                恢复全局
-              </Button>
-            )}
           </div>
         );
       })}
@@ -113,7 +121,7 @@ export function RoleBindingEditor({
 function Labeled({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="flex flex-col gap-1 text-xs text-muted">
-      <span>{label}</span>
+      <span className="md:sr-only">{label}</span>
       {children}
     </label>
   );

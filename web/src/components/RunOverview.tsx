@@ -159,7 +159,7 @@ export function RunOverview({ run, events, headline, onSelectTask, onOpenActivit
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
                       <span className="truncate text-sm font-medium text-ink">{entry.title}</span>
-                      <time className="ml-auto shrink-0 text-2xs text-muted" dateTime={entry.at}>{formatRelative(entry.at)}</time>
+                      <time className="ml-auto w-16 shrink-0 text-right text-2xs tabular-nums text-muted" dateTime={entry.at}>{formatRelative(entry.at)}</time>
                     </div>
                     {entry.detail && <p className="m-0 line-clamp-2 text-xs leading-snug text-muted">{entry.detail}</p>}
                   </div>

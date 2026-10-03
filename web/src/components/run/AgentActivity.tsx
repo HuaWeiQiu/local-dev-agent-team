@@ -129,7 +129,7 @@ function advisorText(entry: AdvisorLogEntry): string {
 }
 
 function AgentState({ status }: { status: AgentDisplayStatus }) {
-  return <span className={cn("shrink-0 text-xs font-medium", statusText[status])}>{agentStatusLabel(status)}</span>;
+  return <span className={cn("w-12 shrink-0 text-right text-xs font-medium", statusText[status])}>{agentStatusLabel(status)}</span>;
 }
 
 function Timestamp({ value }: { value: string }) {

@@ -477,15 +477,14 @@ export function SettingsWorkbench({
             />
             <div className="bd divide-y overflow-hidden rounded-lg">
               {(inventory?.clis ?? []).map((cli) => (
-                <article key={cli.id} className={cn("flex flex-col gap-1.5 px-3 py-2.5", !cli.installed && "opacity-70")}>
-                  <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <strong className="w-16 text-sm font-semibold text-ink">{CLI_LABEL[cli.id]}</strong>
-                    <Badge tone={authTone(cli.auth.status)}>{authLabel(cli.auth.status)}</Badge>
+                <article key={cli.id} className={cn("flex flex-col gap-1 px-3 py-2.5", !cli.installed && "opacity-70")}>
+                  <header className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:grid sm:grid-cols-[4.5rem_6.75rem_4rem_minmax(0,1.2fr)_minmax(0,1fr)_3.5rem]">
+                    <strong className="text-sm font-semibold text-ink">{CLI_LABEL[cli.id]}</strong>
+                    <span className="justify-self-start"><Badge tone={authTone(cli.auth.status)}>{authLabel(cli.auth.status)}</Badge></span>
                     <span className="text-xs text-muted">{cli.installed ? "已安装" : "未找到"}</span>
-                    {cli.version && <span className="font-mono text-xs text-muted" title={cli.version}>{cli.version}</span>}
-                    <span className="text-xs text-muted">{cli.defaultModel ?? "—"}</span>
-                    <span className="text-xs text-muted">{cli.defaultReasoning ?? "—"}</span>
-                    <span className="ml-auto text-xs text-muted">{cli.runtimeSupported ? "可调用" : "仅展示"}</span>
+                    <span className="truncate font-mono text-xs text-muted" title={cli.version}>{cli.version ?? "—"}</span>
+                    <span className="truncate text-xs text-muted">{cli.defaultModel ?? "—"} · {cli.defaultReasoning ?? "—"}</span>
+                    <span className="text-right text-xs text-muted">{cli.runtimeSupported ? "可调用" : "仅展示"}</span>
                   </header>
                   {(cli.binary || cli.auth.detail) && (
                     <p className="m-0 truncate font-mono text-2xs text-muted" title={cli.binary ?? cli.auth.detail}>

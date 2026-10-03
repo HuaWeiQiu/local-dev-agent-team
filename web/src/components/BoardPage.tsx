@@ -171,19 +171,21 @@ function RunCard({ card, selected, busy, onOpen, onDelete }: { card: BoardCard; 
         ? "border-l-accent"
         : "border-l-success";
   return (
-    <article className={cn("group relative border-l-[3px] bg-surface", rail, selected && "bg-accent-soft/40")}>
+    <article className={cn("group relative border-l-[3px] bg-surface pr-8", rail, selected && "bg-accent-soft/40")}>
       <button type="button" onClick={onOpen} className="block w-full cursor-pointer border-0 bg-transparent px-3 py-2.5 text-left focus-ring" aria-label={`打开运行：${summarizeGoal(run.goal, 80)}`}>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <h4 className="m-0 min-w-0 flex-1 truncate text-sm font-medium text-ink" title={run.goal}>{summarizeGoal(run.goal, 90)}</h4>
-          {reason ? (
-            <Badge tone={reason.tone === "neutral" ? "neutral" : reason.tone}>{reason.label}</Badge>
-          ) : (
-            <RunStatusPill status={run.status} />
-          )}
-          <span className="text-2xs text-muted">{strategyDisplayName(run.strategy)}</span>
-          <span className="flex items-center gap-1 text-2xs text-muted"><Clock className="size-3" />{formatRelative(run.updatedAt)}</span>
-          {progress.total > 0 && (
-            <span className="flex w-28 items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:grid sm:grid-cols-[minmax(0,1fr)_5.5rem_4.5rem_5.25rem_7.5rem]">
+          <h4 className="m-0 min-w-0 truncate text-sm font-medium text-ink" title={run.goal}>{summarizeGoal(run.goal, 90)}</h4>
+          <span className="justify-self-start">
+            {reason ? (
+              <Badge tone={reason.tone === "neutral" ? "neutral" : reason.tone}>{reason.label}</Badge>
+            ) : (
+              <RunStatusPill status={run.status} />
+            )}
+          </span>
+          <span className="truncate text-2xs text-muted">{strategyDisplayName(run.strategy)}</span>
+          <span className="flex items-center justify-end gap-1 text-2xs text-muted"><Clock className="size-3 shrink-0" />{formatRelative(run.updatedAt)}</span>
+          {progress.total > 0 ? (
+            <span className="flex items-center gap-2">
               <span
                 role="progressbar"
                 aria-label="任务进度"
@@ -191,12 +193,14 @@ function RunCard({ card, selected, busy, onOpen, onDelete }: { card: BoardCard; 
                 aria-valuemax={progress.total}
                 aria-valuenow={progress.done}
                 aria-valuetext={`${progress.done}/${progress.total} 个任务`}
-                className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3"
+                className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3"
               >
                 <span className={cn("block h-full rounded-full", card.lane === "attention" && reason?.tone === "danger" ? "bg-danger" : "bg-accent")} style={{ width: `${percent}%` }} />
               </span>
-              <span className="text-2xs tabular-nums text-muted">{progress.done}/{progress.total}</span>
+              <span className="w-7 text-right text-2xs tabular-nums text-muted">{progress.done}/{progress.total}</span>
             </span>
+          ) : (
+            <span />
           )}
         </div>
         {failure && card.lane !== "active" && <p className="m-0 mt-1 line-clamp-1 text-xs text-danger-ink">{failure}</p>}

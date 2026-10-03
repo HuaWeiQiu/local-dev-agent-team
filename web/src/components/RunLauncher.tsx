@@ -311,9 +311,9 @@ export function RunLauncher({
             角色与模型（CLI / 模型 / 思考深度）
           </button>
           {advanced && (
-            <div className="role-binding-grid grid gap-2 sm:grid-cols-2">
+            <div className="role-binding-grid bd flex flex-col divide-y overflow-hidden rounded-lg bg-surface">
               {!useCliPicker && (
-                <Callout tone="warning" className="sm:col-span-2">
+                <Callout tone="warning" className="rounded-none border-0">
                   {!showCliPicker
                     ? "已在「设置」中关闭新建运行选型，将使用项目 profile 默认配置；以下为当前默认绑定（只读）。"
                     : "未检测到可用全局 CLI 清单，将使用项目 profile 默认配置。可在「设置」中检索本机 CLI。"}
@@ -328,7 +328,7 @@ export function RunLauncher({
                   ?? cli?.models[0]?.reasoningOptions
                   ?? ["low", "medium", "high"];
                 return (
-                  <div key={role} className="role-binding-card bd flex flex-col gap-2 rounded-lg bg-surface-2 p-3">
+                  <div key={role} className="role-binding-card grid items-center gap-2 px-3 py-2.5 sm:grid-cols-[4.5rem_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.7fr)]">
                     <strong className="text-sm font-semibold text-ink">{agentRoleLabel(role)}</strong>
                     <BindingSelect label="CLI">
                       <Select

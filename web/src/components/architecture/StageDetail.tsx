@@ -65,12 +65,16 @@ export function StageDetail({ brief, onSelectTask }: StageDetailProps) {
         <InspectorSection icon={Bot} title="这一步的智能体">
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {agents.map((agent) => (
-              <li key={`${agent.role}-${agent.label}`} className="flex items-center gap-2 text-sm">
-                <Badge tone={agent.status === "running" ? "active" : agent.status === "failed" ? "danger" : "success"}>
-                  {agent.status === "running" ? "执行中" : agent.status === "failed" ? "失败" : "完成"}
-                </Badge>
-                <span className="text-ink">{agent.label}</span>
-                {agent.note && <span className="truncate text-xs text-muted">{agent.note}</span>}
+              <li key={`${agent.role}-${agent.label}`} className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 text-sm">
+                <span className="justify-self-start">
+                  <Badge tone={agent.status === "running" ? "active" : agent.status === "failed" ? "danger" : "success"}>
+                    {agent.status === "running" ? "执行中" : agent.status === "failed" ? "失败" : "完成"}
+                  </Badge>
+                </span>
+                <span className="min-w-0 truncate text-ink">
+                  {agent.label}
+                  {agent.note ? <span className="ml-2 text-xs text-muted">{agent.note}</span> : null}
+                </span>
               </li>
             ))}
           </ul>

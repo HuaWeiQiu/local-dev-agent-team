@@ -35,7 +35,7 @@ export function ActivityTimeline({ hasRun, entries, visible, kinds, kindCounts, 
               <StatusDot tone={normalizeTone(entry.tone)} className="absolute -left-[5px] top-[7px] rounded-full ring-4 ring-surface" />
               <div className="flex items-baseline gap-2">
                 <strong className="min-w-0 break-words text-sm font-medium text-ink">{entry.title}</strong>
-                <time className="ml-auto shrink-0 text-2xs tabular-nums text-muted" dateTime={entry.at}>{formatTimestamp(entry.at)}</time>
+                <time className="ml-auto w-[5.75rem] shrink-0 text-right text-2xs tabular-nums text-muted" dateTime={entry.at}>{formatTimestamp(entry.at)}</time>
               </div>
               {entry.detail && <p className="m-0 mt-0.5 break-words text-xs leading-relaxed text-muted">{entry.detail}</p>}
             </li>

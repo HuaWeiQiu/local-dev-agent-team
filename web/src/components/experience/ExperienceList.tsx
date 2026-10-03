@@ -84,9 +84,9 @@ export function ExperienceList({
                       selected && "bg-accent-soft/60 hover:bg-accent-soft/60",
                     )}
                   >
-                    <span className="flex items-center justify-between gap-2">
-                      <Badge tone={statusTone[entry.status]}>{statusLabels[entry.status]}</Badge>
-                      <span className="text-2xs text-muted">{scopeLabel(entry.scope)}</span>
+                    <span className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-2">
+                      <span className="justify-self-start"><Badge tone={statusTone[entry.status]}>{statusLabels[entry.status]}</Badge></span>
+                      <span className="justify-self-end text-2xs text-muted">{scopeLabel(entry.scope)}</span>
                     </span>
                     <strong
                       title={entry.summary}
@@ -94,8 +94,9 @@ export function ExperienceList({
                     >
                       {summarizeGoal(entry.summary, 56)}
                     </strong>
-                    <small className="text-2xs text-muted">
-                      命中 {entry.hitCount} · {formatTimestamp(entry.updatedAt)}
+                    <small className="grid grid-cols-[4.75rem_minmax(0,1fr)] text-2xs text-muted">
+                      <span className="tabular-nums">命中 {entry.hitCount}</span>
+                      <span className="justify-self-end tabular-nums">{formatTimestamp(entry.updatedAt)}</span>
                     </small>
                   </button>
                 </li>
