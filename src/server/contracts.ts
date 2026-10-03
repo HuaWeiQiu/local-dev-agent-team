@@ -11,6 +11,8 @@ export const roleBindingSchema = z.object({
 export const startRunRequestSchema = z.object({
   goal: z.string().trim().min(1).max(20_000),
   strategy: z.string().trim().min(1).optional(),
+  /** Omit (or `auto`) to let the deterministic router choose. */
+  template: z.enum(["auto", "quick", "standard", "full"]).optional(),
   profileOverrides: z.record(z.string().min(1), z.string().min(1)).default({}),
   /** Global CLI picker: per-role CLI / model / reasoning for this run. */
   roleBindings: z.record(z.string().min(1), roleBindingSchema).optional(),

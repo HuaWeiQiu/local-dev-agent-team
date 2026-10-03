@@ -222,12 +222,14 @@ program
     [],
   )
   .option("--strategy <name>", "named execution strategy")
+  .option("--template <name>", "workflow template: auto, quick, standard or full")
   .option("-c, --config <path>", "configuration path")
   .action(
     async (options: {
       goal: string;
       profile: string[];
       strategy?: string;
+      template?: string;
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
@@ -245,6 +247,7 @@ program
           goal: options.goal,
           profileOverrides,
           ...(options.strategy ? { strategy: options.strategy } : {}),
+          ...(options.template ? { template: parseTemplateOption(options.template) } : {}),
           ...(roleBindings ? { roleBindings } : {}),
         });
         const state = await runtime.supervisor.wait(started.runId);
@@ -613,6 +616,11 @@ function parseProfileAssignments(assignments: string[]): Record<string, string> 
     result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
   }
   return result;
+}
+
+function parseTemplateOption(value: string): "auto" | "quick" | "standard" | "full" {
+  if (value === "auto" || value === "quick" || value === "standard" || value === "full") return value;
+  throw new Error(`Unknown workflow template '${value}'; use auto, quick, standard or full`);
 }
 
 function collectOption(value: string, previous: string[]): string[] {

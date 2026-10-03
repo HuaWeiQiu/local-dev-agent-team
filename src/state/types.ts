@@ -9,6 +9,7 @@ import type {
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
 import type { ApprovalGate } from "../config/schema.js";
+import type { FlowSelection } from "../flow/types.js";
 
 export type RunStatus =
   | "created"
@@ -169,6 +170,8 @@ export interface RunState {
   /** CLI/model/reasoning actually bound per role (global picker or evolution defaults). */
   roleBindings?: Record<string, RunRoleBinding>;
   strategy: ResolvedStrategy;
+  /** Workflow template chosen for this run; absent on runs created by the v1 engine. */
+  flow?: FlowSelection;
   supervisorId?: string;
   parentRunId?: string;
   purpose?: "evolution-evaluation" | "evolution-proposer";

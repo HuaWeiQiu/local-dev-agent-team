@@ -1,5 +1,6 @@
 import type { LoadedConfig } from "../config/load.js";
 import type { RunEvent } from "../events/types.js";
+import { foldFlowEvents } from "../flow/fold.js";
 import { buildOtlpTraceExport } from "../observability/otlp.js";
 import { buildInteropManifest } from "../interop/manifest.js";
 import { resolveStrategy } from "../strategies/resolve.js";
@@ -415,6 +416,17 @@ export const runRoutes: ProjectApiRoute[] = [
     pattern: "/usage",
     handler: async (context, _request, response) => {
       sendJson(response, 200, await context.supervisor.usageReport());
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/runs/:runId/flow",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      if (!(await context.supervisor.get(runId))) {
+        throw new HttpError(404, "Run not found");
+      }
+      sendJson(response, 200, foldFlowEvents(listRunEvents(context.supervisor, runId)));
     },
   },
   {

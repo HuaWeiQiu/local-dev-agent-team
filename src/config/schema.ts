@@ -350,6 +350,15 @@ export const jevConfigSchema = z
   })
   .strict();
 
+export const workflowConfigSchema = z
+  .object({
+    /** `v1` runs the fixed pipeline with no template routing; kept for side-by-side comparison. */
+    engine: z.enum(["v1", "v2"]).default("v2"),
+    /** `auto` lets the deterministic router pick per goal. */
+    template: z.enum(["auto", "quick", "standard", "full"]).default("auto"),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     version: z.literal(1),
@@ -363,6 +372,7 @@ export const configSchema = z
     roles: z.record(z.string().min(1), roleSchema),
     strategies: strategiesSchema.optional(),
     jev: jevConfigSchema.optional(),
+    workflow: workflowConfigSchema.optional(),
     observability: observabilitySchema.default({ maxEventsPerRun: 50_000 }),
     evaluation: evaluationConfigSchema.optional(),
     experience: experienceConfigSchema.default({

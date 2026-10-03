@@ -9,6 +9,7 @@ import type {
 } from "../domain/contracts.js";
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
+import type { FlowSelection } from "../flow/types.js";
 import type {
   ApprovalRequest,
   RecoveryRecord,
@@ -116,6 +117,7 @@ export const runStateSchema = z.looseObject({
   profileOverrides: z.record(z.string(), z.string()),
   roleBindings: z.record(z.string(), runRoleBindingSchema).optional(),
   strategy: nested<ResolvedStrategy>(),
+  flow: nested<FlowSelection>().optional(),
   supervisorId: z.string().optional(),
   parentRunId: z.string().optional(),
   purpose: z.enum(["evolution-evaluation", "evolution-proposer"]).optional(),

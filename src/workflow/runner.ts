@@ -4,6 +4,21 @@ import type { LoadedConfig } from "../config/load.js";
 import type { RoleAgentService } from "../agents/service.js";
 import { ProfiledAgentService } from "../agents/service.js";
 import {
+  activeFlow,
+  applyTemplateToStrategy,
+  flowFactsFor,
+  flowTemplate,
+  routeTemplate,
+  runFlow,
+  singleTaskPlan,
+  taskStepEnabled,
+  type FlowNodeEvent,
+  type FlowRuntime,
+  type FlowSelection,
+  type FlowTemplateName,
+  type RunNodeKind,
+} from "../flow/index.js";
+import {
   advisorVerdictSchema,
   exploreSummarySchema,
   finalDecisionSchema,
@@ -13,6 +28,8 @@ import {
   testVerdictSchema,
   type AdvisorVerdict,
   type ExploreSummary,
+  type GoalIntake,
+  type TaskPlan,
   type ReviewVerdict,
   type TestVerdict,
 } from "../domain/contracts.js";
@@ -76,6 +93,7 @@ import {
   isHardSpecialistEscalation,
   shouldTrustQualityOverReview,
   passesTaskGates,
+  buildQualityFeedback,
   buildReworkFeedback,
   compactQuality,
 } from "./verdict-policy.js";
@@ -132,6 +150,26 @@ export interface WorkflowRunOptions {
   supervisorId?: string;
   parentRunId?: string;
   purpose?: "evolution-evaluation";
+  /** Operator-chosen workflow template; otherwise the router decides. */
+  template?: FlowTemplateName;
+}
+
+interface RunContext {
+  state: RunState;
+  store: RunStateStore;
+  git: GitManager;
+  agent: RoleAgentService;
+  budget: RunBudgetTracker;
+  signal?: AbortSignal | undefined;
+  planningGoal?: string;
+  allowImpliedHandover?: boolean;
+  verifiedExperiences?: unknown;
+  deterministicPlan?: TaskPlan;
+  intake?: GoalIntake;
+  exploreSummary?: ExploreSummary | undefined;
+  planCheckpoint?: RunCheckpoint;
+  preFinalAdvice?: AdvisorVerdict | undefined;
+  finalCheckpoint?: RunCheckpoint;
 }
 
 export interface WorkflowDependencies {
@@ -176,7 +214,11 @@ export class LocalWorkflowRunner {
 
   async run(options: WorkflowRunOptions): Promise<RunState> {
     const profileOverrides = options.profileOverrides ?? {};
-    const strategy = resolveStrategy(this.loaded.config, options.strategyName);
+    const resolvedStrategy = resolveStrategy(this.loaded.config, options.strategyName);
+    const flowSelection = this.selectFlow(options);
+    const strategy = flowSelection
+      ? applyTemplateToStrategy(resolvedStrategy, flowTemplate(flowSelection.template))
+      : resolvedStrategy;
     const effectiveProfileOverrides = {
       ...strategy.roleProfiles,
       ...profileOverrides,
@@ -229,6 +271,7 @@ export class LocalWorkflowRunner {
           ? { roleBindings: persistedBindings }
           : {}),
         strategy,
+        ...(flowSelection ? { flow: flowSelection } : {}),
         ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
         ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
         ...(options.purpose ? { purpose: options.purpose } : {}),
@@ -260,6 +303,7 @@ export class LocalWorkflowRunner {
         ? { roleBindings: persistedBindings }
         : {}),
       strategy,
+      ...(flowSelection ? { flow: flowSelection } : {}),
       ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.purpose ? { purpose: options.purpose } : {}),
@@ -267,6 +311,7 @@ export class LocalWorkflowRunner {
       history: [{ at: now, status: "created", message: "Run created" }],
     };
     await store.save(state);
+    if (flowSelection) store.emit(runId, "flow.selected", flowSelection);
     const segmentStartedAt = Date.now();
     const deadline = createExecutionDeadline(strategy.executionTimeoutSeconds, options.signal);
     const workflowSignal = deadline.signal;
@@ -286,174 +331,20 @@ export class LocalWorkflowRunner {
       const verifiedExperiences = await this.experience.loadPlanning(options.goal, store, runId);
       const planningGoal = expandPlanningGoal(options.goal, this.loaded.root);
       const allowImpliedHandover = canUseHandoverFallback(options.goal, this.loaded.root);
-      const deterministicPlan = fallbackNamedTaskPlan(planningGoal);
-      if (deterministicPlan) {
-        validateTaskPlan(deterministicPlan);
-        const completeness = assessPlanCompleteness(deterministicPlan, planningGoal, { allowImpliedHandover });
-        if (completeness.status !== "rejected") {
-          await store.transition(
-            state,
-            "architecting",
-            "目标已写明任务与路径，控制面直接生成 DAG（不调用架构模型）",
-          );
-          state.plan = deterministicPlan;
-          state.tasks = deterministicPlan.tasks.map((task) => ({
-            task,
-            status: "pending",
-            attempts: 0,
-          }));
-          await store.transition(state, "planned", `Controller produced ${state.tasks.length} task(s) from the goal`);
-          const checkpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
-          // The plan gate applies to controller-produced DAGs exactly as it
-          // does to architect-produced plans: otherwise a named-path goal
-          // would silently bypass the gate and the run would later become
-          // unrecoverable (recovery requires the approval this path skipped).
-          const planGate = requiresPlanApproval(state);
-          if (planGate && state.purpose !== "evolution-evaluation") {
-            await this.requestApproval(
-              state,
-              store,
-              checkpoint,
-              "plan",
-              `Approve ${state.tasks.length} planned task(s) before worker execution`,
-            );
-            return state;
-          }
-          return await this.continueFromCheckpoint(
-            state,
-            checkpoint,
-            store,
-            git,
-            agent,
-            budget,
-            workflowSignal,
-          );
-        }
-      }
-      await store.transition(state, "orchestrating", "Supervising agent is analyzing the goal");
-      const intake = await agent.runStructured({
-        role: "orchestrator",
-        runId,
-        artifactKey: "intake",
-        context: {
-          goal: planningGoal,
-          project: this.loaded.config.project,
-          baseCommit,
-          ...(verifiedExperiences ? { verifiedExperiences } : {}),
-        },
-        schema: goalIntakeSchema,
-        jsonSchema: goalIntakeJsonSchema,
-      });
-      state.intake = intake.value;
-      await store.save(state);
-
-      const exploreSummary = await this.maybeExplore(
+      const deterministicPlan = this.controllerPlan(planningGoal, allowImpliedHandover);
+      await this.driveFlow({
         state,
-        store,
-        agent,
-        planningGoal,
-        baseCommit,
-        verifiedExperiences,
-      );
-
-      await store.transition(state, "architecting", "架构正在拆分任务 DAG（plan）");
-      const workerRole = this.loaded.config.roles.worker;
-      if (!workerRole) {
-        throw new Error("Required worker role is missing");
-      }
-      let architecture = await agent.runStructured({
-        role: "architect",
-        runId,
-        artifactKey: "architecture",
-        context: {
-          goal: planningGoal,
-          intake: intake.value,
-          project: this.loaded.config.project,
-          baseCommit,
-          roleProfiles: workerRole.allowedProfiles,
-          ...(verifiedExperiences ? { verifiedExperiences } : {}),
-          ...(exploreSummary ? { exploreSummary } : {}),
-        },
-        schema: taskPlanSchema,
-        jsonSchema: taskPlanJsonSchema,
-      });
-      validateTaskPlan(architecture.value);
-      let completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
-      if (completeness.status === "rejected") {
-        architecture = await agent.runStructured({
-          role: "architect",
-          runId,
-          artifactKey: "architecture-retry",
-          context: {
-            goal: planningGoal,
-            intake: {
-              ...intake.value,
-              instructionsForArchitect: [
-                intake.value.instructionsForArchitect,
-                `Previous plan was rejected: ${completeness.issues.join("；")}.`,
-                "Do not emit reconnaissance-only tasks. Produce one implementable task for each named T1–Tn / P0.x deliverable now.",
-              ].join(" "),
-            },
-            project: this.loaded.config.project,
-            baseCommit,
-            roleProfiles: workerRole.allowedProfiles,
-            previousRejectedPlan: architecture.value,
-            completenessIssues: completeness.issues,
-            ...(verifiedExperiences ? { verifiedExperiences } : {}),
-            ...(exploreSummary ? { exploreSummary } : {}),
-          },
-          schema: taskPlanSchema,
-          jsonSchema: taskPlanJsonSchema,
-        });
-        validateTaskPlan(architecture.value);
-        completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
-      }
-      if (completeness.status === "rejected") {
-        const fallback =
-          fallbackNamedTaskPlan(planningGoal)
-          ?? (allowImpliedHandover ? fallbackHandoverTaskPlan() : undefined);
-        const fallbackReport = fallback
-          ? assessPlanCompleteness(fallback, planningGoal, { allowImpliedHandover })
-          : undefined;
-        if (fallback && fallbackReport && fallbackReport.status !== "rejected") {
-          architecture = {
-            ...architecture,
-            value: fallback,
-            text: JSON.stringify(fallback),
-          };
-          completeness = fallbackReport;
-        } else {
-          throw new Error(formatPlanCompletenessError(completeness));
-        }
-      }
-      state.plan = architecture.value;
-      state.tasks = architecture.value.tasks.map((task) => ({
-        task,
-        status: "pending",
-        attempts: 0,
-      }));
-      await store.transition(state, "planned", `Architect produced ${state.tasks.length} task(s)`);
-      const checkpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
-      const planGate = requiresPlanApproval(state);
-      if (planGate && state.purpose !== "evolution-evaluation") {
-        await this.requestApproval(
-          state,
-          store,
-          checkpoint,
-          "plan",
-          `Approve ${state.tasks.length} planned task(s) before worker execution`,
-        );
-        return state;
-      }
-      return await this.continueFromCheckpoint(
-        state,
-        checkpoint,
         store,
         git,
         agent,
         budget,
-        workflowSignal,
-      );
+        signal: workflowSignal,
+        planningGoal,
+        allowImpliedHandover,
+        verifiedExperiences,
+        ...(deterministicPlan ? { deterministicPlan } : {}),
+      });
+      return state;
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
       // A user pause settles as interrupted (resumable) instead of cancelled
@@ -576,54 +467,126 @@ export class LocalWorkflowRunner {
     }
   }
 
-  private async continueFromCheckpoint(
-    state: RunState,
-    checkpoint: RunCheckpoint,
-    store: RunStateStore,
-    git: GitManager,
-    agent: RoleAgentService,
-    budget: RunBudgetTracker,
-    signal?: AbortSignal,
-  ): Promise<RunState> {
-    if (checkpoint.stage === "local-gates-passed") {
-      const finalApproval = latestApproval(state, "final");
-      if (!finalApproval || finalApproval.checkpointId !== checkpoint.id) {
+  private controllerPlan(planningGoal: string, allowImpliedHandover: boolean): TaskPlan | undefined {
+    const plan = fallbackNamedTaskPlan(planningGoal);
+    if (!plan) return undefined;
+    validateTaskPlan(plan);
+    const completeness = assessPlanCompleteness(plan, planningGoal, { allowImpliedHandover });
+    return completeness.status === "rejected" ? undefined : plan;
+  }
+
+  private selectFlow(options: WorkflowRunOptions): FlowSelection | undefined {
+    const workflow = this.loaded.config.workflow;
+    if (workflow?.engine === "v1") return undefined;
+    return routeTemplate({
+      goal: options.goal,
+      ...(options.template ? { override: options.template } : {}),
+      ...(workflow?.template ? { configured: workflow.template } : {}),
+      evaluation: options.purpose === "evolution-evaluation",
+    });
+  }
+
+  /** Runs the stage graph from `startAt`; stages park the run by returning "park". */
+  private async driveFlow(context: RunContext, startAt?: RunNodeKind): Promise<void> {
+    const { state, store } = context;
+    const flow = activeFlow(
+      state.flow ?? { template: "standard", source: "config", reasons: [], engine: "v2" },
+    );
+    const facts = flowFactsFor(state.strategy, {
+      needsArchitect: !context.deterministicPlan,
+      evaluation: state.purpose === "evolution-evaluation",
+    });
+    await runFlow(
+      flow.run,
+      {
+        facts,
+        handlers: this.runHandlers(context),
+        ...(state.flow
+          ? { onNode: (event: FlowNodeEvent) => store.emit(state.id, "flow.node", event) }
+          : {}),
+      },
+      startAt ? { startAt } : {},
+    );
+  }
+
+  private runHandlers(context: RunContext): FlowRuntime["handlers"] {
+    const { state, store, git, agent, budget, signal } = context;
+    return {
+      intake: async () => {
+        await store.transition(state, "orchestrating", "Supervising agent is analyzing the goal");
+        const intake = await agent.runStructured({
+          role: "orchestrator",
+          runId: state.id,
+          artifactKey: "intake",
+          context: {
+            goal: context.planningGoal,
+            project: this.loaded.config.project,
+            baseCommit: state.baseCommit,
+            ...(context.verifiedExperiences ? { verifiedExperiences: context.verifiedExperiences } : {}),
+          },
+          schema: goalIntakeSchema,
+          jsonSchema: goalIntakeJsonSchema,
+        });
+        context.intake = intake.value;
+        state.intake = intake.value;
+        await store.save(state);
+        return "done";
+      },
+      explore: async () => {
+        context.exploreSummary = await this.maybeExplore(
+          state,
+          store,
+          agent,
+          context.planningGoal ?? state.goal,
+          state.baseCommit,
+          context.verifiedExperiences,
+        );
+        return "done";
+      },
+      plan: async (node) => {
+        await this.planStage(context, node.params?.planner === "single-task");
+        return "done";
+      },
+      "approve-plan": async () => {
         await this.requestApproval(
           state,
           store,
-          checkpoint,
-          "final",
-          "All local gates passed; approve the integration result before publication",
+          context.planCheckpoint ?? latestCheckpoint(state),
+          "plan",
+          `Approve ${state.tasks.length} planned task(s) before worker execution`,
         );
-      }
-      return state;
-    }
-    if (checkpoint.stage !== "tasks-complete") {
-      await this.executeTasks(state, store, git, agent, budget, signal);
-      await this.recordCheckpoint(state, store, git, "tasks-complete");
-    }
-
-    await store.transition(state, "final-checks", "Running integration quality commands");
-    await this.prepareWorktreeDependencies(
-      state.integrationWorktree,
-      signal,
-      state.strategy.maxProcessOutputBytes,
-    );
-    state.finalQuality = await runQualityCommands(
-      state.integrationWorktree,
-      this.loaded.config.quality.commands,
-      this.loaded.config.quality.commandTimeoutSeconds,
-      store.artifactDirectory(state.id, recoveryArtifactKey(state, "final-quality")),
-      signal,
-      { maxOutputBytes: state.strategy.maxProcessOutputBytes },
-    );
-    await budget.recordQuality(state.finalQuality);
-    await store.save(state);
-
-    // A failing integration gate already vetoes delivery, so advice would only
-    // spend budget; consult the architect only when there is something to ship.
-    const preFinalAdvice = state.finalQuality.passed
-      ? await this.consultAdvisor({
+        return "park";
+      },
+      execute: async () => {
+        await this.executeTasks(state, store, git, agent, budget, signal);
+        await this.recordCheckpoint(state, store, git, "tasks-complete");
+        return "done";
+      },
+      "final-checks": async () => {
+        await store.transition(state, "final-checks", "Running integration quality commands");
+        await this.prepareWorktreeDependencies(
+          state.integrationWorktree,
+          signal,
+          state.strategy.maxProcessOutputBytes,
+        );
+        state.finalQuality = await runQualityCommands(
+          state.integrationWorktree,
+          this.loaded.config.quality.commands,
+          this.loaded.config.quality.commandTimeoutSeconds,
+          store.artifactDirectory(state.id, recoveryArtifactKey(state, "final-quality")),
+          signal,
+          { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+        );
+        await budget.recordQuality(state.finalQuality);
+        await store.save(state);
+        return "done";
+      },
+      advise: async () => {
+        // A failing integration gate already vetoes delivery, so advice would
+        // only spend budget; consult the architect only when there is
+        // something to ship.
+        if (!state.finalQuality?.passed) return "done";
+        context.preFinalAdvice = await this.consultAdvisor({
           state,
           store,
           agent,
@@ -643,39 +606,187 @@ export class LocalWorkflowRunner {
             diffStat: await git.diffSummary(state.integrationWorktree, state.baseCommit).catch(() => ""),
             finalQuality: compactQuality(state.finalQuality),
           },
-        })
-      : undefined;
-
-    const finalDecision = await agent.runStructured({
-      role: "orchestrator",
-      promptKey: "orchestrator-final",
-      cwd: state.integrationWorktree,
-      runId: state.id,
-      artifactKey: recoveryArtifactKey(state, "final-decision"),
-      context: {
-        goal: state.goal,
-        planSummary: state.plan?.summary,
-        tasks: state.tasks.map((task) => ({
-          id: task.task.id,
-          status: task.status,
-          qualityPassed: task.quality?.passed,
-          review: task.review,
-          test: task.test,
-        })),
-        finalQuality: compactQuality(state.finalQuality),
-        ...(preFinalAdvice ? { preFinalAdvice } : {}),
+        });
+        return "done";
       },
-      schema: finalDecisionSchema,
-      jsonSchema: finalDecisionJsonSchema,
+      decide: async (node) => {
+        await this.decideStage(context, node.params?.mode === "deterministic");
+        return "done";
+      },
+      "approve-final": async () => {
+        if (state.purpose === "evolution-evaluation" && context.finalCheckpoint) {
+          await store.transition(
+            state,
+            "completed",
+            "Automatic evolution evaluation completed without publication",
+          );
+          await this.experience.extractFromRun(state, store);
+          await this.cleaner.cleanup(state, store, git);
+          return "done";
+        }
+        const checkpoint = context.finalCheckpoint ?? latestCheckpoint(state);
+        if (!context.finalCheckpoint) {
+          const finalApproval = latestApproval(state, "final");
+          if (finalApproval && finalApproval.checkpointId === checkpoint.id) return "done";
+        }
+        const blockedAfterChecks = context.finalCheckpoint
+          ? state.tasks.filter((task) => task.status === "blocked")
+          : [];
+        await this.requestApproval(
+          state,
+          store,
+          checkpoint,
+          "final",
+          blockedAfterChecks.length > 0
+            ? `Local gates passed for merged tasks; ${blockedAfterChecks.map((task) => task.task.id).join(", ")} remain blocked`
+            : "All local gates passed; approve the integration result before publication",
+        );
+        return "done";
+      },
+    };
+  }
+
+  private async planStage(context: RunContext, singleTask: boolean): Promise<void> {
+    const { state, store, git } = context;
+    let plan: TaskPlan;
+    let message: string;
+    if (context.deterministicPlan) {
+      await store.transition(
+        state,
+        "architecting",
+        "目标已写明任务与路径，控制面直接生成 DAG（不调用架构模型）",
+      );
+      plan = context.deterministicPlan;
+      message = `Controller produced ${plan.tasks.length} task(s) from the goal`;
+    } else if (singleTask) {
+      await store.transition(state, "architecting", "快速流程：整个目标作为单个任务（不调用架构模型）");
+      plan = singleTaskPlan(state.goal);
+      message = "Quick flow planned a single task";
+    } else {
+      plan = await this.architectPlan(context);
+      message = `Architect produced ${plan.tasks.length} task(s)`;
+    }
+    state.plan = plan;
+    state.tasks = plan.tasks.map((task) => ({ task, status: "pending", attempts: 0 }));
+    await store.transition(state, "planned", message);
+    context.planCheckpoint = await this.recordCheckpoint(state, store, git, "plan-ready");
+  }
+
+  private async architectPlan(context: RunContext): Promise<TaskPlan> {
+    const { state, store, agent } = context;
+    const planningGoal = context.planningGoal ?? state.goal;
+    const allowImpliedHandover = context.allowImpliedHandover ?? false;
+    const { verifiedExperiences, exploreSummary } = context;
+    const intake = context.intake ?? state.intake;
+    if (!intake) throw new Error("Architect planning requires goal intake");
+    await store.transition(state, "architecting", "架构正在拆分任务 DAG（plan）");
+    const workerRole = this.loaded.config.roles.worker;
+    if (!workerRole) {
+      throw new Error("Required worker role is missing");
+    }
+    let architecture = await agent.runStructured({
+      role: "architect",
+      runId: state.id,
+      artifactKey: "architecture",
+      context: {
+        goal: planningGoal,
+        intake,
+        project: this.loaded.config.project,
+        baseCommit: state.baseCommit,
+        roleProfiles: workerRole.allowedProfiles,
+        ...(verifiedExperiences ? { verifiedExperiences } : {}),
+        ...(exploreSummary ? { exploreSummary } : {}),
+      },
+      schema: taskPlanSchema,
+      jsonSchema: taskPlanJsonSchema,
     });
+    validateTaskPlan(architecture.value);
+    let completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
+    if (completeness.status === "rejected") {
+      architecture = await agent.runStructured({
+        role: "architect",
+        runId: state.id,
+        artifactKey: "architecture-retry",
+        context: {
+          goal: planningGoal,
+          intake: {
+            ...intake,
+            instructionsForArchitect: [
+              intake.instructionsForArchitect,
+              `Previous plan was rejected: ${completeness.issues.join("；")}.`,
+              "Do not emit reconnaissance-only tasks. Produce one implementable task for each named T1–Tn / P0.x deliverable now.",
+            ].join(" "),
+          },
+          project: this.loaded.config.project,
+          baseCommit: state.baseCommit,
+          roleProfiles: workerRole.allowedProfiles,
+          previousRejectedPlan: architecture.value,
+          completenessIssues: completeness.issues,
+          ...(verifiedExperiences ? { verifiedExperiences } : {}),
+          ...(exploreSummary ? { exploreSummary } : {}),
+        },
+        schema: taskPlanSchema,
+        jsonSchema: taskPlanJsonSchema,
+      });
+      validateTaskPlan(architecture.value);
+      completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
+    }
+    if (completeness.status === "rejected") {
+      const fallback =
+        fallbackNamedTaskPlan(planningGoal)
+        ?? (allowImpliedHandover ? fallbackHandoverTaskPlan() : undefined);
+      const fallbackReport = fallback
+        ? assessPlanCompleteness(fallback, planningGoal, { allowImpliedHandover })
+        : undefined;
+      if (fallback && fallbackReport && fallbackReport.status !== "rejected") {
+        return fallback;
+      }
+      throw new Error(formatPlanCompletenessError(completeness));
+    }
+    return architecture.value;
+  }
+
+  private async decideStage(context: RunContext, deterministic: boolean): Promise<void> {
+    const { state, store, git, agent } = context;
+    const finalQuality = state.finalQuality;
+    if (!finalQuality) throw new Error("Final decision requires integration quality results");
+    const preFinalAdvice = context.preFinalAdvice;
+    const finalDecision = deterministic
+      ? {
+          value: finalQuality.passed
+            ? { decision: "ready" as const, reason: "Integration quality commands passed (quick flow has no model decision)" }
+            : { decision: "escalate" as const, reason: "Integration quality commands failed" },
+        }
+      : await agent.runStructured({
+          role: "orchestrator",
+          promptKey: "orchestrator-final",
+          cwd: state.integrationWorktree,
+          runId: state.id,
+          artifactKey: recoveryArtifactKey(state, "final-decision"),
+          context: {
+            goal: state.goal,
+            planSummary: state.plan?.summary,
+            tasks: state.tasks.map((task) => ({
+              id: task.task.id,
+              status: task.status,
+              qualityPassed: task.quality?.passed,
+              review: task.review,
+              test: task.test,
+            })),
+            finalQuality: compactQuality(finalQuality),
+            ...(preFinalAdvice ? { preFinalAdvice } : {}),
+          },
+          schema: finalDecisionSchema,
+          jsonSchema: finalDecisionJsonSchema,
+        });
     state.finalDecision = finalDecision.value;
 
     const mergedTasks = state.tasks.filter((task) => task.status === "merged");
-    const qualityPassedWithMergedWork = state.finalQuality.passed && mergedTasks.length > 0;
-    if (!state.finalQuality.passed || (finalDecision.value.decision !== "ready" && !qualityPassedWithMergedWork)) {
+    const qualityPassedWithMergedWork = finalQuality.passed && mergedTasks.length > 0;
+    if (!finalQuality.passed || (finalDecision.value.decision !== "ready" && !qualityPassedWithMergedWork)) {
       throw new Error(
-        !state.finalQuality.passed
-          ? formatQualityFailure("Integration quality commands failed", state.finalQuality)
+        !finalQuality.passed
+          ? formatQualityFailure("Integration quality commands failed", finalQuality)
           : `Supervising agent escalated: ${finalDecision.value.reason}`,
       );
     }
@@ -686,32 +797,34 @@ export class LocalWorkflowRunner {
         message: `终裁 escalate 已降级：质量门已过且 ${mergedTasks.map((task) => task.task.id).join(", ")} 已合并。${finalDecision.value.reason}`,
       });
     }
-    const finalCheckpoint = await this.recordCheckpoint(
+    context.finalCheckpoint = await this.recordCheckpoint(state, store, git, "local-gates-passed");
+  }
+
+  private async continueFromCheckpoint(
+    state: RunState,
+    checkpoint: RunCheckpoint,
+    store: RunStateStore,
+    git: GitManager,
+    agent: RoleAgentService,
+    budget: RunBudgetTracker,
+    signal?: AbortSignal,
+  ): Promise<RunState> {
+    const context: RunContext = {
       state,
       store,
       git,
-      "local-gates-passed",
-    );
-    if (state.purpose === "evolution-evaluation") {
-      await store.transition(
-        state,
-        "completed",
-        "Automatic evolution evaluation completed without publication",
-      );
-      await this.experience.extractFromRun(state, store);
-      await this.cleaner.cleanup(state, store, git);
-      return state;
-    }
-    const blockedAfterChecks = state.tasks.filter((task) => task.status === "blocked");
-    await this.requestApproval(
-      state,
-      store,
-      finalCheckpoint,
-      "final",
-      blockedAfterChecks.length > 0
-        ? `Local gates passed for merged tasks; ${blockedAfterChecks.map((task) => task.task.id).join(", ")} remain blocked`
-        : "All local gates passed; approve the integration result before publication",
-    );
+      agent,
+      budget,
+      signal,
+      planCheckpoint: checkpoint,
+    };
+    const startAt: RunNodeKind =
+      checkpoint.stage === "local-gates-passed"
+        ? "approve-final"
+        : checkpoint.stage === "tasks-complete"
+          ? "final-checks"
+          : "execute";
+    await this.driveFlow(context, startAt);
     return state;
   }
 
@@ -1499,7 +1612,7 @@ export class LocalWorkflowRunner {
           continue;
         }
         const diff = await git.stagedDiff(taskState.worktree, 160_000, signal);
-        const { review, test } = await this.reviewTaskAttempt(
+        const { review, test, skipped } = await this.reviewTaskAttempt(
           state,
           taskState,
           taskState.worktree,
@@ -1530,7 +1643,9 @@ export class LocalWorkflowRunner {
             `Specialist escalated task: ${review.summary}; ${test.summary}`,
           );
         }
-        feedback = buildReworkFeedback(quality, review, test);
+        feedback = skipped
+          ? buildQualityFeedback(quality)
+          : buildReworkFeedback(quality, review, test);
         failureInput = { quality, review, test };
         await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
         await store.transition(
@@ -1736,7 +1851,7 @@ export class LocalWorkflowRunner {
       await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
       return "committed";
     }
-    const { review, test } = await this.reviewTaskAttempt(
+    const { review, test, skipped } = await this.reviewTaskAttempt(
       state,
       taskState,
       taskState.worktree,
@@ -1760,7 +1875,9 @@ export class LocalWorkflowRunner {
       return "fresh";
     }
     taskState.status = "reworking";
-    taskState.error = buildReworkFeedback(quality, review, test);
+    taskState.error = skipped
+      ? buildQualityFeedback(quality)
+      : buildReworkFeedback(quality, review, test);
     await store.save(state);
     return "rework";
   }
@@ -1819,7 +1936,20 @@ export class LocalWorkflowRunner {
     changedFiles: string[],
     diff: string,
     attempt: number,
-  ): Promise<{ review: ReviewVerdict; test: TestVerdict }> {
+  ): Promise<{ review: ReviewVerdict; test: TestVerdict; skipped: boolean }> {
+    const flow = state.flow ? activeFlow(state.flow) : undefined;
+    if (!taskStepEnabled(flow, "review") && !taskStepEnabled(flow, "test")) {
+      // The quick template has no model review; deterministic gates decide alone.
+      const verdict = quality.passed ? "approve" : "request_changes";
+      const summary = quality.passed
+        ? "Deterministic quality gates passed; model review is not part of this flow."
+        : "Deterministic quality gates failed.";
+      return {
+        review: { verdict, summary, findings: [] },
+        test: { verdict, summary, missingTests: [] },
+        skipped: true,
+      };
+    }
     await store.transition(
       state,
       "reviewing-testing",
@@ -1907,7 +2037,7 @@ export class LocalWorkflowRunner {
     taskState.review = review.value;
     taskState.test = test.value;
     await store.save(state);
-    return { review: review.value, test: test.value };
+    return { review: review.value, test: test.value, skipped: false };
   }
 
   private async commitPassedTask(

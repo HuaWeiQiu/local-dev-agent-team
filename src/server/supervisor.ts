@@ -257,6 +257,7 @@ export class RunSupervisor {
             profileOverrides,
             ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
             ...(request.strategy ? { strategyName: request.strategy } : {}),
+            ...(request.template && request.template !== "auto" ? { template: request.template } : {}),
             runId,
             signal: controller.signal,
             supervisorId: this.id,
@@ -854,6 +855,7 @@ function requestHash(request: StartRunRequest): string {
   const normalized = {
     goal: request.goal,
     strategy: request.strategy ?? null,
+    template: request.template ?? null,
     parentRunId: request.parentRunId ?? null,
     profileOverrides: Object.fromEntries(
       Object.entries(request.profileOverrides).sort(([left], [right]) =>

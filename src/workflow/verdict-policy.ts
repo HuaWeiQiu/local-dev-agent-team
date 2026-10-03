@@ -68,6 +68,10 @@ export function buildReworkFeedback(
   );
 }
 
+export function buildQualityFeedback(quality: QualityReport): string {
+  return JSON.stringify({ deterministicChecks: compactQuality(quality) }, null, 2);
+}
+
 export function compactQuality(report: QualityReport): unknown {
   return {
     passed: report.passed,
