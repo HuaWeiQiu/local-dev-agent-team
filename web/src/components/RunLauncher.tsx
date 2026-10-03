@@ -26,6 +26,7 @@ interface RunLauncherProps {
   /** 有 scope 时目标输入区展示经验注入预览 */
   scope?: ProjectScope;
   initialStrategy?: string;
+  initialGoal?: string;
   busy: boolean;
   error: string | undefined;
   /** Global defaults + inventory for CLI picker */
@@ -50,6 +51,7 @@ export function RunLauncher({
   config,
   scope,
   initialStrategy,
+  initialGoal,
   busy,
   error,
   roleDefaults,
@@ -111,6 +113,7 @@ export function RunLauncher({
     }
     if (initializedRef.current) return;
     initializedRef.current = true;
+    if (initialGoal) setGoal(initialGoal);
     setStrategy(
       initialStrategy && config.strategies.definitions[initialStrategy]
         ? initialStrategy

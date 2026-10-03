@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { goToWorkspace, openNav, openRun, openRunTab } from "./helpers";
 
 const VISUAL_RUN_ID = "run-visual-20260808";
 
@@ -24,17 +25,20 @@ test("dark color scheme renders workbench and strategy composer without errors",
   // 等待主题切换的 140–160ms 过渡结束，避免截图拍到中间帧
   await page.waitForTimeout(300);
 
+  await expect(page.getByRole("heading", { name: "看板", level: 1 })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath(`${testInfo.project.name}-dark-board.png`),
+    fullPage: false,
+  });
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "任务图");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath(`${testInfo.project.name}-dark-workbench.png`),
     fullPage: false,
   });
 
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "编排", exact: true }).click();
-  } else {
-    await page.getByRole("button", { name: "策略编排", exact: true }).click();
-  }
+  await goToWorkspace(page, "策略编排");
   const composer = page.getByRole("region", { name: "策略编排器" });
   await expect(composer).toBeVisible();
   await expect(composer.locator(".strategy-stage-node").first()).toBeVisible();
@@ -50,13 +54,9 @@ test("dark color scheme renders workbench and strategy composer without errors",
     fullPage: false,
   });
 
-  if (testInfo.project.name === "mobile") {
-    await page.getByLabel("移动端视图").getByRole("button", { name: "运行", exact: true }).click();
-    await page.getByLabel("移动端视图").getByRole("button", { name: "用量", exact: true }).click();
-  } else {
-    await page.getByRole("button", { name: "运行监控", exact: true }).click();
-    await page.getByRole("tab", { name: "用量" }).click();
-  }
+  await goToWorkspace(page, "运行监控");
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "用量");
   await expect(page.getByLabel("用量与成本")).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath(`${testInfo.project.name}-dark-usage.png`),
@@ -74,6 +74,7 @@ test("dark color scheme renders workbench and strategy composer without errors",
 
 test("theme toggle cycles modes and persists the explicit choice", async ({ page }) => {
   await page.goto("/");
+  await openNav(page);
   const toggle = page.getByRole("button", { name: "切换主题" });
   await expect(toggle).toBeVisible();
   const html = page.locator("html");
@@ -94,6 +95,8 @@ test("theme toggle cycles modes and persists the explicit choice", async ({ page
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect.poll(storedTheme).toBe("dark");
+  await openNav(page);
+  await openNav(page);
 
   await page.getByRole("button", { name: "切换主题" }).click();
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", /./);
@@ -124,6 +127,7 @@ test("cancel issues a cancel request for the active run", async ({ page }) => {
   });
 
   await page.goto("/");
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
   const cancelButton = topbarAction(page, /取消/);
   await expect(cancelButton).toBeVisible();
   await cancelButton.click();
@@ -144,6 +148,7 @@ test("retry issues a retry request for a retryable run", async ({ page }, testIn
   });
 
   await page.goto("/");
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
   if (testInfo.project.name === "desktop") {
     await expect(page.getByText("已中断", { exact: true }).first()).toBeVisible();
   }
@@ -157,5 +162,5 @@ test("retry issues a retry request for a retryable run", async ({ page }, testIn
 
 /** 顶栏操作按钮：桌面端取按钮文本，移动端取 title 兜底的可访问名。 */
 function topbarAction(page: Page, name: RegExp) {
-  return page.locator(".topbar-actions").getByRole("button", { name });
+  return page.locator(".top-actions").getByRole("button", { name });
 }

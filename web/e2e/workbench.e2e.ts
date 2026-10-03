@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { goToWorkspace, openNav, openRun, openRunTab, selectProject } from "./helpers";
 
 test("renders and operates the multi-agent workbench", async ({ page }, testInfo) => {
   const browserErrors: string[] = [];
@@ -10,37 +11,37 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   });
 
   await page.goto("/");
-  const projectSwitcher = page.getByLabel("当前项目");
+  await expect(page.getByRole("heading", { name: "看板", level: 1 })).toBeVisible();
+  await openNav(page);
+  const projectSwitcher = page.getByRole("button", { name: "当前项目" });
   await expect(projectSwitcher).toBeVisible();
-  await expect(projectSwitcher.locator("option")).toHaveCount(2);
-  await projectSwitcher.selectOption("service");
-  await expect(page.locator(".canvas-heading h2")).toContainText("独立校验服务接口契约");
-  await expect(page.locator(".react-flow__node")).toHaveCount(1);
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "运行", exact: true }).click();
-    await expect(
-      page.locator(".run-rail").getByText("校验跨服务接口契约与发布边界", { exact: true }),
-    ).toBeVisible();
-    await expect(page.getByRole("progressbar", { name: "任务进度" }).first()).toHaveAttribute("aria-valuetext", "1/1 个任务");
-  } else {
-    await expect(page.getByText("校验跨服务接口契约与发布边界", { exact: true }).first()).toBeVisible();
-    await expect(page.getByRole("progressbar", { name: "任务进度" }).first()).toHaveAttribute("aria-valuetext", "1/1 个任务");
-  }
-  const runRail = page.locator(".run-rail");
-  await runRail.getByLabel("运行状态筛选").selectOption("attention");
-  await expect(runRail.getByText("校验跨服务接口契约与发布边界", { exact: true })).toBeVisible();
-  await runRail.getByLabel("运行状态筛选").selectOption("all");
-  await runRail.getByRole("button", { name: "清理历史" }).click();
+  await projectSwitcher.click();
+  await expect(page.getByRole("menuitemradio")).toHaveCount(2);
+  await page.keyboard.press("Escape");
+  await selectProject(page, "service");
+
+  // 看板：卡片带任务进度，搜索可过滤
+  const serviceCard = page.getByRole("button", { name: /打开运行：校验跨服务接口契约与发布边界/ });
+  await expect(serviceCard).toBeVisible();
+  await expect(page.getByRole("progressbar", { name: "任务进度" }).first()).toHaveAttribute("aria-valuetext", "1/1 个任务");
+  await page.getByLabel("搜索运行").fill("不存在的目标");
+  await expect(serviceCard).toBeHidden();
+  await page.getByLabel("搜索运行").fill("");
+  await expect(serviceCard).toBeVisible();
+  await page.getByRole("button", { name: "清理历史" }).click();
   const cleanupDialog = page.getByRole("dialog");
   await expect(cleanupDialog.getByRole("heading", { name: "清理本地运行历史" })).toBeVisible();
   await cleanupDialog.getByRole("button", { name: "生成预览" }).click();
   await expect(cleanupDialog.getByText("这个保留范围内没有可清理运行")).toBeVisible();
   await expect(cleanupDialog.getByRole("button", { name: "确认删除 0 个运行" })).toBeDisabled();
   await cleanupDialog.getByRole("button", { name: "关闭" }).click();
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "任务图" }).click();
-  }
-  await page.getByRole("button", { name: "处理审批" }).click();
+
+  await openRun(page, "校验跨服务接口契约与发布边界");
+  await openRunTab(page, "任务图");
+  await expect(page.locator(".canvas-heading h2")).toContainText("独立校验服务接口契约");
+  await expect(page.locator(".react-flow__node")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "处理审批" }).first().click();
   const approvalDialog = page.getByRole("dialog");
   await expect(approvalDialog.getByRole("heading", { name: "审批交付结果" })).toBeVisible();
   await approvalDialog.getByLabel("操作者").fill("e2e-reviewer");
@@ -53,15 +54,16 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     fullPage: false,
   });
   await approvalDialog.getByRole("button", { name: "关闭" }).click();
-  await projectSwitcher.selectOption("visual");
+  await selectProject(page, "visual");
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "任务图");
   await expect(page.locator(".canvas-heading h2")).toContainText("按依赖波次执行");
   await expect(page.locator(".react-flow__node")).toHaveCount(4);
   await expect(page.locator(".react-flow__edge")).toHaveCount(4);
+  // fixture 运行被控制服务恢复为 interrupted：顶栏重试按钮文案为「重新开始」
+  await expect(page.getByRole("button", { name: /重新开始|放弃检查点/ })).toBeVisible();
   if (testInfo.project.name === "mobile") {
-    // fixture 运行被控制服务恢复为 interrupted：顶栏重试按钮文案为「重新开始」，
-    // 移动端按钮文字隐藏，可访问名取 title「放弃检查点，用同一目标新开一条 run」
-    await expect(page.getByRole("button", { name: /重新开始|放弃检查点/ })).toBeVisible();
-    await page.getByRole("button", { name: "详情", exact: true }).click();
+    await openRunTab(page, "详情");
   }
 
   const telemetryHeading = page.getByRole("heading", { name: "资源与追踪" });
@@ -74,11 +76,7 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     path: testInfo.outputPath(`${testInfo.project.name}-telemetry.png`),
     fullPage: false,
   });
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "证据", exact: true }).click();
-  } else {
-    await page.getByRole("tab", { name: "交付证据" }).click();
-  }
+  await openRunTab(page, "交付证据");
   const evidenceCenter = page.getByLabel("交付证据中心");
   await expect(evidenceCenter).toBeVisible();
   await expect(evidenceCenter.getByText("需要处理", { exact: true })).toBeVisible();
@@ -89,21 +87,16 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     path: testInfo.outputPath(`${testInfo.project.name}-evidence.png`),
     fullPage: false,
   });
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "任务图" }).click();
-  } else {
-    await page.getByRole("tab", { name: "任务图" }).click();
-  }
+  await openRunTab(page, "任务图");
 
   const ledgerNode = page.locator(".react-flow__node").filter({ hasText: "幂等账本" });
   await ledgerNode.click();
+  await expect(page.getByRole("heading", { name: "任务详情" })).toBeVisible();
   if (testInfo.project.name === "mobile") {
-    await expect(page.getByRole("heading", { name: "任务详情" })).toBeVisible();
-    await page.getByRole("button", { name: "任务图" }).click();
-  } else {
-    await expect(page.getByRole("heading", { name: "任务详情" })).toBeVisible();
+    await openRunTab(page, "任务图");
   }
 
+  await openNav(page);
   await page.getByRole("button", { name: "新建运行" }).first().click();
   const launcher = page.getByRole("dialog");
   await expect(launcher.getByRole("heading", { name: "启动 Agent 团队" })).toBeVisible();
@@ -136,11 +129,7 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   });
   await launcher.getByRole("button", { name: "关闭" }).click();
 
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "编排", exact: true }).click();
-  } else {
-    await page.getByRole("button", { name: "策略编排", exact: true }).click();
-  }
+  await goToWorkspace(page, "策略编排");
   const composer = page.getByRole("region", { name: "策略编排器" });
   await expect(composer).toBeVisible();
   await expect(composer.locator(".strategy-stage-node")).toHaveCount(7);
@@ -206,17 +195,9 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   const savedStrategy = blueprintLauncher.locator(".strategy-segments label").filter({ hasText: blueprintName });
   await expect(savedStrategy.locator("input")).toBeChecked();
   await blueprintLauncher.getByRole("button", { name: "关闭" }).click();
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "任务图" }).click();
-  } else {
-    await page.getByRole("button", { name: "运行监控", exact: true }).click();
-  }
-
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "日志", exact: true }).click();
-  } else {
-    await page.getByRole("tab", { name: "活动日志" }).click();
-  }
+  await goToWorkspace(page, "运行监控");
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "活动日志");
   const agentActivity = page.locator(".agent-activity-list");
   await expect(agentActivity.getByText("执行", { exact: true })).toBeVisible();
   await expect(agentActivity.getByText("codex-worker", { exact: false })).toBeVisible();

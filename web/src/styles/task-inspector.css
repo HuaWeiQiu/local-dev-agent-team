@@ -1,7 +1,6 @@
 /* -------------------------------------------------------------- 任务详情 */
 
 .task-inspector {
-  grid-area: inspector;
   display: flex;
   min-height: 0;
   flex-direction: column;

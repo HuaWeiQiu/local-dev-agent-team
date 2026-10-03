@@ -17,7 +17,7 @@ import {
   startRun,
 } from "../api";
 import { runActionErrorMessage, summarizeGoal } from "../presentation";
-import type { MonitorPanel } from "../components/RunDashboard";
+import type { MonitorPanel } from "../components/RunPage";
 import type { RunMonitor } from "./useRunEvents";
 import type {
   ApprovalRequest,
@@ -34,7 +34,7 @@ interface UseRunActionsOptions {
   /** useRunEvents 返回的运行监控数据与刷新函数 */
   monitor: RunMonitor;
   setMonitorPanel: Dispatch<SetStateAction<MonitorPanel>>;
-  setMobileView: Dispatch<SetStateAction<"runs" | "design" | "evolution" | "experience" | "project" | "settings" | "flow" | "details" | "logs" | "evidence" | "usage">>;
+  setMonitorView: Dispatch<SetStateAction<"board" | "run">>;
   setWorkspaceMode: Dispatch<SetStateAction<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">>;
   setLauncherOpen: Dispatch<SetStateAction<boolean>>;
   setLauncherStrategy: Dispatch<SetStateAction<string | undefined>>;
@@ -48,7 +48,7 @@ export function useRunActions({
   scope,
   monitor,
   setMonitorPanel,
-  setMobileView,
+  setMonitorView,
   setWorkspaceMode,
   setLauncherOpen,
   setLauncherStrategy,
@@ -84,7 +84,7 @@ export function useRunActions({
       setLauncherStrategy(undefined);
       setSelectedRunId(runId);
       setMonitorPanel("activity");
-      setMobileView("logs");
+      setMonitorView("run");
       setWorkspaceMode("monitor");
       await refreshRuns();
       return true;
@@ -173,7 +173,7 @@ export function useRunActions({
       const runId = await retryRun(scope, selectedRunId);
       setSelectedRunId(runId);
       setMonitorPanel("activity");
-      setMobileView("logs");
+      setMonitorView("run");
       await refreshRuns();
     } catch (requestError) {
       setError(runActionErrorMessage(requestError));

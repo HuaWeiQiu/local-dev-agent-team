@@ -1,18 +1,6 @@
 /* ---------------------------------------------------------------- 响应式 */
 
 @media (max-width: 1220px) {
-  .monitor-workbench {
-    grid-template-columns: 260px minmax(380px, 1fr) 310px;
-  }
-
-  .topbar-run {
-    display: none;
-  }
-
-  .topbar {
-    grid-template-columns: minmax(300px, 1fr) auto;
-  }
-
   .activity-list > div {
     grid-template-columns: 98px 10px 112px minmax(0, 1fr);
   }
@@ -43,15 +31,6 @@
 }
 
 @media (max-width: 900px) {
-  .monitor-workbench {
-    grid-template-columns: 244px minmax(360px, 1fr);
-    grid-template-areas: "rail run";
-  }
-
-  .task-inspector {
-    display: none;
-  }
-
   .composer-canvas-summary {
     max-width: calc(100% - 28px);
     overflow-x: auto;
@@ -109,138 +88,6 @@
 }
 
 @media (max-width: 800px) {
-  .app-shell {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 60px minmax(0, 1fr);
-    grid-template-areas: "header" "workspace";
-  }
-
-  .app-navigation {
-    display: none;
-  }
-
-  .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .project-context {
-    gap: 8px;
-    padding: 0 10px;
-  }
-
-  .topbar-product,
-  .context-divider,
-  .project-branch {
-    display: none;
-  }
-
-  .project-context select {
-    max-width: 170px;
-    padding-left: 4px;
-  }
-
-  .topbar-actions {
-    gap: 5px;
-    padding-right: 8px;
-  }
-
-  .topbar-actions .button {
-    width: 36px;
-    padding: 0;
-  }
-
-  .topbar-actions .button span {
-    display: none;
-  }
-
-  .topbar-actions .mobile-evolution-entry {
-    display: inline-flex;
-    width: auto;
-    padding: 0 9px;
-  }
-
-  .topbar-actions .mobile-evolution-entry span {
-    display: inline;
-  }
-
-  .workspace-shell {
-    padding-bottom: 64px;
-  }
-
-  .monitor-workbench {
-    position: relative;
-    display: block;
-    height: 100%;
-  }
-
-  /* 移动端显隐只由 data-mobile-view 单机制驱动：
-     先压低 .is-active 的面板显隐，再用更高优先级的 data-mobile-view 规则恢复，
-     不再使用 !important。 */
-  .run-rail,
-  .run-workspace,
-  .task-inspector {
-    display: none;
-    width: 100%;
-    height: 100%;
-    border: 0;
-  }
-
-  .app-shell[data-mobile-view="runs"] .run-rail {
-    display: flex;
-  }
-
-  .app-shell[data-mobile-view="flow"] .run-workspace,
-  .app-shell[data-mobile-view="logs"] .run-workspace,
-  .app-shell[data-mobile-view="evidence"] .run-workspace,
-  .app-shell[data-mobile-view="usage"] .run-workspace {
-    display: grid;
-  }
-
-  .app-shell[data-mobile-view="details"] .task-inspector {
-    display: flex;
-  }
-
-  .run-panel.is-active {
-    display: none;
-  }
-
-  .app-shell[data-mobile-view="flow"] .run-panel-graph,
-  .app-shell[data-mobile-view="logs"] .run-panel-activity,
-  .app-shell[data-mobile-view="evidence"] .run-panel-evidence,
-  .app-shell[data-mobile-view="usage"] .run-panel-usage {
-    display: flex;
-  }
-
-  .run-workspace {
-    grid-template-rows: 66px auto minmax(0, 1fr);
-  }
-
-  .run-workspace-header {
-    padding: 0 13px;
-  }
-
-  .run-workspace-title {
-    gap: 3px;
-  }
-
-  .run-workspace-title > div {
-    display: block;
-  }
-
-  .run-workspace-title h1 {
-    font-size: var(--text-14);
-  }
-
-  .run-workspace-title > div > span {
-    display: block;
-    margin-top: 3px;
-    font-size: var(--text-11);
-  }
-
-  .run-view-tabs {
-    display: none;
-  }
-
   .canvas-heading {
     min-height: 52px;
     padding: 8px 13px;
