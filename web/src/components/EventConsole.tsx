@@ -12,9 +12,16 @@ import {
   advisorTriggerLabel,
   formatTimestamp,
   jevEntryText,
-  runStatusLabel,
 } from "../presentation";
 import { buildOutputLog, isOutputEvent } from "../output-log";
+import {
+  deriveTimeline,
+  filterTimeline,
+  timelineKindCounts,
+  timelineKindLabels,
+  type TimelineKind,
+} from "../timeline";
+import { EmptyState } from "./EmptyState";
 import type { RunEvent, RunState } from "../types";
 
 interface EventConsoleProps {
@@ -39,6 +46,10 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
     [events, run?.status],
   );
   const advisorLog = useMemo(() => deriveAdvisorLog(events), [events]);
+  const [kinds, setKinds] = useState<ReadonlySet<TimelineKind>>(new Set());
+  const timeline = useMemo(() => deriveTimeline(run, events), [run, events]);
+  const kindCounts = useMemo(() => timelineKindCounts(timeline), [timeline]);
+  const visibleTimeline = useMemo(() => filterTimeline(timeline, kinds), [timeline, kinds]);
   const advisorUsage = run?.strategy.advisor?.enabled
     ? `${run.advisorConsultations ?? 0} / ${run.strategy.advisor.maxConsultationsPerRun}`
     : undefined;
@@ -154,20 +165,50 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
                 ))}
               </div>
             )}
-            {run && agentActivity.length === 0 && <span className="console-empty">等待角色启动</span>}
-            {!run && <span className="console-empty">选择运行后显示角色</span>}
+            {run && agentActivity.length === 0 && <EmptyState size="inline" title="等待角色启动" hint="总控开始工作后，这里会显示每个角色的状态" />}
+            {!run && <EmptyState size="inline" title="选择运行后显示角色" />}
           </div>
         ) : tab === "activity" ? (
-          <div className="activity-list">
-            {[...(run?.history ?? [])].reverse().map((item, index) => (
-              <div key={`${item.at}-${index}`}>
-                <time>{formatTimestamp(item.at)}</time>
-                <span className="activity-dot" />
-                <strong>{runStatusLabel(item.status)}</strong>
-                <p>{item.message}</p>
+          <div className="activity-timeline">
+            {run && timeline.length > 0 && (
+              <div className="timeline-filters" role="group" aria-label="活动类型筛选">
+                <button
+                  type="button"
+                  className={kinds.size === 0 ? "is-active" : ""}
+                  aria-pressed={kinds.size === 0}
+                  onClick={() => setKinds(new Set())}
+                >
+                  全部<span>{timeline.length}</span>
+                </button>
+                {(Object.keys(timelineKindLabels) as TimelineKind[])
+                  .filter((kind) => kindCounts[kind] > 0)
+                  .map((kind) => (
+                    <button
+                      type="button"
+                      key={kind}
+                      className={kinds.has(kind) ? "is-active" : ""}
+                      aria-pressed={kinds.has(kind)}
+                      onClick={() => setKinds(toggleKind(kinds, kind))}
+                    >
+                      {timelineKindLabels[kind]}<span>{kindCounts[kind]}</span>
+                    </button>
+                  ))}
               </div>
-            ))}
-            {!run && <span className="console-empty">选择运行后显示活动</span>}
+            )}
+            <ol className="activity-list">
+              {visibleTimeline.map((entry) => (
+                <li key={entry.key} className={`timeline-row is-${entry.tone}`}>
+                  <time>{formatTimestamp(entry.at)}</time>
+                  <span className="activity-dot" aria-hidden="true" />
+                  <div>
+                    <strong>{entry.title}</strong>
+                    {entry.detail && <p>{entry.detail}</p>}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {!run && <EmptyState size="inline" title="选择运行后显示活动" />}
+            {run && timeline.length === 0 && <EmptyState size="inline" title="还没有活动记录" />}
           </div>
         ) : (
           <pre className="output-log">
@@ -183,6 +224,13 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
     </section>
   );
 });
+
+function toggleKind(current: ReadonlySet<TimelineKind>, kind: TimelineKind): ReadonlySet<TimelineKind> {
+  const next = new Set(current);
+  if (next.has(kind)) next.delete(kind);
+  else next.add(kind);
+  return next;
+}
 
 function formatOutput(event: RunEvent): string {
   const payload = event.payload as { role?: unknown; profile?: unknown; chunk?: unknown };

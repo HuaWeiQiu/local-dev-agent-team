@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getConfig, probeJev } from "../api";
 import { errorMessage, jevProbeSummary, jevStatusLabel } from "../presentation";
 import type { JevProbeResult, JevSettings, ProjectScope } from "../types";
+import { PanelHeader } from "./PanelHeader";
 
 const CONFIG_HINT = `jev:
   enabled: true
@@ -48,14 +49,12 @@ export function JevPanel({ scope }: { scope: ProjectScope }) {
 
   return (
     <section className="settings-panel jev-panel" aria-label="Jev 本地分流模型">
-      <div className="settings-panel-head">
-        <Cpu size={18} />
-        <div>
-          <h2>Jev 本地分流模型</h2>
-          <small>任务失败后判断「直接重试」还是「先问架构顾问」；只给建议，不能放行失败的检查</small>
-        </div>
-        <span className={`jev-status is-${status.tone}`}>{status.label}</span>
-      </div>
+      <PanelHeader
+        icon={<Cpu size={18} />}
+        title="Jev 本地分流模型"
+        subtitle="任务失败后判断「直接重试」还是「先问架构顾问」；只给建议，不能放行失败的检查"
+        actions={<span className={`jev-status is-${status.tone}`}>{status.label}</span>}
+      />
 
       {loadError && <p className="jev-note is-error">{loadError}</p>}
 

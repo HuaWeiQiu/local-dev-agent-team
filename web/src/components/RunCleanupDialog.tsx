@@ -2,6 +2,7 @@ import { AlertTriangle, ArchiveX, Clock3, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatBytes } from "../presentation";
 import type { RunCleanupPreview } from "../types";
+import { EmptyState } from "./EmptyState";
 import { RunStatusBadge } from "./StatusBadge";
 
 interface RunCleanupDialogProps {
@@ -43,9 +44,9 @@ export function RunCleanupDialog({ open, preview, busy, error, onPreview, onConf
                   <span><strong>{candidate.goal}</strong><small>{new Date(candidate.updatedAt).toLocaleString("zh-CN")} · {formatBytes(candidate.bytes)}</small></span>
                 </div>
               ))}
-              {preview.candidates.length === 0 && <div className="cleanup-empty"><ArchiveX size={24} /><span>这个保留范围内没有可清理运行</span></div>}
+              {preview.candidates.length === 0 && <EmptyState icon={<ArchiveX size={24} />} title="这个保留范围内没有可清理运行" />}
             </>
-          ) : <div className="cleanup-empty"><Clock3 size={24} /><span>生成预览后才能确认清理</span></div>}
+          ) : <EmptyState icon={<Clock3 size={24} />} title="生成预览后才能确认清理" />}
         </div>
         {error && <p className="form-error">{error}</p>}
         <footer>

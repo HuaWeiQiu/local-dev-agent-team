@@ -31,6 +31,7 @@ import type {
   RoleBindingInput,
 } from "../types";
 import { JevPanel } from "./JevPanel";
+import { PanelHeader } from "./PanelHeader";
 import { applyRolePatch, RoleBindingEditor } from "./RoleBindingEditor";
 
 const BUILT_IN_ROLES = [
@@ -418,13 +419,7 @@ export function SettingsWorkbench({
       )}
 
       {!isProject && <section className="settings-panel">
-        <div className="settings-panel-head">
-          <RefreshCw size={18} />
-          <div>
-            <h2>CLI 配置检测</h2>
-            <small>自动检测可关；手动检测随时可用，强制扫本机配置</small>
-          </div>
-        </div>
+        <PanelHeader icon={<RefreshCw size={18} />} title="CLI 配置检测" subtitle="自动检测可关；手动检测随时可用，强制扫本机配置" />
         <div className="detect-options">
           <label className="detect-option">
             <input
@@ -479,26 +474,24 @@ export function SettingsWorkbench({
       </section>}
 
       {!isProject && <section className="settings-panel">
-        <div className="settings-panel-head">
-          <Terminal size={18} />
-          <div>
-            <h2>本机 CLI 清单</h2>
-            <small>
-              {inventory
-                ? `${cacheSourceLabel(fromCache, cacheReason)} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
-                : "尚未扫描"}
-            </small>
-          </div>
-          <button
-            type="button"
-            className="button secondary settings-inline-detect"
-            onClick={() => void rescan()}
-            disabled={scanning || saving}
-          >
-            {scanning ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}
-            <span>{scanning ? "检测中" : "手动检测"}</span>
-          </button>
-        </div>
+        <PanelHeader
+          icon={<Terminal size={18} />}
+          title="本机 CLI 清单"
+          subtitle={inventory
+            ? `${cacheSourceLabel(fromCache, cacheReason)} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
+            : "尚未扫描"}
+          actions={
+            <button
+              type="button"
+              className="button secondary settings-inline-detect"
+              onClick={() => void rescan()}
+              disabled={scanning || saving}
+            >
+              {scanning ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}
+              <span>{scanning ? "检测中" : "手动检测"}</span>
+            </button>
+          }
+        />
         <div className="cli-card-grid">
           {(inventory?.clis ?? []).map((cli) => (
             <article key={cli.id} className={`cli-card ${cli.installed ? "is-installed" : "is-missing"}`}>
@@ -531,17 +524,13 @@ export function SettingsWorkbench({
       </section>}
 
       <section className="settings-panel">
-        <div className="settings-panel-head">
-          <ShieldCheck size={18} />
-          <div>
-            <h2>{isProject ? "项目角色" : "全局角色默认"}</h2>
-            <small>
-              {isProject
-                ? "改过的角色只对本项目生效；点「恢复全局」后该角色重新跟全局走"
-                : "保存后，没有项目覆盖的角色会用这些值；新建运行仍可在弹窗里改一次"}
-            </small>
-          </div>
-          {!isProject && (
+        <PanelHeader
+          icon={<ShieldCheck size={18} />}
+          title={isProject ? "项目角色" : "全局角色默认"}
+          subtitle={isProject
+            ? "改过的角色只对本项目生效；点「恢复全局」后该角色重新跟全局走"
+            : "保存后，没有项目覆盖的角色会用这些值；新建运行仍可在弹窗里改一次"}
+          actions={!isProject && (
             <button
               type="button"
               className="button secondary settings-inline-detect"
@@ -553,7 +542,7 @@ export function SettingsWorkbench({
               <span>采用建议默认</span>
             </button>
           )}
-        </div>
+        />
         <RoleBindingEditor
           roles={isProject ? projectRoles : roles}
           roleNames={roleNames}

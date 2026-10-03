@@ -1,5 +1,7 @@
 import { FileCheck2, Gauge, ScrollText, Workflow } from "lucide-react";
 import { useMemo } from "react";
+import { deriveAgentActivity } from "../agent-activity";
+import { deriveLiveStatus } from "../live-status";
 import { humanizeFailure, strategyDisplayName, summarizeGoal } from "../presentation";
 import type { RunMonitor } from "../hooks/useRunEvents";
 import type {
@@ -9,6 +11,7 @@ import type {
 import { DagCanvas } from "./DagCanvas";
 import { EventConsole } from "./EventConsole";
 import { EvidenceCenter } from "./EvidenceCenter";
+import { RunLiveBar } from "./RunLiveBar";
 import { RunRail } from "./RunRail";
 import { TaskInspector } from "./TaskInspector";
 import { UsagePanel } from "./UsagePanel";
@@ -62,6 +65,10 @@ export function RunDashboard({
     () => run?.tasks.find((task) => task.task.id === selectedTaskId),
     [run?.tasks, selectedTaskId],
   );
+  const liveStatus = useMemo(
+    () => deriveLiveStatus(run, deriveAgentActivity(events, run?.status)),
+    [run, events],
+  );
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
 
   return (
@@ -103,6 +110,7 @@ export function RunDashboard({
             </button>
           </div>
         </header>
+        {liveStatus && <RunLiveBar status={liveStatus} onOpenActivity={() => onMonitorPanelChange("activity")} />}
         <div className={`run-panel run-panel-graph ${monitorPanel === "graph" ? "is-active" : ""}`}>
           <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
         </div>

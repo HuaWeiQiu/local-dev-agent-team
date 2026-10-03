@@ -950,7 +950,7 @@ code {
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 76px minmax(0, 1fr);
+  grid-template-rows: 76px auto minmax(0, 1fr);
   background: var(--bg);
 }
 
@@ -1032,6 +1032,7 @@ code {
 }
 
 .run-panel {
+  grid-row: 3;
   display: none;
   min-width: 0;
   min-height: 0;
@@ -1690,17 +1691,64 @@ code {
   flex: 1;
 }
 
-.activity-list {
-  padding: 15px 20px;
+.activity-timeline {
+  display: flex;
+  flex-direction: column;
 }
 
-.activity-list > div {
+.timeline-filters {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-1);
+}
+
+.timeline-filters button {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-11);
+  cursor: pointer;
+}
+
+.timeline-filters button span {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.timeline-filters button.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.activity-list {
+  margin: 0;
+  padding: 12px 20px 15px;
+  list-style: none;
+}
+
+.timeline-row {
   display: grid;
-  grid-template-columns: 108px 10px 132px minmax(0, 1fr);
+  grid-template-columns: 108px 10px minmax(0, 1fr);
   min-height: 34px;
   align-items: baseline;
   gap: 8px;
   font-size: var(--text-11);
+}
+
+.timeline-row > div {
+  min-width: 0;
 }
 
 .activity-list time {
@@ -1708,16 +1756,30 @@ code {
 }
 
 .activity-list strong {
-  overflow: hidden;
   color: var(--ink-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .activity-list p {
-  margin: 0;
-  color: var(--ink-2);
+  margin: 2px 0 0;
+  color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+.timeline-row.is-danger .activity-dot {
+  background: var(--danger, #d4504c);
+}
+
+.timeline-row.is-warning .activity-dot {
+  background: var(--warning, #d29b2f);
+}
+
+.timeline-row.is-success .activity-dot {
+  background: var(--success, #3a9d6a);
+}
+
+.timeline-row.is-neutral .activity-dot {
+  background: var(--muted);
 }
 
 .activity-dot {
@@ -1727,11 +1789,6 @@ code {
   background: var(--accent);
 }
 
-.console-empty {
-  display: block;
-  padding: 28px 0;
-  color: var(--muted);
-}
 
 .agent-activity-list {
   min-height: 100%;
@@ -2031,21 +2088,7 @@ code {
   background: var(--surface-1);
 }
 
-.evidence-empty {
-  display: flex;
-  width: 100%;
-  min-height: 280px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 10px;
-  color: var(--muted);
-}
 
-.evidence-empty strong {
-  color: var(--ink-2);
-  font-size: var(--text-13);
-}
 
 .spin {
   animation: spin 900ms linear infinite;
@@ -3306,16 +3349,6 @@ button.palette-item:disabled {
   font-size: var(--text-11);
 }
 
-.cleanup-empty {
-  display: flex;
-  min-height: 170px;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 9px;
-  color: var(--muted);
-  font-size: var(--text-11);
-}
 
 .run-cleanup-dialog > .form-error {
   margin: 0 20px 12px;
@@ -5004,7 +5037,7 @@ button.palette-item:disabled {
   }
 
   .run-workspace {
-    grid-template-rows: 66px minmax(0, 1fr);
+    grid-template-rows: 66px auto minmax(0, 1fr);
   }
 
   .run-workspace-header {
@@ -6520,4 +6553,110 @@ button.palette-item:disabled {
 .output-log-notice {
   color: var(--muted);
   font-style: italic;
+}
+
+/* ------------------------------------------------------- 运行状态条 */
+
+.run-live-bar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2, var(--surface-1));
+  font-size: var(--text-12);
+}
+
+.run-live-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.run-live-workers {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.run-live-worker {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--accent-soft, rgba(80, 120, 255, 0.12));
+  color: var(--ink-2);
+}
+
+.run-live-worker.is-advisor {
+  outline: 1px dashed var(--accent);
+}
+
+.run-live-muted {
+  color: var(--muted);
+}
+
+.run-live-pill.is-attention {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--warning-soft, rgba(210, 155, 47, 0.16));
+  color: var(--ink-2);
+}
+
+.run-live-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.run-live-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: inherit;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------- 统一空状态 */
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.empty-state.is-block {
+  width: 100%;
+  min-height: 220px;
+  padding: 24px;
+}
+
+.empty-state.is-inline {
+  padding: 28px 0;
+}
+
+.empty-state strong {
+  color: var(--ink-2);
+  font-size: var(--text-13);
+}
+
+.empty-state-hint {
+  font-size: var(--text-12);
+  line-height: 1.5;
+}
+
+.empty-state-action {
+  margin-top: 4px;
 }

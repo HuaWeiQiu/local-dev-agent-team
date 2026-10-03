@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState, memo } from "react";
 import { formatBytes } from "../presentation";
+import { EmptyState } from "./EmptyState";
 import type { EvidenceFilePreview, RunEvidence, RunState } from "../types";
 
 interface EvidenceCenterProps {
@@ -29,13 +30,13 @@ export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, load
   }, [evidence?.runId]);
 
   if (!run) {
-    return <div className="evidence-empty"><ShieldCheck size={28} /><strong>选择运行后查看交付证据</strong></div>;
+    return <EmptyState icon={<ShieldCheck size={28} />} title="选择运行后查看交付证据" />;
   }
   if (loading && !evidence) {
-    return <div className="evidence-empty"><CircleDashed className="spin" size={28} /><strong>正在汇总本地证据</strong></div>;
+    return <EmptyState role="status" icon={<CircleDashed className="spin" size={28} />} title="正在汇总本地证据" />;
   }
   if (!evidence) {
-    return <div className="evidence-empty"><AlertTriangle size={28} /><strong>交付证据暂不可用</strong></div>;
+    return <EmptyState icon={<AlertTriangle size={28} />} title="交付证据暂不可用" hint="运行结束并生成证据后会显示在这里" />;
   }
 
   const openArtifact = async (artifactPath: string) => {
