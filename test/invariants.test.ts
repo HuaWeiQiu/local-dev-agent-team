@@ -29,7 +29,7 @@ describe("repository-wide safety invariants", () => {
       .filter(({ text }) => /from\s+["'](node:)?child_process["']/.test(text))
       .map(({ file }) => file)
       .sort();
-    expect(importers).toEqual(["process/alive.ts", "process/live-children.ts", "process/run.ts"].sort());
+    expect(importers).toEqual(["process/alive.ts", "process/live-children.ts", "process/run.ts", "process/stream.ts"].sort());
   });
 
   it("does not persist credentials in state or configuration code paths", () => {

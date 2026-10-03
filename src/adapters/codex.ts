@@ -120,7 +120,7 @@ const doctorSpec: AdapterDoctorSpec = {
   },
 };
 
-function codexProviderArguments(
+export function codexProviderArguments(
   provider: NonNullable<AgentProfile["codexProvider"]>,
 ): string[] {
   const prefix = `model_providers.${provider.id}`;

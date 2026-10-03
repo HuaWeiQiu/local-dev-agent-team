@@ -50,6 +50,10 @@ export default tseslint.config(
     rules: typeAwareRules,
   },
   {
+    files: ["test/support/**/*.mjs"],
+    languageOptions: { globals: globals.node },
+  },
+  {
     files: ["web/src/**/*.{ts,tsx}"],
     languageOptions: {
       globals: globals.browser,
