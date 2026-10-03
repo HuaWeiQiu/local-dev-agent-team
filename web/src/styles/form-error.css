@@ -1,0 +1,6 @@
+/* 表单错误提示的配色；尺寸与间距见 modal.css。 */
+
+.form-error {
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+}

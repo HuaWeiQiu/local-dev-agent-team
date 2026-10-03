@@ -1,5 +1,5 @@
 import { FileCheck2, Gauge, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { deriveAgentActivity } from "../agent-activity";
 import { latestPendingApproval } from "../hooks/useRunEvents";
 import type { RunMonitor } from "../hooks/useRunEvents";
@@ -103,7 +103,7 @@ export function RunPage({
       )}
 
       <div className={cn("grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)]", showInspector && wide ? "grid-cols-[minmax(0,1fr)_348px]" : "grid-cols-1")}>
-        <div className="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)] [&>*]:col-start-1 [&>*]:row-start-1">
+        <div className="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)] [&>*]:col-start-1 [&>*]:row-start-1">
           <div className={cn("min-h-0", monitorPanel !== "overview" && "hidden")}>
             <RunOverview
               run={run}
@@ -116,29 +116,33 @@ export function RunPage({
             />
           </div>
           {!wide && (
-            <div className={cn("min-h-0 overflow-hidden [&>aside]:h-full [&>aside]:border-l-0", monitorPanel !== "details" && "hidden")}>
+            <Panel active={monitorPanel === "details"}>
               <TaskInspector run={run} task={selectedTask} />
-            </div>
+            </Panel>
           )}
-          <div className={cn("run-panel", monitorPanel === "graph" && "is-active")}>
+          <Panel active={monitorPanel === "graph"}>
             {/* React Flow fits its viewport on mount, so it must mount while visible. */}
             {monitorPanel === "graph" && (
               <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task) => { onSelectTask(task); if (!wide) onMonitorPanelChange("details"); }} />
             )}
-          </div>
-          <div className={cn("run-panel", monitorPanel === "activity" && "is-active")}>
+          </Panel>
+          <Panel active={monitorPanel === "activity"}>
             <EventConsole run={run} events={events} connected={connected} exporting={busy} onExport={() => void onExportEvents()} />
-          </div>
-          <div className={cn("run-panel", monitorPanel === "evidence" && "is-active")}>
+          </Panel>
+          <Panel active={monitorPanel === "evidence"}>
             <EvidenceCenter run={run} evidence={evidence} loading={evidenceLoading} onReadArtifact={onReadArtifact} />
-          </div>
-          <div className={cn("run-panel", monitorPanel === "usage" && "is-active")}>
+          </Panel>
+          <Panel active={monitorPanel === "usage"}>
             <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={onRefreshUsage} />
-          </div>
+          </Panel>
         </div>
-        {showInspector && wide && <TaskInspector run={run} task={selectedTask} />}
+        {showInspector && wide && <TaskInspector run={run} task={selectedTask} className="bd-l" />}
       </div>
 
     </section>
   );
+}
+
+function Panel({ active, children }: { active: boolean; children: ReactNode }) {
+  return <div className={cn("min-h-0 min-w-0 flex-col", active ? "flex" : "hidden")}>{children}</div>;
 }

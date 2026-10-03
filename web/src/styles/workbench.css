@@ -33,8 +33,7 @@
   justify-content: space-between;
 }
 
-.section-heading h2,
-.canvas-heading h2 {
+.section-heading h2 {
   margin: 3px 0 0;
   font-size: var(--text-16);
   line-height: 1.35;
@@ -306,75 +305,6 @@
   font-size: var(--text-12);
 }
 
-/* --------------------------------------------- 状态徽章：soft 底 + 状态圆点 */
-
-.status-badge {
-  display: inline-flex;
-  min-height: 22px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: var(--text-11);
-  font-weight: var(--weight-bold);
-  white-space: nowrap;
-}
-
-.status-badge::before {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--muted);
-  content: "";
-}
-
-.tone-success {
-  color: var(--success-ink);
-  background: var(--success-soft);
-}
-
-.tone-success::before {
-  background: var(--success);
-}
-
-.tone-danger {
-  color: var(--danger-ink);
-  background: var(--danger-soft);
-}
-
-.tone-danger::before {
-  background: var(--danger);
-}
-
-.tone-warning {
-  color: var(--warning-ink);
-  background: var(--warning-soft);
-}
-
-.tone-warning::before {
-  background: var(--warning);
-}
-
-.tone-active {
-  color: var(--info-ink);
-  background: var(--info-soft);
-}
-
-.tone-active::before {
-  background: var(--info);
-}
-
-.tone-neutral {
-  color: var(--ink-2);
-  background: var(--surface-3);
-}
-
-.tone-neutral::before {
-  background: var(--muted);
-}
-
 /* ----------------------------------------------------- 运行工作区与视图切换 */
 
 .run-workspace {
@@ -461,14 +391,4 @@
   color: var(--ink);
   background: var(--surface-1);
   box-shadow: var(--shadow-1);
-}
-
-.run-panel {
-  display: none;
-  min-width: 0;
-  min-height: 0;
-}
-
-.run-panel.is-active {
-  display: flex;
 }

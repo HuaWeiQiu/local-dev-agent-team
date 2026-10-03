@@ -7,14 +7,10 @@
 @import "./styles/base.css";
 @import "./styles/topbar-buttons.css";
 @import "./styles/workbench.css";
-@import "./styles/task-graph.css";
-@import "./styles/task-inspector.css";
-@import "./styles/event-console.css";
-@import "./styles/evidence.css";
-@import "./styles/usage.css";
+@import "./styles/xyflow.css";
+@import "./styles/form-error.css";
 @import "./styles/strategy.css";
 @import "./styles/modal.css";
-@import "./styles/evolution.css";
 @import "./styles/misc.css";
 @import "./styles/responsive.css";
 @import "./styles/motion.css";

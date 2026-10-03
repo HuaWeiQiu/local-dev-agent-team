@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { cn } from "../ui/cn";
 
 interface EmptyStateProps {
   title: string;
@@ -13,11 +14,21 @@ interface EmptyStateProps {
 /** Single empty/loading/placeholder pattern: optional icon, sentence title, muted hint, optional action. */
 export function EmptyState({ title, hint, icon, action, size = "block", role }: EmptyStateProps) {
   return (
-    <div className={`empty-state is-${size}`} {...(role ? { role, "aria-live": "polite" as const } : {})}>
-      {icon && <span className="empty-state-icon" aria-hidden="true">{icon}</span>}
-      <strong>{title}</strong>
-      {hint && <span className="empty-state-hint">{hint}</span>}
-      {action && <div className="empty-state-action">{action}</div>}
+    <div
+      className={cn(
+        "flex min-w-0 flex-col items-center justify-center gap-1.5 text-center text-muted",
+        size === "block" ? "min-h-56 w-full flex-1 p-6" : "px-4 py-8",
+      )}
+      {...(role ? { role, "aria-live": "polite" as const } : {})}
+    >
+      {icon && (
+        <span aria-hidden="true" className="mb-1 grid size-11 place-items-center rounded-full bg-surface-3 text-muted [&_svg]:size-5">
+          {icon}
+        </span>
+      )}
+      <strong className="text-sm font-medium text-ink-2">{title}</strong>
+      {hint && <span className="max-w-sm text-xs leading-relaxed">{hint}</span>}
+      {action && <div className="mt-2">{action}</div>}
     </div>
   );
 }

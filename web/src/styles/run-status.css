@@ -68,42 +68,6 @@
   cursor: pointer;
 }
 
-/* ------------------------------------------------------- 统一空状态 */
-
-.empty-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 8px;
-  color: var(--muted);
-  text-align: center;
-}
-
-.empty-state.is-block {
-  width: 100%;
-  min-height: 220px;
-  padding: 24px;
-}
-
-.empty-state.is-inline {
-  padding: 28px 0;
-}
-
-.empty-state strong {
-  color: var(--ink-2);
-  font-size: var(--text-13);
-}
-
-.empty-state-hint {
-  font-size: var(--text-12);
-  line-height: 1.5;
-}
-
-.empty-state-action {
-  margin-top: 4px;
-}
-
 .run-attention {
   grid-row: 2;
   min-width: 0;

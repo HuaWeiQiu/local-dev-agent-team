@@ -1,28 +1,20 @@
-import { Activity, Bot, Compass, CornerDownRight, Download, Radio, TerminalSquare } from "lucide-react";
+import { Activity, Bot, Download, Radio, TerminalSquare } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import {
-  agentRoleLabel,
-  agentStatusLabel,
-  deriveAdvisorLog,
-  deriveAgentActivity,
-  type AgentDisplayStatus,
-} from "../agent-activity";
-import {
-  advisorRecommendationLabel,
-  advisorTriggerLabel,
-  formatTimestamp,
-  jevEntryText,
-} from "../presentation";
+import { agentRoleLabel, deriveAdvisorLog, deriveAgentActivity, type AgentDisplayStatus } from "../agent-activity";
+import { formatTimestamp } from "../presentation";
 import { buildOutputLog, isOutputEvent } from "../output-log";
-import {
-  deriveTimeline,
-  filterTimeline,
-  timelineKindCounts,
-  timelineKindLabels,
-  type TimelineKind,
-} from "../timeline";
-import { EmptyState } from "./EmptyState";
+import { deriveTimeline, filterTimeline, timelineKindCounts, type TimelineKind } from "../timeline";
 import type { RunEvent, RunState } from "../types";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { ActivityTimeline } from "./run/ActivityTimeline";
+import { AgentActivity } from "./run/AgentActivity";
+
+type ConsoleTab = "agents" | "activity" | "output";
+
+const panelClass = "min-h-full outline-none focus-visible:shadow-[inset_0_0_0_2px_var(--accent-line)]";
 
 interface EventConsoleProps {
   run: RunState | undefined;
@@ -33,7 +25,7 @@ interface EventConsoleProps {
 }
 
 export const EventConsole = memo(function EventConsole({ run, events, connected, exporting, onExport }: EventConsoleProps) {
-  const [tab, setTab] = useState<"agents" | "activity" | "output">("agents");
+  const [tab, setTab] = useState<ConsoleTab>("agents");
   const scrollRef = useRef<HTMLDivElement>(null);
   const outputCount = useMemo(() => events.filter(isOutputEvent).length, [events]);
   // The text is only built while the output tab is visible, and capped to the newest window.
@@ -72,165 +64,74 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
   }, [outputLog, tab]);
 
   return (
-    <section className="event-console" aria-label="运行事件和日志">
-      <header>
-        <div className="console-tabs" role="tablist">
-          <button className={tab === "agents" ? "is-active" : ""} onClick={() => setTab("agents")} role="tab" aria-selected={tab === "agents"}>
-            <Bot size={15} />角色
-            {agentActivity.length > 0 && <span>{activeAgents || agentActivity.length}</span>}
-          </button>
-          <button className={tab === "activity" ? "is-active" : ""} onClick={() => setTab("activity")} role="tab" aria-selected={tab === "activity"}>
-            <Activity size={15} />活动
-          </button>
-          <button className={tab === "output" ? "is-active" : ""} onClick={() => setTab("output")} role="tab" aria-selected={tab === "output"}>
-            <TerminalSquare size={15} />输出
-            {outputCount > 0 && <span>{outputCount}</span>}
-          </button>
-        </div>
-        <div className="console-actions">
-          <button
-            className="icon-button compact"
-            onClick={onExport}
-            disabled={!run || exporting}
-            aria-label="导出日志"
-            title="导出当前运行的事件日志（NDJSON）"
-          >
-            <Download size={15} />
-          </button>
-          <span className={`stream-state ${connected ? "is-connected" : ""}`}>
-            <Radio size={13} />{connected ? "实时" : "离线"}
-          </span>
-        </div>
-      </header>
-      <div
-        className="console-body"
-        ref={scrollRef}
-        onScroll={(event) => {
-          const body = event.currentTarget;
-          pinnedToBottom.current = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
-        }}
-      >
-        {tab === "agents" ? (
-          <div className="agent-activity-list">
-            {agentActivity.map((invocation) => (
-              <div className="agent-activity-group" key={invocation.id}>
-                <div className="agent-activity-row">
-                  <span className={`agent-state-dot is-${invocation.status}`} aria-hidden="true" />
-                  <div className="agent-activity-identity">
-                    <strong>
-                      {agentRoleLabel(invocation.role)}
-                      {invocation.advisor && <span className="advisor-tag" title="只读顾问：按需出场，不写代码">顾问</span>}
-                    </strong>
-                    <small>{invocation.profile} · {invocation.adapter}{invocation.model ? ` / ${invocation.model}` : ""}</small>
-                  </div>
-                  <AgentState status={invocation.status} />
-                  <time>{formatTimestamp(invocation.updatedAt)}</time>
-                </div>
-                {invocation.children.map((child) => (
-                  <div className="agent-activity-row is-child" key={child.id}>
-                    <CornerDownRight size={14} aria-hidden="true" />
-                    <div className="agent-activity-identity">
-                      <strong>{child.label}</strong>
-                      <small>Codex 原生子代理 · {shortThreadId(child.threadId)}{child.model ? ` · ${child.model}` : ""}</small>
-                    </div>
-                    <AgentState status={child.status} />
-                    <time>{formatTimestamp(child.updatedAt)}</time>
-                  </div>
-                ))}
-              </div>
-            ))}
-            {advisorLog.length > 0 && (
-              <div className="advisor-log" aria-label="架构顾问记录">
-                <div className="advisor-log-title">
-                  <Compass size={14} aria-hidden="true" />
-                  <strong>架构顾问</strong>
-                  {advisorUsage && <span>{advisorUsage}</span>}
-                </div>
-                {advisorLog.map((entry) => (
-                  <div className={`advisor-log-row is-${entry.status}`} key={entry.sequence}>
-                    <div>
-                      <strong>{entry.jev ? "Jev 分流" : advisorTriggerLabel(entry.trigger)}{entry.taskId ? ` · ${entry.taskId}` : ""}</strong>
-                      <small>
-                        {entry.jev
-                          ? jevEntryText(entry.jev)
-                          : entry.status === "consulted" && entry.recommendation
-                          ? `${advisorRecommendationLabel(entry.recommendation)}${entry.summary ? `：${entry.summary}` : ""}`
-                          : entry.status === "skipped"
-                            ? "已达本次运行的顾问次数上限，已跳过"
-                            : `顾问调用失败，已放行${entry.detail ? `：${entry.detail}` : ""}`}
-                      </small>
-                    </div>
-                    <time>{formatTimestamp(entry.occurredAt)}</time>
-                  </div>
-                ))}
-              </div>
-            )}
-            {run && agentActivity.length === 0 && <EmptyState size="inline" title="等待角色启动" hint="总控开始工作后，这里会显示每个角色的状态" />}
-            {!run && <EmptyState size="inline" title="选择运行后显示角色" />}
+    <Tabs asChild value={tab} onValueChange={(value) => setTab(value as ConsoleTab)}>
+      <section aria-label="运行事件和日志" className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface">
+        <header className="bd-b flex items-center justify-between gap-2 px-2 md:px-4">
+          <TabsList aria-label="日志视图" className="min-w-0 gap-0 border-b-0">
+            <TabsTrigger value="agents" className="h-11 shrink-0 px-2.5 max-sm:[&>svg]:hidden sm:px-3">
+              <Bot />角色
+              {agentActivity.length > 0 && <Badge className="px-1.5 tabular-nums">{activeAgents || agentActivity.length}</Badge>}
+            </TabsTrigger>
+            <TabsTrigger value="activity" className="h-11 shrink-0 px-2.5 max-sm:[&>svg]:hidden sm:px-3">
+              <Activity />活动
+            </TabsTrigger>
+            <TabsTrigger value="output" className="h-11 shrink-0 px-2.5 max-sm:[&>svg]:hidden sm:px-3">
+              <TerminalSquare />输出
+              {outputCount > 0 && <Badge className="px-1.5 tabular-nums">{outputCount}</Badge>}
+            </TabsTrigger>
+          </TabsList>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onExport}
+              disabled={!run || exporting}
+              aria-label="导出日志"
+              title="导出当前运行的事件日志（NDJSON）"
+            >
+              <Download />
+            </Button>
+            <Badge tone={connected ? "success" : "neutral"}>
+              <Radio className="size-3" aria-hidden />{connected ? "实时" : "离线"}
+            </Badge>
           </div>
-        ) : tab === "activity" ? (
-          <div className="activity-timeline">
-            {run && timeline.length > 0 && (
-              <div className="timeline-filters" role="group" aria-label="活动类型筛选">
-                <button
-                  type="button"
-                  className={kinds.size === 0 ? "is-active" : ""}
-                  aria-pressed={kinds.size === 0}
-                  onClick={() => setKinds(new Set())}
-                >
-                  全部<span>{timeline.length}</span>
-                </button>
-                {(Object.keys(timelineKindLabels) as TimelineKind[])
-                  .filter((kind) => kindCounts[kind] > 0)
-                  .map((kind) => (
-                    <button
-                      type="button"
-                      key={kind}
-                      className={kinds.has(kind) ? "is-active" : ""}
-                      aria-pressed={kinds.has(kind)}
-                      onClick={() => setKinds(toggleKind(kinds, kind))}
-                    >
-                      {timelineKindLabels[kind]}<span>{kindCounts[kind]}</span>
-                    </button>
-                  ))}
-              </div>
-            )}
-            <ol className="activity-list">
-              {visibleTimeline.map((entry) => (
-                <li key={entry.key} className={`timeline-row is-${entry.tone}`}>
-                  <time>{formatTimestamp(entry.at)}</time>
-                  <span className="activity-dot" aria-hidden="true" />
-                  <div>
-                    <strong>{entry.title}</strong>
-                    {entry.detail && <p>{entry.detail}</p>}
-                  </div>
-                </li>
-              ))}
-            </ol>
-            {!run && <EmptyState size="inline" title="选择运行后显示活动" />}
-            {run && timeline.length === 0 && <EmptyState size="inline" title="还没有活动记录" />}
-          </div>
-        ) : (
-          <pre className="output-log">
-            {outputLog && outputLog.omittedEvents > 0 && (
-              <span className="output-log-notice">
-                {`… 已省略较早的 ${outputLog.omittedEvents} 条输出，仅显示最近内容；点击右上角导出可获取完整日志\n`}
-              </span>
-            )}
-            {outputLog && outputLog.eventCount > 0 ? outputLog.text : "等待角色输出…"}
-          </pre>
-        )}
-      </div>
-    </section>
+        </header>
+        <div
+          ref={scrollRef}
+          className={cn("scroll-thin min-h-0 flex-1 overflow-auto", tab === "output" && "bg-[var(--terminal-bg)]")}
+          onScroll={(event) => {
+            const body = event.currentTarget;
+            pinnedToBottom.current = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+          }}
+        >
+          <TabsContent value="agents" className={panelClass}>
+            <AgentActivity hasRun={Boolean(run)} activity={agentActivity} advisorLog={advisorLog} advisorUsage={advisorUsage} />
+          </TabsContent>
+          <TabsContent value="activity" className={panelClass}>
+            <ActivityTimeline
+              hasRun={Boolean(run)}
+              entries={timeline}
+              visible={visibleTimeline}
+              kinds={kinds}
+              kindCounts={kindCounts}
+              onKindsChange={setKinds}
+            />
+          </TabsContent>
+          <TabsContent value="output" className={cn(panelClass, "flex flex-col")}>
+            <pre className="output-log m-0 flex-1 whitespace-pre-wrap break-words bg-[var(--terminal-bg)] p-3.5 font-mono text-2xs leading-[1.7] text-[var(--terminal-ink)] min-[801px]:px-5 min-[801px]:py-[18px] min-[801px]:text-xs">
+              {outputLog && outputLog.omittedEvents > 0 && (
+                <span className="italic text-[var(--terminal-muted)]">
+                  {`… 已省略较早的 ${outputLog.omittedEvents} 条输出，仅显示最近内容；点击右上角导出可获取完整日志\n`}
+                </span>
+              )}
+              {outputLog && outputLog.eventCount > 0 ? outputLog.text : <span className="text-[var(--terminal-muted)]">等待角色输出…</span>}
+            </pre>
+          </TabsContent>
+        </div>
+      </section>
+    </Tabs>
   );
 });
-
-function toggleKind(current: ReadonlySet<TimelineKind>, kind: TimelineKind): ReadonlySet<TimelineKind> {
-  const next = new Set(current);
-  if (next.has(kind)) next.delete(kind);
-  else next.add(kind);
-  return next;
-}
 
 function formatOutput(event: RunEvent): string {
   const payload = event.payload as { role?: unknown; profile?: unknown; chunk?: unknown };
@@ -241,14 +142,6 @@ function formatOutput(event: RunEvent): string {
   return `[${formatTimestamp(event.occurredAt)}] ${role}${profile} ${stream}\n${chunk}`;
 }
 
-function AgentState({ status }: { status: AgentDisplayStatus }) {
-  return <span className={`agent-state is-${status}`}>{agentStatusLabel(status)}</span>;
-}
-
 function isActiveAgent(status: AgentDisplayStatus): boolean {
   return status === "pending" || status === "running";
-}
-
-function shortThreadId(threadId: string): string {
-  return threadId.length > 12 ? `${threadId.slice(0, 8)}…` : threadId;
 }

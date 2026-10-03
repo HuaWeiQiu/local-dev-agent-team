@@ -69,7 +69,7 @@ export function buildTaskGraph(tasks: TaskRunState[]): {
       source: dependency,
       target: task.task.id,
       type: "smoothstep",
-      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: edgeColor },
       style: { stroke: edgeColor, strokeWidth: 1.5 },
     })),
   );
