@@ -2,15 +2,18 @@ import { FileCheck2, Gauge, ScrollText, Workflow } from "lucide-react";
 import { useMemo } from "react";
 import { deriveAgentActivity } from "../agent-activity";
 import { deriveLiveStatus } from "../live-status";
+import { latestPendingApproval } from "../hooks/useRunEvents";
 import { humanizeFailure, strategyDisplayName, summarizeGoal } from "../presentation";
 import type { RunMonitor } from "../hooks/useRunEvents";
 import type {
+  ApprovalRequest,
   EvidenceFilePreview,
   TaskRunState,
 } from "../types";
 import { DagCanvas } from "./DagCanvas";
 import { EventConsole } from "./EventConsole";
 import { EvidenceCenter } from "./EvidenceCenter";
+import { ApprovalCard } from "./ApprovalCard";
 import { RunLiveBar } from "./RunLiveBar";
 import { RunRail } from "./RunRail";
 import { TaskInspector } from "./TaskInspector";
@@ -28,6 +31,7 @@ interface RunDashboardProps {
   onCreate(): void;
   onCleanup(): void;
   onDeleteRun(runId: string): Promise<void>;
+  onReviewApproval(approval: ApprovalRequest): void;
   onSelectTask(task: TaskRunState): void;
   onExportEvents(): Promise<void>;
   onReadArtifact(path: string): Promise<EvidenceFilePreview>;
@@ -44,6 +48,7 @@ export function RunDashboard({
   onCreate,
   onCleanup,
   onDeleteRun,
+  onReviewApproval,
   onSelectTask,
   onExportEvents,
   onReadArtifact,
@@ -69,6 +74,7 @@ export function RunDashboard({
     () => deriveLiveStatus(run, deriveAgentActivity(events, run?.status)),
     [run, events],
   );
+  const pendingApproval = useMemo(() => latestPendingApproval(run), [run]);
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
 
   return (
@@ -110,7 +116,12 @@ export function RunDashboard({
             </button>
           </div>
         </header>
-        {liveStatus && <RunLiveBar status={liveStatus} onOpenActivity={() => onMonitorPanelChange("activity")} />}
+        <div className="run-attention">
+          {liveStatus && <RunLiveBar status={liveStatus} onOpenActivity={() => onMonitorPanelChange("activity")} />}
+          {run && pendingApproval && (
+            <ApprovalCard run={run} approval={pendingApproval} busy={busy} onReview={() => onReviewApproval(pendingApproval)} />
+          )}
+        </div>
         <div className={`run-panel run-panel-graph ${monitorPanel === "graph" ? "is-active" : ""}`}>
           <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
         </div>

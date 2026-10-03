@@ -421,6 +421,7 @@ export default function App() {
             onCreate={openLauncher}
             onCleanup={actions.openCleanup}
             onDeleteRun={actions.handleDeleteRun}
+            onReviewApproval={(approval) => actions.setRunAction({ mode: "approval", approval })}
             onSelectTask={handleSelectTask}
             onExportEvents={actions.exportRunEvents}
             onReadArtifact={actions.readEvidenceArtifact}

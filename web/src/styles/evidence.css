@@ -1,0 +1,367 @@
+/* ---------------------------------------------------------------- 证据中心 */
+
+.evidence-center {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  grid-template-rows: auto minmax(360px, 1fr) auto;
+  background: var(--surface-1);
+}
+
+
+
+.spin {
+  animation: spin 900ms linear infinite;
+}
+
+.evidence-overview {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.readiness {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding-right: 15px;
+  border-right: 1px solid var(--line);
+}
+
+.readiness > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.readiness small {
+  color: var(--muted);
+  font-size: var(--text-11);
+  font-weight: var(--weight-bold);
+}
+
+.readiness strong {
+  font-size: var(--text-16);
+}
+
+.readiness-ready {
+  color: var(--success);
+}
+
+.readiness-attention {
+  color: var(--danger);
+}
+
+.readiness-in-progress {
+  color: var(--info);
+}
+
+.evidence-checks {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 7px;
+}
+
+.evidence-check {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  transition: box-shadow 140ms ease, transform 140ms ease;
+}
+
+.evidence-check:hover {
+  box-shadow: var(--shadow-1);
+  transform: translateY(-1px);
+}
+
+.evidence-check > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.evidence-check strong {
+  font-size: var(--text-11);
+}
+
+.evidence-check small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-11);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-check.is-pass svg {
+  color: var(--success);
+}
+
+.evidence-check.is-fail svg {
+  color: var(--danger);
+}
+
+.evidence-check.is-pending svg {
+  color: var(--warning);
+}
+
+.evidence-body {
+  display: grid;
+  min-width: 0;
+  min-height: 360px;
+  grid-template-columns: 250px minmax(0, 1fr);
+  border-bottom: 1px solid var(--line);
+}
+
+.evidence-index {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.evidence-index > button,
+.artifact-list button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 10px 11px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+}
+
+.evidence-index button:hover:not(:disabled),
+.evidence-index button.is-selected {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.evidence-index button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.evidence-index button > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.evidence-index button strong {
+  overflow: hidden;
+  font-size: var(--text-11);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-index button small {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.evidence-index-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px 11px 8px;
+  color: var(--ink-2);
+  font-size: var(--text-11);
+  font-weight: var(--weight-bold);
+}
+
+.evidence-index-heading small {
+  color: var(--muted);
+  font-size: var(--text-11);
+  font-weight: var(--weight-medium);
+}
+
+.artifact-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.artifact-list > p {
+  padding: 14px 11px;
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.evidence-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--terminal-bg);
+}
+
+.evidence-preview > header {
+  display: flex;
+  min-height: 58px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  color: var(--terminal-ink);
+  border-bottom: 1px solid var(--terminal-line);
+  background: var(--terminal-raised);
+}
+
+.evidence-preview h2 {
+  overflow: hidden;
+  max-width: 620px;
+  margin: 3px 0 0;
+  font-size: var(--text-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-preview header code,
+.evidence-preview header small {
+  color: var(--terminal-muted);
+  font-size: var(--text-11);
+}
+
+.evidence-code {
+  min-height: 0;
+  overflow: auto;
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  color: var(--terminal-ink);
+  background: var(--terminal-bg);
+  font-size: var(--text-11);
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.evidence-notice {
+  display: flex;
+  min-height: 260px;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px;
+  color: var(--terminal-muted);
+  text-align: center;
+}
+
+.evidence-notice strong {
+  color: var(--terminal-ink);
+  font-size: var(--text-12);
+}
+
+.evidence-notice span {
+  font-size: var(--text-11);
+}
+
+.evidence-notice.is-error {
+  color: color-mix(in oklab, var(--danger) 60%, oklch(0.98 0 0));
+}
+
+.task-evidence {
+  min-width: 0;
+  background: var(--surface-1);
+}
+
+.task-evidence > header {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-evidence h2 {
+  margin: 3px 0 0;
+  font-size: var(--text-13);
+}
+
+.task-evidence > header small {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.task-evidence-table {
+  min-width: 720px;
+}
+
+.task-evidence-row {
+  display: grid;
+  min-height: 46px;
+  grid-template-columns: minmax(180px, 1.6fr) repeat(3, minmax(76px, 0.6fr)) 90px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-11);
+}
+
+.task-evidence-row > span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.task-evidence-row > span:first-child strong {
+  overflow: hidden;
+  font-size: var(--text-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-evidence-row small,
+.task-evidence-row code {
+  color: var(--muted);
+  font-size: var(--text-11);
+}
+
+.task-evidence-row.table-heading {
+  min-height: 32px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-weight: var(--weight-bold);
+}
+
+.value-pass {
+  color: var(--success);
+}
+
+.value-fail {
+  color: var(--danger);
+}
+
+.value-pending {
+  color: var(--muted);
+}
