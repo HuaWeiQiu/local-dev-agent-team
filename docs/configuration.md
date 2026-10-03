@@ -187,6 +187,7 @@ Optional local fork model (top-level `jev`, default disabled):
 jev:
   enabled: true
   baseUrl: http://127.0.0.1:9931/v1   # OpenAI-compatible; loopback hosts only
+  protocol: openai-chat               # or laya (typed-decision classifier host)
   model: jev                          # opaque; validated by the local server
   timeoutMs: 3000                     # 200-30000
   minConfidence: 0.8                  # 0.5-1; below this the deterministic rule applies
@@ -200,6 +201,14 @@ advisor forward; a confident `retry` skips it; errors, timeouts, invalid output 
 low confidence keep the deterministic repeated-failure rule. It cannot block a
 task or affect any quality gate, and no credentials are accepted. Event:
 `run.jev.decided`.
+
+With `protocol: laya` the request is `POST {baseUrl}/decide` with
+`{state, questions}` and the answer is read from `answers.route`
+(`choice` and `confidence`). `scripts/laya-jev-server.py` hosts a Laya MLX
+checkpoint on loopback for this protocol. Laya is a classifier, not a chat
+model, and it ships uncalibrated; in a zero-shot check it chose `retry` with
+high confidence even for repeated, design-level failures. Evaluate it on your
+own failures and raise `minConfidence` before enabling it.
 
 Other notes:
 

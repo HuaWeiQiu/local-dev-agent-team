@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { configSchema } from "../src/config/schema.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
-import { JevClient, parseDecision } from "../src/jev/client.js";
+import { JevClient, parseDecision, parseLayaDecision } from "../src/jev/client.js";
 import { resolveConsultation, type JevDecisionInput } from "../src/jev/policy.js";
 
 const input: JevDecisionInput = {
@@ -128,6 +128,55 @@ describe("JevClient", () => {
   });
 });
 
+describe("Laya protocol", () => {
+  const config = { baseUrl: "http://127.0.0.1:9932", model: "laya", timeoutMs: 1_000, protocol: "laya" as const };
+  const answer = (choice: string, confidence: number, retry = 0.9) =>
+    new Response(
+      JSON.stringify({ answers: { route: { choice, confidence, probabilities: { retry, consult: 1 - retry } } } }),
+    );
+
+  it("posts typed questions to /decide and maps the answer", async () => {
+    let seenUrl = "";
+    let seenBody: { state?: string; questions?: Record<string, { type: string }> } = {};
+    const client = new JevClient(config, (async (url: URL | string, init?: RequestInit) => {
+      seenUrl = String(url);
+      seenBody = JSON.parse(String(init?.body));
+      return answer("retry", 0.93, 0.97);
+    }) as typeof fetch);
+
+    await expect(client.decide(input)).resolves.toEqual({
+      decision: "retry",
+      confidence: 0.93,
+      reason: "Laya retry p=0.97",
+    });
+    expect(seenUrl).toBe("http://127.0.0.1:9932/decide");
+    expect(seenBody.questions?.route?.type).toBe("choice");
+    expect(JSON.parse(seenBody.state ?? "{}")).toMatchObject({ task: { id: "alpha" }, attempt: 2 });
+  });
+
+  it("treats malformed answers and HTTP errors as no decision", async () => {
+    const make = (fetchImpl: unknown) => new JevClient(config, fetchImpl as typeof fetch);
+    await expect(make(async () => answer("maybe", 0.9)).decide(input)).resolves.toBeUndefined();
+    await expect(make(async () => new Response("{}", { status: 400 })).probe()).resolves.toMatchObject({
+      ok: false,
+      error: "HTTP 400",
+    });
+    await expect(make(async () => new Response("{}")).probe()).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("answers.route"),
+    });
+  });
+
+  it("clamps confidence into range", () => {
+    expect(parseLayaDecision({ answers: { route: { choice: "consult", confidence: 1.4 } } })).toEqual({
+      decision: "consult",
+      confidence: 1,
+    });
+    expect(parseLayaDecision({ answers: { route: { choice: "consult" } } })).toBeUndefined();
+    expect(parseLayaDecision(null)).toBeUndefined();
+  });
+});
+
 describe("jev config", () => {
   function parseWith(jev: unknown) {
     return configSchema.safeParse({ ...createDefaultConfig("jev"), jev });
@@ -136,7 +185,14 @@ describe("jev config", () => {
   it("accepts loopback endpoints and defaults to disabled", () => {
     const parsed = parseWith({ baseUrl: "http://localhost:8080/v1", model: "jev" });
     expect(parsed.success).toBe(true);
-    expect(parsed.data?.jev).toMatchObject({ enabled: false, timeoutMs: 3_000, minConfidence: 0.8 });
+    expect(parsed.data?.jev).toMatchObject({
+      enabled: false,
+      protocol: "openai-chat",
+      timeoutMs: 3_000,
+      minConfidence: 0.8,
+    });
+    expect(parseWith({ baseUrl: "http://127.0.0.1:9932", model: "laya", protocol: "laya" }).success).toBe(true);
+    expect(parseWith({ baseUrl: "http://127.0.0.1:9932", model: "x", protocol: "grpc" }).success).toBe(false);
     expect(parseWith({ baseUrl: "http://[::1]:8080/v1", model: "jev" }).success).toBe(true);
     expect(parseWith({ baseUrl: "http://127.0.0.2:8080/v1", model: "jev" }).success).toBe(true);
   });

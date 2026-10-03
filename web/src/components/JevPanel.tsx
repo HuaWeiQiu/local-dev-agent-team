@@ -62,6 +62,7 @@ export function JevPanel({ scope }: { scope: ProjectScope }) {
         <>
           <dl className="jev-config">
             <div><dt>地址</dt><dd className="mono">{jev.baseUrl}</dd></div>
+            <div><dt>协议</dt><dd>{jev.protocol === "laya" ? "Laya 决策模型" : "OpenAI 兼容对话"}</dd></div>
             <div><dt>模型</dt><dd className="mono">{jev.model}</dd></div>
             <div><dt>超时</dt><dd>{jev.timeoutMs} ms</dd></div>
             <div><dt>置信度阈值</dt><dd>{jev.minConfidence.toFixed(2)}（低于它按确定性规则处理）</dd></div>

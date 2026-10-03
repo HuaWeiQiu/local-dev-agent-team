@@ -186,6 +186,7 @@ export interface RecoveryRecord {
 }
 
 export interface JevSettings {
+  protocol?: "openai-chat" | "laya";
   enabled: boolean;
   baseUrl: string;
   model: string;

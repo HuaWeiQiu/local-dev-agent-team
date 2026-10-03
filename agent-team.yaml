@@ -283,8 +283,9 @@ strategies:
 # pointing baseUrl/model at your local OpenAI-compatible server.
 jev:
   enabled: false
-  baseUrl: http://127.0.0.1:9931/v1
-  model: jev
+  protocol: laya
+  baseUrl: http://127.0.0.1:9932
+  model: laya-multilingual
   timeoutMs: 3000
   minConfidence: 0.8
 

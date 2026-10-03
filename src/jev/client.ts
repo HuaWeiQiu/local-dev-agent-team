@@ -35,7 +35,9 @@ const PROBE_INPUT: JevDecisionInput = {
 
 export class JevClient implements ForkAdvisor {
   constructor(
-    private readonly config: Pick<JevConfig, "baseUrl" | "model" | "timeoutMs">,
+    private readonly config: Pick<JevConfig, "baseUrl" | "model" | "timeoutMs"> & {
+      protocol?: JevConfig["protocol"];
+    },
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
@@ -55,10 +57,41 @@ export class JevClient implements ForkAdvisor {
   }
 
   private async request(input: JevDecisionInput, signal?: AbortSignal): Promise<RequestOutcome> {
+    return this.config.protocol === "laya" ? this.requestLaya(input, signal) : this.requestChat(input, signal);
+  }
+
+  private async requestLaya(input: JevDecisionInput, signal?: AbortSignal): Promise<RequestOutcome> {
     const timeout = AbortSignal.timeout(this.config.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     try {
-      const response = await this.fetchImpl(this.endpoint(), {
+      const response = await this.fetchImpl(this.endpoint("decide"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: combined,
+        body: JSON.stringify({
+          model: this.config.model,
+          state: JSON.stringify(renderInput(input)),
+          questions: LAYA_QUESTIONS,
+        }),
+      });
+      if (!response.ok) {
+        return { error: `HTTP ${response.status}` };
+      }
+      const decision = parseLayaDecision(await response.json());
+      return decision ? { decision } : { error: "响应缺少 answers.route 的 choice / confidence" };
+    } catch (error) {
+      if (timeout.aborted) {
+        return { error: `超过 ${this.config.timeoutMs}ms 未响应` };
+      }
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private async requestChat(input: JevDecisionInput, signal?: AbortSignal): Promise<RequestOutcome> {
+    const timeout = AbortSignal.timeout(this.config.timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      const response = await this.fetchImpl(this.endpoint("chat/completions"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: combined,
@@ -95,9 +128,9 @@ export class JevClient implements ForkAdvisor {
     }
   }
 
-  private endpoint(): URL {
+  private endpoint(path: string): URL {
     const base = this.config.baseUrl.endsWith("/") ? this.config.baseUrl : `${this.config.baseUrl}/`;
-    return new URL("chat/completions", base);
+    return new URL(path, base);
   }
 }
 
@@ -109,6 +142,40 @@ function renderInput(input: JevDecisionInput): Record<string, unknown> {
     sameFailureAsPreviousAttempt: input.repeated,
     failure: input.failureSummary.slice(0, MAX_FAILURE_CHARS),
   };
+}
+
+/** Typed question for a decision classifier: one choice, scored per option in a single pass. */
+const LAYA_QUESTIONS = {
+  route: {
+    type: "choice",
+    instructions:
+      "A coding task attempt failed its deterministic checks. Should the orchestrator retry directly, or consult the senior architect first?",
+    criteria: {
+      retry: "new, transient or easy failure: flaky test, timeout, typo, missing import, lint or format error, first attempt",
+      consult:
+        "stuck or design-level failure: same failure repeated, wrong approach, contract mismatch, conflicting requirements, unclear cause",
+    },
+  },
+} as const;
+
+export function parseLayaDecision(payload: unknown): JevDecision | undefined {
+  const answers = (payload as { answers?: Record<string, unknown> } | null)?.answers;
+  const route = answers?.route as
+    | { choice?: unknown; confidence?: unknown; probabilities?: Record<string, unknown> }
+    | undefined;
+  if (!route || (route.choice !== "retry" && route.choice !== "consult")) {
+    return undefined;
+  }
+  if (typeof route.confidence !== "number") {
+    return undefined;
+  }
+  const probability = route.probabilities?.[route.choice];
+  const parsed = jevDecisionSchema.safeParse({
+    decision: route.choice,
+    confidence: Math.min(Math.max(route.confidence, 0), 1),
+    ...(typeof probability === "number" ? { reason: `Laya ${route.choice} p=${probability.toFixed(2)}` } : {}),
+  });
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function parseDecision(content: string): JevDecision | undefined {

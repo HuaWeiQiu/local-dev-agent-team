@@ -326,7 +326,7 @@ function isLoopbackHttpUrl(value: string): boolean {
 }
 
 /**
- * Optional local fork model ("Jev"): an OpenAI-compatible chat endpoint that
+ * Optional local fork model ("Jev"): a loopback decision endpoint that
  * only advises on cheap routing forks. It never holds credentials and must be
  * reachable on loopback so failure text and diffs stay on this machine.
  */
@@ -336,6 +336,12 @@ export const jevConfigSchema = z
     baseUrl: z
       .url()
       .refine(isLoopbackHttpUrl, "Jev baseUrl must be an http(s) loopback address (localhost, 127.x.x.x or ::1)"),
+    /**
+     * `openai-chat` talks to a chat-completions server that answers with a JSON
+     * decision. `laya` talks to a typed-decision classifier host (see
+     * scripts/laya-jev-server.py): one forward pass, no text generation.
+     */
+    protocol: z.enum(["openai-chat", "laya"]).default("openai-chat"),
     /** Opaque to the orchestrator; the local server validates it. */
     model: z.string().min(1),
     timeoutMs: z.number().int().min(200).max(30_000).default(3_000),
