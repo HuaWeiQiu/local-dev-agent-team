@@ -24,6 +24,8 @@ const attentionReasons: Partial<Record<RunStatus, AttentionReason>> = {
   interrupted: { label: "已中断，可继续", priority: 2, tone: "neutral" },
 };
 
+const agentQuestionReason: AttentionReason = { label: "智能体在提问", priority: 6, tone: "warning" };
+
 export function attentionReason(status: RunStatus): AttentionReason | undefined {
   return attentionReasons[status];
 }
@@ -50,8 +52,9 @@ export function taskProgress(counts: RunSummary["taskCounts"]): { done: number; 
 export function buildBoard(runs: RunSummary[]): Record<BoardLane, BoardCard[]> {
   const board: Record<BoardLane, BoardCard[]> = { attention: [], active: [], done: [] };
   for (const run of runs) {
-    const lane = laneOf(run.status);
-    const reason = attentionReason(run.status);
+    const asking = run.agentQuestions !== undefined && run.agentQuestions > 0 && activeRunStatuses.has(run.status);
+    const lane = asking ? "attention" : laneOf(run.status);
+    const reason = asking ? agentQuestionReason : attentionReason(run.status);
     board[lane].push({
       run,
       lane,

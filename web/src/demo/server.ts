@@ -1,4 +1,4 @@
-import type { RunEvent, RunState, RunStatus, RunSummary, Task, TaskStatus } from "../types";
+import type { LiveAgent, RunEvent, RunState, RunStatus, RunSummary, Task, TaskStatus } from "../types";
 import {
   buildDemoRuns,
   buildEvidence,
@@ -118,7 +118,13 @@ class DemoServer {
     if (working.length === 0) return;
     const line = stdoutScript[this.tick % stdoutScript.length]!;
     const index = run.state.tasks.indexOf(working[this.tick % working.length]!);
-    this.emit(project, run, "agent.stdout", { invocationId: `demo-running-w${index}`, text: `${line}\n` });
+    this.emit(project, run, "agent.stdout", {
+      invocationId: `demo-running-w${index}`,
+      role: "worker",
+      artifactKey: `demo-w${index}`,
+      text: `${line}\n`,
+      chunk: `${line}\n`,
+    });
     if (this.tick % 14 === 0) {
       const item = working[0]!;
       item.status = "passed";
@@ -207,6 +213,30 @@ class DemoServer {
     for (const [delay, step] of steps) window.setTimeout(step, delay);
   }
 
+  private demoAgents(run: DemoRun): LiveAgent[] {
+    const now = new Date().toISOString();
+    return run.state.tasks.flatMap((item, index) =>
+      item.status === "working"
+        ? [{
+            id: `demo-agent-${item.task.id}`,
+            runId: run.state.id,
+            role: "worker",
+            artifactKey: `demo-w${index}`,
+            taskId: item.task.id,
+            profile: "codex-worker",
+            adapter: "codex",
+            model: "gpt-5",
+            kind: "codex-app-server" as const,
+            capabilities: { steer: true, interrupt: true, askUser: true, resume: false },
+            startedAt: now,
+            lastActivityAt: now,
+            status: "running" as const,
+            questions: [],
+          }]
+        : [],
+    );
+  }
+
   act(project: string, runId: string, action: string, body: Record<string, unknown>): unknown {
     const run = this.find(project, runId);
     if (!run) return undefined;
@@ -289,6 +319,16 @@ class DemoServer {
       if (rest === "evidence") return ok({ evidence: buildEvidence(run) });
       if (rest === "evidence/file") return ok({ file: { path: "plan/architect-output.md", size: 120, content: "# 演示产物\n\n这是演示数据，不对应真实文件。\n", truncated: false } });
       if (rest === "export") return ok({});
+      if (rest === "agents") return ok({ agents: this.demoAgents(run) });
+      const agentAction = /^agents\/([^/]+)\/(steer|interrupt|answer)$/.exec(rest ?? "");
+      if (agentAction && method === "POST") {
+        const agentId = decodeURIComponent(agentAction[1]!);
+        const actor = String(body.actor ?? "demo");
+        if (agentAction[2] === "steer") this.emit(project, run, "agent.steered", { agentId, actor, text: body.text });
+        else if (agentAction[2] === "interrupt") this.emit(project, run, "agent.interrupted", { agentId, actor, note: body.note, redirected: body.note !== undefined });
+        else this.emit(project, run, "agent.answered", { agentId, actor, questionId: body.questionId, answer: body.answer });
+        return ok({ ok: true });
+      }
       const action = /^actions\/(.+)$/.exec(rest);
       if (action && method === "POST") {
         const result = this.act(project, runId, action[1]!, body);

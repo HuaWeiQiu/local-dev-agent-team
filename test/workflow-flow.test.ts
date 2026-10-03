@@ -169,7 +169,7 @@ describe("flow-driven workflow", () => {
 
   it("keeps the v1 pipeline free of flow state and events when engine is v1", async () => {
     const loaded = await fixture("v1", (config) => {
-      config.workflow = { engine: "v1", template: "auto" };
+      config.workflow = { engine: "v1", template: "auto", sessions: "auto" };
     });
     const { events, sink } = recorder();
     const state = await new LocalWorkflowRunner(loaded, {

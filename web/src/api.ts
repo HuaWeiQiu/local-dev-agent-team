@@ -18,11 +18,13 @@ import type {
   RunCleanupPreview,
   RunCleanupResult,
   RunEvidence,
+  LiveAgent,
   RunState,
   RunSummary,
   StartRunInput,
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
+  Task,
   UsageReport,
   WorkspaceInfo,
   CliInventory,
@@ -256,12 +258,51 @@ export async function respondApproval(
     decision: "approved" | "rejected";
     actor: string;
     reason: string;
+    /** Approve-with-edits: replaces the architect's plan. */
+    plan?: { summary: string; tasks: Task[] };
   },
 ): Promise<void> {
   await request(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/respond-approval`, {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function getRunAgents(scope: ProjectScope, runId: string): Promise<LiveAgent[]> {
+  return (
+    await request<{ agents: LiveAgent[] }>(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/agents`)
+  ).agents;
+}
+
+export async function steerAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; text: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "steer"), { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function interruptAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; note?: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "interrupt"), { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function answerAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; questionId: string; answer: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "answer"), { method: "POST", body: JSON.stringify(input) });
+}
+
+function agentUrl(scope: ProjectScope, runId: string, agentId: string, action: string): string {
+  return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/agents/${encodeURIComponent(agentId)}/${action}`;
 }
 
 export async function resumeRun(

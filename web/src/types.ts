@@ -253,6 +253,33 @@ export interface RunSummary {
   taskCounts: Record<TaskStatus, number>;
   error?: string;
   parentRunId?: string;
+  /** Live agent questions waiting for an operator answer. */
+  agentQuestions?: number;
+}
+
+export interface LiveAgentQuestion {
+  questionId: string;
+  prompt: string;
+  options?: string[];
+  secret: boolean;
+  askedAt: string;
+}
+
+export interface LiveAgent {
+  id: string;
+  runId: string;
+  role: string;
+  artifactKey: string;
+  taskId?: string;
+  profile: string;
+  adapter: string;
+  model: string;
+  kind: "codex-app-server" | "claude-stream" | "one-shot";
+  capabilities: { steer: boolean; interrupt: boolean; askUser: boolean; resume: boolean };
+  startedAt: string;
+  lastActivityAt: string;
+  status: "running" | "awaiting-answer";
+  questions: LiveAgentQuestion[];
 }
 
 export interface Task {

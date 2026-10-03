@@ -52,11 +52,11 @@ function startTurn(message) {
   current = { id: `turn-${++turnCounter}`, prompt, schema: message.params.outputSchema };
   send({ id: message.id, result: { turn: { id: current.id, items: [], status: "inProgress" } } });
   send({ method: "turn/started", params: { threadId: "thr-1", turn: { id: current.id, status: "inProgress" } } });
-  if (prompt.includes("slow")) {
+  if (/\bslow\b/.test(prompt)) {
     send({ method: "item/agentMessage/delta", params: { threadId: "thr-1", turnId: current.id, itemId: "m1", delta: "working" } });
     return;
   }
-  if (prompt.includes("ask")) {
+  if (/\bask\b/.test(prompt)) {
     current.questionRequestId = 900;
     send({
       id: 900,
@@ -71,22 +71,22 @@ function startTurn(message) {
     });
     return;
   }
-  if (prompt.includes("approve")) {
+  if (/\bapprove\b/.test(prompt)) {
     current.approvalRequestId = 901;
     send({ id: 901, method: "item/commandExecution/requestApproval", params: { threadId: "thr-1", turnId: current.id, itemId: "c1", command: "rm -rf /" } });
     setTimeout(() => finish("approval-handled"), 50);
     return;
   }
-  if (prompt.includes("tool")) {
+  if (/\btool\b/.test(prompt)) {
     send({ method: "item/started", params: { threadId: "thr-1", turnId: current.id, item: { type: "commandExecution", id: "c1", command: "ls", status: "inProgress" } } });
     send({ method: "item/completed", params: { threadId: "thr-1", turnId: current.id, item: { type: "commandExecution", id: "c1", command: "ls", status: "completed", exitCode: 0 } } });
   }
-  if (prompt.includes("fail")) {
+  if (/\bfail\b/.test(prompt)) {
     send({ method: "turn/completed", params: { threadId: "thr-1", turn: { id: current.id, status: "failed", error: { message: "usage limit reached", codexErrorInfo: "usageLimitExceeded" }, items: [] } } });
     current = undefined;
     return;
   }
-  if (prompt.includes("die")) process.exit(3);
+  if (/\bdie\b/.test(prompt)) process.exit(3);
   finish(current.schema ? JSON.stringify({ ok: true }) : `echo:${prompt}`);
 }
 

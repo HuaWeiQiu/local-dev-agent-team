@@ -324,6 +324,7 @@ export default function App({ demo = false }: { demo?: boolean }) {
                 />
               ) : monitorView === "run" ? (
                 <RunPage
+                  scope={scope}
                   monitor={monitor}
                   busy={busy}
                   monitorPanel={monitorPanel}

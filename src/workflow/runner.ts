@@ -3,6 +3,7 @@ import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import type { RoleAgentService } from "../agents/service.js";
 import { ProfiledAgentService } from "../agents/service.js";
+import type { LiveSupport } from "../agents/live-invoke.js";
 import {
   activeFlow,
   applyTemplateToStrategy,
@@ -179,6 +180,8 @@ export interface WorkflowDependencies {
     signal?: AbortSignal,
   ) => RoleAgentService;
   eventSink?: RunEventSink;
+  /** Live agent sessions; absent means every role runs one-shot. */
+  live?: LiveSupport;
   /** Overrides the client built from `config.jev`; mainly for tests. */
   forkAdvisor?: ForkAdvisor;
 }
@@ -1230,14 +1233,7 @@ export class LocalWorkflowRunner {
       };
       const waveAgent = this.dependencies.createAgentService
         ? this.dependencies.createAgentService(store, waveProfileOverrides, waveSignal)
-        : new ProfiledAgentService(
-            this.loaded.config,
-            this.loaded.root,
-            store,
-            waveProfileOverrides,
-            waveSignal,
-            budget,
-          );
+        : this.profiledAgent(this.loaded.config, store, waveProfileOverrides, waveSignal, budget);
       const results = await Promise.allSettled(
         wave.map(async (task) => {
           const taskState = findTaskState(state, task.id);
@@ -2092,13 +2088,33 @@ export class LocalWorkflowRunner {
     if (this.dependencies.createAgentService) {
       return this.dependencies.createAgentService(store, profileOverrides, signal);
     }
-    return new ProfiledAgentService(
+    return this.profiledAgent(
       this.configWithRuntimeProfiles(bindingsSource),
+      store,
+      profileOverrides,
+      signal,
+      budget,
+    );
+  }
+
+  private profiledAgent(
+    config: AgentTeamConfig,
+    store: RunStateStore,
+    profileOverrides: Record<string, string>,
+    signal: AbortSignal | undefined,
+    budget: RunBudgetTracker,
+  ): ProfiledAgentService {
+    const live = this.loaded.config.workflow?.sessions === "off" ? undefined : this.dependencies.live;
+    return new ProfiledAgentService(
+      config,
       this.loaded.root,
       store,
       profileOverrides,
       signal,
       budget,
+      undefined,
+      undefined,
+      live,
     );
   }
 

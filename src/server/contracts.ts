@@ -56,6 +56,31 @@ export const approvalResponseRequestSchema = z.object({
   decision: z.enum(["approved", "rejected"]),
   actor: z.string().trim().min(1).max(200),
   reason: z.string().trim().min(1).max(2_000),
+  /** Approve-with-edits: the operator-modified plan replaces the architect's. */
+  plan: z.unknown().optional(),
+});
+
+export const editPlanRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(2_000),
+  plan: z.unknown(),
+});
+
+export const steerAgentRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  text: z.string().trim().min(1).max(8_000),
+});
+
+export const interruptAgentRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  /** With a note the agent continues from it; without, its attempt ends and the task reworks. */
+  note: z.string().trim().min(1).max(8_000).optional(),
+});
+
+export const answerAgentRequestSchema = z.object({
+  actor: z.string().trim().min(1).max(200),
+  questionId: z.string().min(1).max(200),
+  answer: z.string().max(8_000),
 });
 
 export const resumeRunRequestSchema = z.object({
@@ -148,6 +173,10 @@ export const experienceReasonRequestSchema = z
   .strict();
 
 export type ApprovalResponseRequest = z.infer<typeof approvalResponseRequestSchema>;
+export type EditPlanRequest = z.infer<typeof editPlanRequestSchema>;
+export type SteerAgentRequest = z.infer<typeof steerAgentRequestSchema>;
+export type InterruptAgentRequest = z.infer<typeof interruptAgentRequestSchema>;
+export type AnswerAgentRequest = z.infer<typeof answerAgentRequestSchema>;
 export type ResumeRunRequest = z.infer<typeof resumeRunRequestSchema>;
 export type PauseRunRequest = z.infer<typeof pauseRunRequestSchema>;
 export type CleanupPreviewRequest = z.infer<typeof cleanupPreviewRequestSchema>;

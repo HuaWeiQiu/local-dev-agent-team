@@ -17,6 +17,7 @@ import {
   startRun,
 } from "../api";
 import { runActionErrorMessage, summarizeGoal } from "../presentation";
+import type { EditablePlan } from "../components/PlanEditor";
 import type { MonitorPanel } from "../components/RunPage";
 import type { RunMonitor } from "./useRunEvents";
 import type {
@@ -205,6 +206,7 @@ export function useRunActions({
     decision?: "approved" | "rejected";
     actor: string;
     reason: string;
+    plan?: EditablePlan;
   }) => {
     if (!scope || !selectedRunId || !runAction) return;
     setBusy(true);
@@ -217,6 +219,7 @@ export function useRunActions({
           decision: input.decision,
           actor: input.actor,
           reason: input.reason,
+          ...(input.plan ? { plan: input.plan } : {}),
         });
       } else if (runAction.mode === "pause") {
         await pauseRun(scope, selectedRunId, {

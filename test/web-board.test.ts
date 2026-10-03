@@ -40,6 +40,15 @@ describe("board lanes", () => {
     expect(board.done).toEqual([]);
   });
 
+  it("moves an active run with unanswered agent questions into the attention lane", () => {
+    const asking = { ...summary("asking", "implementing", "2026-08-11T09:00:00Z"), agentQuestions: 2 };
+    const board = buildBoard([asking, summary("running", "implementing", "2026-08-11T09:10:00Z")]);
+    expect(board.attention.map((card) => [card.run.id, card.reason?.label])).toEqual([["asking", "智能体在提问"]]);
+    expect(board.active.map((card) => card.run.id)).toEqual(["running"]);
+    const finished = { ...summary("old", "completed", "2026-08-11T09:00:00Z"), agentQuestions: 1 };
+    expect(buildBoard([finished]).done).toHaveLength(1);
+  });
+
   it("counts passed and merged tasks as done", () => {
     expect(taskProgress({ pending: 1, working: 1, reworking: 0, passed: 2, merged: 3, blocked: 0 })).toEqual({ done: 5, total: 7 });
   });

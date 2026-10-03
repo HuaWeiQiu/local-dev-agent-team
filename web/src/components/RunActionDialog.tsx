@@ -1,10 +1,11 @@
 import { Check, History, Pause, X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { completenessBarCopy, planCompletenessForRun } from "../plan-completeness";
 import type { ApprovalRequest, RunState } from "../types";
 import { Button } from "../ui/button";
 import { Modal } from "../ui/dialog";
 import { Callout, Field, Input, Textarea } from "../ui/form";
+import { PlanEditor, planDraftProblem, type EditablePlan } from "./PlanEditor";
 
 interface RunActionDialogProps {
   mode: "approval" | "resume" | "pause" | undefined;
@@ -17,6 +18,7 @@ interface RunActionDialogProps {
     decision?: "approved" | "rejected";
     actor: string;
     reason: string;
+    plan?: EditablePlan;
   }): Promise<void>;
 }
 
@@ -32,18 +34,31 @@ export function RunActionDialog({
   const [actor, setActor] = useState("");
   const [reason, setReason] = useState("");
   const [ackIncomplete, setAckIncomplete] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<EditablePlan>();
 
   useEffect(() => {
     if (mode) {
       setActor("");
       setReason("");
       setAckIncomplete(false);
+      setEditing(false);
+      setDraft(run?.plan ? structuredClone(run.plan) : undefined);
     }
-  }, [mode]);
+    // The draft is seeded when the dialog opens, not when the run refreshes underneath it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, approval?.id]);
+
+  const canEditPlan = mode === "approval" && approval?.gate === "plan" && Boolean(run?.plan);
+  const edited = useMemo(
+    () => editing && draft !== undefined && JSON.stringify(draft) !== JSON.stringify(run?.plan),
+    [draft, editing, run?.plan],
+  );
+  const draftProblem = edited && draft ? planDraftProblem(draft) : undefined;
 
   const completeness = mode && run && approval?.gate === "plan" ? planCompletenessForRun(run) : undefined;
   const incomplete = completeness !== undefined && completeness.status !== "complete";
-  const approveBlocked = incomplete && !ackIncomplete;
+  const approveBlocked = (incomplete && !ackIncomplete && !edited) || draftProblem !== undefined;
 
   const execute = async (decision?: "approved" | "rejected") => {
     if (!actor.trim() || !reason.trim()) return;
@@ -52,6 +67,7 @@ export function RunActionDialog({
       ...(decision ? { decision } : {}),
       actor: actor.trim(),
       reason: reason.trim(),
+      ...(decision === "approved" && edited && draft ? { plan: draft } : {}),
     });
   };
   const submit = (event: FormEvent) => {
@@ -85,7 +101,7 @@ export function RunActionDialog({
           )}
           <Button type="submit" form={formId} variant="primary" disabled={busy || !ready || approveBlocked}>
             {mode === "approval" ? <Check /> : mode === "pause" ? <Pause /> : <History />}
-            {busy ? "提交中" : mode === "approval" ? "批准" : mode === "pause" ? "暂停" : "恢复"}
+            {busy ? "提交中" : mode === "approval" ? (edited ? "批准修改后的计划" : "批准") : mode === "pause" ? "暂停" : "恢复"}
           </Button>
         </>
       }
@@ -114,6 +130,21 @@ export function RunActionDialog({
               </label>
             ) : null}
           </Callout>
+        ) : null}
+        {canEditPlan && draft ? (
+          <div className="flex flex-col gap-2">
+            <Button
+              variant={editing ? "secondary" : "ghost"}
+              size="sm"
+              className="self-start"
+              aria-expanded={editing}
+              onClick={() => setEditing((current) => !current)}
+            >
+              {editing ? "收起计划编辑" : "编辑计划后批准"}
+            </Button>
+            {editing ? <PlanEditor plan={draft} onChange={setDraft} disabled={busy} /> : null}
+            {draftProblem ? <Callout tone="danger" role="alert">{draftProblem}</Callout> : null}
+          </div>
         ) : null}
         <Field label="操作者" htmlFor="action-actor">
           <Input id="action-actor" data-autofocus value={actor} onChange={(event) => setActor(event.target.value)} maxLength={200} required />

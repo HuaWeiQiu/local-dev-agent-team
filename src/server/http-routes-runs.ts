@@ -1,6 +1,7 @@
 import type { LoadedConfig } from "../config/load.js";
 import type { RunEvent } from "../events/types.js";
 import { foldFlowEvents } from "../flow/fold.js";
+import { InterventionError } from "../interventions/registry.js";
 import { buildOtlpTraceExport } from "../observability/otlp.js";
 import { buildInteropManifest } from "../interop/manifest.js";
 import { resolveStrategy } from "../strategies/resolve.js";
@@ -18,7 +19,11 @@ import {
   type CheckedStrategyBlueprint,
 } from "../strategies/catalog.js";
 import {
+  answerAgentRequestSchema,
   approvalResponseRequestSchema,
+  editPlanRequestSchema,
+  interruptAgentRequestSchema,
+  steerAgentRequestSchema,
   cleanupPreviewRequestSchema,
   cleanupRunRequestSchema,
   experienceReasonRequestSchema,
@@ -420,6 +425,96 @@ export const runRoutes: ProjectApiRoute[] = [
   },
   {
     method: "GET",
+    pattern: "/runs/:runId/agents",
+    handler: async (context, _request, response, _url, params) => {
+      const runId = decodePathSegment(params.runId!);
+      if (!(await context.supervisor.get(runId))) {
+        throw new HttpError(404, "Run not found");
+      }
+      sendJson(response, 200, { agents: context.supervisor.listAgents(runId) });
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/agents/:agentId/steer",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = steerAgentRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        await context.supervisor.steerAgent(
+          decodePathSegment(params.runId!),
+          decodePathSegment(params.agentId!),
+          parsed.data,
+        );
+        sendJson(response, 202, { ok: true });
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/agents/:agentId/interrupt",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = interruptAgentRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        await context.supervisor.interruptAgent(
+          decodePathSegment(params.runId!),
+          decodePathSegment(params.agentId!),
+          parsed.data,
+        );
+        sendJson(response, 202, { ok: true });
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/agents/:agentId/answer",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = answerAgentRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        await context.supervisor.answerAgent(
+          decodePathSegment(params.runId!),
+          decodePathSegment(params.agentId!),
+          parsed.data,
+        );
+        sendJson(response, 202, { ok: true });
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/runs/:runId/actions/edit-plan",
+    handler: async (context, request, response, _url, params) => {
+      const parsed = editPlanRequestSchema.safeParse(await readJson(request));
+      if (!parsed.success) {
+        throw new HttpError(400, parsed.error.issues.map((issue) => issue.message).join("; "));
+      }
+      try {
+        sendJson(
+          response,
+          200,
+          await context.supervisor.editPlan(decodePathSegment(params.runId!), parsed.data),
+        );
+      } catch (error) {
+        throw runActionHttpError(error);
+      }
+    },
+  },
+  {
+    method: "GET",
     pattern: "/runs/:runId/flow",
     handler: async (context, _request, response, _url, params) => {
       const runId = decodePathSegment(params.runId!);
@@ -736,9 +831,9 @@ function requireStrategyCatalog(context: ProjectHttpContext): StrategyBlueprintC
 
 const runNotFoundMessage = /was not found/;
 const runStateConflictMessage =
-  /from status '|is already active|is still active|cannot be deleted|active child run|referenced as a parent|changed after preview|already has a response|is not the latest request|expired at |missing or expired|already used for another request|cannot be retried directly|no recoverable task-boundary checkpoint|requires approval before worker recovery/;
+  /from status '|is already active|is still active|cannot be deleted|active child run|referenced as a parent|changed after preview|already has a response|is not the latest request|expired at |missing or expired|already used for another request|cannot be retried directly|no recoverable task-boundary checkpoint|requires approval before worker recovery|can only be edited while|cannot be edited|Only an approved plan gate/;
 const runParameterMessage =
-  /^Unknown (?:strategy|profile|role|fallback profile) |^Profile '.+' is not allowed|must be an integer|^Invalid run ID/;
+  /^Unknown (?:strategy|profile|role|fallback profile) |^Profile '.+' is not allowed|must be an integer|^Invalid run ID|^Edited plan is invalid|^Task '.+' uses profile|^Duplicate task id|depends on unknown task|dependency cycle|cannot depend on itself/;
 
 function runActionHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
@@ -750,6 +845,10 @@ function runActionHttpError(error: unknown): HttpError {
   }
   if (error instanceof ProjectMutationConflictError) {
     return new HttpError(409, message, error.code);
+  }
+  if (error instanceof InterventionError) {
+    const status = error.code === "not-found" ? 404 : error.code === "unsupported" ? 409 : 400;
+    return new HttpError(status, message, `AGENT_${error.code.toUpperCase().replace("-", "_")}`);
   }
   if (error instanceof RunNotFoundError || runNotFoundMessage.test(message)) {
     return new HttpError(404, message, "RUN_NOT_FOUND");

@@ -1,16 +1,18 @@
-import { FileCheck2, Gauge, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
+import { Bot, CircleHelp, FileCheck2, Gauge, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { deriveAgentActivity } from "../agent-activity";
 import { latestPendingApproval } from "../hooks/useRunEvents";
 import type { RunMonitor } from "../hooks/useRunEvents";
+import { useLiveAgents } from "../hooks/useLiveAgents";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { deriveLiveStatus } from "../live-status";
-import { strategyDisplayName } from "../presentation";
+import { activeRunStatuses, strategyDisplayName } from "../presentation";
 import { formatRelative } from "../time";
-import type { ApprovalRequest, EvidenceFilePreview, TaskRunState } from "../types";
+import type { ApprovalRequest, EvidenceFilePreview, ProjectScope, TaskRunState } from "../types";
 import { cn } from "../ui/cn";
 import { RunStatusPill } from "../ui/status";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
+import { AgentsPanel } from "./AgentsPanel";
 import { ApprovalCard } from "./ApprovalCard";
 import { DagCanvas } from "./DagCanvas";
 import { EventConsole } from "./EventConsole";
@@ -21,9 +23,10 @@ import { StageStepper } from "./StageStepper";
 import { TaskInspector } from "./TaskInspector";
 import { UsagePanel } from "./UsagePanel";
 
-export type MonitorPanel = "overview" | "details" | "graph" | "activity" | "evidence" | "usage";
+export type MonitorPanel = "overview" | "details" | "graph" | "agents" | "activity" | "evidence" | "usage";
 
 interface RunPageProps {
+  scope: ProjectScope | undefined;
   monitor: RunMonitor;
   busy: boolean;
   monitorPanel: MonitorPanel;
@@ -39,12 +42,14 @@ const tabs: Array<{ value: MonitorPanel; label: string; icon: typeof Workflow }>
   { value: "overview", label: "概览", icon: LayoutDashboard },
   { value: "graph", label: "任务图", icon: Workflow },
   { value: "details", label: "详情", icon: PanelRight },
+  { value: "agents", label: "智能体", icon: Bot },
   { value: "activity", label: "活动日志", icon: ScrollText },
   { value: "evidence", label: "交付证据", icon: FileCheck2 },
   { value: "usage", label: "用量", icon: Gauge },
 ];
 
 export function RunPage({
+  scope,
   monitor,
   busy,
   monitorPanel,
@@ -62,6 +67,9 @@ export function RunPage({
   const pendingApproval = useMemo(() => latestPendingApproval(run), [run]);
   const done = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
   const showInspector = monitorPanel === "graph";
+  const runActive = run ? activeRunStatuses.has(run.status) : false;
+  const liveAgents = useLiveAgents(scope, selectedRunId, events, runActive);
+  const questionCount = liveAgents.agents.reduce((total, agent) => total + agent.questions.length, 0);
 
   if (!run) {
     return (
@@ -89,14 +97,28 @@ export function RunPage({
             {tabs.filter((tab) => wide ? tab.value !== "details" : true).map(({ value, label, icon: Icon }) => (
               <TabsTrigger key={value} value={value} className="shrink-0">
                 <Icon />{label}
+                {value === "agents" && liveAgents.agents.length > 0 ? (
+                  <span className="ml-1 rounded-full bg-accent-soft px-1.5 text-2xs text-accent-ink">{liveAgents.agents.length}</span>
+                ) : null}
               </TabsTrigger>
             ))}
           </TabsList>
         </Tabs>
       </header>
 
-      {(liveStatus?.running || liveStatus?.pendingApprovals || pendingApproval) && (
+      {(liveStatus?.running || liveStatus?.pendingApprovals || pendingApproval || questionCount > 0) && (
         <div className="flex flex-col gap-2.5 px-4 pt-3.5 md:px-6">
+          {questionCount > 0 && (
+            <button
+              type="button"
+              onClick={() => onMonitorPanelChange("agents")}
+              className="flex cursor-pointer items-center gap-2 rounded-lg border border-solid border-warning/40 bg-warning-soft px-4 py-2.5 text-left text-sm font-medium text-warning-ink focus-ring"
+            >
+              <CircleHelp className="size-4" aria-hidden />
+              {questionCount} 个智能体问题等你回答
+              <span className="ml-auto text-xs font-normal underline">去回答</span>
+            </button>
+          )}
           {liveStatus && <RunLiveBar status={liveStatus} onOpenActivity={() => onMonitorPanelChange("activity")} />}
           {pendingApproval && <ApprovalCard run={run} approval={pendingApproval} busy={busy} onReview={() => onReviewApproval(pendingApproval)} />}
         </div>
@@ -125,6 +147,9 @@ export function RunPage({
             {monitorPanel === "graph" && (
               <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task) => { onSelectTask(task); if (!wide) onMonitorPanelChange("details"); }} />
             )}
+          </Panel>
+          <Panel active={monitorPanel === "agents"}>
+            <AgentsPanel events={events} controls={liveAgents} runActive={runActive} />
           </Panel>
           <Panel active={monitorPanel === "activity"}>
             <EventConsole run={run} events={events} connected={connected} exporting={busy} onExport={() => void onExportEvents()} />

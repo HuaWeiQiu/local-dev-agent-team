@@ -356,6 +356,8 @@ export const workflowConfigSchema = z
     engine: z.enum(["v1", "v2"]).default("v2"),
     /** `auto` lets the deterministic router pick per goal. */
     template: z.enum(["auto", "quick", "standard", "full"]).default("auto"),
+    /** `auto` uses live Codex/Claude sessions (steer, interrupt, ask-user) when the CLI supports them. */
+    sessions: z.enum(["auto", "off"]).default("auto"),
   })
   .strict();
 

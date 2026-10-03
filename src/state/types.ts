@@ -141,6 +141,8 @@ export interface RunSummary {
   taskCounts: Record<TaskStatus, number>;
   error?: string;
   parentRunId?: string;
+  /** Live agent questions waiting for an operator answer; set by the supervisor, never persisted. */
+  agentQuestions?: number;
 }
 
 export interface RunRoleBinding {
