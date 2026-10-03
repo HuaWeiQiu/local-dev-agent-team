@@ -806,6 +806,7 @@ Agent CLI 需要通过适配器接口接入。
 
 - [配置说明](docs/configuration.md)
 - [工作流说明](docs/workflow.md)
+- [Web 工作台开发指南](docs/web-workbench.zh-CN.md)
 - [安全模型](docs/security.md)（含受限自演进信任、持久化、应用、控制面与前端边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
 - [可选外部集成](docs/integrations-optional.zh-CN.md)（经验闭环、外挂 OCR、不内嵌边界）
