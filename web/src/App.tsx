@@ -1,15 +1,11 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { Activity, Ban, BookMarked, Bot, Check, CircleDot, Copy, ExternalLink, FileCheck2, FolderCog, FolderPlus, Gauge, GitBranch, GitPullRequest, History, Monitor, Moon, Network, Pause, Plus, Radio, RotateCcw, Rows3, ScrollText, Settings2, ShieldCheck, Sparkles, Sun, Workflow } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace } from "./api";
-import { EvolutionWorkbench } from "./components/EvolutionWorkbench";
-import { ExperienceWorkbench } from "./components/ExperienceWorkbench";
 import { RunCleanupDialog } from "./components/RunCleanupDialog";
 import { RunDashboard, type MonitorPanel } from "./components/RunDashboard";
 import { RunLauncher } from "./components/RunLauncher";
 import { RunActionDialog } from "./components/RunActionDialog";
-import { SettingsWorkbench } from "./components/SettingsWorkbench";
-import { StrategyComposer } from "./components/StrategyComposer";
 import { RunStatusBadge } from "./components/StatusBadge";
 import { useDesktopProject } from "./hooks/useDesktopProject";
 import { useDesktopSettings } from "./hooks/useDesktopSettings";
@@ -19,6 +15,20 @@ import { useThemeMode } from "./hooks/useThemeMode";
 import { activeRunStatuses, preferredMonitorPanel, runActionErrorMessage } from "./presentation";
 import { themeModeLabel } from "./theme";
 import type { ProjectScope, TaskRunState, WorkspaceInfo } from "./types";
+
+// Secondary workbenches load on demand so the run monitor ships a smaller first chunk.
+const EvolutionWorkbench = lazy(() =>
+  import("./components/EvolutionWorkbench").then((module) => ({ default: module.EvolutionWorkbench })),
+);
+const ExperienceWorkbench = lazy(() =>
+  import("./components/ExperienceWorkbench").then((module) => ({ default: module.ExperienceWorkbench })),
+);
+const SettingsWorkbench = lazy(() =>
+  import("./components/SettingsWorkbench").then((module) => ({ default: module.SettingsWorkbench })),
+);
+const StrategyComposer = lazy(() =>
+  import("./components/StrategyComposer").then((module) => ({ default: module.StrategyComposer })),
+);
 
 const retryableStatuses = new Set(["blocked", "cancelled", "interrupted"]);
 
@@ -372,6 +382,7 @@ export default function App() {
       </nav>
 
       <div className="workspace-shell">
+        <Suspense fallback={<div className="workbench-loading" role="status" aria-live="polite">正在加载…</div>}>
         {workspaceMode === "settings" ? (
           <SettingsWorkbench
             pane="global"
@@ -416,6 +427,7 @@ export default function App() {
             onRefreshUsage={() => void monitor.refreshUsage().catch((requestError: unknown) => setError(runActionErrorMessage(requestError)))}
           />
         )}
+        </Suspense>
       </div>
       {error && !launcherOpen && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(undefined)} aria-label="关闭错误">×</button></div>}
       {config && (

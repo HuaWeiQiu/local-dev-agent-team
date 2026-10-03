@@ -6508,3 +6508,16 @@ button.palette-item:disabled {
     flex: 1;
   }
 }
+
+.workbench-loading {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  color: var(--muted);
+  font-size: var(--text-13);
+}
+
+.output-log-notice {
+  color: var(--muted);
+  font-style: italic;
+}

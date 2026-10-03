@@ -1,5 +1,5 @@
 import type { AgentProfile, Reasoning } from "../config/schema.js";
-import { runProcess } from "../process/run.js";
+import { type runProcess } from "../process/run.js";
 import {
   parseClaudeJson,
   runAdapterDoctor,

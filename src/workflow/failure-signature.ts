@@ -19,6 +19,7 @@ export interface FailureSignature {
 const OUTPUT_TAIL_CHARS = 1_500;
 const SUMMARY_MAX_CHARS = 400;
 
+// eslint-disable-next-line no-control-regex -- matching the ESC byte is the point
 const ANSI_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const ISO_TIMESTAMP_PATTERN = /\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?z?/g;
 const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;

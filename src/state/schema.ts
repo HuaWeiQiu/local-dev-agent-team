@@ -13,9 +13,7 @@ import type {
   ApprovalRequest,
   RecoveryRecord,
   RunCheckpoint,
-  RunRoleBinding,
   RunState,
-  RunUsage,
 } from "./types.js";
 
 /** Schema version written into new state.json documents; legacy files without it are treated as 1. */

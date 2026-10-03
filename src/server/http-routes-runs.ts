@@ -11,7 +11,7 @@ import {
   legacyMaxProcessOutputBytes,
 } from "../strategies/defaults.js";
 import {
-  StrategyBlueprintCatalog,
+  type StrategyBlueprintCatalog,
   StrategyBlueprintConflictError,
   StrategyBlueprintNotFoundError,
   type CheckedStrategyBlueprint,

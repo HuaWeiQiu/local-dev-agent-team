@@ -8,7 +8,7 @@ import type {
   RunCleanupResult,
   RunEvidence,
 } from "../evidence/types.js";
-import { SqliteEventStore } from "../events/store.js";
+import { type SqliteEventStore } from "../events/store.js";
 import {
   GithubPublisher,
 } from "../github/publish.js";
@@ -263,7 +263,7 @@ export class RunSupervisor {
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
             ...(purpose ? { purpose } : {}),
           });
-      this.track(
+      void this.track(
         runId,
         controller,
         workflow,
@@ -753,7 +753,7 @@ export class RunSupervisor {
           state,
           resumeOptions,
         );
-    this.track(state.id, controller, workflow);
+    void this.track(state.id, controller, workflow);
   }
 
   /** Rebuild ephemeral desktop picker profiles before resume/approval continuation. */

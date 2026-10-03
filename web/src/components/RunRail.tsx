@@ -67,7 +67,6 @@ export const RunRail = memo(function RunRail({
           const completed = run.taskCounts.merged + run.taskCounts.passed;
           const total = Object.values(run.taskCounts).reduce((sum, count) => sum + count, 0);
           const referencedAsParent = runs.some((item) => item.parentRunId === run.id);
-          const canDelete = deletableStatuses.has(run.status) && !referencedAsParent;
           return (
             <div
               key={run.id}

@@ -4,7 +4,7 @@ import {
   type ApplicationCommandResult,
   type ApplicationPreview,
   type ApplicationPreviewDescription,
-  EvolutionApplicationCoordinator,
+  type EvolutionApplicationCoordinator,
 } from "../evolution/application.js";
 import {
   EVOLUTION_DOMAIN_VERSION,

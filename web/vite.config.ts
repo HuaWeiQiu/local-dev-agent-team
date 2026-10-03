@@ -15,5 +15,19 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Stable vendor chunks cache across app releases and keep the entry small.
+        manualChunks(id: string) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("@xyflow") || id.includes("d3-")) return "vendor-flow";
+          if (id.includes("lucide-react")) return "vendor-icons";
+          if (id.includes("react-dom") || id.includes("/react/") || id.includes("scheduler")) {
+            return "vendor-react";
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

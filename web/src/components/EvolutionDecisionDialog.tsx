@@ -32,6 +32,8 @@ export function EvolutionDecisionDialog({ decision, busy, error, onClose, onSubm
   const dialogRef = useModalKeyboard(Boolean(decision), busy, onClose);
   useEffect(() => {
     if (decision) setReason("");
+    // Reset only when a different command opens, not on every decision object change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [decision?.commandId]);
   if (!decision) return null;
   const copy = dialogCopy[decision.mode];

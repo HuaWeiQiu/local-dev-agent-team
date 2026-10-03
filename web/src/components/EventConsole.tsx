@@ -14,6 +14,7 @@ import {
   jevEntryText,
   runStatusLabel,
 } from "../presentation";
+import { buildOutputLog, isOutputEvent } from "../output-log";
 import type { RunEvent, RunState } from "../types";
 
 interface EventConsoleProps {
@@ -27,11 +28,12 @@ interface EventConsoleProps {
 export const EventConsole = memo(function EventConsole({ run, events, connected, exporting, onExport }: EventConsoleProps) {
   const [tab, setTab] = useState<"agents" | "activity" | "output">("agents");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const outputEvents = useMemo(
-    () => events.filter((event) => event.type === "agent.stdout" || event.type === "agent.stderr"),
-    [events],
+  const outputCount = useMemo(() => events.filter(isOutputEvent).length, [events]);
+  // The text is only built while the output tab is visible, and capped to the newest window.
+  const outputLog = useMemo(
+    () => (tab === "output" ? buildOutputLog(events, formatOutput) : undefined),
+    [events, tab],
   );
-  const outputText = useMemo(() => outputEvents.map(formatOutput).join(""), [outputEvents]);
   const agentActivity = useMemo(
     () => deriveAgentActivity(events, run?.status),
     [events, run?.status],
@@ -50,11 +52,13 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
     [agentActivity],
   );
 
+  const pinnedToBottom = useRef(true);
+
   useEffect(() => {
-    if (tab === "output") {
+    if (tab === "output" && pinnedToBottom.current) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
     }
-  }, [events, tab]);
+  }, [outputLog, tab]);
 
   return (
     <section className="event-console" aria-label="运行事件和日志">
@@ -69,7 +73,7 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
           </button>
           <button className={tab === "output" ? "is-active" : ""} onClick={() => setTab("output")} role="tab" aria-selected={tab === "output"}>
             <TerminalSquare size={15} />输出
-            {outputEvents.length > 0 && <span>{outputEvents.length}</span>}
+            {outputCount > 0 && <span>{outputCount}</span>}
           </button>
         </div>
         <div className="console-actions">
@@ -87,7 +91,14 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
           </span>
         </div>
       </header>
-      <div className="console-body" ref={scrollRef}>
+      <div
+        className="console-body"
+        ref={scrollRef}
+        onScroll={(event) => {
+          const body = event.currentTarget;
+          pinnedToBottom.current = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+        }}
+      >
         {tab === "agents" ? (
           <div className="agent-activity-list">
             {agentActivity.map((invocation) => (
@@ -159,7 +170,14 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
             {!run && <span className="console-empty">选择运行后显示活动</span>}
           </div>
         ) : (
-          <pre className="output-log">{outputEvents.length > 0 ? outputText : "等待角色输出…"}</pre>
+          <pre className="output-log">
+            {outputLog && outputLog.omittedEvents > 0 && (
+              <span className="output-log-notice">
+                {`… 已省略较早的 ${outputLog.omittedEvents} 条输出，仅显示最近内容；点击右上角导出可获取完整日志\n`}
+              </span>
+            )}
+            {outputLog && outputLog.eventCount > 0 ? outputLog.text : "等待角色输出…"}
+          </pre>
         )}
       </div>
     </section>

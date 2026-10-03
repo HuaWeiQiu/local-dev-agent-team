@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
-import type { CommandSpec } from "../config/schema.js";
 import type { RoleAgentService } from "../agents/service.js";
 import { ProfiledAgentService } from "../agents/service.js";
 import {

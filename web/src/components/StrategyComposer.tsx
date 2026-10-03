@@ -112,6 +112,8 @@ export function StrategyComposer({
 
   useEffect(() => {
     setBlueprintName(blueprintNameFor(selectedName, definition));
+    // Only a change of source or selection should rename; other edits keep the typed name.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [definition.source, selectedName]);
 
   useEffect(() => {

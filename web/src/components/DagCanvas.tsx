@@ -43,6 +43,8 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
   const palette = useFlowPalette();
   const graph = useMemo(
     () => buildTaskGraph(run?.tasks ?? []),
+    // palette.edge forces a rebuild of edge styling when the theme changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [palette.edge, run?.tasks],
   );
   const nodes = useMemo(

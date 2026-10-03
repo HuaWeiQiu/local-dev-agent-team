@@ -141,6 +141,8 @@ export function EvolutionWorkbench({ scope, config }: EvolutionWorkbenchProps) {
         if (active) setLoading(false);
       });
     return () => { active = false; };
+    // includeArchived has its own refetch effect below; this one runs per project scope.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
   // 切换是否查看归档候选时重新拉取（归档项由服务端按需返回）

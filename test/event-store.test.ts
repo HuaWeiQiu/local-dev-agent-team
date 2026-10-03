@@ -171,7 +171,7 @@ describe("SQLite event store", () => {
   it("throttles pruning during rapid appends and prunes again on close", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
     const databasePath = path.join(root, "events.sqlite");
-    let now = 1_000_000;
+    const now = 1_000_000;
     const store = new SqliteEventStore(databasePath, {
       maxEventsPerRun: 10,
       now: () => now,
@@ -192,7 +192,7 @@ describe("SQLite event store", () => {
 
   it("prunes once the unpruned backlog crosses the pending threshold", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-events-"));
-    let now = 1_000_000;
+    const now = 1_000_000;
     const store = new SqliteEventStore(path.join(root, "events.sqlite"), {
       maxEventsPerRun: 10,
       now: () => now,
