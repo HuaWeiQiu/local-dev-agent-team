@@ -47,10 +47,12 @@ describe("SSE replay", () => {
         const { value, done } = await reader.read();
         if (done) break;
         pending += decoder.decode(value, { stream: true });
-        for (const match of pending.matchAll(/^id: (\d+)$/gm)) {
-          ids.push(Number(match[1]));
+        const frames = pending.split("\n\n");
+        pending = frames.pop() ?? "";
+        for (const frame of frames) {
+          const match = frame.match(/^id: (\d+)$/m);
+          if (match?.[1]) ids.push(Number(match[1]));
         }
-        pending = pending.slice(pending.lastIndexOf("\n\n") + 2);
       }
       await reader.cancel();
 
