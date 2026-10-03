@@ -197,8 +197,9 @@ After a task fails and before the next attempt, Jev may answer
 `{"decision":"retry"|"consult","confidence":0..1}` through
 `POST {baseUrl}/chat/completions`. It is only asked when the architect advisor is
 enabled for `repeated-failure` and has quota left. A confident `consult` brings the
-advisor forward; a confident `retry` skips it; errors, timeouts, invalid output and
-low confidence keep the deterministic repeated-failure rule. It cannot block a
+advisor forward. A `retry` never skips a consultation that the repeated-failure
+rule requires, so Jev can only add consultations, not remove them. Errors,
+timeouts, invalid output and low confidence keep the deterministic rule. It cannot block a
 task or affect any quality gate, and no credentials are accepted. Event:
 `run.jev.decided`.
 

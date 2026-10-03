@@ -30,8 +30,10 @@ export interface ConsultationResolution {
 
 /**
  * Combines the deterministic repeated-failure verdict with the fork model.
- * Jev can bring the architect forward or skip it, but only when it clears the
- * confidence threshold; everything else keeps the deterministic behavior.
+ * Jev may only bring the architect forward, and only when it clears the
+ * confidence threshold. It can never skip a consultation the deterministic
+ * rule already requires: a fast classifier saying "retry" is not evidence that
+ * a repeated failure is safe to retry, and an extra consultation is cheap.
  */
 export function resolveConsultation(input: {
   repeated: boolean;
@@ -49,9 +51,14 @@ export function resolveConsultation(input: {
       reason: `Jev confidence ${jev.confidence.toFixed(2)} below ${minConfidence.toFixed(2)}`,
     };
   }
+  if (jev.decision === "consult") {
+    return { consult: true, source: "jev", reason: jev.reason ?? "Jev chose consult" };
+  }
   return {
-    consult: jev.decision === "consult",
-    source: "jev",
-    reason: jev.reason ?? `Jev chose ${jev.decision}`,
+    consult: repeated,
+    source: "deterministic",
+    reason: repeated
+      ? "Jev chose retry, but a repeated failure always consults the architect"
+      : (jev.reason ?? "Jev chose retry"),
   };
 }

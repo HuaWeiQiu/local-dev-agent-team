@@ -1572,7 +1572,7 @@ export class LocalWorkflowRunner {
 
   /**
    * Ask the local fork model whether to escalate now. Advisory only: it can
-   * bring the architect forward or skip it, never change any check result, and
+   * bring the architect forward, never skip a required consultation or change any check result, and
    * any failure or low confidence keeps the deterministic decision.
    */
   private async decideWithFork(

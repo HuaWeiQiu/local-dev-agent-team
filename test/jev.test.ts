@@ -26,13 +26,23 @@ describe("resolveConsultation", () => {
         minConfidence: 0.8,
       }),
     ).toMatchObject({ consult: true, source: "jev" });
+  });
+
+  it("never lets a confident retry skip a required consultation", () => {
     expect(
       resolveConsultation({
         repeated: true,
-        jev: { decision: "retry", confidence: 0.9 },
+        jev: { decision: "retry", confidence: 0.99 },
         minConfidence: 0.8,
       }),
-    ).toMatchObject({ consult: false, source: "jev" });
+    ).toMatchObject({ consult: true, source: "deterministic", reason: expect.stringContaining("repeated failure") });
+    expect(
+      resolveConsultation({
+        repeated: false,
+        jev: { decision: "retry", confidence: 0.99 },
+        minConfidence: 0.8,
+      }),
+    ).toMatchObject({ consult: false, source: "deterministic" });
   });
 
   it("keeps the deterministic result when Jev is missing or unsure", () => {

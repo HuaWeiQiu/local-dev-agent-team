@@ -295,17 +295,21 @@ describe("jev fork layer", () => {
     });
   }, 60_000);
 
-  it("skips the architect on a confident retry decision", async () => {
+  it("still consults the architect on a repeated failure despite a confident retry", async () => {
     const loaded = await createFixture({ qualityPasses: false, advisor: advised });
     const service = new AdvisorFixtureService();
     const fork = new ScriptedFork({ decision: "retry", confidence: 0.9 });
     const { state, events } = await runWith(loaded, service, fork);
 
-    expect(service.advisorCalls).toEqual([]);
-    expect(service.workerContexts).toHaveLength(3);
-    expect(state.advisorConsultations).toBeUndefined();
+    expect(service.advisorCalls.map((call) => call.trigger)).toEqual(["repeated-failure"]);
+    expect(state.advisorConsultations).toBe(1);
     const decided = events.filter((event) => event.type === "run.jev.decided");
-    expect(decided.at(-1)?.payload).toMatchObject({ repeated: true, changedOutcome: true });
+    expect(decided.at(-1)?.payload).toMatchObject({
+      repeated: true,
+      source: "deterministic",
+      consult: true,
+      changedOutcome: false,
+    });
   }, 60_000);
 
   it("falls back to the deterministic rule on low confidence, errors, or no answer", async () => {
