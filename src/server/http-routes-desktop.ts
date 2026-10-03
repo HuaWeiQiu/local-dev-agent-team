@@ -49,7 +49,7 @@ export async function dispatchDesktopApi(
   }
 
   if (method === "GET" && url.pathname === "/api/desktop/settings") {
-    const settings = await loadDesktopSettings();
+    await loadDesktopSettings();
     const { inventory, fromCache, reason } = await getInventory({ refresh: false });
     // Re-load after getInventory may have rewritten the cache fingerprint.
     const latest = await loadDesktopSettings();

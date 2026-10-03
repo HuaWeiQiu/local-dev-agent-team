@@ -15,7 +15,7 @@ import {
   type AutomaticOutcomeAggregate,
   type AutomaticStrategyCandidate,
 } from "./automation.js";
-import { EvolutionApplicationCoordinator } from "./application.js";
+import { type EvolutionApplicationCoordinator } from "./application.js";
 import { AutomaticEvolutionStateStore } from "./automatic-state.js";
 import {
   computeCandidateDigest,
@@ -27,7 +27,7 @@ import {
 import { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { createExecutionDeadline, RunBudgetTracker } from "../observability/budget.js";
-import { StrategyBlueprintCatalog } from "../strategies/catalog.js";
+import { type StrategyBlueprintCatalog } from "../strategies/catalog.js";
 import { resolveStrategy, type ResolvedStrategy } from "../strategies/resolve.js";
 import { createRunId } from "../workflow/id.js";
 import { GitManager } from "../git/manager.js";
@@ -348,7 +348,7 @@ export class AutomaticEvolutionController {
     this.state.stopReason = reason;
     this.touch();
     this.abortController.abort(new Error(reason));
-    if (this.state.activeRunId) this.session?.cancel(this.state.activeRunId);
+    if (this.state.activeRunId) void this.session?.cancel(this.state.activeRunId).catch(() => false);
     await this.loop;
     return this.snapshot();
   }
@@ -357,7 +357,7 @@ export class AutomaticEvolutionController {
     if (!this.loop || !this.abortController) return;
     this.state.stopReason = "Control service closed";
     this.abortController.abort(new Error(this.state.stopReason));
-    if (this.state.activeRunId) this.session?.cancel(this.state.activeRunId);
+    if (this.state.activeRunId) void this.session?.cancel(this.state.activeRunId).catch(() => false);
     await this.loop;
   }
 

@@ -90,9 +90,39 @@ export const swarmMorphologySchema = z
   })
   .strict();
 
+export const advisorTriggerSchema = z.enum(["repeated-failure", "pre-final"]);
+
+/**
+ * On-call architect advisor. Read-only, never writes code: its advice is
+ * injected into the next worker attempt or the final decision context.
+ */
+export const advisorMorphologySchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    triggers: z
+      .array(advisorTriggerSchema)
+      .min(1)
+      .max(2)
+      .default(["repeated-failure", "pre-final"]),
+    maxConsultationsPerRun: z.number().int().min(1).max(10).default(3),
+    /** Optional profile override; must be read-only and allowed for architect when set. */
+    profile: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((advisor, context) => {
+    if (new Set(advisor.triggers).size !== advisor.triggers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["triggers"],
+        message: "Advisor triggers must be unique",
+      });
+    }
+  });
+
 export const taskMorphologySchema = z
   .object({
     explore: exploreMorphologySchema.optional(),
+    advisor: advisorMorphologySchema.optional(),
     plan: z
       .object({
         role: z.literal("architect").default("architect"),
@@ -282,6 +312,66 @@ export const experienceConfigSchema = z
   })
   .strict();
 
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return false;
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Optional local fork model ("Jev"): a loopback decision endpoint that
+ * only advises on cheap routing forks. It never holds credentials and must be
+ * reachable on loopback so failure text and diffs stay on this machine.
+ */
+export const jevConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    baseUrl: z
+      .url()
+      .refine(isLoopbackHttpUrl, "Jev baseUrl must be an http(s) loopback address (localhost, 127.x.x.x or ::1)"),
+    /**
+     * `openai-chat` talks to a chat-completions server that answers with a JSON
+     * decision. `laya` talks to a typed-decision classifier host (see
+     * scripts/laya-jev-server.py): one forward pass, no text generation.
+     */
+    protocol: z.enum(["openai-chat", "laya"]).default("openai-chat"),
+    /** Opaque to the orchestrator; the local server validates it. */
+    model: z.string().min(1),
+    timeoutMs: z.number().int().min(200).max(30_000).default(3_000),
+    /** Decisions below this self-reported confidence fall back to deterministic logic. */
+    minConfidence: z.number().min(0.5).max(1).default(0.8),
+  })
+  .strict();
+
+export const workflowConfigSchema = z
+  .object({
+    /** `auto` lets the deterministic router pick per goal. */
+    template: z.enum(["auto", "quick", "standard", "full"]).default("auto"),
+    /** `auto` uses live Codex/Claude sessions (steer, interrupt, ask-user) when the CLI supports them. */
+    sessions: z.enum(["auto", "off"]).default("auto"),
+    /** Interrupt and nudge a live agent that produced no output for this long; 0 disables. */
+    stallSeconds: z.number().min(0).max(86_400).default(600),
+    maxStallRecoveries: z.number().int().min(0).max(10).default(2),
+    /** Rerun a failing quality command this many times before treating it as a real failure. */
+    flakyReruns: z.number().int().min(0).max(3).default(1),
+    /** Optional per-task caps so one runaway task blocks itself instead of draining the run budget. */
+    taskBudget: z
+      .object({
+        maxAgentInvocations: z.number().int().min(1).optional(),
+        maxMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 export const configSchema = z
   .object({
     version: z.literal(1),
@@ -294,6 +384,8 @@ export const configSchema = z
     profiles: z.record(z.string().min(1), profileSchema),
     roles: z.record(z.string().min(1), roleSchema),
     strategies: strategiesSchema.optional(),
+    jev: jevConfigSchema.optional(),
+    workflow: workflowConfigSchema.optional(),
     observability: observabilitySchema.default({ maxEventsPerRun: 50_000 }),
     evaluation: evaluationConfigSchema.optional(),
     experience: experienceConfigSchema.default({
@@ -450,6 +542,37 @@ export const configSchema = z
             });
           }
         }
+        const advisorProfile = strategy.taskMorphology?.advisor?.profile;
+        if (advisorProfile) {
+          const profile = config.profiles[advisorProfile];
+          const advisorPath = [
+            "strategies",
+            "definitions",
+            strategyName,
+            "taskMorphology",
+            "advisor",
+            "profile",
+          ];
+          if (!profile) {
+            context.addIssue({
+              code: "custom",
+              path: advisorPath,
+              message: `Advisor profile '${advisorProfile}' is not defined`,
+            });
+          } else if (profile.permission !== "read-only") {
+            context.addIssue({
+              code: "custom",
+              path: advisorPath,
+              message: `Advisor profile '${advisorProfile}' must be read-only`,
+            });
+          } else if (!config.roles.architect?.allowedProfiles.includes(advisorProfile)) {
+            context.addIssue({
+              code: "custom",
+              path: advisorPath,
+              message: `Advisor profile '${advisorProfile}' is not allowed for architect`,
+            });
+          }
+        }
       }
     }
 
@@ -564,6 +687,7 @@ export const configSchema = z
   });
 
 export type AgentTeamConfig = z.infer<typeof configSchema>;
+export type JevConfig = z.infer<typeof jevConfigSchema>;
 export type WorkflowRole = (typeof workflowRoles)[number];
 export type AgentProfile = z.infer<typeof profileSchema>;
 export type RolePolicy = z.infer<typeof roleSchema>;
@@ -572,6 +696,7 @@ export type Reasoning = z.infer<typeof reasoningSchema>;
 export type Permission = z.infer<typeof permissionSchema>;
 export type ExternalToolsPolicy = z.infer<typeof externalToolsSchema>;
 export type ApprovalGate = z.infer<typeof approvalGateSchema>;
+export type AdvisorTrigger = z.infer<typeof advisorTriggerSchema>;
 export type StrategyTopologyMode = z.infer<typeof strategyTopologyModeSchema>;
 export type StrategyTopology = z.infer<typeof strategyTopologySchema>;
 export type ObservabilityConfig = z.infer<typeof observabilitySchema>;

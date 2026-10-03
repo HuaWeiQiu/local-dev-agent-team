@@ -11,7 +11,6 @@ import {
   decodeUtf8,
   isolate,
   requireNonEmpty,
-  sha256Canonical,
   sha256Text,
   targetFromCandidate,
   targetKey,

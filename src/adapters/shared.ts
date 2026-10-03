@@ -452,7 +452,7 @@ function extractCodexUsage(stdout: string): AgentUsage | undefined {
   return usage;
 }
 
-function extractUsage(envelope: Record<string, unknown>): AgentUsage | undefined {
+export function extractUsage(envelope: Record<string, unknown>): AgentUsage | undefined {
   const raw = isRecord(envelope.usage) ? envelope.usage : undefined;
   const inputTokens = numberField(raw, "input_tokens", "inputTokens");
   const cachedInputTokens = numberField(raw, "cached_input_tokens", "cachedInputTokens", "cache_read_input_tokens");

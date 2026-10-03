@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentRoleLabel,
   agentStatusLabel,
+  deriveAdvisorLog,
   deriveAgentActivity,
   retainAgentMonitorEvents,
 } from "../web/src/agent-activity.js";
@@ -128,6 +129,86 @@ describe("web agent activity", () => {
       id: "invoke-long",
       status: "running",
       children: [expect.objectContaining({ status: "running" })],
+    });
+  });
+
+  it("tags architect advisor invocations by their artifact key", () => {
+    const events = [
+      event(1, "agent.invocation.started", {
+        invocationId: "invoke-advice",
+        role: "architect",
+        profile: "grok-architect",
+        adapter: "grok",
+        artifactKey: "tasks/alpha/attempt-3/advisor",
+      }),
+      event(2, "agent.invocation.started", {
+        invocationId: "invoke-final-advice",
+        role: "architect",
+        profile: "grok-architect",
+        adapter: "grok",
+        artifactKey: "recoveries/1/pre-final-advisor",
+      }),
+      event(3, "agent.invocation.started", {
+        invocationId: "invoke-plan",
+        role: "architect",
+        profile: "grok-architect",
+        adapter: "grok",
+        artifactKey: "architecture",
+      }),
+    ];
+    const byId = new Map(deriveAgentActivity(events, "implementing").map((item) => [item.id, item]));
+    expect(byId.get("invoke-advice")?.advisor).toBe(true);
+    expect(byId.get("invoke-final-advice")?.advisor).toBe(true);
+    expect(byId.get("invoke-plan")).not.toHaveProperty("advisor");
+  });
+
+  it("derives a newest-first advisor log and retains it beyond the output window", () => {
+    const consulted = event(1, "run.advisor.consulted", {
+      trigger: "repeated-failure",
+      taskId: "alpha",
+      recommendation: "change_approach",
+      summary: "Fix the root cause",
+    });
+    const skipped = event(2, "run.advisor.skipped", { trigger: "pre-final", reason: "consultation-limit" });
+    const failed = event(3, "run.advisor.failed", { trigger: "repeated-failure", taskId: "beta", error: "chain exhausted" });
+    const output = Array.from({ length: 600 }, (_, index) =>
+      event(index + 4, "agent.stdout", { chunk: `line ${index}` }));
+
+    const retained = retainAgentMonitorEvents([consulted, skipped, failed, ...output], 500);
+    const log = deriveAdvisorLog(retained);
+    expect(log.map((entry) => [entry.status, entry.trigger])).toEqual([
+      ["failed", "repeated-failure"],
+      ["skipped", "pre-final"],
+      ["consulted", "repeated-failure"],
+    ]);
+    expect(log[0]).toMatchObject({ taskId: "beta", detail: "chain exhausted" });
+    expect(log[2]).toMatchObject({ taskId: "alpha", recommendation: "change_approach" });
+  });
+
+  it("includes Jev fork decisions in the advisor log and ignores malformed ones", () => {
+    const log = deriveAdvisorLog([
+      event(1, "run.jev.decided", {
+        taskId: "alpha",
+        source: "jev",
+        decision: "consult",
+        confidence: 0.93,
+        consult: true,
+        changedOutcome: true,
+        latencyMs: 41,
+      }),
+      event(2, "run.jev.decided", { taskId: "alpha", source: "bogus" }),
+      event(3, "run.jev.decided", { taskId: "beta", source: "deterministic", consult: false, changedOutcome: false }),
+    ]);
+
+    expect(log).toHaveLength(2);
+    expect(log[0]).toMatchObject({ status: "jev", taskId: "beta", jev: { source: "deterministic" } });
+    expect(log[1]?.jev).toEqual({
+      source: "jev",
+      decision: "consult",
+      confidence: 0.93,
+      consult: true,
+      changedOutcome: true,
+      latencyMs: 41,
     });
   });
 });

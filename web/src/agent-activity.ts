@@ -1,3 +1,4 @@
+import { isAdvisorArtifactKey } from "./presentation";
 import type { RunEvent, RunStatus } from "./types";
 
 export type AgentDisplayStatus =
@@ -26,6 +27,8 @@ export interface AgentInvocationActivity {
   adapter: string;
   model?: string;
   artifactKey?: string;
+  /** True for read-only architect advisor consultations. */
+  advisor?: true;
   status: AgentDisplayStatus;
   startedAt: string;
   updatedAt: string;
@@ -60,6 +63,11 @@ export function retainAgentMonitorEvents(events: RunEvent[], maxRecent = 500): R
   const retained = new Map<string, RunEvent>();
   for (let index = 0; index < recentStart; index += 1) {
     const event = events[index]!;
+    if (event.type in advisorEventStatus) {
+      // Advisor consultations are rare and bounded per run; keep them all.
+      retained.set(`advisor:${event.sequence}`, event);
+      continue;
+    }
     if (!retainedAgentEventTypes.has(event.type)) continue;
     const payload = recordValue(event.payload);
     const invocationId = stringValue(payload?.invocationId);
@@ -160,11 +168,104 @@ export function deriveAgentActivity(
     }
   }
 
-  return [...invocations.values()].sort((left, right) => {
-    const leftActive = Number(left.status === "running" || left.status === "pending");
-    const rightActive = Number(right.status === "running" || right.status === "pending");
-    return rightActive - leftActive || right.updatedAt.localeCompare(left.updatedAt);
-  });
+  return [...invocations.values()]
+    .map((invocation): AgentInvocationActivity => (
+      isAdvisorArtifactKey(invocation.artifactKey)
+        ? { ...invocation, advisor: true as const }
+        : invocation
+    ))
+    .sort((left, right) => {
+      const leftActive = Number(left.status === "running" || left.status === "pending");
+      const rightActive = Number(right.status === "running" || right.status === "pending");
+      return rightActive - leftActive || right.updatedAt.localeCompare(left.updatedAt);
+    });
+}
+
+export type AdvisorLogStatus = "consulted" | "skipped" | "failed" | "jev";
+
+export interface AdvisorLogEntry {
+  sequence: number;
+  status: AdvisorLogStatus;
+  trigger: string;
+  taskId?: string;
+  recommendation?: string;
+  summary?: string;
+  detail?: string;
+  occurredAt: string;
+  jev?: {
+    source: "jev" | "deterministic";
+    decision?: string;
+    confidence?: number;
+    consult: boolean;
+    changedOutcome: boolean;
+    latencyMs?: number;
+  };
+}
+
+const advisorEventStatus: Record<string, AdvisorLogStatus> = {
+  "run.advisor.consulted": "consulted",
+  "run.advisor.skipped": "skipped",
+  "run.advisor.failed": "failed",
+  "run.jev.decided": "jev",
+};
+
+function deriveJevEntry(event: RunEvent): AdvisorLogEntry | undefined {
+  const payload = recordValue(event.payload);
+  const source = payload?.source;
+  if (source !== "jev" && source !== "deterministic") return undefined;
+  const taskId = stringValue(payload?.taskId);
+  const decision = stringValue(payload?.decision);
+  const detail = stringValue(payload?.reason);
+  const confidence = typeof payload?.confidence === "number" ? payload.confidence : undefined;
+  const latencyMs = typeof payload?.latencyMs === "number" ? payload.latencyMs : undefined;
+  return {
+    sequence: event.sequence,
+    status: "jev",
+    trigger: "jev",
+    ...(taskId ? { taskId } : {}),
+    ...(detail ? { detail } : {}),
+    occurredAt: event.occurredAt,
+    jev: {
+      source,
+      ...(decision ? { decision } : {}),
+      ...(confidence !== undefined ? { confidence } : {}),
+      consult: payload?.consult === true,
+      changedOutcome: payload?.changedOutcome === true,
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
+    },
+  };
+}
+
+/** Newest-first architect advisor consultations and Jev fork decisions derived from run events. */
+export function deriveAdvisorLog(events: RunEvent[]): AdvisorLogEntry[] {
+  const entries: AdvisorLogEntry[] = [];
+  for (const event of events) {
+    const status = advisorEventStatus[event.type];
+    if (status === "jev") {
+      const entry = deriveJevEntry(event);
+      if (entry) entries.push(entry);
+      continue;
+    }
+    if (!status) continue;
+    const payload = recordValue(event.payload);
+    const trigger = stringValue(payload?.trigger);
+    if (!trigger) continue;
+    const taskId = stringValue(payload?.taskId);
+    const recommendation = stringValue(payload?.recommendation);
+    const summary = stringValue(payload?.summary);
+    const detail = stringValue(payload?.error) ?? stringValue(payload?.reason);
+    entries.push({
+      sequence: event.sequence,
+      status,
+      trigger,
+      ...(taskId ? { taskId } : {}),
+      ...(recommendation ? { recommendation } : {}),
+      ...(summary ? { summary } : {}),
+      ...(detail ? { detail } : {}),
+      occurredAt: event.occurredAt,
+    });
+  }
+  return entries.sort((left, right) => right.sequence - left.sequence);
 }
 
 export function agentStatusLabel(status: AgentDisplayStatus): string {

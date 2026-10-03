@@ -1,10 +1,7 @@
 import {
-  chmod,
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
-  realpath,
   rename,
   rm,
   stat,
@@ -17,7 +14,6 @@ import { stringify as stringifyYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import { loadConfig } from "../src/config/load.js";
-import type { NamedStrategy } from "../src/config/schema.js";
 import {
   StrategyBlueprintCatalog,
   StrategyBlueprintConflictError,

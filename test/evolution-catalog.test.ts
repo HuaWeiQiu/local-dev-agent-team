@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createEvolutionCatalog,
-  EvolutionCatalog,
+  type EvolutionCatalog,
   EvolutionCatalogConflictError,
   EvolutionCatalogError,
   EvolutionCatalogNotFoundError,

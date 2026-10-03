@@ -83,6 +83,15 @@ export interface CompiledStrategyTopology {
   edges: Array<{ source: string; target: string }>;
 }
 
+export type AdvisorTrigger = "repeated-failure" | "pre-final";
+
+export interface AdvisorSettings {
+  enabled?: boolean;
+  triggers?: AdvisorTrigger[];
+  maxConsultationsPerRun?: number;
+  profile?: string;
+}
+
 export interface TaskMorphology {
   explore?: {
     enabled?: boolean;
@@ -90,6 +99,7 @@ export interface TaskMorphology {
     maxInjectedChars?: number;
     failOpen?: boolean;
   };
+  advisor?: AdvisorSettings;
   plan?: {
     role?: "architect";
   };
@@ -175,6 +185,19 @@ export interface RecoveryRecord {
   }>;
 }
 
+export interface JevSettings {
+  protocol?: "openai-chat" | "laya";
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  minConfidence: number;
+}
+
+export type JevProbeResult =
+  | { ok: true; latencyMs: number; decision: { decision: "retry" | "consult"; confidence: number; reason?: string } }
+  | { ok: false; latencyMs: number; error: string };
+
 export interface PublicConfig {
   project: {
     name: string;
@@ -189,6 +212,7 @@ export interface PublicConfig {
     definitions: Record<string, StrategyDefinition>;
   };
   observability: { maxEventsPerRun: number };
+  jev?: JevSettings;
   interop: {
     schemaVersion: 1;
     adapters: Array<{
@@ -229,6 +253,84 @@ export interface RunSummary {
   taskCounts: Record<TaskStatus, number>;
   error?: string;
   parentRunId?: string;
+  /** Live agent questions waiting for an operator answer. */
+  agentQuestions?: number;
+}
+
+export interface LiveAgentQuestion {
+  questionId: string;
+  prompt: string;
+  options?: string[];
+  secret: boolean;
+  askedAt: string;
+}
+
+export interface LiveAgent {
+  id: string;
+  runId: string;
+  role: string;
+  artifactKey: string;
+  taskId?: string;
+  profile: string;
+  adapter: string;
+  model: string;
+  kind: "codex-app-server" | "claude-stream" | "one-shot";
+  capabilities: { steer: boolean; interrupt: boolean; askUser: boolean; resume: boolean };
+  startedAt: string;
+  lastActivityAt: string;
+  status: "running" | "awaiting-answer";
+  questions: LiveAgentQuestion[];
+}
+
+export type ArchitectureKind = "module" | "interface" | "data";
+export type ArchitectureRelationKind = "calls" | "reads" | "writes" | "depends";
+export type ArchitectureSource = "architect" | "inferred" | "controller";
+
+export interface ArchitectureElement {
+  id: string;
+  name: string;
+  kind: ArchitectureKind;
+  responsibility: string;
+  paths: string[];
+  /** Directory in the repository index that covers these paths. */
+  nodeId?: string;
+}
+
+export interface RepoTraceNode {
+  id: string;
+  parentId: string | null;
+  path: string;
+  name: string;
+  kind: "directory" | "file";
+}
+
+/** The repository walk frozen when the run started. */
+export interface RepoTrace {
+  matched: boolean;
+  nodes: RepoTraceNode[];
+}
+
+export interface ArchitectureRelation {
+  from: string;
+  to: string;
+  kind: ArchitectureRelationKind;
+  label?: string;
+}
+
+export interface ArchitectureStep {
+  order: number;
+  from: string;
+  to: string;
+  action: string;
+}
+
+/** One system model. The map and the sequence are views of this object. */
+export interface ArchitectureDesign {
+  summary: string;
+  source: ArchitectureSource;
+  elements: ArchitectureElement[];
+  relations: ArchitectureRelation[];
+  sequence: ArchitectureStep[];
 }
 
 export interface Task {
@@ -241,6 +343,8 @@ export interface Task {
   profile: string | null;
   batchKey?: string | null;
   evidenceKind?: "commands" | "host-evidence" | null;
+  /** Element in `plan.design` this task implements. */
+  elementId?: string | null;
 }
 
 export interface Finding {
@@ -259,8 +363,11 @@ export interface TaskRunState {
   worktree?: string;
   commit?: string;
   profile?: string;
+  agentInvocations?: number;
   quality?: {
     passed: boolean;
+    flaky?: Array<{ command: string; args: string[] }>;
+    reruns?: number;
     commands: Array<{
       spec: { command: string; args: string[] };
       exitCode: number | null;
@@ -305,6 +412,13 @@ export interface RunState {
       maxInjectedChars: number;
       failOpen: boolean;
     };
+    /** Absent on runs persisted before the architect advisor existed. */
+    advisor?: {
+      enabled: boolean;
+      triggers: AdvisorTrigger[];
+      maxConsultationsPerRun: number;
+      profile?: string;
+    };
   };
   profileOverrides: Record<string, string>;
   roleBindings?: Record<string, {
@@ -316,7 +430,23 @@ export interface RunState {
   parentRunId?: string;
   createdAt: string;
   updatedAt: string;
-  plan?: { summary: string; tasks: Task[] };
+  plan?: { summary: string; tasks: Task[]; design?: ArchitectureDesign };
+  explore?: {
+    summary: string;
+    modules: string[];
+    riskPaths: string[];
+    suggestedAcceptanceCommands: string[];
+    forbiddenPaths: string[];
+    notes: string[];
+  };
+  /** Walked repository paths for this goal. Absent on runs started before the index existed. */
+  repoTrace?: RepoTrace;
+  intake?: {
+    goalSummary: string;
+    instructionsForArchitect: string;
+    constraints: string[];
+    risk: "low" | "medium" | "high";
+  };
   tasks: TaskRunState[];
   history: Array<{ at: string; status: RunStatus; message: string }>;
   finalQuality?: {
@@ -335,6 +465,8 @@ export interface RunState {
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  /** Architect advisor consultations used by this run. */
+  advisorConsultations?: number;
   pullRequestUrl?: string;
   pullRequestNumber?: number;
   usage?: {
@@ -439,9 +571,12 @@ export interface RoleBindingInput {
   reasoning?: string;
 }
 
+export type FlowTemplateChoice = "auto" | "quick" | "standard" | "full";
+
 export interface StartRunInput {
   goal: string;
   strategy?: string;
+  template?: FlowTemplateChoice;
   profileOverrides: Record<string, string>;
   roleBindings?: Record<string, RoleBindingInput>;
 }
@@ -837,4 +972,130 @@ export interface ExperiencePlanningBundle {
     scope: ExperienceScope;
     hitCount: number;
   }>;
+}
+
+export type ExplainTone = "good" | "warn" | "bad" | "neutral";
+
+export interface ExplainLine {
+  tone: ExplainTone;
+  text: string;
+}
+
+export interface TaskExplanation {
+  taskId: string;
+  title: string;
+  status: string;
+  tone: ExplainTone;
+  summary: string;
+  lines: ExplainLine[];
+}
+
+export interface RunExplanation {
+  headline: ExplainLine;
+  flow?: { template: string; source: string; reasons: string[] };
+  run: ExplainLine[];
+  tasks: TaskExplanation[];
+}
+
+export interface UsageLine {
+  invocations: number;
+  failures: number;
+  durationMs: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  costReported: boolean;
+}
+
+export interface RunUsageBreakdown {
+  total: UsageLine;
+  byRole: Array<UsageLine & { role: string }>;
+  byTask: Array<UsageLine & { taskId: string }>;
+  byProfile: Array<UsageLine & { profile: string; model: string }>;
+  unattributed: UsageLine;
+}
+
+export interface ReplayStep {
+  at: string;
+  offsetMs: number;
+  kind: "status" | "flow" | "triage" | "agent" | "operator" | "quality" | "approval" | "advice" | "wave";
+  tone: ExplainTone;
+  title: string;
+  detail?: string;
+  taskId?: string;
+  nodeId?: string;
+}
+
+export interface TranscriptSummary {
+  id: string;
+  artifactKey: string;
+  profile: string;
+  role?: string;
+  taskId?: string;
+  live: boolean;
+  success?: boolean;
+  durationMs?: number;
+  bytes: number;
+}
+
+export interface TranscriptEntry {
+  kind: "message" | "tool" | "question" | "notice" | "turn" | "operator" | "output";
+  at?: string;
+  text: string;
+  label?: string;
+  status?: string;
+}
+
+export interface Transcript {
+  id: string;
+  entries: TranscriptEntry[];
+  truncated: boolean;
+}
+
+export interface TaskDiff {
+  taskId: string;
+  available: boolean;
+  source?: "commit" | "worktree";
+  commit?: string;
+  changedFiles: string[];
+  content?: string;
+  truncated: boolean;
+  detail?: string;
+}
+
+export type CheckRole = "typecheck" | "lint" | "test" | "build";
+
+export interface DetectedCommand {
+  role: CheckRole;
+  label: string;
+  command: { command: string; args: string[] };
+  source: string;
+  selected: boolean;
+}
+
+export interface OnboardingStatus {
+  projectId: string;
+  projectName: string;
+  source: "file" | "detected";
+  configPath: string;
+  needsSetup: boolean;
+  detection: {
+    root: string;
+    name: string;
+    isGitRepo: boolean;
+    defaultBranch?: string;
+    ecosystems: string[];
+    packageManager?: string;
+    commands: DetectedCommand[];
+  };
+  current: { commands: Array<{ command: string; args: string[] }> };
+  clis: Array<{
+    id: string;
+    installed: boolean;
+    runtimeSupported: boolean;
+    version?: string;
+    authStatus: "unknown" | "present" | "missing" | "invalid";
+  }>;
+  recommendedCli?: string;
 }

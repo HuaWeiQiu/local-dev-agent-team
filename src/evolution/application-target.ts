@@ -1,15 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { lstat } from "node:fs/promises";
+import { type lstat } from "node:fs/promises";
 import path from "node:path";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import type { LoadedConfig } from "../config/load.js";
 import type { NamedStrategy } from "../config/schema.js";
 import {
-  GitManager,
+  type GitManager,
   type ExactTrackedFileCommitAuthorization,
 } from "../git/manager.js";
 import {
-  StrategyBlueprintCatalog,
+  type StrategyBlueprintCatalog,
   StrategyBlueprintConflictError,
   StrategyBlueprintDriftError,
   StrategyBlueprintError,

@@ -4,8 +4,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { Command } from "commander";
-import { stringify as stringifyYaml } from "yaml";
-import { createDefaultConfig } from "./config/defaults.js";
 import { loadConfig } from "./config/load.js";
 import { resolveProfile } from "./profiles/resolve.js";
 import { AdapterRegistry } from "./adapters/registry.js";
@@ -39,12 +37,12 @@ program
  * only produces a LoadedConfig; cross-package validation is opted into here.
  */
 function loadValidatedConfig(configPath?: string): Promise<LoadedConfig> {
-  return loadConfig(process.cwd(), configPath, { validation: "full" });
+  return loadConfig(process.cwd(), configPath, { validation: "full", zeroConfig: true });
 }
 
 program
   .command("init")
-  .description("Create an agent-team.yaml in a project")
+  .description("Write an agent-team.yaml from detected defaults (optional; Agent Team runs without one)")
   .argument("[directory]", "project directory", ".")
   .option("--force", "replace an existing configuration", false)
   .action(async (directory: string, options: { force: boolean }) => {
@@ -60,8 +58,24 @@ program
         }
       }
     }
-    const config = createDefaultConfig(path.basename(root));
-    await writeFile(target, stringifyYaml(config), "utf8");
+    const { buildStarterConfig, serializeStarterConfig } = await import("./onboarding/starter.js");
+    const { detectRepository } = await import("./onboarding/detect.js");
+    const { getInventory } = await import("./desktop/settings.js");
+    const detection = await detectRepository(root);
+    const inventory = await getInventory({ refresh: false }).then(
+      (result) => result.inventory,
+      () => undefined,
+    );
+    const config = buildStarterConfig({ detection, ...(inventory ? { inventory } : {}) });
+    await writeFile(target, serializeStarterConfig(config), "utf8");
+    if (detection.commands.length > 0) {
+      process.stdout.write(
+        `Detected quality commands: ${detection.commands
+          .filter((entry) => entry.selected)
+          .map((entry) => entry.label)
+          .join(", ") || "(none selected)"}\n`,
+      );
+    }
     process.stdout.write(`Created ${target}\n`);
   });
 
@@ -78,7 +92,11 @@ program
       return;
     }
     const loaded = await loadValidatedConfig(options.config);
-    process.stdout.write(`Valid: ${loaded.path}\n`);
+    process.stdout.write(
+      loaded.source === "detected"
+        ? `Valid: detected defaults for ${loaded.root} (no agent-team.yaml; run 'agent-team init' to customize)\n`
+        : `Valid: ${loaded.path}\n`,
+    );
   });
 
 program
@@ -222,12 +240,14 @@ program
     [],
   )
   .option("--strategy <name>", "named execution strategy")
+  .option("--template <name>", "workflow template: auto, quick, standard or full")
   .option("-c, --config <path>", "configuration path")
   .action(
     async (options: {
       goal: string;
       profile: string[];
       strategy?: string;
+      template?: string;
       config?: string;
     }) => {
       const profileOverrides = parseProfileAssignments(options.profile);
@@ -245,6 +265,7 @@ program
           goal: options.goal,
           profileOverrides,
           ...(options.strategy ? { strategy: options.strategy } : {}),
+          ...(options.template ? { template: parseTemplateOption(options.template) } : {}),
           ...(roleBindings ? { roleBindings } : {}),
         });
         const state = await runtime.supervisor.wait(started.runId);
@@ -613,6 +634,11 @@ function parseProfileAssignments(assignments: string[]): Record<string, string> 
     result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
   }
   return result;
+}
+
+function parseTemplateOption(value: string): "auto" | "quick" | "standard" | "full" {
+  if (value === "auto" || value === "quick" || value === "standard" || value === "full") return value;
+  throw new Error(`Unknown workflow template '${value}'; use auto, quick, standard or full`);
 }
 
 function collectOption(value: string, previous: string[]): string[] {

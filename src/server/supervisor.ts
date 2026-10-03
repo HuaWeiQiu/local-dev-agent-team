@@ -1,6 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { LiveSupport } from "../agents/live-invoke.js";
+import {
+  LiveAgentRegistry,
+  type LiveAgentView,
+} from "../interventions/registry.js";
+import {
+  parseEditedPlan,
+  planEditIsEmpty,
+  summarizePlanEdit,
+} from "../interventions/plan-edit.js";
+import { attachTreeNodes } from "../domain/architecture-design.js";
+import { SessionFactory } from "../sessions/factory.js";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
+import { RunInsights } from "../visibility/service.js";
 import { LocalEvidenceStore } from "../evidence/local.js";
 import type {
   EvidenceFilePreview,
@@ -8,14 +21,14 @@ import type {
   RunCleanupResult,
   RunEvidence,
 } from "../evidence/types.js";
-import { SqliteEventStore } from "../events/store.js";
+import { type SqliteEventStore } from "../events/store.js";
 import {
   GithubPublisher,
 } from "../github/publish.js";
 import {
   materializeRoleBindings,
   roleBindingsFromRunState,
-} from "../desktop/role-bindings.js";
+} from "../profiles/role-bindings.js";
 import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
 import type {
@@ -28,6 +41,10 @@ import { createRunId } from "../workflow/id.js";
 import { LocalWorkflowRunner, type WorkflowResumeOptions } from "../workflow/runner.js";
 import type {
   ApprovalResponseRequest,
+  EditPlanRequest,
+  InterruptAgentRequest,
+  AnswerAgentRequest,
+  SteerAgentRequest,
   ResumeRunRequest,
   StartRunRequest,
 } from "./contracts.js";
@@ -122,6 +139,8 @@ export class RunSupervisor {
   private evolutionMutationFinished: Promise<void> = Promise.resolve();
   private finishEvolutionMutation: (() => void) | undefined;
   private automationOwner: symbol | undefined;
+  readonly live: LiveSupport;
+  readonly insights: RunInsights;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -133,6 +152,19 @@ export class RunSupervisor {
       events,
     );
     this.evidenceStore = new LocalEvidenceStore(this.stateStore);
+    this.live = {
+      factory: new SessionFactory(),
+      registry: new LiveAgentRegistry((runId, type, payload) => {
+        events.emit(runId, type, payload);
+      }),
+    };
+    this.insights = new RunInsights(
+      this.loaded,
+      this.stateStore,
+      this.evidenceStore,
+      events,
+      async (runId) => await this.get(runId),
+    );
     this.retention = new RunRetention(this.loaded, this.stateStore, this.evidenceStore, events, {
       get: async (runId) => await this.get(runId),
       requireRun: async (runId) => await this.requireRun(runId),
@@ -252,18 +284,19 @@ export class RunSupervisor {
               ...(purpose ? { purpose } : {}),
             },
           )
-        : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events }).run({
+        : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events, live: this.live }).run({
             goal: request.goal,
             profileOverrides,
             ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
             ...(request.strategy ? { strategyName: request.strategy } : {}),
+            ...(request.template && request.template !== "auto" ? { template: request.template } : {}),
             runId,
             signal: controller.signal,
             supervisorId: this.id,
             ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
             ...(purpose ? { purpose } : {}),
           });
-      this.track(
+      void this.track(
         runId,
         controller,
         workflow,
@@ -477,6 +510,12 @@ export class RunSupervisor {
         throw new Error(`Approval request '${approval.id}' expired at ${approval.expiresAt}`);
       }
 
+      if (response.plan !== undefined) {
+        if (approval.gate !== "plan" || response.decision !== "approved") {
+          throw new Error("Only an approved plan gate can carry an edited plan");
+        }
+        await this.applyPlanEdit(state, response.plan, response.actor, response.reason);
+      }
       await this.recordApprovalResponse(state, approval, response);
       if (response.decision === "rejected") {
         state.error = `Approval rejected by ${response.actor}: ${response.reason}`;
@@ -515,6 +554,60 @@ export class RunSupervisor {
       }
       return { runId, status: "resuming" };
     });
+  }
+
+  /** Saves an edited plan while the run waits at the plan gate; the gate stays pending. */
+  async editPlan(runId: string, request: EditPlanRequest): Promise<{ runId: string; tasks: number }> {
+    return await this.serializeAction(runId, async () => {
+      const state = await this.requireRun(runId);
+      const approval = state.approvals?.at(-1);
+      if (approval?.gate !== "plan" || approval.status !== "pending") {
+        throw new Error("The plan can only be edited while it awaits approval");
+      }
+      if (this.active.has(runId)) {
+        throw new Error(`Run '${runId}' is active and its plan cannot be edited`);
+      }
+      await this.applyPlanEdit(state, request.plan, request.actor, request.reason);
+      return { runId, tasks: state.tasks.length };
+    });
+  }
+
+  private async applyPlanEdit(
+    state: RunState,
+    input: unknown,
+    actor: string,
+    reason: string,
+  ): Promise<void> {
+    if (!state.plan) throw new Error("The run has no plan to edit");
+    if (state.tasks.some((task) => task.status !== "pending")) {
+      throw new Error("A plan cannot be edited after task execution has started");
+    }
+    const plan = attachTreeNodes(parseEditedPlan(input, this.loaded.config), state.repoTree);
+    const summary = summarizePlanEdit(state.plan, plan);
+    if (planEditIsEmpty(summary)) return;
+    state.plan = plan;
+    state.tasks = plan.tasks.map((task) => ({ task, status: "pending", attempts: 0 }));
+    await this.stateStore.save(state);
+    this.events.emit(state.id, "plan.edited", { actor, reason, ...summary, taskIds: plan.tasks.map((task) => task.id) });
+  }
+
+  listAgents(runId: string): LiveAgentView[] {
+    return this.live.registry.list(runId);
+  }
+
+  async steerAgent(runId: string, agentId: string, request: SteerAgentRequest): Promise<void> {
+    await this.live.registry.steer(runId, agentId, request.text, request.actor);
+  }
+
+  async interruptAgent(runId: string, agentId: string, request: InterruptAgentRequest): Promise<void> {
+    await this.live.registry.interrupt(runId, agentId, {
+      actor: request.actor,
+      ...(request.note !== undefined ? { note: request.note } : {}),
+    });
+  }
+
+  async answerAgent(runId: string, agentId: string, request: AnswerAgentRequest): Promise<void> {
+    await this.live.registry.answer(runId, agentId, request.questionId, request.answer, request.actor);
   }
 
   async resume(runId: string, request: ResumeRunRequest): Promise<RunActionResult> {
@@ -571,7 +664,17 @@ export class RunSupervisor {
   }
 
   async list(): Promise<RunSummary[]> {
-    return (await this.stateStore.list()).map(summarizeRun);
+    const questions = new Map<string, number>();
+    for (const agent of this.live.registry.list()) {
+      if (agent.questions.length > 0) {
+        questions.set(agent.runId, (questions.get(agent.runId) ?? 0) + agent.questions.length);
+      }
+    }
+    return (await this.stateStore.list()).map((state) => {
+      const summary = summarizeRun(state);
+      const waiting = questions.get(state.id);
+      return waiting ? { ...summary, agentQuestions: waiting } : summary;
+    });
   }
 
   async usageReport(): Promise<UsageReport> {
@@ -749,11 +852,11 @@ export class RunSupervisor {
     const loadedForResume = this.configForPersistedRun(state);
     const workflow = this.dependencies.resumeWorkflow
       ? this.dependencies.resumeWorkflow(state, resumeOptions)
-      : new LocalWorkflowRunner(loadedForResume, { eventSink: this.events }).resume(
+      : new LocalWorkflowRunner(loadedForResume, { eventSink: this.events, live: this.live }).resume(
           state,
           resumeOptions,
         );
-    this.track(state.id, controller, workflow);
+    void this.track(state.id, controller, workflow);
   }
 
   /** Rebuild ephemeral desktop picker profiles before resume/approval continuation. */
@@ -854,6 +957,7 @@ function requestHash(request: StartRunRequest): string {
   const normalized = {
     goal: request.goal,
     strategy: request.strategy ?? null,
+    template: request.template ?? null,
     parentRunId: request.parentRunId ?? null,
     profileOverrides: Object.fromEntries(
       Object.entries(request.profileOverrides).sort(([left], [right]) =>

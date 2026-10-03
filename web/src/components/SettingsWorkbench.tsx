@@ -1,6 +1,4 @@
 import {
-  CheckCircle2,
-  CircleAlert,
   FolderCog,
   LoaderCircle,
   RefreshCw,
@@ -30,6 +28,13 @@ import type {
   ProjectScope,
   RoleBindingInput,
 } from "../types";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
+import { Callout } from "../ui/form";
+import { Toggle } from "../ui/toggle";
+import { JevPanel } from "./JevPanel";
+import { PanelHeader, SettingsSection } from "./PanelHeader";
 import { applyRolePatch, RoleBindingEditor } from "./RoleBindingEditor";
 
 const BUILT_IN_ROLES = [
@@ -338,232 +343,206 @@ export function SettingsWorkbench({
 
   if (loading) {
     return (
-      <div className="settings-workbench settings-loading">
-        <LoaderCircle className="spin" size={28} />
-        <strong>{pane === "project" ? "正在加载项目设置" : "正在加载全局设置"}</strong>
+      <div className="grid h-full place-items-center">
+        <div className="flex flex-col items-center gap-3 text-sm text-muted" role="status">
+          <LoaderCircle className="size-6 animate-spin text-accent" />
+          <strong className="font-medium text-ink-2">{pane === "project" ? "正在加载项目设置" : "正在加载全局设置"}</strong>
+        </div>
       </div>
     );
   }
 
   const isProject = pane === "project";
+  const detectButton = (label: string, size: "sm" | "md" = "md") => (
+    <Button size={size} onClick={() => void rescan()} disabled={scanning || saving}>
+      {scanning ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+      <span>{scanning ? "检测中" : label}</span>
+    </Button>
+  );
 
   return (
-    <section className="settings-workbench" aria-label={isProject ? "项目设置" : "全局设置"}>
-      <header className="settings-hero">
-        <div className="settings-hero-icon">{isProject ? <FolderCog size={22} /> : <Settings2 size={22} />}</div>
-        <div>
-          <span className="section-kicker">{isProject ? `当前项目${projectName ? ` · ${projectName}` : ""}` : "本机全局"}</span>
-          <h1>{isProject ? "项目角色覆盖" : "Agent CLI 与角色默认"}</h1>
-          <p>
-            {isProject
-              ? "只改当前项目。某个角色没单独设置时，自动用全局默认；保存后新建运行和重试都会按合并结果选 CLI。"
-              : "检索本机 Codex / Grok / Kimi / Claude 的配置与授权状态，设置默认模型与思考深度。项目没有单独覆盖的角色会用这里的值。"}
-          </p>
-        </div>
-        <div className="settings-hero-actions">
-          {!isProject && (
-            <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
-              {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
-              <span>{scanning ? "检测中" : "手动检测"}</span>
-            </button>
-          )}
-          {isProject && onOpenGlobal && (
-            <button type="button" className="button secondary" onClick={onOpenGlobal}>
-              <Settings2 size={16} />
-              <span>全局设置</span>
-            </button>
-          )}
-          {!isProject && onOpenProject && (
-            <button type="button" className="button secondary" onClick={onOpenProject} disabled={!scope}>
-              <FolderCog size={16} />
-              <span>项目设置</span>
-            </button>
-          )}
-          <button type="button" className="button primary" onClick={() => void save()} disabled={saving || scanning}>
-            {saving ? <LoaderCircle size={16} className="spin" /> : <Save size={16} />}
-            <span>{saving ? "保存中" : isProject ? "保存项目" : "保存全局"}</span>
-          </button>
-        </div>
-      </header>
-
-      <div className="settings-layer-tabs" role="tablist" aria-label="设置范围">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={!isProject}
-          className={!isProject ? "is-active" : ""}
-          onClick={() => onOpenGlobal?.()}
-          disabled={!isProject && !onOpenGlobal}
-        >
-          全局
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={isProject}
-          className={isProject ? "is-active" : ""}
-          onClick={() => onOpenProject?.()}
-          disabled={!scope || (isProject && !onOpenProject)}
-        >
-          项目
-        </button>
-      </div>
-
-      {(error || message) && (
-        <div className={`settings-banner ${error ? "is-error" : "is-ok"}`} role="status">
-          {error ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
-          <span>{error ?? message}</span>
-        </div>
-      )}
-
-      {!isProject && <section className="settings-panel">
-        <div className="settings-panel-head">
-          <RefreshCw size={18} />
-          <div>
-            <h2>CLI 配置检测</h2>
-            <small>自动检测可关；手动检测随时可用，强制扫本机配置</small>
+    <section className="scroll-thin h-full overflow-y-auto" aria-label={isProject ? "项目设置" : "全局设置"}>
+      <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
+        <header className="flex flex-wrap items-start gap-4">
+          <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-md bg-accent-soft text-accent-ink [&_svg]:size-4">
+            {isProject ? <FolderCog /> : <Settings2 />}
+          </span>
+          <div className="min-w-0 flex-1 basis-72">
+            <span className="text-xs font-medium text-accent-ink">{isProject ? `当前项目${projectName ? ` · ${projectName}` : ""}` : "本机全局"}</span>
+            <h1 className="m-0 mt-0.5 text-xl font-semibold tracking-tight text-ink">{isProject ? "项目角色覆盖" : "Agent CLI 与角色默认"}</h1>
+            <p className="m-0 mt-1.5 max-w-2xl text-sm leading-relaxed text-muted">
+              {isProject
+                ? "只改当前项目。某个角色没单独设置时，自动用全局默认；保存后新建运行和重试都会按合并结果选 CLI。"
+                : "检索本机 Codex / Grok / Kimi / Claude 的配置与授权状态，设置默认模型与思考深度。项目没有单独覆盖的角色会用这里的值。"}
+            </p>
           </div>
-        </div>
-        <div className="detect-options">
-          <label className="detect-option">
-            <input
-              type="checkbox"
-              checked={uiState.autoDetectCliConfig !== false}
-              onChange={(event) => patchUi({ autoDetectCliConfig: event.target.checked })}
-              disabled={saving || scanning}
-            />
-            <span>
-              <strong>自动检测</strong>
-              <small>设置页打开时每 30 秒检查配置指纹；变更则刷新模型/思考深度</small>
-            </span>
-          </label>
-          <label className="detect-option">
-            <input
-              type="checkbox"
-              checked={uiState.autoDetectOnFocus !== false}
-              onChange={(event) => patchUi({ autoDetectOnFocus: event.target.checked })}
-              disabled={saving || scanning || uiState.autoDetectCliConfig === false}
-            />
-            <span>
-              <strong>回到窗口时检测</strong>
-              <small>切回 Agent Team 时检查 ~/.codex 等配置是否改过</small>
-            </span>
-          </label>
-          <label className="detect-option">
-            <input
-              type="checkbox"
-              checked={uiState.showCliPickerInRunLauncher !== false}
-              onChange={(event) => patchUi({ showCliPickerInRunLauncher: event.target.checked })}
-              disabled={saving || scanning}
-            />
-            <span>
-              <strong>新建运行时可选择 CLI</strong>
-              <small>关闭后新建运行直接使用项目 profile 默认，角色区只读展示当前绑定</small>
-            </span>
-          </label>
-          <div className="detect-manual-row">
-            <div>
-              <strong>手动检测</strong>
-              <small>立即强制重扫本机 Codex / Grok / Kimi / Claude，不依赖自动开关</small>
-            </div>
-            <button type="button" className="button secondary" onClick={() => void rescan()} disabled={scanning || saving}>
-              {scanning ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
-              <span>{scanning ? "检测中…" : "立即手动检测"}</span>
-            </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {!isProject && detectButton("手动检测")}
+            {isProject && onOpenGlobal && (
+              <Button onClick={onOpenGlobal}>
+                <Settings2 />
+                <span>全局设置</span>
+              </Button>
+            )}
+            {!isProject && onOpenProject && (
+              <Button onClick={onOpenProject} disabled={!scope}>
+                <FolderCog />
+                <span>项目设置</span>
+              </Button>
+            )}
+            <Button variant="primary" onClick={() => void save()} disabled={saving || scanning}>
+              {saving ? <LoaderCircle className="animate-spin" /> : <Save />}
+              <span>{saving ? "保存中" : isProject ? "保存项目" : "保存全局"}</span>
+            </Button>
           </div>
-          <p className="settings-detect-hint">
-            监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存全局」。
-          </p>
-        </div>
-      </section>}
+        </header>
 
-      {!isProject && <section className="settings-panel">
-        <div className="settings-panel-head">
-          <Terminal size={18} />
-          <div>
-            <h2>本机 CLI 清单</h2>
-            <small>
-              {inventory
-                ? `${cacheSourceLabel(fromCache, cacheReason)} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
-                : "尚未扫描"}
-            </small>
-          </div>
-          <button
-            type="button"
-            className="button secondary settings-inline-detect"
-            onClick={() => void rescan()}
-            disabled={scanning || saving}
-          >
-            {scanning ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}
-            <span>{scanning ? "检测中" : "手动检测"}</span>
-          </button>
-        </div>
-        <div className="cli-card-grid">
-          {(inventory?.clis ?? []).map((cli) => (
-            <article key={cli.id} className={`cli-card ${cli.installed ? "is-installed" : "is-missing"}`}>
-              <header>
-                <strong>{CLI_LABEL[cli.id]}</strong>
-                <span className={`cli-badge is-${cli.auth.status}`}>
-                  {authLabel(cli.auth.status)}
-                </span>
-              </header>
-              <dl>
-                <div><dt>安装</dt><dd>{cli.installed ? "已安装" : "未找到"}</dd></div>
-                {cli.version && <div><dt>版本</dt><dd title={cli.version}>{cli.version}</dd></div>}
-                {cli.binary && <div><dt>路径</dt><dd className="mono" title={cli.binary}>{shortPath(cli.binary)}</dd></div>}
-                <div><dt>默认模型</dt><dd>{cli.defaultModel ?? "—"}</dd></div>
-                <div><dt>思考深度</dt><dd>{cli.defaultReasoning ?? "—"}</dd></div>
-                <div><dt>运行时</dt><dd>{cli.runtimeSupported ? "可调用" : "仅展示"}</dd></div>
-                {cli.auth.detail && <div><dt>授权说明</dt><dd>{cli.auth.detail}</dd></div>}
-              </dl>
-              {cli.models.length > 0 && (
-                <div className="cli-models">
-                  {cli.models.slice(0, 6).map((model) => (
-                    <code key={model.id}>{model.label}</code>
-                  ))}
-                  {cli.models.length > 6 && <span>+{cli.models.length - 6}</span>}
-                </div>
+        <div className="bd-b flex items-center gap-1" role="tablist" aria-label="设置范围">
+          {([
+            { id: "global", label: "全局", active: !isProject, disabled: !isProject && !onOpenGlobal, onClick: () => onOpenGlobal?.() },
+            { id: "project", label: "项目", active: isProject, disabled: !scope || (isProject && !onOpenProject), onClick: () => onOpenProject?.() },
+          ] as const).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={tab.active}
+              disabled={tab.disabled}
+              onClick={tab.onClick}
+              className={cn(
+                "-mb-px h-9 cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-3 text-sm font-medium text-muted transition-colors hover:text-ink focus-ring disabled:cursor-default disabled:opacity-50",
+                tab.active && "is-active border-accent text-ink",
               )}
-            </article>
+            >
+              {tab.label}
+            </button>
           ))}
         </div>
-      </section>}
 
-      <section className="settings-panel">
-        <div className="settings-panel-head">
-          <ShieldCheck size={18} />
-          <div>
-            <h2>{isProject ? "项目角色" : "全局角色默认"}</h2>
-            <small>
-              {isProject
-                ? "改过的角色只对本项目生效；点「恢复全局」后该角色重新跟全局走"
-                : "保存后，没有项目覆盖的角色会用这些值；新建运行仍可在弹窗里改一次"}
-            </small>
-          </div>
-          {!isProject && (
-            <button
-              type="button"
-              className="button secondary settings-inline-detect"
-              onClick={adoptSuggested}
-              disabled={saving || scanning || Object.keys(suggested).length === 0}
-              title="按本机 CLI 检索结果填充推荐的默认模型与思考深度"
-            >
-              <Sparkles size={14} />
-              <span>采用建议默认</span>
-            </button>
-          )}
-        </div>
-        <RoleBindingEditor
-          roles={isProject ? projectRoles : roles}
-          roleNames={roleNames}
-          {...(inventory ? { inventory } : {})}
-          disabled={saving || scanning}
-          {...(isProject ? { sources: projectSources, onClear: inheritGlobal } : {})}
-          onChange={updateRole}
-        />
-      </section>
+        {(error || message) && (
+          <Callout tone={error ? "danger" : "success"} role="status">{error ?? message}</Callout>
+        )}
+
+        {!isProject && (
+          <SettingsSection>
+            <PanelHeader icon={<RefreshCw />} title="CLI 配置检测" subtitle="自动检测可关；手动检测随时可用，强制扫本机配置" />
+            <div className="flex flex-col divide-y divide-line">
+              <Toggle
+                label="自动检测"
+                hint="设置页打开时每 30 秒检查配置指纹；变更则刷新模型/思考深度"
+                checked={uiState.autoDetectCliConfig !== false}
+                onChange={(event) => patchUi({ autoDetectCliConfig: event.target.checked })}
+                disabled={saving || scanning}
+              />
+              <Toggle
+                label="回到窗口时检测"
+                hint="切回 Agent Team 时检查 ~/.codex 等配置是否改过"
+                checked={uiState.autoDetectOnFocus !== false}
+                onChange={(event) => patchUi({ autoDetectOnFocus: event.target.checked })}
+                disabled={saving || scanning || uiState.autoDetectCliConfig === false}
+              />
+              <Toggle
+                label="新建运行时可选择 CLI"
+                hint="关闭后新建运行直接使用项目 profile 默认，角色区只读展示当前绑定"
+                checked={uiState.showCliPickerInRunLauncher !== false}
+                onChange={(event) => patchUi({ showCliPickerInRunLauncher: event.target.checked })}
+                disabled={saving || scanning}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3 px-1 py-3">
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <strong className="text-sm font-medium text-ink">手动检测</strong>
+                  <small className="text-xs text-muted">立即强制重扫本机 Codex / Grok / Kimi / Claude，不依赖自动开关</small>
+                </div>
+                <Button onClick={() => void rescan()} disabled={scanning || saving}>
+                  {scanning ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+                  <span>{scanning ? "检测中…" : "立即手动检测"}</span>
+                </Button>
+              </div>
+            </div>
+            <p className="m-0 text-xs text-muted">
+              监听路径：~/.codex、~/.grok、~/.kimi-code、~/.claude。改完自动/手动选项后请点「保存全局」。
+            </p>
+          </SettingsSection>
+        )}
+
+        {!isProject && (
+          <SettingsSection>
+            <PanelHeader
+              icon={<Terminal />}
+              title="本机 CLI 清单"
+              subtitle={inventory
+                ? `${cacheSourceLabel(fromCache, cacheReason)} · 扫描于 ${new Date(inventory.scannedAt).toLocaleString("zh-CN")}`
+                : "尚未扫描"}
+              actions={detectButton("手动检测", "sm")}
+            />
+            <div className="bd divide-y overflow-hidden rounded-lg">
+              {(inventory?.clis ?? []).map((cli) => (
+                <article key={cli.id} className={cn("flex flex-col gap-1 px-3 py-2.5", !cli.installed && "opacity-70")}>
+                  <header className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:grid sm:grid-cols-[4.5rem_6.75rem_4rem_minmax(0,1.2fr)_minmax(0,1fr)_3.5rem]">
+                    <strong className="text-sm font-semibold text-ink">{CLI_LABEL[cli.id]}</strong>
+                    <span className="justify-self-start"><Badge tone={authTone(cli.auth.status)}>{authLabel(cli.auth.status)}</Badge></span>
+                    <span className="text-xs text-muted">{cli.installed ? "已安装" : "未找到"}</span>
+                    <span className="truncate font-mono text-xs text-muted" title={cli.version}>{cli.version ?? "—"}</span>
+                    <span className="truncate text-xs text-muted">{cli.defaultModel ?? "—"} · {cli.defaultReasoning ?? "—"}</span>
+                    <span className="text-right text-xs text-muted">{cli.runtimeSupported ? "可调用" : "仅展示"}</span>
+                  </header>
+                  {(cli.binary || cli.auth.detail) && (
+                    <p className="m-0 truncate font-mono text-2xs text-muted" title={cli.binary ?? cli.auth.detail}>
+                      {cli.binary ? shortPath(cli.binary) : cli.auth.detail}
+                    </p>
+                  )}
+                </article>
+              ))}
+            </div>
+          </SettingsSection>
+        )}
+
+        <SettingsSection>
+          <PanelHeader
+            icon={<ShieldCheck />}
+            title={isProject ? "项目角色" : "全局角色默认"}
+            subtitle={isProject
+              ? "改过的角色只对本项目生效；点「恢复全局」后该角色重新跟全局走"
+              : "保存后，没有项目覆盖的角色会用这些值；新建运行仍可在弹窗里改一次"}
+            actions={!isProject && (
+              <Button
+                size="sm"
+                onClick={adoptSuggested}
+                disabled={saving || scanning || Object.keys(suggested).length === 0}
+                title="按本机 CLI 检索结果填充推荐的默认模型与思考深度"
+              >
+                <Sparkles />
+                <span>采用建议默认</span>
+              </Button>
+            )}
+          />
+          <RoleBindingEditor
+            roles={isProject ? projectRoles : roles}
+            roleNames={roleNames}
+            {...(inventory ? { inventory } : {})}
+            disabled={saving || scanning}
+            {...(isProject ? { sources: projectSources, onClear: inheritGlobal } : {})}
+            onChange={updateRole}
+          />
+        </SettingsSection>
+
+        {isProject && scope && <JevPanel scope={scope} />}
+      </div>
     </section>
   );
+}
+
+function authTone(status: CliProbeResult["auth"]["status"]): "success" | "warning" | "danger" | "neutral" {
+  switch (status) {
+    case "present":
+      return "success";
+    case "missing":
+      return "warning";
+    case "invalid":
+      return "danger";
+    default:
+      return "neutral";
+  }
 }
 
 function authLabel(status: CliProbeResult["auth"]["status"]): string {

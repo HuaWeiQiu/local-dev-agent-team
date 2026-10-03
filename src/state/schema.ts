@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type {
+  ExploreSummary,
   FinalDecision,
   GoalIntake,
   ReviewVerdict,
@@ -7,15 +8,15 @@ import type {
   TaskPlan,
   TestVerdict,
 } from "../domain/contracts.js";
+import type { RepoTrace, RepoTree } from "../domain/repo-tree.js";
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
+import type { FlowSelection } from "../flow/types.js";
 import type {
   ApprovalRequest,
   RecoveryRecord,
   RunCheckpoint,
-  RunRoleBinding,
   RunState,
-  RunUsage,
 } from "./types.js";
 
 /** Schema version written into new state.json documents; legacy files without it are treated as 1. */
@@ -76,6 +77,7 @@ const taskRunStateSchema = z.looseObject({
   commit: z.string().optional(),
   mergeCommit: z.string().optional(),
   profile: z.string().optional(),
+  agentInvocations: z.number().optional(),
   quality: nested<QualityReport>().optional(),
   review: nested<ReviewVerdict>().optional(),
   test: nested<TestVerdict>().optional(),
@@ -118,10 +120,14 @@ export const runStateSchema = z.looseObject({
   profileOverrides: z.record(z.string(), z.string()),
   roleBindings: z.record(z.string(), runRoleBindingSchema).optional(),
   strategy: nested<ResolvedStrategy>(),
+  flow: nested<FlowSelection>().optional(),
   supervisorId: z.string().optional(),
   parentRunId: z.string().optional(),
   purpose: z.enum(["evolution-evaluation", "evolution-proposer"]).optional(),
   intake: nested<GoalIntake>().optional(),
+  explore: nested<ExploreSummary>().optional(),
+  repoTree: nested<RepoTree>().optional(),
+  repoTrace: nested<RepoTrace>().optional(),
   plan: nested<TaskPlan>().optional(),
   tasks: z.array(taskRunStateSchema),
   finalQuality: nested<QualityReport>().optional(),
@@ -131,6 +137,7 @@ export const runStateSchema = z.looseObject({
   recoveries: z.array(nested<RecoveryRecord>()).optional(),
   resumeCount: z.number().optional(),
   executionElapsedMs: z.number().optional(),
+  advisorConsultations: z.number().int().min(0).optional(),
   usage: runUsageSchema.optional(),
   pullRequestUrl: z.string().optional(),
   pullRequestNumber: z.number().optional(),

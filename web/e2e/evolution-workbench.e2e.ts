@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { goToWorkspace } from "./helpers";
 
 test("creates, preflights, applies and rolls back an evolution candidate", async ({ page }, testInfo) => {
   const browserErrors: string[] = [];
@@ -9,7 +10,7 @@ test("creates, preflights, applies and rolls back an evolution candidate", async
 
   await page.goto("/");
   await expect(page.getByLabel("当前项目")).toBeVisible();
-  await page.getByRole("button", { name: "演进工作台", exact: true }).click();
+  await goToWorkspace(page, "演进工作台");
   const workbench = page.getByRole("region", { name: "演进工作台" });
   await expect(workbench).toBeVisible();
   const automation = workbench.getByRole("region", { name: "自动演进控制" });

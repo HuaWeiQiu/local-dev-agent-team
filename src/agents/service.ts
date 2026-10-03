@@ -6,7 +6,10 @@ import type { AgentTeamConfig } from "../config/schema.js";
 import { fallbackProfiles, resolveProfile } from "../profiles/resolve.js";
 import { AgentInvocationError, invokeAgent } from "../adapters/invoke.js";
 import { AdapterRegistry } from "../adapters/registry.js";
-import { adapterRoleWarning } from "../adapters/conformance.js";
+import { adapterRoleWarning, assertAdapterProfile } from "../adapters/conformance.js";
+import { invokeLive, type LiveSupport } from "./live-invoke.js";
+import { DEFAULT_MAX_STALL_RECOVERIES, DEFAULT_STALL_SECONDS } from "../reliability/stall.js";
+import { OperatorInterruptError } from "../interventions/registry.js";
 import type { AgentRunResult } from "../adapters/types.js";
 import type { RunStateStore } from "../state/store.js";
 import { assertRoleProfilePermission } from "../security/permissions.js";
@@ -92,6 +95,7 @@ export class ProfiledAgentService implements RoleAgentService {
     private readonly observer?: AgentInvocationObserver,
     private readonly registry = new AdapterRegistry(),
     private readonly health: ProviderHealthRegistry = defaultProviderHealthRegistry,
+    private readonly live?: LiveSupport,
   ) {}
 
   async runStructured<T>(options: RoleInvocationOptions<T>): Promise<RoleResponse<T>> {
@@ -231,42 +235,79 @@ export class ProfiledAgentService implements RoleAgentService {
         });
         let result;
         try {
-          result = await invokeAgent(
-            {
+          const livePlan = this.live
+            ? await this.live.factory.plan(
+                candidate.profile.adapter,
+                candidate.profile,
+                options.cwd ?? this.root,
+              )
+            : undefined;
+          if (this.live && livePlan && livePlan.kind !== "one-shot") {
+            assertAdapterProfile(
+              this.registry.get(candidate.profile.adapter),
+              candidate.profile,
+              outputSchema !== undefined,
+            );
+            result = await invokeLive({
+              support: this.live,
               adapterName: candidate.profile.adapter,
+              profileName: candidate.name,
               profile: candidate.profile,
               cwd: options.cwd ?? this.root,
-              runId: options.runId,
               prompt,
               artifactDirectory,
+              runId: options.runId,
+              role: options.role,
+              artifactKey: options.artifactKey,
+              ...(taskIdFromContext(options.context) ? { taskId: taskIdFromContext(options.context)! } : {}),
               ...(outputSchema ? { outputSchema } : {}),
               ...(this.signal ? { signal: this.signal } : {}),
-              ...(this.observer?.maxProcessOutputBytes
-                ? { maxOutputBytes: this.observer.maxProcessOutputBytes }
-                : {}),
-              onStdout: (chunk) => {
+              stall: {
+                stallSeconds: this.config.workflow?.stallSeconds ?? DEFAULT_STALL_SECONDS,
+                maxRecoveries: this.config.workflow?.maxStallRecoveries ?? DEFAULT_MAX_STALL_RECOVERIES,
+              },
+              onText: (chunk) => {
                 batcher.push("stdout", boundedOutputChunk(chunk));
               },
-              onStderr: (chunk) => {
-                batcher.push("stderr", boundedOutputChunk(chunk));
+            });
+          } else {
+            result = await invokeAgent(
+              {
+                adapterName: candidate.profile.adapter,
+                profile: candidate.profile,
+                cwd: options.cwd ?? this.root,
+                runId: options.runId,
+                prompt,
+                artifactDirectory,
+                ...(outputSchema ? { outputSchema } : {}),
+                ...(this.signal ? { signal: this.signal } : {}),
+                ...(this.observer?.maxProcessOutputBytes
+                  ? { maxOutputBytes: this.observer.maxProcessOutputBytes }
+                  : {}),
+                onStdout: (chunk) => {
+                  batcher.push("stdout", boundedOutputChunk(chunk));
+                },
+                onStderr: (chunk) => {
+                  batcher.push("stderr", boundedOutputChunk(chunk));
+                },
+                ...(invocationId
+                  ? {
+                      onActivity: (activity) => {
+                        this.store.emit(options.runId, "agent.children.updated", {
+                          invocationId,
+                          role: options.role,
+                          profile: candidate.name,
+                          adapter: candidate.profile.adapter,
+                          artifactKey: options.artifactKey,
+                          agents: activity.agents,
+                        });
+                      },
+                    }
+                  : {}),
               },
-              ...(invocationId
-                ? {
-                    onActivity: (activity) => {
-                      this.store.emit(options.runId, "agent.children.updated", {
-                        invocationId,
-                        role: options.role,
-                        profile: candidate.name,
-                        adapter: candidate.profile.adapter,
-                        artifactKey: options.artifactKey,
-                        agents: activity.agents,
-                      });
-                    },
-                  }
-                : {}),
-            },
-            this.registry,
-          );
+              this.registry,
+            );
+          }
         } finally {
           batcher.flushAll();
         }
@@ -327,7 +368,9 @@ export class ProfiledAgentService implements RoleAgentService {
           }
         }
         this.signal?.throwIfAborted();
-        if (observationFailed || isBudgetExceeded(failure)) throw failure;
+        if (observationFailed || isBudgetExceeded(failure) || failure instanceof OperatorInterruptError) {
+          throw failure;
+        }
 
         const classification =
           failure instanceof AgentInvocationError
@@ -380,8 +423,11 @@ export class ProfiledAgentService implements RoleAgentService {
       reviewer: "reviewer.md",
       tester: "tester.md",
       "orchestrator-final": "orchestrator-final.md",
+      "architect-advisor": "architect-advisor.md",
     };
-    const promptPath = rolePolicy.promptFile
+    // The advisor is a distinct task of the architect role; a role-level
+    // promptFile (written for planning) must not replace its instructions.
+    const promptPath = rolePolicy.promptFile && promptKey !== "architect-advisor"
       ? path.resolve(this.root, rolePolicy.promptFile)
       : fileURLToPath(
           new URL(`../../prompts/${defaultNames[promptKey] ?? `${promptKey}.md`}`, import.meta.url),
@@ -389,6 +435,12 @@ export class ProfiledAgentService implements RoleAgentService {
     const instructions = await loadPromptTemplate(promptPath);
     return `${instructions.trim()}\n\n## Run Context\n\n${JSON.stringify(context, null, 2)}\n`;
   }
+}
+
+function taskIdFromContext(context: unknown): string | undefined {
+  if (!context || typeof context !== "object" || !("task" in context)) return undefined;
+  const task = (context as { task?: { id?: unknown } }).task;
+  return typeof task?.id === "string" ? task.id : undefined;
 }
 
 function isBudgetExceeded(error: unknown): boolean {

@@ -1,0 +1,73 @@
+/* 浏览器基线。放进 base 层，让 Tailwind 工具类（utilities 层）可以覆盖其中的字体、颜色与焦点轮廓。 */
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-width: 320px;
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    overflow: hidden;
+    color: var(--ink);
+    background: var(--bg);
+    font-family: var(--font-sans);
+    font-weight: var(--weight-regular);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+
+  button,
+  textarea,
+  select,
+  input {
+    font: inherit;
+    letter-spacing: 0;
+  }
+
+  button {
+    color: inherit;
+  }
+
+  button:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  code {
+    font-family: var(--font-mono);
+    letter-spacing: 0;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--line-strong);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}

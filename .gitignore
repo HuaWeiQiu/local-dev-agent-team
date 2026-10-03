@@ -15,3 +15,4 @@ coverage/
 !.env.example
 .agent-team/
 *.log
+desktop-latest.json

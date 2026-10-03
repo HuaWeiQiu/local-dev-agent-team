@@ -1,5 +1,5 @@
 import type { AgentProfile, Reasoning } from "../config/schema.js";
-import { runProcess } from "../process/run.js";
+import { type runProcess } from "../process/run.js";
 import {
   parseOutputFileResult,
   runAdapterDoctor,
@@ -120,7 +120,7 @@ const doctorSpec: AdapterDoctorSpec = {
   },
 };
 
-function codexProviderArguments(
+export function codexProviderArguments(
   provider: NonNullable<AgentProfile["codexProvider"]>,
 ): string[] {
   const prefix = `model_providers.${provider.id}`;

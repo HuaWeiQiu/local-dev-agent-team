@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import type { LoadedConfig } from "../src/config/load.js";
 import { SqliteEventStore } from "../src/events/store.js";
-import { GithubClient } from "../src/github/client.js";
+import { type GithubClient } from "../src/github/client.js";
 import { GithubPublisher } from "../src/github/publish.js";
 import { RunStateStore } from "../src/state/store.js";
 import type { RunState } from "../src/state/types.js";

@@ -1,5 +1,10 @@
+import type { ReactNode } from "react";
 import { agentRoleLabel } from "../presentation";
 import type { CliId, CliInventory, RoleBindingInput } from "../types";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
+import { Select } from "../ui/form";
 
 const CLI_LABEL: Record<CliId, string> = {
   codex: "Codex",
@@ -27,8 +32,15 @@ export function RoleBindingEditor({
 }) {
   const clisById = new Map((inventory?.clis ?? []).map((cli) => [cli.id, cli]));
 
+  const columns = "md:grid-cols-[7.5rem_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.7fr)]";
   return (
-    <div className="role-default-grid">
+    <div className="role-default-grid bd divide-y overflow-hidden rounded-lg bg-surface">
+      <div className={cn("hidden px-3 py-2 text-2xs font-medium text-muted md:grid md:gap-3", columns)}>
+        <span>角色</span>
+        <span>Agent CLI</span>
+        <span>模型</span>
+        <span>思考深度</span>
+      </div>
       {roleNames.map((role) => {
         const binding = roles[role] ?? { cli: "grok" as CliId, reasoning: "high" };
         const cli = clisById.get(binding.cli);
@@ -40,18 +52,27 @@ export function RoleBindingEditor({
         );
         const source = sources?.[role] ?? "global";
         return (
-          <div key={role} className={`role-default-card ${source === "project" ? "is-project" : "is-global"}`}>
-            <strong>
-              {agentRoleLabel(role)}
+          <div
+            key={role}
+            className={cn(
+              "grid gap-3 px-3 py-3 md:items-center md:gap-3",
+              columns,
+              source === "project" && "bg-accent-soft/40",
+            )}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <strong className="text-sm font-semibold text-ink">{agentRoleLabel(role)}</strong>
               {sources && (
-                <span className={`role-source-badge is-${source}`}>
-                  {source === "project" ? "项目" : "全局"}
-                </span>
+                <Badge tone={source === "project" ? "active" : "neutral"}>{source === "project" ? "项目" : "全局"}</Badge>
               )}
-            </strong>
-            <label>
-              <span>Agent CLI</span>
-              <select
+              {onClear && source === "project" && (
+                <Button size="sm" disabled={disabled} onClick={() => onClear(role)}>
+                  恢复全局
+                </Button>
+              )}
+            </div>
+            <Labeled label="Agent CLI">
+              <Select
                 value={binding.cli}
                 disabled={disabled}
                 onChange={(event) => onChange(role, { cli: event.target.value as CliId })}
@@ -66,11 +87,10 @@ export function RoleBindingEditor({
                     </option>
                   );
                 })}
-              </select>
-            </label>
-            <label>
-              <span>模型</span>
-              <select
+              </Select>
+            </Labeled>
+            <Labeled label="模型">
+              <Select
                 value={binding.model ?? ""}
                 disabled={disabled}
                 onChange={(event) => onChange(role, { model: event.target.value })}
@@ -78,11 +98,10 @@ export function RoleBindingEditor({
                 {(models.length > 0 ? models : [{ id: binding.model ?? "default", label: binding.model ?? "default" }]).map((model) => (
                   <option key={model.id} value={model.id}>{model.label}</option>
                 ))}
-              </select>
-            </label>
-            <label>
-              <span>思考深度</span>
-              <select
+              </Select>
+            </Labeled>
+            <Labeled label="思考深度">
+              <Select
                 value={binding.reasoning ?? "high"}
                 disabled={disabled}
                 onChange={(event) => onChange(role, { reasoning: event.target.value })}
@@ -90,22 +109,21 @@ export function RoleBindingEditor({
                 {reasoningOptions.map((option) => (
                   <option key={option} value={option}>{option}</option>
                 ))}
-              </select>
-            </label>
-            {onClear && source === "project" && (
-              <button
-                type="button"
-                className="button secondary role-inherit-button"
-                disabled={disabled}
-                onClick={() => onClear(role)}
-              >
-                恢复全局
-              </button>
-            )}
+              </Select>
+            </Labeled>
           </div>
         );
       })}
     </div>
+  );
+}
+
+function Labeled({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-1 text-xs text-muted">
+      <span className="md:sr-only">{label}</span>
+      {children}
+    </label>
   );
 }
 

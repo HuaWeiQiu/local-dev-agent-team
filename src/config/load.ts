@@ -3,6 +3,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { configSchema, type AgentTeamConfig } from "./schema.js";
 import type { AdapterRegistry } from "../adapters/registry.js";
+import type { CliInventory } from "../desktop/cli-inventory.js";
 
 const configNames = ["agent-team.yaml", "agent-team.yml"];
 
@@ -10,6 +11,12 @@ export interface LoadedConfig {
   config: AgentTeamConfig;
   path: string;
   root: string;
+  /**
+   * "file": read from agent-team.yaml. "detected": synthesized in memory from
+   * the repository and installed CLIs (zero-config); `path` is where the file
+   * would be written once the user customizes.
+   */
+  source?: "file" | "detected";
 }
 
 export interface LoadConfigOptions {
@@ -23,6 +30,14 @@ export interface LoadConfigOptions {
   validation?: "full" | "schema-only";
   /** validation: "full" 时复用的 registry；缺省惰性创建一个默认 AdapterRegistry。 */
   registry?: AdapterRegistry;
+  /**
+   * When no agent-team.yaml exists, synthesize a configuration from the
+   * repository (detected quality commands) and installed agent CLIs instead of
+   * failing. Nothing is written to disk.
+   */
+  zeroConfig?: boolean;
+  /** CLI inventory used for zero-config adapter selection; scanned lazily if omitted. */
+  inventory?: CliInventory;
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -93,6 +108,15 @@ async function validateLoadedConfig(
   }
 }
 
+async function scanInventoryOrUndefined(): Promise<CliInventory | undefined> {
+  try {
+    const { getInventory } = await import("../desktop/settings.js");
+    return (await getInventory({ refresh: false })).inventory;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function loadConfig(
   startDirectory = process.cwd(),
   explicitPath?: string,
@@ -102,18 +126,31 @@ export async function loadConfig(
     ? path.resolve(startDirectory, explicitPath)
     : await findConfig(startDirectory);
 
+  let source: "file" | "detected" = "file";
+  let resolvedPath = configPath ?? path.join(startDirectory, "agent-team.yaml");
+  let resolvedRoot = configPath ? path.dirname(configPath) : startDirectory;
+  let document: unknown;
   if (!configPath) {
-    throw new Error("No agent-team.yaml found. Run 'agent-team init' first.");
+    if (!options.zeroConfig) {
+      throw new Error("No agent-team.yaml found. Run 'agent-team init' first.");
+    }
+    const { loadZeroConfig } = await import("../onboarding/starter.js");
+    const inventory = options.inventory ?? (await scanInventoryOrUndefined());
+    const zero = await loadZeroConfig(startDirectory, inventory ? { inventory } : {});
+    document = zero.config;
+    resolvedPath = zero.path;
+    resolvedRoot = zero.root;
+    source = "detected";
+  } else {
+    document = parseYaml(await readFile(configPath, "utf8"));
   }
-
-  const contents = await readFile(configPath, "utf8");
-  const document = parseYaml(contents);
+  const displayPath = resolvedPath;
   const result = configSchema.safeParse(document);
   if (!result.success) {
     const details = result.error.issues
       .map((issue) => `${issue.path.join(".") || "config"}: ${issue.message}`)
       .join("\n");
-    throw new Error(`Invalid configuration at ${configPath}:\n${details}`);
+    throw new Error(`Invalid configuration at ${displayPath}:\n${details}`);
   }
 
   const automation = result.data.evolution.automatic;
@@ -122,7 +159,7 @@ export async function loadConfig(
     result.data.strategies?.definitions[automation.targetStrategy]
   ) {
     throw new Error(
-      `Invalid configuration at ${configPath}:\nevolution.automatic.targetStrategy: ` +
+      `Invalid configuration at ${displayPath}:\nevolution.automatic.targetStrategy: ` +
       "Automatic evolution target cannot replace a configured strategy",
     );
   }
@@ -139,12 +176,13 @@ export async function loadConfig(
   }
 
   if (options.validation !== "schema-only") {
-    await validateLoadedConfig(result.data, configPath, options.registry);
+    await validateLoadedConfig(result.data, displayPath, options.registry);
   }
 
   return {
     config: result.data,
-    path: configPath,
-    root: path.dirname(configPath),
+    path: displayPath,
+    root: resolvedRoot,
+    source,
   };
 }

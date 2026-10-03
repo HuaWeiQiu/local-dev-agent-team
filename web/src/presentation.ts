@@ -1,5 +1,5 @@
 import { ApiError } from "./api";
-import type { RunStatus, TaskStatus } from "./types";
+import type { JevProbeResult, RunStatus, TaskStatus } from "./types";
 
 const runLabels: Record<RunStatus, string> = {
   created: "已创建",
@@ -333,6 +333,7 @@ export function morphologySummary(definition: {
   maxParallel?: number;
   taskMorphology?: {
     explore?: { enabled?: boolean };
+    advisor?: { enabled?: boolean };
     implement?: { swarm?: { maxConcurrency?: number } };
   };
 } | undefined, projectMaxParallel?: number): string {
@@ -343,7 +344,68 @@ export function morphologySummary(definition: {
   const swarmLabel = swarm !== undefined
     ? `Swarm ≤${Math.min(swarm, maxParallel)}`
     : `Swarm ≤${maxParallel}`;
-  return `${exploreOn ? "探索开" : "探索关"} · ${swarmLabel}`;
+  const advisorOn = definition.taskMorphology?.advisor?.enabled === true;
+  return `${exploreOn ? "探索开" : "探索关"} · ${swarmLabel}${advisorOn ? " · 顾问开" : ""}`;
+}
+
+const advisorTriggerLabels: Record<string, string> = {
+  "repeated-failure": "同一错误重复",
+  "pre-final": "交付前",
+};
+
+export function advisorTriggerLabel(trigger: string): string {
+  return advisorTriggerLabels[trigger] ?? trigger;
+}
+
+const advisorRecommendationLabels: Record<string, string> = {
+  proceed: "方向正确",
+  change_approach: "建议换方案",
+  stop: "建议停止",
+};
+
+export function advisorRecommendationLabel(recommendation: string): string {
+  return advisorRecommendationLabels[recommendation] ?? recommendation;
+}
+
+/** One-line summary of a Jev fork decision; low confidence or outages are shown as deterministic fallback. */
+export function jevEntryText(jev: {
+  source: "jev" | "deterministic";
+  decision?: string;
+  confidence?: number;
+  consult: boolean;
+  changedOutcome: boolean;
+}): string {
+  if (jev.source === "deterministic") {
+    const heard =
+      jev.decision !== undefined && jev.confidence !== undefined
+        ? `Jev 倾向${jev.decision === "consult" ? "升级" : "重试"}(置信度 ${jev.confidence.toFixed(2)})但不够确定`
+        : "Jev 无响应";
+    return `${heard}，按确定性规则${jev.consult ? "升级给顾问" : "直接重试"}`;
+  }
+  const confidence = jev.confidence !== undefined ? `(置信度 ${jev.confidence.toFixed(2)})` : "";
+  const action = jev.consult ? "升级给顾问" : "直接重试";
+  return `Jev${confidence}：${action}${jev.changedOutcome ? (jev.consult ? "，比规则更早" : "，跳过了顾问") : "，与规则一致"}`;
+}
+
+export function jevStatusLabel(
+  jev: { enabled: boolean } | null | undefined,
+): { label: string; tone: "on" | "off" | "none" } {
+  if (!jev) return { label: "未配置", tone: "none" };
+  return jev.enabled ? { label: "已启用", tone: "on" } : { label: "已配置 · 未启用", tone: "off" };
+}
+
+export function jevProbeSummary(result: JevProbeResult): string {
+  if (!result.ok) {
+    return `连接失败（${result.latencyMs} ms）：${result.error}`;
+  }
+  const { decision, confidence, reason } = result.decision;
+  const choice = decision === "consult" ? "升级给顾问" : "直接重试";
+  return `连接正常（${result.latencyMs} ms）：模拟失败 → ${choice}，置信度 ${confidence.toFixed(2)}${reason ? `，${reason}` : ""}`;
+}
+
+/** Artifact keys of read-only architect advisor consultations. */
+export function isAdvisorArtifactKey(artifactKey: string | undefined): boolean {
+  return artifactKey !== undefined && /(^|\/)(pre-final-)?advisor$/.test(artifactKey);
 }
 
 export function canvasEmptyCopy(run: {
@@ -401,27 +463,14 @@ export const activeRunStatuses: ReadonlySet<string> = new Set([
 
 /**
  * Default main workspace panel when opening a run.
- * Prefer live activity when there is no task graph yet or the run failed early.
+ * The architecture view is the live process: stages stay clickable even
+ * before the architect has published a task graph.
  */
-export function preferredMonitorPanel(run: {
+export function preferredMonitorPanel(_run: {
   status: RunStatus;
   tasks: unknown[];
   error?: string;
 } | undefined): "graph" | "activity" {
-  if (!run) return "graph";
-  if (run.tasks.length > 0) return "graph";
-  if (
-    run.status === "orchestrating" ||
-    run.status === "exploring" ||
-    run.status === "architecting" ||
-    run.status === "created" ||
-    run.status === "blocked" ||
-    run.status === "cancelled" ||
-    run.status === "interrupted" ||
-    Boolean(run.error)
-  ) {
-    return "activity";
-  }
   return "graph";
 }
 

@@ -11,6 +11,11 @@ Implement exactly one assigned task in the current isolated Git worktree.
 5. After checks pass, stop. Do not rewrite already passing code or perform
    speculative cleanup.
 
+If the Run Context contains `architectAdvice`, the previous attempt failed the
+same way twice and a read-only architect reviewed it. Address that advice
+before editing: follow its recommended approach, or state why a specific point
+does not apply. It never relaxes a check; failing commands still have to pass.
+
 Do not add dependencies, redesign architecture, weaken tests, create branches,
 commit, push, or open a pull request unless the assigned task explicitly says
 so. If one corrective pass after a failed check does not resolve the issue,
