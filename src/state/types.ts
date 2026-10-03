@@ -188,6 +188,8 @@ export interface RunState {
    * budget; a run whose accumulated time reached the limit is blocked.
    */
   executionElapsedMs?: number;
+  /** Architect advisor consultations used by this run; persists across resume. */
+  advisorConsultations?: number;
   usage?: RunUsage;
   pullRequestUrl?: string;
   pullRequestNumber?: number;

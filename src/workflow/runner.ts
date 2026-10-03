@@ -5,18 +5,21 @@ import type { CommandSpec } from "../config/schema.js";
 import type { RoleAgentService } from "../agents/service.js";
 import { ProfiledAgentService } from "../agents/service.js";
 import {
+  advisorVerdictSchema,
   exploreSummarySchema,
   finalDecisionSchema,
   goalIntakeSchema,
   reviewVerdictSchema,
   taskPlanSchema,
   testVerdictSchema,
+  type AdvisorVerdict,
   type ExploreSummary,
   type ReviewVerdict,
   type Task,
   type TestVerdict,
 } from "../domain/contracts.js";
 import {
+  advisorVerdictJsonSchema,
   exploreSummaryJsonSchema,
   finalDecisionJsonSchema,
   goalIntakeJsonSchema,
@@ -56,6 +59,20 @@ import type {
   TaskRunState,
 } from "../state/types.js";
 import { branchSegment, createRunId } from "./id.js";
+import {
+  computeFailureSignature,
+  isRepeatedFailure,
+  type FailureSignature,
+  type FailureSignatureInput,
+} from "./failure-signature.js";
+import { JevClient } from "../jev/client.js";
+import {
+  resolveConsultation,
+  type ConsultationResolution,
+  type ForkAdvisor,
+  type JevDecision,
+  type JevDecisionInput,
+} from "../jev/policy.js";
 import { resolveStrategy } from "../strategies/resolve.js";
 import { legacyExecutionTimeoutSeconds } from "../strategies/defaults.js";
 import type { RunEventSink } from "../events/types.js";
@@ -70,7 +87,7 @@ import {
   materializeRoleBindings,
   roleBindingsFromRunState,
 } from "../desktop/role-bindings.js";
-import type { AgentTeamConfig } from "../config/schema.js";
+import type { AdvisorTrigger, AgentTeamConfig } from "../config/schema.js";
 
 type WorkflowRoleBindings = Record<
   string,
@@ -96,6 +113,8 @@ export interface WorkflowDependencies {
     signal?: AbortSignal,
   ) => RoleAgentService;
   eventSink?: RunEventSink;
+  /** Overrides the client built from `config.jev`; mainly for tests. */
+  forkAdvisor?: ForkAdvisor;
 }
 
 export interface WorkflowResumeOptions {
@@ -109,6 +128,7 @@ export interface WorkflowResumeOptions {
 export class LocalWorkflowRunner {
   private readonly runsDirectory: string;
   private readonly worktreesDirectory: string;
+  private readonly forkAdvisor: ForkAdvisor | undefined;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -117,6 +137,9 @@ export class LocalWorkflowRunner {
     const stateRoot = path.resolve(loaded.root, loaded.config.project.stateDirectory);
     this.runsDirectory = path.join(stateRoot, "runs");
     this.worktreesDirectory = path.join(stateRoot, "worktrees");
+    const jev = loaded.config.jev;
+    this.forkAdvisor =
+      dependencies.forkAdvisor ?? (jev?.enabled ? new JevClient(jev) : undefined);
   }
 
   async run(options: WorkflowRunOptions): Promise<RunState> {
@@ -565,6 +588,32 @@ export class LocalWorkflowRunner {
     await budget.recordQuality(state.finalQuality);
     await store.save(state);
 
+    // A failing integration gate already vetoes delivery, so advice would only
+    // spend budget; consult the architect only when there is something to ship.
+    const preFinalAdvice = state.finalQuality.passed
+      ? await this.consultAdvisor({
+          state,
+          store,
+          agent,
+          trigger: "pre-final",
+          cwd: state.integrationWorktree,
+          artifactKey: recoveryArtifactKey(state, "pre-final-advisor"),
+          ...(signal ? { signal } : {}),
+          context: {
+            trigger: "pre-final",
+            goal: state.goal,
+            planSummary: state.plan?.summary,
+            tasks: state.tasks.map((task) => ({
+              id: task.task.id,
+              title: task.task.title,
+              status: task.status,
+            })),
+            diffStat: await git.diffSummary(state.integrationWorktree, state.baseCommit).catch(() => ""),
+            finalQuality: compactQuality(state.finalQuality),
+          },
+        })
+      : undefined;
+
     const finalDecision = await agent.runStructured({
       role: "orchestrator",
       promptKey: "orchestrator-final",
@@ -582,6 +631,7 @@ export class LocalWorkflowRunner {
           test: task.test,
         })),
         finalQuality: compactQuality(state.finalQuality),
+        ...(preFinalAdvice ? { preFinalAdvice } : {}),
       },
       schema: finalDecisionSchema,
       jsonSchema: finalDecisionJsonSchema,
@@ -1266,6 +1316,9 @@ export class LocalWorkflowRunner {
     const maxAttempts = state.strategy.maxReworkAttempts + 1;
     let feedback = "";
     let lastReworkExperienceIds: string[] = [];
+    let failureInput: FailureSignatureInput | undefined;
+    let previousSignature: FailureSignature | undefined;
+    let architectAdvice: AdvisorVerdict | undefined;
     const reused = await this.tryFinishAlreadyPassedTask(
       state,
       taskState,
@@ -1299,6 +1352,63 @@ export class LocalWorkflowRunner {
 
     for (let attempt = startAttempt; attempt <= maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
+      if (failureInput) {
+        // Deterministic fork: the same normalized failure twice in a row means
+        // a blind retry is unlikely to help, so escalate to the architect.
+        const currentSignature = computeFailureSignature(failureInput);
+        const repeated = isRepeatedFailure(previousSignature, currentSignature);
+        previousSignature = currentSignature;
+        failureInput = undefined;
+        architectAdvice = undefined;
+        let consult = repeated;
+        let escalatedBy: "jev" | undefined;
+        if (this.forkAdvisor && this.canConsultAdvisor(state, "repeated-failure")) {
+          const resolution = await this.decideWithFork(state, store, {
+            taskId: taskState.task.id,
+            taskTitle: taskState.task.title,
+            attempt,
+            maxAttempts,
+            repeated,
+            failureSummary: currentSignature.summary,
+            ...(signal ? { signal } : {}),
+          });
+          consult = resolution.consult;
+          if (consult && !repeated) {
+            escalatedBy = "jev";
+          }
+        }
+        if (consult) {
+          const verdict = await this.consultAdvisor({
+            state,
+            store,
+            agent,
+            trigger: "repeated-failure",
+            taskId: taskState.task.id,
+            cwd: taskState.worktree,
+            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "advisor"),
+            ...(signal ? { signal } : {}),
+            context: {
+              trigger: "repeated-failure",
+              goal: state.goal,
+              planSummary: state.plan.summary,
+              task: taskState.task,
+              attempt,
+              repeatedFailure: currentSignature.summary,
+              repeated,
+              ...(escalatedBy ? { escalatedBy } : {}),
+              feedback: feedback.slice(-20_000),
+              diff: await git.stagedDiff(taskState.worktree, 60_000, signal).catch(() => ""),
+            },
+          });
+          if (verdict?.recommendation === "stop") {
+            taskState.status = "blocked";
+            taskState.error = `Architect advisor stopped the task after a repeated failure: ${verdict.summary}`;
+            await store.save(state);
+            return;
+          }
+          architectAdvice = verdict;
+        }
+      }
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
       await store.save(state);
@@ -1325,6 +1435,7 @@ export class LocalWorkflowRunner {
             attempt,
             feedback,
             ...(reworkExperiences ? { verifiedFailureExperiences: reworkExperiences } : {}),
+            ...(architectAdvice ? { architectAdvice } : {}),
           },
         });
         taskState.profile = worker.profileName;
@@ -1343,6 +1454,7 @@ export class LocalWorkflowRunner {
         const files = await git.changedFiles(taskState.worktree, signal);
         if (files.length === 0) {
           feedback = "No repository changes were produced. Implement the assigned task.";
+          failureInput = { quality, errorMessage: feedback };
           await this.recordAttemptCard(state, store, taskState, attempt, feedback);
           continue;
         }
@@ -1350,6 +1462,7 @@ export class LocalWorkflowRunner {
           git.assertOwnedPaths(files, taskState.task.ownedPaths);
         } catch (error) {
           feedback = error instanceof Error ? error.message : String(error);
+          failureInput = { quality, errorMessage: feedback };
           await this.recordAttemptCard(state, store, taskState, attempt, feedback);
           continue;
         }
@@ -1386,6 +1499,7 @@ export class LocalWorkflowRunner {
           );
         }
         feedback = buildReworkFeedback(quality, review, test);
+        failureInput = { quality, review, test };
         await this.recordAttemptCard(state, store, taskState, attempt, feedback);
         await store.transition(
           state,
@@ -1399,6 +1513,7 @@ export class LocalWorkflowRunner {
           throw error;
         }
         feedback = error instanceof Error ? error.message : String(error);
+        failureInput = { errorMessage: feedback };
         await this.recordAttemptCard(state, store, taskState, attempt, feedback);
         if (feedback.startsWith("Specialist escalated")) {
           taskState.status = "blocked";
@@ -1412,6 +1527,133 @@ export class LocalWorkflowRunner {
     taskState.status = "blocked";
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
     await store.save(state);
+  }
+
+  private canConsultAdvisor(state: RunState, trigger: AdvisorTrigger): boolean {
+    const advisor = state.strategy.advisor;
+    return Boolean(
+      advisor?.enabled &&
+        advisor.triggers.includes(trigger) &&
+        (state.advisorConsultations ?? 0) < advisor.maxConsultationsPerRun,
+    );
+  }
+
+  /**
+   * Ask the local fork model whether to escalate now. Advisory only: it can
+   * bring the architect forward or skip it, never change any check result, and
+   * any failure or low confidence keeps the deterministic decision.
+   */
+  private async decideWithFork(
+    state: RunState,
+    store: RunStateStore,
+    input: JevDecisionInput & { signal?: AbortSignal },
+  ): Promise<ConsultationResolution> {
+    const { signal, ...request } = input;
+    const startedAt = Date.now();
+    let decision: JevDecision | undefined;
+    try {
+      decision = await this.forkAdvisor?.decide(request, signal);
+    } catch {
+      decision = undefined;
+    }
+    signal?.throwIfAborted();
+    const minConfidence = this.loaded.config.jev?.minConfidence ?? 0.8;
+    const resolution = resolveConsultation({
+      repeated: request.repeated,
+      jev: decision,
+      minConfidence,
+    });
+    store.emit(state.id, "run.jev.decided", {
+      taskId: request.taskId,
+      attempt: request.attempt,
+      repeated: request.repeated,
+      ...(decision
+        ? { decision: decision.decision, confidence: decision.confidence }
+        : {}),
+      source: resolution.source,
+      consult: resolution.consult,
+      changedOutcome: resolution.consult !== request.repeated,
+      reason: resolution.reason,
+      latencyMs: Date.now() - startedAt,
+    });
+    return resolution;
+  }
+
+  /**
+   * Consult the on-call architect. Read-only: the verdict is advice injected
+   * into later context and never overrides deterministic checks. Returns
+   * undefined when disabled, out of budget, or when the consultation failed
+   * (fail-open). Budget exhaustion and aborts are never swallowed.
+   */
+  private async consultAdvisor(options: {
+    state: RunState;
+    store: RunStateStore;
+    agent: RoleAgentService;
+    trigger: AdvisorTrigger;
+    taskId?: string;
+    cwd: string;
+    artifactKey: string;
+    context: Record<string, unknown>;
+    signal?: AbortSignal;
+  }): Promise<AdvisorVerdict | undefined> {
+    const { state, store, agent, trigger, taskId } = options;
+    const advisor = state.strategy.advisor;
+    if (!advisor?.enabled || !advisor.triggers.includes(trigger)) {
+      return undefined;
+    }
+    const used = state.advisorConsultations ?? 0;
+    if (used >= advisor.maxConsultationsPerRun) {
+      store.emit(state.id, "run.advisor.skipped", {
+        trigger,
+        ...(taskId ? { taskId } : {}),
+        reason: "consultation-limit",
+        used,
+        limit: advisor.maxConsultationsPerRun,
+      });
+      return undefined;
+    }
+    // Count before invoking so an interrupted consultation still spends quota
+    // and resume cannot loop on it indefinitely.
+    state.advisorConsultations = used + 1;
+    await store.save(state);
+    try {
+      const response = await agent.runStructured({
+        role: "architect",
+        promptKey: "architect-advisor",
+        cwd: options.cwd,
+        runId: state.id,
+        artifactKey: options.artifactKey,
+        ...(advisor.profile ? { profileName: advisor.profile } : {}),
+        context: options.context,
+        schema: advisorVerdictSchema,
+        jsonSchema: advisorVerdictJsonSchema,
+      });
+      store.emit(state.id, "run.advisor.consulted", {
+        trigger,
+        ...(taskId ? { taskId } : {}),
+        profile: response.profileName,
+        usedFallback: response.usedFallback,
+        recommendation: response.value.recommendation,
+        summary: response.value.summary,
+        used: used + 1,
+        limit: advisor.maxConsultationsPerRun,
+      });
+      return response.value;
+    } catch (error) {
+      if (error instanceof RunBudgetExceededError || isBudgetExceededError(error)) {
+        throw error;
+      }
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      store.emit(state.id, "run.advisor.failed", {
+        trigger,
+        ...(taskId ? { taskId } : {}),
+        error: message.slice(0, 500),
+      });
+      return undefined;
+    }
   }
 
   private async canReusePassedWorktree(taskState: TaskRunState): Promise<boolean> {
@@ -2029,6 +2271,10 @@ function resetIncompleteTask(task: TaskRunState): void {  task.status = "pending
   delete task.review;
   delete task.test;
   delete task.error;
+}
+
+function isBudgetExceededError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "RUN_BUDGET_EXCEEDED";
 }
 
 function recoveryArtifactKey(state: RunState, key: string): string {

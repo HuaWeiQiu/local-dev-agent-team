@@ -86,6 +86,9 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
               {" · "}并行 {run.strategy.maxParallel}
               {" · "}Swarm {run.strategy.swarmMaxConcurrency ?? run.strategy.maxParallel}
               {run.strategy.explore?.enabled ? " · 探索" : ""}
+              {run.strategy.advisor?.enabled
+                ? ` · 顾问 ${run.advisorConsultations ?? 0}/${run.strategy.advisor.maxConsultationsPerRun}`
+                : ""}
             </span>
           </div>
         )}

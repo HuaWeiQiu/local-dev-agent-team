@@ -13,6 +13,7 @@ import type {
   EvolutionPreviewResponse,
   EvolutionProposal,
   EvolutionSnapshot,
+  JevProbeResult,
   RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
@@ -87,6 +88,13 @@ export async function saveDesktopSettings(input: {
 
 export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {
   return await request<PublicConfig>(`${apiRoot(scope)}/config`);
+}
+
+export async function probeJev(scope: ProjectScope): Promise<JevProbeResult> {
+  return await request<JevProbeResult>(`${apiRoot(scope)}/jev/probe`, {
+    method: "POST",
+    body: "{}",
+  });
 }
 
 export async function getProjectRoleSettings(scope: ProjectScope): Promise<ProjectRoleSettingsView> {

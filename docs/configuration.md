@@ -163,6 +163,44 @@ Optional first-class role:
   shows it in the run launcher and CLI picker without editing the file. New
   defaults and `agent-team.example.yaml` include it explicitly.
 
+Architect advisor (`taskMorphology.advisor`, per strategy, default disabled):
+
+```yaml
+taskMorphology:
+  advisor:
+    enabled: true
+    triggers: [repeated-failure, pre-final]   # subset, unique
+    maxConsultationsPerRun: 3                  # 1-10, persisted across resume
+    profile: grok-architect                    # optional; read-only and in architect's allowlist
+```
+
+The advisor reuses the `architect` role and its profile chain with the bundled
+`prompts/architect-advisor.md` (a role-level `promptFile` does not replace it).
+`repeated-failure` fires only when the same normalized failure occurs on two
+consecutive attempts, so it needs `maxReworkAttempts >= 2`. Advisor failures
+are fail-open; budget exhaustion and aborts are not swallowed. Events:
+`run.advisor.consulted`, `run.advisor.skipped`, `run.advisor.failed`.
+
+Optional local fork model (top-level `jev`, default disabled):
+
+```yaml
+jev:
+  enabled: true
+  baseUrl: http://127.0.0.1:9931/v1   # OpenAI-compatible; loopback hosts only
+  model: jev                          # opaque; validated by the local server
+  timeoutMs: 3000                     # 200-30000
+  minConfidence: 0.8                  # 0.5-1; below this the deterministic rule applies
+```
+
+After a task fails and before the next attempt, Jev may answer
+`{"decision":"retry"|"consult","confidence":0..1}` through
+`POST {baseUrl}/chat/completions`. It is only asked when the architect advisor is
+enabled for `repeated-failure` and has quota left. A confident `consult` brings the
+advisor forward; a confident `retry` skips it; errors, timeouts, invalid output and
+low confidence keep the deterministic repeated-failure rule. It cannot block a
+task or affect any quality gate, and no credentials are accepted. Event:
+`run.jev.decided`.
+
 Other notes:
 
 - A task plan may choose only a profile allowed by the worker role.

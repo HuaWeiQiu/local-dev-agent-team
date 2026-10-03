@@ -210,7 +210,8 @@ strategies:
       topology:
         mode: parallel-dag
       maxParallel: 3
-      maxReworkAttempts: 1
+      # repeated-failure 顾问需要至少 2 次返工：同一失败连续出现两次才会触发
+      maxReworkAttempts: 2
       executionTimeoutSeconds: 21600
       maxAgentInvocations: 64
       maxProcessOutputBytes: 1048576
@@ -223,6 +224,11 @@ strategies:
           enabled: false
           maxInjectedChars: 4000
           failOpen: true
+        # architect 按需顾问：只读、不写代码，仅在同一失败重复和交付前出场
+        advisor:
+          enabled: true
+          triggers: [repeated-failure, pre-final]
+          maxConsultationsPerRun: 3
         plan:
           role: architect
         implement:
@@ -252,6 +258,10 @@ strategies:
           enabled: true
           maxInjectedChars: 4000
           failOpen: false
+        advisor:
+          enabled: true
+          triggers: [repeated-failure, pre-final]
+          maxConsultationsPerRun: 5
         plan:
           role: architect
         implement:
@@ -264,6 +274,19 @@ strategies:
         worker: grok-worker
         reviewer: grok-reviewer
         tester: grok-tester
+
+# Optional local fork model ("Jev"). Advisory only: it decides whether a failed
+# task is escalated to the architect advisor now or retried directly. It never
+# approves work or overrides a failing check, and any error or low confidence
+# falls back to the deterministic repeated-failure rule. baseUrl must be a
+# loopback address; no credentials are stored here. Set enabled: true after
+# pointing baseUrl/model at your local OpenAI-compatible server.
+jev:
+  enabled: false
+  baseUrl: http://127.0.0.1:9931/v1
+  model: jev
+  timeoutMs: 3000
+  minConfidence: 0.8
 
 observability:
   maxEventsPerRun: 50000

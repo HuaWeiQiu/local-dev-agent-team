@@ -24,6 +24,11 @@ describe("strategy resolution", () => {
         maxInjectedChars: 4_000,
         failOpen: true,
       },
+      advisor: {
+        enabled: false,
+        triggers: ["repeated-failure", "pre-final"],
+        maxConsultationsPerRun: 3,
+      },
       topology: expect.objectContaining({
         version: 1,
         mode: "parallel-dag",
@@ -96,6 +101,27 @@ describe("strategy resolution", () => {
     expect(resolved.topology.stages.find((stage) => stage.id === "explore")).toMatchObject({
       roles: ["researcher"],
       label: "技术调研 / 代码探索",
+    });
+  });
+
+  it("resolves the architect advisor morphology", () => {
+    const config = createDefaultConfig("fixture");
+    config.strategies!.definitions.advised = {
+      roleProfiles: {},
+      taskMorphology: {
+        advisor: {
+          enabled: true,
+          triggers: ["pre-final"],
+          maxConsultationsPerRun: 5,
+          profile: "codex-planner",
+        },
+      },
+    };
+    expect(resolveStrategy(config, "advised").advisor).toEqual({
+      enabled: true,
+      triggers: ["pre-final"],
+      maxConsultationsPerRun: 5,
+      profile: "codex-planner",
     });
   });
 

@@ -36,6 +36,7 @@ import {
   saveProjectRoleSettings,
 } from "../desktop/project-role-settings.js";
 import { getInventory } from "../desktop/settings.js";
+import { JevClient } from "../jev/client.js";
 import { requireDesktopMutation } from "./http-routes-desktop.js";
 import {
   ProjectMutationConflictError,
@@ -72,6 +73,18 @@ export const runRoutes: ProjectApiRoute[] = [
     pattern: "/config",
     handler: (context, _request, response) => {
       sendJson(response, 200, buildPublicConfig(context.loaded, context.strategies));
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/jev/probe",
+    handler: async (context, request, response, _url, _params, serverOrigin, sessionOperator) => {
+      requireDesktopMutation(request, serverOrigin, sessionOperator);
+      const jev = context.loaded.config.jev;
+      if (!jev) {
+        throw new HttpError(404, "agent-team.yaml 中没有 jev 配置", "JEV_NOT_CONFIGURED");
+      }
+      sendJson(response, 200, await new JevClient(jev).probe());
     },
   },
   {
@@ -682,6 +695,7 @@ export function buildPublicConfig(
     roles: loaded.config.roles,
     strategies,
     observability: loaded.config.observability,
+    ...(loaded.config.jev ? { jev: loaded.config.jev } : {}),
     interop: buildInteropManifest(loaded.config),
   };
 }

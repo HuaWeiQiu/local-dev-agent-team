@@ -83,6 +83,15 @@ export interface CompiledStrategyTopology {
   edges: Array<{ source: string; target: string }>;
 }
 
+export type AdvisorTrigger = "repeated-failure" | "pre-final";
+
+export interface AdvisorSettings {
+  enabled?: boolean;
+  triggers?: AdvisorTrigger[];
+  maxConsultationsPerRun?: number;
+  profile?: string;
+}
+
 export interface TaskMorphology {
   explore?: {
     enabled?: boolean;
@@ -90,6 +99,7 @@ export interface TaskMorphology {
     maxInjectedChars?: number;
     failOpen?: boolean;
   };
+  advisor?: AdvisorSettings;
   plan?: {
     role?: "architect";
   };
@@ -175,6 +185,18 @@ export interface RecoveryRecord {
   }>;
 }
 
+export interface JevSettings {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
+  minConfidence: number;
+}
+
+export type JevProbeResult =
+  | { ok: true; latencyMs: number; decision: { decision: "retry" | "consult"; confidence: number; reason?: string } }
+  | { ok: false; latencyMs: number; error: string };
+
 export interface PublicConfig {
   project: {
     name: string;
@@ -189,6 +211,7 @@ export interface PublicConfig {
     definitions: Record<string, StrategyDefinition>;
   };
   observability: { maxEventsPerRun: number };
+  jev?: JevSettings;
   interop: {
     schemaVersion: 1;
     adapters: Array<{
@@ -305,6 +328,13 @@ export interface RunState {
       maxInjectedChars: number;
       failOpen: boolean;
     };
+    /** Absent on runs persisted before the architect advisor existed. */
+    advisor?: {
+      enabled: boolean;
+      triggers: AdvisorTrigger[];
+      maxConsultationsPerRun: number;
+      profile?: string;
+    };
   };
   profileOverrides: Record<string, string>;
   roleBindings?: Record<string, {
@@ -335,6 +365,8 @@ export interface RunState {
   approvals?: ApprovalRequest[];
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
+  /** Architect advisor consultations used by this run. */
+  advisorConsultations?: number;
   pullRequestUrl?: string;
   pullRequestNumber?: number;
   usage?: {

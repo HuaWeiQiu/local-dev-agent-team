@@ -1,5 +1,23 @@
-import type { AgentTeamConfig, ApprovalGate, NamedStrategy } from "../config/schema.js";
+import type {
+  AdvisorTrigger,
+  AgentTeamConfig,
+  ApprovalGate,
+  NamedStrategy,
+} from "../config/schema.js";
 import { compileStrategyTopology, type CompiledStrategyTopology } from "./topology.js";
+
+export interface ResolvedAdvisorMorphology {
+  enabled: boolean;
+  triggers: AdvisorTrigger[];
+  maxConsultationsPerRun: number;
+  profile?: string;
+}
+
+const disabledAdvisor: ResolvedAdvisorMorphology = {
+  enabled: false,
+  triggers: ["repeated-failure", "pre-final"],
+  maxConsultationsPerRun: 3,
+};
 
 export interface ResolvedExploreMorphology {
   enabled: boolean;
@@ -23,6 +41,8 @@ export interface ResolvedStrategy {
   /** Effective wave concurrency: min(swarm.maxConcurrency, maxParallel). */
   swarmMaxConcurrency: number;
   explore: ResolvedExploreMorphology;
+  /** Absent on runs persisted before the advisor existed; treat as disabled. */
+  advisor?: ResolvedAdvisorMorphology;
 }
 
 export function resolveStrategy(
@@ -47,6 +67,7 @@ export function resolveStrategy(
       topology: compileStrategyTopology("parallel-dag", ["final"], { exploreEnabled: false }),
       swarmMaxConcurrency: config.project.maxParallel,
       explore: { enabled: false, maxInjectedChars: 4_000, failOpen: true },
+      advisor: { ...disabledAdvisor, triggers: [...disabledAdvisor.triggers] },
     };
   }
 
@@ -84,6 +105,15 @@ function resolveNamedStrategy(
     failOpen: exploreConfig?.failOpen ?? true,
     ...(exploreConfig?.profile ? { profile: exploreConfig.profile } : {}),
   };
+  const advisorConfig = strategy.taskMorphology?.advisor;
+  const advisor: ResolvedAdvisorMorphology = advisorConfig
+    ? {
+        enabled: advisorConfig.enabled,
+        triggers: [...advisorConfig.triggers],
+        maxConsultationsPerRun: advisorConfig.maxConsultationsPerRun,
+        ...(advisorConfig.profile ? { profile: advisorConfig.profile } : {}),
+      }
+    : { ...disabledAdvisor, triggers: [...disabledAdvisor.triggers] };
 
   return {
     name,
@@ -102,5 +132,6 @@ function resolveNamedStrategy(
     }),
     swarmMaxConcurrency,
     explore,
+    advisor,
   };
 }

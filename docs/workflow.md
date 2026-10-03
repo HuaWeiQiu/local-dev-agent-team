@@ -25,10 +25,16 @@
    docs-only task, yields to a passing quality gate.
 8. Failed gates produce bounded feedback for the same worker. Escalation with a
    failed quality gate, or an exhausted retry budget, blocks that task only.
+   When the strategy enables the architect advisor and the same normalized
+   failure repeats on consecutive attempts, a read-only architect is consulted
+   before the next attempt (see [architect-advisor.zh-CN.md](architect-advisor.zh-CN.md)).
 9. Passing task commits merge into the integration branch in stable task-ID
    order. Remaining blocked tasks do not discard already merged work. Final
    project checks and the supervising controller run once more; a final
    escalate cannot veto merged work when the integration quality gate passed.
+   With the advisor enabled, the architect first reviews the integrated result
+   when the integration gate passed, and its advice is added to the final
+   decision context.
 10. A passing or partially successful run creates a durable final approval
     request and stops at `awaiting-human`. Approval moves it to
     `ready-to-merge`; publication, CI observation, repair, and completion

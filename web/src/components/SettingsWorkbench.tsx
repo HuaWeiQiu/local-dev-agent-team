@@ -30,6 +30,7 @@ import type {
   ProjectScope,
   RoleBindingInput,
 } from "../types";
+import { JevPanel } from "./JevPanel";
 import { applyRolePatch, RoleBindingEditor } from "./RoleBindingEditor";
 
 const BUILT_IN_ROLES = [
@@ -562,6 +563,8 @@ export function SettingsWorkbench({
           onChange={updateRole}
         />
       </section>
+
+      {isProject && scope && <JevPanel scope={scope} />}
     </section>
   );
 }

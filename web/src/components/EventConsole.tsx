@@ -1,12 +1,19 @@
-import { Activity, Bot, CornerDownRight, Download, Radio, TerminalSquare } from "lucide-react";
+import { Activity, Bot, Compass, CornerDownRight, Download, Radio, TerminalSquare } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   agentRoleLabel,
   agentStatusLabel,
+  deriveAdvisorLog,
   deriveAgentActivity,
   type AgentDisplayStatus,
 } from "../agent-activity";
-import { formatTimestamp, runStatusLabel } from "../presentation";
+import {
+  advisorRecommendationLabel,
+  advisorTriggerLabel,
+  formatTimestamp,
+  jevEntryText,
+  runStatusLabel,
+} from "../presentation";
 import type { RunEvent, RunState } from "../types";
 
 interface EventConsoleProps {
@@ -29,6 +36,10 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
     () => deriveAgentActivity(events, run?.status),
     [events, run?.status],
   );
+  const advisorLog = useMemo(() => deriveAdvisorLog(events), [events]);
+  const advisorUsage = run?.strategy.advisor?.enabled
+    ? `${run.advisorConsultations ?? 0} / ${run.strategy.advisor.maxConsultationsPerRun}`
+    : undefined;
   const activeAgents = useMemo(
     () => agentActivity.reduce(
       (count, invocation) => count
@@ -84,7 +95,10 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
                 <div className="agent-activity-row">
                   <span className={`agent-state-dot is-${invocation.status}`} aria-hidden="true" />
                   <div className="agent-activity-identity">
-                    <strong>{agentRoleLabel(invocation.role)}</strong>
+                    <strong>
+                      {agentRoleLabel(invocation.role)}
+                      {invocation.advisor && <span className="advisor-tag" title="只读顾问：按需出场，不写代码">顾问</span>}
+                    </strong>
                     <small>{invocation.profile} · {invocation.adapter}{invocation.model ? ` / ${invocation.model}` : ""}</small>
                   </div>
                   <AgentState status={invocation.status} />
@@ -103,6 +117,32 @@ export const EventConsole = memo(function EventConsole({ run, events, connected,
                 ))}
               </div>
             ))}
+            {advisorLog.length > 0 && (
+              <div className="advisor-log" aria-label="架构顾问记录">
+                <div className="advisor-log-title">
+                  <Compass size={14} aria-hidden="true" />
+                  <strong>架构顾问</strong>
+                  {advisorUsage && <span>{advisorUsage}</span>}
+                </div>
+                {advisorLog.map((entry) => (
+                  <div className={`advisor-log-row is-${entry.status}`} key={entry.sequence}>
+                    <div>
+                      <strong>{entry.jev ? "Jev 分流" : advisorTriggerLabel(entry.trigger)}{entry.taskId ? ` · ${entry.taskId}` : ""}</strong>
+                      <small>
+                        {entry.jev
+                          ? jevEntryText(entry.jev)
+                          : entry.status === "consulted" && entry.recommendation
+                          ? `${advisorRecommendationLabel(entry.recommendation)}${entry.summary ? `：${entry.summary}` : ""}`
+                          : entry.status === "skipped"
+                            ? "已达本次运行的顾问次数上限，已跳过"
+                            : `顾问调用失败，已放行${entry.detail ? `：${entry.detail}` : ""}`}
+                      </small>
+                    </div>
+                    <time>{formatTimestamp(entry.occurredAt)}</time>
+                  </div>
+                ))}
+              </div>
+            )}
             {run && agentActivity.length === 0 && <span className="console-empty">等待角色启动</span>}
             {!run && <span className="console-empty">选择运行后显示角色</span>}
           </div>

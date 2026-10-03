@@ -65,6 +65,14 @@ export const finalDecisionSchema = z.object({
   reason: z.string().min(1),
 });
 
+export const advisorVerdictSchema = z.object({
+  recommendation: z.enum(["proceed", "change_approach", "stop"]),
+  summary: z.string().min(1),
+  advice: z.string().min(1),
+  risks: z.array(z.string()),
+});
+
+export type AdvisorVerdict = z.infer<typeof advisorVerdictSchema>;
 export type GoalIntake = z.infer<typeof goalIntakeSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type TaskPlan = z.infer<typeof taskPlanSchema>;

@@ -55,6 +55,8 @@ interface StrategyDraft {
   maxArtifactBytes: number;
   planApproval: boolean;
   exploreEnabled: boolean;
+  advisorEnabled: boolean;
+  advisorMaxConsultations: number;
   swarmMaxConcurrency: number;
   roleProfiles: Record<string, string>;
 }
@@ -268,6 +270,7 @@ export function StrategyComposer({
             <span><strong>{draft.mode === "sequential" ? 1 : draft.maxParallel}</strong> 并行上限</span>
             <span><strong>{draft.mode === "sequential" ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel)}</strong> Swarm 并发</span>
             <span className={draft.exploreEnabled ? "is-enabled" : ""}><strong>{draft.exploreEnabled ? "已启用" : "未启用"}</strong> 探索</span>
+            <span className={draft.advisorEnabled ? "is-enabled" : ""}><strong>{draft.advisorEnabled ? "已启用" : "未启用"}</strong> 架构顾问</span>
             <span className={draft.planApproval ? "is-enabled" : ""}><strong>{draft.planApproval ? "已启用" : "未启用"}</strong> 计划审批</span>
           </div>
         </div>
@@ -455,6 +458,25 @@ export function StrategyComposer({
               />
             </label>
             <label className="policy-toggle">
+              <span><strong>架构顾问</strong><small>同一错误重复、交付前按需召唤架构角色（只读）</small></span>
+              <input
+                type="checkbox"
+                checked={draft.advisorEnabled}
+                onChange={(event) => updateDraft((current) => ({ ...current, advisorEnabled: event.target.checked }))}
+                disabled={submitting}
+              />
+            </label>
+            {draft.advisorEnabled && (
+              <NumberField
+                label="顾问次数上限（每次运行）"
+                value={draft.advisorMaxConsultations}
+                min={1}
+                max={10}
+                disabled={submitting}
+                onChange={(value) => updateDraft((current) => ({ ...current, advisorMaxConsultations: value }))}
+              />
+            )}
+            <label className="policy-toggle">
               <span><strong>计划审批</strong><small>执行波次前暂停</small></span>
               <input
                 type="checkbox"
@@ -578,6 +600,8 @@ function createDraft(definition: StrategyDefinition, config: PublicConfig): Stra
     maxArtifactBytes: definition.maxArtifactBytes ?? 1_073_741_824,
     planApproval: definition.approvalGates?.includes("plan") ?? false,
     exploreEnabled: definition.taskMorphology?.explore?.enabled === true,
+    advisorEnabled: definition.taskMorphology?.advisor?.enabled === true,
+    advisorMaxConsultations: definition.taskMorphology?.advisor?.maxConsultationsPerRun ?? 3,
     swarmMaxConcurrency: Math.min(swarm, maxParallel),
     roleProfiles: { ...(definition.roleProfiles ?? {}) },
   };
@@ -613,6 +637,17 @@ function buildBlueprintDefinition(
           ? { profile: definition.taskMorphology.explore.profile }
           : {}),
       },
+      // Keep an existing advisor block (triggers/profile) even while it is off;
+      // only create one when the operator turns it on.
+      ...(draft.advisorEnabled || definition.taskMorphology?.advisor
+        ? {
+            advisor: {
+              ...definition.taskMorphology?.advisor,
+              enabled: draft.advisorEnabled,
+              maxConsultationsPerRun: draft.advisorMaxConsultations,
+            },
+          }
+        : {}),
       plan: { role: "architect" },
       implement: {
         role: "worker",
@@ -638,6 +673,8 @@ function sameDraft(left: StrategyDraft, right: StrategyDraft): boolean {
     left.maxArtifactBytes !== right.maxArtifactBytes ||
     left.planApproval !== right.planApproval ||
     left.exploreEnabled !== right.exploreEnabled ||
+    left.advisorEnabled !== right.advisorEnabled ||
+    left.advisorMaxConsultations !== right.advisorMaxConsultations ||
     left.swarmMaxConcurrency !== right.swarmMaxConcurrency
   ) {
     return false;

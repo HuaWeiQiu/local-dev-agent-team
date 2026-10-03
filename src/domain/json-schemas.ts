@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  advisorVerdictSchema,
   exploreSummarySchema,
   finalDecisionSchema,
   goalIntakeSchema,
@@ -57,3 +58,5 @@ export const reviewVerdictJsonSchema: Record<string, unknown> = toCliJsonSchema(
 export const testVerdictJsonSchema: Record<string, unknown> = toCliJsonSchema(testVerdictSchema);
 
 export const finalDecisionJsonSchema: Record<string, unknown> = toCliJsonSchema(finalDecisionSchema);
+
+export const advisorVerdictJsonSchema: Record<string, unknown> = toCliJsonSchema(advisorVerdictSchema);

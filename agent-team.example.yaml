@@ -171,6 +171,12 @@ strategies:
           enabled: false
           maxInjectedChars: 4000
           failOpen: true
+        # On-call architect advisor (read-only). The repeated-failure trigger
+        # needs maxReworkAttempts >= 2; with 1 only pre-final can fire.
+        advisor:
+          enabled: false
+          triggers: [repeated-failure, pre-final]
+          maxConsultationsPerRun: 3
         implement:
           role: worker
           swarm:
@@ -193,6 +199,10 @@ strategies:
           enabled: true
           maxInjectedChars: 4000
           failOpen: false
+        advisor:
+          enabled: true
+          triggers: [repeated-failure, pre-final]
+          maxConsultationsPerRun: 5
         implement:
           role: worker
           swarm:
@@ -203,6 +213,14 @@ strategies:
         worker: grok-worker
         reviewer: codex-reviewer
         tester: codex-tester
+
+# Optional local fork model ("Jev"), advisory only. See docs/architect-advisor.zh-CN.md.
+jev:
+  enabled: false
+  baseUrl: http://127.0.0.1:9931/v1
+  model: jev
+  timeoutMs: 3000
+  minConfidence: 0.8
 
 observability:
   maxEventsPerRun: 50000

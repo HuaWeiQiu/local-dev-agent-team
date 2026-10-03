@@ -380,8 +380,11 @@ export class ProfiledAgentService implements RoleAgentService {
       reviewer: "reviewer.md",
       tester: "tester.md",
       "orchestrator-final": "orchestrator-final.md",
+      "architect-advisor": "architect-advisor.md",
     };
-    const promptPath = rolePolicy.promptFile
+    // The advisor is a distinct task of the architect role; a role-level
+    // promptFile (written for planning) must not replace its instructions.
+    const promptPath = rolePolicy.promptFile && promptKey !== "architect-advisor"
       ? path.resolve(this.root, rolePolicy.promptFile)
       : fileURLToPath(
           new URL(`../../prompts/${defaultNames[promptKey] ?? `${promptKey}.md`}`, import.meta.url),

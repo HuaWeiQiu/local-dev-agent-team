@@ -3,11 +3,17 @@ import { ApiError } from "../web/src/api.js";
 import { buildTaskGraph } from "../web/src/graph.js";
 import { assessPlanCompleteness, namedDeliverablesInGoal } from "../web/src/plan-completeness.js";
 import {
+  advisorRecommendationLabel,
+  advisorTriggerLabel,
+  jevEntryText,
+  jevProbeSummary,
+  jevStatusLabel,
   agentRoleLabel,
   canvasEmptyCopy,
   formatExperienceCondition,
   formatExperienceTag,
   humanizeFailure,
+  isAdvisorArtifactKey,
   morphologySummary,
   orderedRoles,
   preferredMonitorPanel,
@@ -64,6 +70,50 @@ describe("web workbench projections", () => {
         implement: { swarm: { maxConcurrency: 2 } },
       },
     })).toContain("Swarm ≤2");
+    expect(morphologySummary({
+      maxParallel: 3,
+      taskMorphology: { advisor: { enabled: true } },
+    })).toContain("顾问开");
+    expect(morphologySummary({ maxParallel: 3 })).not.toContain("顾问");
+  });
+
+  it("labels advisor triggers, recommendations and artifact keys", () => {
+    expect(advisorTriggerLabel("repeated-failure")).toBe("同一错误重复");
+    expect(advisorTriggerLabel("pre-final")).toBe("交付前");
+    expect(advisorRecommendationLabel("change_approach")).toBe("建议换方案");
+    expect(advisorRecommendationLabel("unknown-value")).toBe("unknown-value");
+    expect(isAdvisorArtifactKey("tasks/a/attempt-3/advisor")).toBe(true);
+    expect(isAdvisorArtifactKey("pre-final-advisor")).toBe(true);
+    expect(isAdvisorArtifactKey("tasks/a/attempt-1/worker")).toBe(false);
+    expect(isAdvisorArtifactKey(undefined)).toBe(false);
+  });
+
+  it("describes Jev fork decisions including deterministic fallbacks", () => {
+    expect(
+      jevEntryText({ source: "jev", decision: "retry", confidence: 0.91, consult: false, changedOutcome: true }),
+    ).toBe("Jev(置信度 0.91)：直接重试，跳过了顾问");
+    expect(
+      jevEntryText({ source: "jev", decision: "consult", confidence: 0.9, consult: true, changedOutcome: false }),
+    ).toBe("Jev(置信度 0.90)：升级给顾问，与规则一致");
+    expect(jevEntryText({ source: "deterministic", consult: true, changedOutcome: false })).toBe(
+      "Jev 无响应，按确定性规则升级给顾问",
+    );
+    expect(
+      jevEntryText({ source: "deterministic", decision: "retry", confidence: 0.4, consult: false, changedOutcome: false }),
+    ).toContain("不够确定");
+  });
+
+  it("labels Jev status and summarizes probe results", () => {
+    expect(jevStatusLabel(undefined)).toEqual({ label: "未配置", tone: "none" });
+    expect(jevStatusLabel(null).tone).toBe("none");
+    expect(jevStatusLabel({ enabled: false })).toEqual({ label: "已配置 · 未启用", tone: "off" });
+    expect(jevStatusLabel({ enabled: true })).toEqual({ label: "已启用", tone: "on" });
+    expect(
+      jevProbeSummary({ ok: true, latencyMs: 42, decision: { decision: "consult", confidence: 0.9, reason: "loop" } }),
+    ).toBe("连接正常（42 ms）：模拟失败 → 升级给顾问，置信度 0.90，loop");
+    expect(jevProbeSummary({ ok: false, latencyMs: 3000, error: "超过 3000ms 未响应" })).toBe(
+      "连接失败（3000 ms）：超过 3000ms 未响应",
+    );
   });
 
   it("maps strategy, topology and role ids to Chinese operator labels", () => {

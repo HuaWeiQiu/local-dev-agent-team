@@ -7,7 +7,7 @@ import {
   taskKind,
   taskKindLabel,
 } from "../plan-completeness";
-import { agentRoleLabel, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
+import { advisorTriggerLabel, agentRoleLabel, formatBytes, humanizeFailure, profileDisplayName, strategyDisplayName } from "../presentation";
 import type { RunState, TaskRunState } from "../types";
 import { RunStatusBadge, TaskStatusBadge } from "./StatusBadge";
 
@@ -149,6 +149,12 @@ function RunDetail({ run }: { run: RunState }) {
           <div><dt>Swarm 并发</dt><dd>{run.strategy.swarmMaxConcurrency ?? run.strategy.maxParallel}</dd></div>
           <div><dt>代码探索</dt><dd>{run.strategy.explore?.enabled ? "已启用" : "关闭"}</dd></div>
           <div><dt>返工上限</dt><dd>{run.strategy.maxReworkAttempts}</dd></div>
+          <div><dt>架构顾问</dt><dd>{run.strategy.advisor?.enabled
+            ? `已启用 · ${run.advisorConsultations ?? 0} / ${run.strategy.advisor.maxConsultationsPerRun} 次`
+            : "关闭"}</dd></div>
+          {run.strategy.advisor?.enabled && (
+            <div><dt>顾问触发</dt><dd>{run.strategy.advisor.triggers.map(advisorTriggerLabel).join("、")}</dd></div>
+          )}
           {run.parentRunId && <div><dt>来源运行</dt><dd><code>{run.parentRunId}</code></dd></div>}
         </dl>
       </section>
