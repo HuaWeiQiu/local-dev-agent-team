@@ -901,3 +901,93 @@ export interface ExperiencePlanningBundle {
     hitCount: number;
   }>;
 }
+
+export type ExplainTone = "good" | "warn" | "bad" | "neutral";
+
+export interface ExplainLine {
+  tone: ExplainTone;
+  text: string;
+}
+
+export interface TaskExplanation {
+  taskId: string;
+  title: string;
+  status: string;
+  tone: ExplainTone;
+  summary: string;
+  lines: ExplainLine[];
+}
+
+export interface RunExplanation {
+  headline: ExplainLine;
+  flow?: { template: string; source: string; reasons: string[] };
+  run: ExplainLine[];
+  tasks: TaskExplanation[];
+}
+
+export interface UsageLine {
+  invocations: number;
+  failures: number;
+  durationMs: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  costReported: boolean;
+}
+
+export interface RunUsageBreakdown {
+  total: UsageLine;
+  byRole: Array<UsageLine & { role: string }>;
+  byTask: Array<UsageLine & { taskId: string }>;
+  byProfile: Array<UsageLine & { profile: string; model: string }>;
+  unattributed: UsageLine;
+}
+
+export interface ReplayStep {
+  at: string;
+  offsetMs: number;
+  kind: "status" | "flow" | "triage" | "agent" | "operator" | "quality" | "approval" | "advice" | "wave";
+  tone: ExplainTone;
+  title: string;
+  detail?: string;
+  taskId?: string;
+  nodeId?: string;
+}
+
+export interface TranscriptSummary {
+  id: string;
+  artifactKey: string;
+  profile: string;
+  role?: string;
+  taskId?: string;
+  live: boolean;
+  success?: boolean;
+  durationMs?: number;
+  bytes: number;
+}
+
+export interface TranscriptEntry {
+  kind: "message" | "tool" | "question" | "notice" | "turn" | "operator" | "output";
+  at?: string;
+  text: string;
+  label?: string;
+  status?: string;
+}
+
+export interface Transcript {
+  id: string;
+  entries: TranscriptEntry[];
+  truncated: boolean;
+}
+
+export interface TaskDiff {
+  taskId: string;
+  available: boolean;
+  source?: "commit" | "worktree";
+  commit?: string;
+  changedFiles: string[];
+  content?: string;
+  truncated: boolean;
+  detail?: string;
+}

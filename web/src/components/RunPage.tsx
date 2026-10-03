@@ -1,9 +1,10 @@
-import { Bot, CircleHelp, FileCheck2, Gauge, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
+import { Bot, CircleHelp, FileCheck2, Gauge, Lightbulb, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { deriveAgentActivity } from "../agent-activity";
 import { latestPendingApproval } from "../hooks/useRunEvents";
 import type { RunMonitor } from "../hooks/useRunEvents";
 import { useLiveAgents } from "../hooks/useLiveAgents";
+import { useRunInsights } from "../hooks/useRunInsights";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { deriveLiveStatus } from "../live-status";
 import { activeRunStatuses, strategyDisplayName } from "../presentation";
@@ -17,13 +18,14 @@ import { ApprovalCard } from "./ApprovalCard";
 import { DagCanvas } from "./DagCanvas";
 import { EventConsole } from "./EventConsole";
 import { EvidenceCenter } from "./EvidenceCenter";
+import { InsightsPanel } from "./InsightsPanel";
 import { RunLiveBar } from "./RunLiveBar";
 import { RunOverview } from "./RunOverview";
 import { StageStepper } from "./StageStepper";
 import { TaskInspector } from "./TaskInspector";
 import { UsagePanel } from "./UsagePanel";
 
-export type MonitorPanel = "overview" | "details" | "graph" | "agents" | "activity" | "evidence" | "usage";
+export type MonitorPanel = "overview" | "details" | "graph" | "agents" | "activity" | "evidence" | "usage" | "insights";
 
 interface RunPageProps {
   scope: ProjectScope | undefined;
@@ -45,6 +47,7 @@ const tabs: Array<{ value: MonitorPanel; label: string; icon: typeof Workflow }>
   { value: "agents", label: "智能体", icon: Bot },
   { value: "activity", label: "活动日志", icon: ScrollText },
   { value: "evidence", label: "交付证据", icon: FileCheck2 },
+  { value: "insights", label: "洞察", icon: Lightbulb },
   { value: "usage", label: "用量", icon: Gauge },
 ];
 
@@ -69,6 +72,7 @@ export function RunPage({
   const showInspector = monitorPanel === "graph";
   const runActive = run ? activeRunStatuses.has(run.status) : false;
   const liveAgents = useLiveAgents(scope, selectedRunId, events, runActive);
+  const insights = useRunInsights(scope, selectedRunId, run?.updatedAt, monitorPanel === "insights");
   const questionCount = liveAgents.agents.reduce((total, agent) => total + agent.questions.length, 0);
 
   if (!run) {
@@ -130,6 +134,7 @@ export function RunPage({
             <RunOverview
               run={run}
               events={events}
+              headline={insights.explanation?.headline}
               onSelectTask={(task) => {
                 onSelectTask(task);
                 onMonitorPanelChange("graph");
@@ -139,7 +144,7 @@ export function RunPage({
           </div>
           {!wide && (
             <Panel active={monitorPanel === "details"}>
-              <TaskInspector run={run} task={selectedTask} />
+              <TaskInspector run={run} task={selectedTask} onLoadDiff={insights.loadDiff} />
             </Panel>
           )}
           <Panel active={monitorPanel === "graph"}>
@@ -157,11 +162,14 @@ export function RunPage({
           <Panel active={monitorPanel === "evidence"}>
             <EvidenceCenter run={run} evidence={evidence} loading={evidenceLoading} onReadArtifact={onReadArtifact} />
           </Panel>
+          <Panel active={monitorPanel === "insights"}>
+            <InsightsPanel insights={insights} />
+          </Panel>
           <Panel active={monitorPanel === "usage"}>
             <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={onRefreshUsage} />
           </Panel>
         </div>
-        {showInspector && wide && <TaskInspector run={run} task={selectedTask} className="bd-l" />}
+        {showInspector && wide && <TaskInspector run={run} task={selectedTask} onLoadDiff={insights.loadDiff} className="bd-l" />}
       </div>
 
     </section>

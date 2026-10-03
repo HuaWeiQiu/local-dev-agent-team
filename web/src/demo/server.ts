@@ -11,6 +11,7 @@ import {
   iso,
   type DemoRun,
 } from "./seed";
+import { demoExplanation, demoReplay, demoTaskDiff, demoTranscript, demoTranscripts, demoUsageBreakdown } from "./insights";
 
 type Listener = (event: RunEvent) => void;
 
@@ -320,6 +321,13 @@ class DemoServer {
       if (rest === "evidence/file") return ok({ file: { path: "plan/architect-output.md", size: 120, content: "# 演示产物\n\n这是演示数据，不对应真实文件。\n", truncated: false } });
       if (rest === "export") return ok({});
       if (rest === "agents") return ok({ agents: this.demoAgents(run) });
+      if (rest === "explain") return ok({ explanation: demoExplanation(run) });
+      if (rest === "usage") return ok({ usage: demoUsageBreakdown(run) });
+      if (rest === "replay") return ok({ steps: demoReplay(run) });
+      if (rest === "transcripts") return ok({ transcripts: demoTranscripts(run) });
+      if (rest === "transcript") return ok({ transcript: demoTranscript(new URLSearchParams(rawPath.split("?")[1] ?? "").get("id") ?? "") });
+      const taskDiff = /^tasks\/([^/]+)\/diff$/.exec(rest ?? "");
+      if (taskDiff) return ok({ diff: demoTaskDiff(run, decodeURIComponent(taskDiff[1]!)) });
       const agentAction = /^agents\/([^/]+)\/(steer|interrupt|answer)$/.exec(rest ?? "");
       if (agentAction && method === "POST") {
         const agentId = decodeURIComponent(agentAction[1]!);

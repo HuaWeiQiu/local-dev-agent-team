@@ -145,6 +145,22 @@ export class GitManager {
     return `${result.stdout.slice(0, maxCharacters)}\n\n[diff truncated at ${maxCharacters} characters]`;
   }
 
+  async commitDiff(commit: string, maxCharacters = 300_000): Promise<GitDiffEvidence> {
+    assertGitObjectId(commit);
+    const [diff, files] = await Promise.all([
+      this.git(["show", "--no-ext-diff", "--unified=30", "--format=", commit], this.root),
+      this.git(["show", "--name-only", "--format=", "-z", commit], this.root),
+    ]);
+    const truncated = diff.stdout.length > maxCharacters;
+    return {
+      content: truncated
+        ? `${diff.stdout.slice(0, maxCharacters)}\n\n[diff truncated at ${maxCharacters} characters]`
+        : diff.stdout,
+      changedFiles: parseNulFields(files.stdout),
+      truncated,
+    };
+  }
+
   assertOwnedPaths(files: string[], patterns: string[]): void {
     const violations = files.filter(
       (file) => !patterns.some((pattern) => pathMatchesOwnedPath(file, pattern)),

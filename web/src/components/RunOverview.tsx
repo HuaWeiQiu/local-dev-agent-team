@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { formatElapsed } from "../live-status";
 import { humanizeFailure } from "../presentation";
 import { deriveTimeline } from "../timeline";
-import type { RunEvent, RunState, TaskRunState } from "../types";
+import type { ExplainLine, RunEvent, RunState, TaskRunState } from "../types";
 import { Badge } from "../ui/badge";
 import { Card, SectionTitle } from "../ui/card";
 import { cn } from "../ui/cn";
@@ -13,6 +13,8 @@ import { formatRelative } from "../time";
 interface RunOverviewProps {
   run: RunState | undefined;
   events: RunEvent[];
+  /** One-line, evidence-backed answer to "why is the run in this state". */
+  headline?: ExplainLine | undefined;
   onSelectTask(task: TaskRunState): void;
   onOpenActivity(): void;
 }
@@ -24,7 +26,7 @@ function verdictIcon(verdict: string | undefined, passed?: boolean) {
   return <CircleDashed className="size-4 text-muted/70" aria-label="未开始" />;
 }
 
-export function RunOverview({ run, events, onSelectTask, onOpenActivity }: RunOverviewProps) {
+export function RunOverview({ run, events, headline, onSelectTask, onOpenActivity }: RunOverviewProps) {
   const timeline = useMemo(() => deriveTimeline(run, events).slice(-8).reverse(), [run, events]);
   if (!run) return <div className="grid h-full place-items-center text-sm text-muted">选择一个运行查看概览</div>;
 
@@ -45,6 +47,19 @@ export function RunOverview({ run, events, onSelectTask, onOpenActivity }: RunOv
               <p className="m-0 mt-0.5 text-sm leading-snug text-ink-2">{failure}</p>
             </div>
           </div>
+        )}
+        {headline && (
+          <Card className="p-4">
+            <SectionTitle>结论</SectionTitle>
+            <p
+              className={cn(
+                "m-0 mt-1.5 text-sm font-medium leading-snug",
+                headline.tone === "good" ? "text-success-ink" : headline.tone === "bad" ? "text-danger-ink" : headline.tone === "warn" ? "text-warning-ink" : "text-ink-2",
+              )}
+            >
+              {headline.text}
+            </p>
+          </Card>
         )}
         {(run.plan?.summary || run.finalDecision) && (
           <Card className="p-4">

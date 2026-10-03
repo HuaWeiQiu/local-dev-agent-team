@@ -12,6 +12,7 @@ import {
 import { SessionFactory } from "../sessions/factory.js";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
+import { RunInsights } from "../visibility/service.js";
 import { LocalEvidenceStore } from "../evidence/local.js";
 import type {
   EvidenceFilePreview,
@@ -138,6 +139,7 @@ export class RunSupervisor {
   private finishEvolutionMutation: (() => void) | undefined;
   private automationOwner: symbol | undefined;
   readonly live: LiveSupport;
+  readonly insights: RunInsights;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -155,6 +157,13 @@ export class RunSupervisor {
         events.emit(runId, type, payload);
       }),
     };
+    this.insights = new RunInsights(
+      this.loaded,
+      this.stateStore,
+      this.evidenceStore,
+      events,
+      async (runId) => await this.get(runId),
+    );
     this.retention = new RunRetention(this.loaded, this.stateStore, this.evidenceStore, events, {
       get: async (runId) => await this.get(runId),
       requireRun: async (runId) => await this.requireRun(runId),

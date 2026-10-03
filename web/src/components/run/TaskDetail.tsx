@@ -1,11 +1,12 @@
-import { CheckCircle2, FileCode2, GitBranch, ShieldAlert, TerminalSquare } from "lucide-react";
+import { CheckCircle2, FileCode2, GitBranch, GitCompare, ShieldAlert, TerminalSquare } from "lucide-react";
 import { acceptanceSummary, taskKind, taskKindLabel } from "../../plan-completeness";
 import { humanizeFailure, profileDisplayName } from "../../presentation";
-import type { RunState, TaskRunState } from "../../types";
+import type { RunState, TaskDiff, TaskRunState } from "../../types";
+import { TaskDiffSection } from "../insights/DiffView";
 import { cn } from "../../ui/cn";
 import { Definition, DefinitionList, InlineError, InspectorCode, InspectorSection, Verdict, describeRunFailure } from "./inspector-parts";
 
-export function TaskDetail({ task, run }: { task: TaskRunState; run?: RunState }) {
+export function TaskDetail({ task, run, onLoadDiff }: { task: TaskRunState; run?: RunState; onLoadDiff?: (taskId: string) => Promise<TaskDiff> }) {
   const kind = taskKind(task.task);
   const profile = task.profile ?? task.task.profile ?? undefined;
   return (
@@ -32,6 +33,11 @@ export function TaskDetail({ task, run }: { task: TaskRunState; run?: RunState }
           {task.commit && <Definition term="提交"><InspectorCode>{task.commit.slice(0, 10)}</InspectorCode></Definition>}
         </DefinitionList>
       </InspectorSection>
+      {onLoadDiff && task.attempts > 0 && (
+        <InspectorSection icon={GitCompare} title="改动">
+          <TaskDiffSection taskId={task.task.id} onLoad={onLoadDiff} />
+        </InspectorSection>
+      )}
       <InspectorSection icon={FileCode2} title="负责路径">
         <div className="flex flex-wrap gap-1.5">
           {task.task.ownedPaths.map((item) => (

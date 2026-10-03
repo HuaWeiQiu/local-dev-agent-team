@@ -19,6 +19,12 @@ import type {
   RunCleanupResult,
   RunEvidence,
   LiveAgent,
+  ReplayStep,
+  RunExplanation,
+  RunUsageBreakdown,
+  TaskDiff,
+  Transcript,
+  TranscriptSummary,
   RunState,
   RunSummary,
   StartRunInput,
@@ -266,6 +272,38 @@ export async function respondApproval(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+function runUrl(scope: ProjectScope, runId: string, tail: string): string {
+  return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/${tail}`;
+}
+
+export async function getRunExplanation(scope: ProjectScope, runId: string): Promise<RunExplanation> {
+  return (await request<{ explanation: RunExplanation }>(runUrl(scope, runId, "explain"))).explanation;
+}
+
+export async function getRunUsageBreakdown(scope: ProjectScope, runId: string): Promise<RunUsageBreakdown> {
+  return (await request<{ usage: RunUsageBreakdown }>(runUrl(scope, runId, "usage"))).usage;
+}
+
+export async function getRunReplay(scope: ProjectScope, runId: string): Promise<ReplayStep[]> {
+  return (await request<{ steps: ReplayStep[] }>(runUrl(scope, runId, "replay"))).steps;
+}
+
+export async function getTranscripts(scope: ProjectScope, runId: string): Promise<TranscriptSummary[]> {
+  return (await request<{ transcripts: TranscriptSummary[] }>(runUrl(scope, runId, "transcripts"))).transcripts;
+}
+
+export async function getTranscript(scope: ProjectScope, runId: string, id: string): Promise<Transcript> {
+  return (
+    await request<{ transcript: Transcript }>(runUrl(scope, runId, `transcript?id=${encodeURIComponent(id)}`))
+  ).transcript;
+}
+
+export async function getTaskDiff(scope: ProjectScope, runId: string, taskId: string): Promise<TaskDiff> {
+  return (
+    await request<{ diff: TaskDiff }>(runUrl(scope, runId, `tasks/${encodeURIComponent(taskId)}/diff`))
+  ).diff;
 }
 
 export async function getRunAgents(scope: ProjectScope, runId: string): Promise<LiveAgent[]> {
