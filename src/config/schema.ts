@@ -358,6 +358,19 @@ export const workflowConfigSchema = z
     template: z.enum(["auto", "quick", "standard", "full"]).default("auto"),
     /** `auto` uses live Codex/Claude sessions (steer, interrupt, ask-user) when the CLI supports them. */
     sessions: z.enum(["auto", "off"]).default("auto"),
+    /** Interrupt and nudge a live agent that produced no output for this long; 0 disables. */
+    stallSeconds: z.number().min(0).max(86_400).default(600),
+    maxStallRecoveries: z.number().int().min(0).max(10).default(2),
+    /** Rerun a failing quality command this many times before treating it as a real failure. */
+    flakyReruns: z.number().int().min(0).max(3).default(1),
+    /** Optional per-task caps so one runaway task blocks itself instead of draining the run budget. */
+    taskBudget: z
+      .object({
+        maxAgentInvocations: z.number().int().min(1).optional(),
+        maxMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

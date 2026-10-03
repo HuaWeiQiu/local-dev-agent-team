@@ -41,7 +41,7 @@ interface Emitted {
   payload: Record<string, unknown>;
 }
 
-function fixture() {
+function fixture(workflow?: { stallSeconds: number; maxStallRecoveries: number }) {
   const emitted: Emitted[] = [];
   const emit = (runId: string, type: string, payload: unknown) => {
     emitted.push({ runId, type, payload: payload as Record<string, unknown> });
@@ -57,6 +57,15 @@ function fixture() {
     timeoutSeconds: 60,
     args: [],
   };
+  if (workflow) {
+    config.workflow = {
+      engine: "v2",
+      template: "auto",
+      sessions: "auto",
+      flakyReruns: 1,
+      ...workflow,
+    };
+  }
   config.roles.worker = {
     defaultProfile: "fake-codex",
     allowedProfiles: ["fake-codex"],
@@ -258,5 +267,32 @@ describe("LiveAgentRegistry", () => {
     expect(registry.list("r1")).toHaveLength(1);
     handle.detach();
     expect(registry.list("r1")).toHaveLength(0);
+  });
+});
+
+describe("stall watchdog", () => {
+  it("interrupts a silent agent and continues the same task", async () => {
+    const { run, emitted } = fixture({ stallSeconds: 0.3, maxStallRecoveries: 2 });
+    const result = await run("stall-run", "slow");
+    expect(result.text).toContain("stopped producing output");
+    const stalled = emitted.filter((event) => event.type === "agent.stalled");
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]?.payload).toMatchObject({ role: "worker", taskId: "T1", recovery: 1, maxRecoveries: 2 });
+  });
+
+  it("fails as a timeout once recoveries are exhausted", async () => {
+    const { run, emitted } = fixture({ stallSeconds: 0.2, maxStallRecoveries: 1 });
+    await expect(run("stall-forever-run", "hangforever")).rejects.toThrow(/stalled/i);
+    expect(emitted.filter((event) => event.type === "agent.stalled")).toHaveLength(2);
+  });
+
+  it("stays quiet when the watchdog is disabled", async () => {
+    const { run, registry } = fixture({ stallSeconds: 0, maxStallRecoveries: 2 });
+    const pending = run("no-stall-run", "slow");
+    const agent = await until(() => registry.list("no-stall-run")[0]);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(registry.list("no-stall-run")).toHaveLength(1);
+    await retry(() => registry.steer("no-stall-run", agent.id, "go", "lead"));
+    await expect(pending).resolves.toMatchObject({ text: "steered:go" });
   });
 });

@@ -74,6 +74,23 @@ export interface FlowTemplate {
     advisor: "strategy" | "force" | "off";
     planGate: "strategy" | "force" | "off";
   };
+  /**
+   * Retry-or-consult policy between rework attempts. A template without an
+   * advisor can still stop early instead of repeating a failure that did not change.
+   */
+  triage: {
+    stopAfterIdenticalFailures?: number;
+  };
+}
+
+export type TriageDecision = "retry" | "consult" | "stop";
+
+export interface TriageEvent {
+  taskId: string;
+  attempt: number;
+  decision: TriageDecision;
+  source: "signature" | "jev" | "advisor" | "limit";
+  reason: string;
 }
 
 export type FlowSelectionSource = "router" | "user" | "config" | "evaluation";

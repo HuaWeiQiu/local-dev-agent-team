@@ -18,6 +18,7 @@ import {
   type FlowSelection,
   type FlowTemplateName,
   type RunNodeKind,
+  type TriageEvent,
 } from "../flow/index.js";
 import {
   advisorVerdictSchema,
@@ -57,11 +58,9 @@ import {
 } from "../domain/plan.js";
 import { GitManager } from "../git/manager.js";
 import { ensureWorktreeNodeModules, formatQualityFailure } from "../quality/install.js";
-import {
-  deduplicateCommands,
-  runQualityCommands,
-  type QualityReport,
-} from "../quality/run.js";
+import { runQualityWithRerun } from "../quality/flaky.js";
+import { deduplicateCommands, type QualityReport } from "../quality/run.js";
+import { TaskBudgetAgent, TaskBudgetExceededError } from "../reliability/task-budget.js";
 import { RunStateStore } from "../state/store.js";
 import type {
   ApprovalRequest,
@@ -193,6 +192,8 @@ export interface WorkflowResumeOptions {
   signal?: AbortSignal;
   supervisorId?: string;
 }
+
+const DEFAULT_FLAKY_RERUNS = 1;
 
 export class LocalWorkflowRunner {
   private readonly runsDirectory: string;
@@ -572,14 +573,16 @@ export class LocalWorkflowRunner {
           signal,
           state.strategy.maxProcessOutputBytes,
         );
-        state.finalQuality = await runQualityCommands(
+        state.finalQuality = await runQualityWithRerun(
           state.integrationWorktree,
           this.loaded.config.quality.commands,
           this.loaded.config.quality.commandTimeoutSeconds,
           store.artifactDirectory(state.id, recoveryArtifactKey(state, "final-quality")),
           signal,
           { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+          this.flakyReruns(),
         );
+        this.noteFlaky(state, store, state.finalQuality);
         await budget.recordQuality(state.finalQuality);
         await store.save(state);
         return "done";
@@ -1447,13 +1450,27 @@ export class LocalWorkflowRunner {
     taskState: TaskRunState,
     store: RunStateStore,
     git: GitManager,
-    agent: RoleAgentService,
+    baseAgent: RoleAgentService,
     budget: RunBudgetTracker,
     signal?: AbortSignal,
   ): Promise<void> {
     if (!taskState.worktree || !state.plan) {
       throw new Error(`Task '${taskState.task.id}' worktree is not initialized`);
     }
+    const taskBudget = this.loaded.config.workflow?.taskBudget;
+    const agent: RoleAgentService = taskBudget
+      ? new TaskBudgetAgent(
+          baseAgent,
+          taskState.task.id,
+          taskBudget,
+          taskState.agentInvocations ?? 0,
+          (count) => {
+            taskState.agentInvocations = count;
+          },
+        )
+      : baseAgent;
+    const triagePolicy = (state.flow ? activeFlow(state.flow) : undefined)?.template.triage;
+    let identicalFailures = 0;
     const maxAttempts = state.strategy.maxReworkAttempts + 1;
     let feedback = "";
     let lastReworkExperienceIds: string[] = [];
@@ -1498,6 +1515,7 @@ export class LocalWorkflowRunner {
         // a blind retry is unlikely to help, so escalate to the architect.
         const currentSignature = computeFailureSignature(failureInput);
         const repeated = isRepeatedFailure(previousSignature, currentSignature);
+        identicalFailures = repeated ? identicalFailures + 1 : 1;
         previousSignature = currentSignature;
         failureInput = undefined;
         architectAdvice = undefined;
@@ -1542,6 +1560,13 @@ export class LocalWorkflowRunner {
             },
           });
           if (verdict?.recommendation === "stop") {
+            this.emitTriage(state, store, {
+              taskId: taskState.task.id,
+              attempt,
+              decision: "stop",
+              source: "advisor",
+              reason: verdict.summary,
+            });
             taskState.status = "blocked";
             taskState.error = `Architect advisor stopped the task after a repeated failure: ${verdict.summary}`;
             await store.save(state);
@@ -1549,6 +1574,30 @@ export class LocalWorkflowRunner {
           }
           architectAdvice = verdict;
         }
+        const stopAfter = triagePolicy?.stopAfterIdenticalFailures;
+        if (stopAfter !== undefined && repeated && identicalFailures >= stopAfter && !architectAdvice) {
+          const reason = `The same failure repeated ${identicalFailures} times: ${currentSignature.summary}`;
+          this.emitTriage(state, store, {
+            taskId: taskState.task.id,
+            attempt,
+            decision: "stop",
+            source: "limit",
+            reason,
+          });
+          taskState.status = "blocked";
+          taskState.error = `Stopped after a repeated identical failure: ${currentSignature.summary}`;
+          await store.save(state);
+          return;
+        }
+        this.emitTriage(state, store, {
+          taskId: taskState.task.id,
+          attempt,
+          decision: architectAdvice ? "consult" : "retry",
+          source: architectAdvice ? (escalatedBy === "jev" ? "jev" : "advisor") : "signature",
+          reason: repeated
+            ? `Repeated failure: ${currentSignature.summary}`
+            : `New failure: ${currentSignature.summary}`,
+        });
       }
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
@@ -1655,6 +1704,12 @@ export class LocalWorkflowRunner {
           // rework feedback; never spin them into further attempts.
           throw error;
         }
+        if (error instanceof TaskBudgetExceededError) {
+          taskState.status = "blocked";
+          taskState.error = error.message;
+          await store.save(state);
+          return;
+        }
         feedback = error instanceof Error ? error.message : String(error);
         failureInput = { errorMessage: feedback };
         await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
@@ -1670,6 +1725,28 @@ export class LocalWorkflowRunner {
     taskState.status = "blocked";
     taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
     await store.save(state);
+  }
+
+  private flakyReruns(): number {
+    return this.loaded.config.workflow?.flakyReruns ?? DEFAULT_FLAKY_RERUNS;
+  }
+
+  private noteFlaky(
+    state: RunState,
+    store: RunStateStore,
+    quality: QualityReport,
+    taskId?: string,
+  ): void {
+    if (!quality.flaky?.length) return;
+    store.emit(state.id, "quality.flaky", {
+      ...(taskId ? { taskId } : {}),
+      commands: quality.flaky.map((spec) => [spec.command, ...spec.args].join(" ")),
+      reruns: quality.reruns ?? 1,
+    });
+  }
+
+  private emitTriage(state: RunState, store: RunStateStore, event: TriageEvent): void {
+    if (state.flow) store.emit(state.id, "flow.triage", event);
   }
 
   private canConsultAdvisor(state: RunState, trigger: AdvisorTrigger): boolean {
@@ -1906,7 +1983,7 @@ export class LocalWorkflowRunner {
       ...projectCommands,
       ...taskState.task.acceptanceCommands,
     ]);
-    const quality = await runQualityCommands(
+    const quality = await runQualityWithRerun(
       worktree,
       commands,
       this.loaded.config.quality.commandTimeoutSeconds,
@@ -1916,7 +1993,9 @@ export class LocalWorkflowRunner {
       ),
       signal,
       { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+      this.flakyReruns(),
     );
+    this.noteFlaky(state, store, quality, taskState.task.id);
     await budget.recordQuality(quality);
     taskState.quality = quality;
     return quality;

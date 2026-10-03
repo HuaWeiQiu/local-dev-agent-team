@@ -8,6 +8,7 @@ import { AgentInvocationError, invokeAgent } from "../adapters/invoke.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import { adapterRoleWarning, assertAdapterProfile } from "../adapters/conformance.js";
 import { invokeLive, type LiveSupport } from "./live-invoke.js";
+import { DEFAULT_MAX_STALL_RECOVERIES, DEFAULT_STALL_SECONDS } from "../reliability/stall.js";
 import { OperatorInterruptError } from "../interventions/registry.js";
 import type { AgentRunResult } from "../adapters/types.js";
 import type { RunStateStore } from "../state/store.js";
@@ -261,6 +262,10 @@ export class ProfiledAgentService implements RoleAgentService {
               ...(taskIdFromContext(options.context) ? { taskId: taskIdFromContext(options.context)! } : {}),
               ...(outputSchema ? { outputSchema } : {}),
               ...(this.signal ? { signal: this.signal } : {}),
+              stall: {
+                stallSeconds: this.config.workflow?.stallSeconds ?? DEFAULT_STALL_SECONDS,
+                maxRecoveries: this.config.workflow?.maxStallRecoveries ?? DEFAULT_MAX_STALL_RECOVERIES,
+              },
               onText: (chunk) => {
                 batcher.push("stdout", boundedOutputChunk(chunk));
               },

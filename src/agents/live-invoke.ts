@@ -7,6 +7,7 @@ import type { AgentProfile } from "../config/schema.js";
 import { OperatorInterruptError, type LiveAgentRegistry } from "../interventions/registry.js";
 import { beginLiveChild } from "../process/live-children.js";
 import { resolveAgentTeamStateRoot } from "../process/state-root.js";
+import { StallWatchdog } from "../reliability/stall.js";
 import {
   classifyProviderFailure,
   ProviderFailureError,
@@ -40,7 +41,18 @@ export interface LiveInvokeOptions {
   signal?: AbortSignal;
   onText?: (chunk: string) => void;
   onSessionEvent?: (event: SessionEvent) => void;
+  /** Interrupt and nudge a turn silent for `stallSeconds`; omitted or 0 disables the watchdog. */
+  stall?: { stallSeconds: number; maxRecoveries: number };
 }
+
+interface StallState {
+  pending: boolean;
+  recoveries: number;
+  watchdog?: StallWatchdog | undefined;
+}
+
+const STALL_CONTINUATION_PROMPT =
+  "Your previous turn stopped producing output and was interrupted. Continue the original task from where you left off, keep to the original output format, and finish with the required final answer.";
 
 /** Redirects after an operator interrupt are bounded so a loop cannot burn the budget. */
 const MAX_REDIRECTS = 5;
@@ -81,7 +93,35 @@ export async function invokeLive(options: LiveInvokeOptions): Promise<AgentRunRe
   );
   const log = createWriteStream(path.join(options.artifactDirectory, "stdout.log"), { flags: "w" });
   const events = createWriteStream(path.join(options.artifactDirectory, "session.jsonl"), { flags: "w" });
+  const stallState: StallState = { pending: false, recoveries: 0 };
+  const toolsInFlight = new Set<string>();
+  const stallSeconds = options.stall?.stallSeconds ?? 0;
+  const watchdog =
+    stallSeconds > 0 && session.capabilities.interrupt
+      ? new StallWatchdog({
+          stallMs: stallSeconds * 1000,
+          isPaused: () => toolsInFlight.size > 0 || handle.awaitingAnswer(),
+          onStall: (idleMs) => {
+            stallState.pending = true;
+            handle.noteStall({
+              idleSeconds: Math.round(idleMs / 1000),
+              recovery: stallState.recoveries + 1,
+              maxRecoveries: options.stall?.maxRecoveries ?? 0,
+            });
+            void session.interrupt().catch(() => undefined);
+          },
+        })
+      : undefined;
+  stallState.watchdog = watchdog;
+  watchdog?.start();
   const unsubscribe = session.onEvent((event) => {
+    watchdog?.touch();
+    if (event.type === "tool") {
+      if (event.status === "started") toolsInFlight.add(event.toolId);
+      else toolsInFlight.delete(event.toolId);
+    } else if (event.type === "turn-completed") {
+      toolsInFlight.clear();
+    }
     if (event.type === "text-delta") {
       log.write(event.text);
       options.onText?.(event.text);
@@ -92,7 +132,7 @@ export async function invokeLive(options: LiveInvokeOptions): Promise<AgentRunRe
   });
   const startedAt = Date.now();
   try {
-    const result = await runWithRedirects(session, handle, options);
+    const result = await runWithRedirects(session, handle, options, stallState);
     return {
       text: result.text,
       ...(result.structured !== undefined ? { structured: result.structured } : {}),
@@ -109,6 +149,7 @@ export async function invokeLive(options: LiveInvokeOptions): Promise<AgentRunRe
       },
     };
   } finally {
+    watchdog?.stop();
     unsubscribe();
     handle.detach();
     log.end();
@@ -122,6 +163,7 @@ async function runWithRedirects(
   session: AgentSession,
   handle: { takeInterrupt(): { actor: string; note?: string } | undefined },
   options: LiveInvokeOptions,
+  stall: StallState,
 ): Promise<TurnResult> {
   let prompt = options.prompt;
   const timeoutMs = options.profile.timeoutSeconds * 1000;
@@ -132,8 +174,12 @@ async function runWithRedirects(
       ...(options.signal ? { signal: options.signal } : {}),
       timeoutMs,
     });
-    if (result.status === "completed") return result;
+    if (result.status === "completed") {
+      stall.pending = false;
+      return result;
+    }
     if (result.status === "failed") {
+      stall.pending = false;
       const message = result.error ?? "agent turn failed";
       throw new ProviderFailureError(
         message,
@@ -145,6 +191,26 @@ async function runWithRedirects(
     }
     options.signal?.throwIfAborted();
     const directive = handle.takeInterrupt();
+    if (!directive && stall.pending) {
+      stall.pending = false;
+      stall.recoveries += 1;
+      const maxRecoveries = options.stall?.maxRecoveries ?? 0;
+      if (stall.recoveries > maxRecoveries) {
+        const message = `Agent stalled: no output for ${options.stall?.stallSeconds}s after ${maxRecoveries} recovery attempt(s)`;
+        throw new ProviderFailureError(
+          message,
+          classifyProviderFailure({ message, timedOut: true }),
+          options.profileName,
+          options.adapterName,
+          options.profile.model,
+        );
+      }
+      prompt = STALL_CONTINUATION_PROMPT;
+      stall.watchdog?.rearm();
+      redirect -= 1;
+      continue;
+    }
+    stall.pending = false;
     if (!directive) {
       throw new SessionError("agent turn was interrupted unexpectedly", "protocol");
     }

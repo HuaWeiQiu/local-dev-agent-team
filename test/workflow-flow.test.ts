@@ -141,6 +141,82 @@ describe("flow-driven workflow", () => {
     expect(agent.roles).not.toContain("reviewer");
   }, 60_000);
 
+  it("stops the quick template when the same failure repeats instead of burning every attempt", async () => {
+    const loaded = await fixture("quick-repeat", (config) => {
+      config.quality.commands = [{ command: process.execPath, args: ["-e", "process.exit(1)"] }];
+    });
+    const agent = new RecordingAgentService();
+    const { events, sink } = recorder();
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => agent,
+      eventSink: sink,
+    }).run({ goal: "Fix the typo in README", template: "quick" });
+
+    expect(state.tasks[0]?.status).toBe("blocked");
+    expect(state.tasks[0]?.error).toMatch(/repeated identical failure/);
+    expect(state.tasks[0]?.attempts).toBe(2);
+    expect(agent.roles.filter((role) => role === "worker")).toHaveLength(2);
+    const triage = foldFlowEvents(events as RunEvent[]).triage ?? [];
+    expect(triage.map((item) => [item.attempt, item.decision, item.source])).toEqual([
+      [2, "retry", "signature"],
+      [3, "stop", "limit"],
+    ]);
+  }, 60_000);
+
+  it("treats a quality command that passes on rerun as flaky instead of reworking", async () => {
+    const marker = path.join(await mkdtemp(path.join(tmpdir(), "agent-team-flaky-marker-")), "runs");
+    const loaded = await fixture("flaky", (config) => {
+      config.quality.commands = [
+        {
+          command: process.execPath,
+          args: [
+            "-e",
+            `const fs=require("fs");const f=${JSON.stringify(marker)};` +
+              'const n=(fs.existsSync(f)?Number(fs.readFileSync(f,"utf8")):0)+1;fs.writeFileSync(f,String(n));' +
+              "process.exit(n>=2?0:1)",
+          ],
+        },
+      ];
+    });
+    const agent = new RecordingAgentService();
+    const { events, sink } = recorder();
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => agent,
+      eventSink: sink,
+    }).run({ goal: "Fix the typo in README", template: "quick" });
+
+    expect(state.tasks[0]?.status).toBe("merged");
+    expect(state.tasks[0]?.attempts).toBe(1);
+    expect(state.tasks[0]?.quality?.flaky).toHaveLength(1);
+    expect(events.some((event) => event.type === "quality.flaky")).toBe(true);
+  }, 60_000);
+
+  it("blocks one task that exceeds its agent budget without ending the run", async () => {
+    const loaded = await fixture("task-budget", (config) => {
+      config.quality.commands = [{ command: process.execPath, args: ["-e", "process.exit(1)"] }];
+      config.strategies = undefined;
+      config.workflow = {
+        engine: "v2",
+        template: "auto",
+        sessions: "auto",
+        stallSeconds: 600,
+        maxStallRecoveries: 2,
+        flakyReruns: 0,
+        taskBudget: { maxAgentInvocations: 1 },
+      };
+    });
+    const agent = new RecordingAgentService();
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => agent,
+    }).run({ goal: "Fix the typo in README", template: "standard" });
+
+    const task = state.tasks[0];
+    expect(task?.status).toBe("blocked");
+    expect(task?.error).toMatch(/budget of 1 agent invocation/);
+    expect(task?.agentInvocations).toBe(1);
+    expect(agent.roles.filter((role) => role === "worker")).toHaveLength(1);
+  }, 60_000);
+
   it("parks the full template at plan approval and records the parked node", async () => {
     const loaded = await fixture("full");
     const agent = new RecordingAgentService();

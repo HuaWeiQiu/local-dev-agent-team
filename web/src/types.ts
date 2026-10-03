@@ -310,8 +310,11 @@ export interface TaskRunState {
   worktree?: string;
   commit?: string;
   profile?: string;
+  agentInvocations?: number;
   quality?: {
     passed: boolean;
+    flaky?: Array<{ command: string; args: string[] }>;
+    reruns?: number;
     commands: Array<{
       spec: { command: string; args: string[] };
       exitCode: number | null;

@@ -15,6 +15,7 @@ if (process.env.FAKE_LOG) {
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnCounter = 0;
 let current;
+let hangForever = false;
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -52,6 +53,8 @@ function startTurn(message) {
   current = { id: `turn-${++turnCounter}`, prompt, schema: message.params.outputSchema };
   send({ id: message.id, result: { turn: { id: current.id, items: [], status: "inProgress" } } });
   send({ method: "turn/started", params: { threadId: "thr-1", turn: { id: current.id, status: "inProgress" } } });
+  if (/\bhangforever\b/.test(prompt)) hangForever = true;
+  if (hangForever) return;
   if (/\bslow\b/.test(prompt)) {
     send({ method: "item/agentMessage/delta", params: { threadId: "thr-1", turnId: current.id, itemId: "m1", delta: "working" } });
     return;

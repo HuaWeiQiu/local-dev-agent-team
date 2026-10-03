@@ -57,6 +57,8 @@ export interface TaskRunState {
    */
   merging?: string;
   profile?: string;
+  /** Agent invocations this task has used; checked against `workflow.taskBudget`. */
+  agentInvocations?: number;
   quality?: QualityReport;
   review?: ReviewVerdict;
   test?: TestVerdict;

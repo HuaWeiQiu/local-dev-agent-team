@@ -55,6 +55,10 @@ export interface LiveAgentHandle {
   readonly id: string;
   /** Returns and clears an operator interrupt requested for the current turn. */
   takeInterrupt(): InterruptDirective | undefined;
+  /** True while a question waits for the operator; silence is expected then. */
+  awaitingAnswer(): boolean;
+  /** Records that the stall watchdog interrupted the agent. */
+  noteStall(info: { idleSeconds: number; recovery: number; maxRecoveries: number }): void;
   detach(): void;
 }
 
@@ -137,6 +141,15 @@ export class LiveAgentRegistry {
         const directive = entry.interrupt;
         delete entry.interrupt;
         return directive;
+      },
+      awaitingAnswer: () => view.status === "awaiting-answer",
+      noteStall: (info) => {
+        this.emit(input.runId, "agent.stalled", {
+          agentId: id,
+          role: input.role,
+          ...(input.taskId ? { taskId: input.taskId } : {}),
+          ...info,
+        });
       },
       detach: () => {
         if (!this.entries.delete(id)) return;

@@ -1,6 +1,6 @@
 import type { RunEvent } from "../events/types.js";
 import type { FlowNodeStatus } from "./executor.js";
-import type { FlowSelection, RunNodeKind } from "./types.js";
+import type { FlowSelection, RunNodeKind, TriageEvent } from "./types.js";
 
 export interface FlowNodeProgress {
   nodeId: RunNodeKind;
@@ -15,6 +15,8 @@ export interface FlowNodeProgress {
 export interface FlowProgress {
   selection?: FlowSelection;
   nodes: FlowNodeProgress[];
+  /** Retry-or-consult decisions taken between rework attempts, in order. */
+  triage?: TriageEvent[];
   /** The node a run is working in, or parked at, right now. */
   current?: RunNodeKind;
 }
@@ -30,6 +32,10 @@ export function foldFlowEvents(events: readonly RunEvent[]): FlowProgress {
   for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
     if (event.type === "flow.selected") {
       progress.selection = event.payload as FlowSelection;
+      continue;
+    }
+    if (event.type === "flow.triage") {
+      (progress.triage ??= []).push(event.payload as TriageEvent);
       continue;
     }
     if (event.type !== "flow.node") continue;

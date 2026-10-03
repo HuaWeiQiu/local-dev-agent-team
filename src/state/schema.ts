@@ -75,6 +75,7 @@ const taskRunStateSchema = z.looseObject({
   commit: z.string().optional(),
   mergeCommit: z.string().optional(),
   profile: z.string().optional(),
+  agentInvocations: z.number().optional(),
   quality: nested<QualityReport>().optional(),
   review: nested<ReviewVerdict>().optional(),
   test: nested<TestVerdict>().optional(),

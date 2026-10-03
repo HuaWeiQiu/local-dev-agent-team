@@ -88,6 +88,7 @@ export const FLOW_TEMPLATES: Readonly<Record<FlowTemplateName, FlowTemplate>> = 
     run: quickRun,
     task: quickTask,
     strategy: { explore: "strategy", advisor: "off", planGate: "off" },
+    triage: { stopAfterIdenticalFailures: 2 },
   },
   standard: {
     name: "standard",
@@ -96,6 +97,7 @@ export const FLOW_TEMPLATES: Readonly<Record<FlowTemplateName, FlowTemplate>> = 
     run: standardRun,
     task: standardTask,
     strategy: { explore: "strategy", advisor: "strategy", planGate: "strategy" },
+    triage: {},
   },
   full: {
     name: "full",
@@ -104,6 +106,7 @@ export const FLOW_TEMPLATES: Readonly<Record<FlowTemplateName, FlowTemplate>> = 
     run: standardRun,
     task: standardTask,
     strategy: { explore: "force", advisor: "force", planGate: "force" },
+    triage: {},
   },
 };
 
