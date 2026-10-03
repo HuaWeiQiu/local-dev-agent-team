@@ -1,9 +1,0 @@
-/* 策略编排已迁移到 Tailwind；此处只保留仍被其他组件共用的规则。 */
-
-.field-label {
-  display: block;
-  margin-bottom: 7px;
-  color: var(--ink-2);
-  font-size: var(--text-11);
-  font-weight: var(--weight-bold);
-}
