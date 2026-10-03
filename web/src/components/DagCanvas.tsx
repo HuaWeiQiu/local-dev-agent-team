@@ -1,15 +1,16 @@
 import { Background, BackgroundVariant, Controls, MarkerType, MiniMap, ReactFlow } from "@xyflow/react";
-import { Network } from "lucide-react";
 import { memo, useMemo } from "react";
 import { useFlowPalette } from "../flow-theme";
 import { buildTaskGraph, TASK_NODE_GRID, TASK_NODE_GRID_COMPACT, type TaskNodeData } from "../graph";
 import { completenessBarCopy, planCompletenessForRun, taskKind } from "../plan-completeness";
-import { canvasEmptyCopy, humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
-import type { RunState, TaskRunState } from "../types";
+import { humanizeFailure, statusTone, strategyDisplayName, summarizeGoal } from "../presentation";
+import type { StageId } from "../stages";
+import type { RunEvent, RunState, TaskRunState } from "../types";
 import { useMediaQuery } from "../useMediaQuery";
 import { Badge } from "../ui/badge";
 import { Callout } from "../ui/form";
-import { EmptyState } from "./EmptyState";
+import { ArchitectureDiagram } from "./architecture/ArchitectureDiagram";
+import { ProcessDiagram } from "./architecture/ProcessDiagram";
 import { PlanCompleteness } from "./run/PlanCompleteness";
 import { TaskNode } from "./run/TaskNode";
 
@@ -17,11 +18,25 @@ const nodeTypes = { task: TaskNode };
 
 interface DagCanvasProps {
   run: RunState | undefined;
+  events?: RunEvent[];
   selectedTaskId: string | undefined;
+  selectedStageId?: StageId;
+  selectedModuleId?: string;
   onSelectTask(task: TaskRunState): void;
+  onSelectStage?(id: StageId): void;
+  onSelectModule?(id: string): void;
 }
 
-export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelectTask }: DagCanvasProps) {
+export const DagCanvas = memo(function DagCanvas({
+  run,
+  events = [],
+  selectedTaskId,
+  selectedStageId,
+  selectedModuleId,
+  onSelectTask,
+  onSelectStage,
+  onSelectModule,
+}: DagCanvasProps) {
   const compactLayout = useMediaQuery("(max-width: 800px)");
   const palette = useFlowPalette();
   const graph = useMemo(
@@ -62,7 +77,6 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
     [graph.edges, palette.edgeActive, selectedTaskId],
   );
   const completedTasks = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
-  const emptyCopy = canvasEmptyCopy(run);
   const completeness = run ? planCompletenessForRun(run) : undefined;
   const completenessCopy = completeness ? completenessBarCopy(completeness) : undefined;
   const thinReconWarning = Boolean(
@@ -76,7 +90,7 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
   const hasBanners = Boolean(completeness && completenessCopy) || thinReconWarning || Boolean(run?.error);
 
   return (
-    <section aria-label="任务依赖图" className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+    <section aria-label="架构与任务图" className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
       <div className="canvas-heading contents">
         <header className="bd-b flex flex-wrap items-center gap-x-4 gap-y-1.5 bg-surface px-4 py-2.5 md:px-6">
           <h2 className="m-0 min-w-0 flex-1 basis-56 truncate text-sm font-semibold leading-snug text-ink" title={run?.goal}>
@@ -119,8 +133,28 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
           )}
         </div>
       )}
+      <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto">
+      {run && nodes.length > 0 && (
+        <>
+          <div className="px-4 pt-3 md:px-6">
+            <ProcessDiagram
+              run={run}
+              events={events}
+              variant="strip"
+              {...(selectedStageId ? { selectedStageId } : {})}
+              onSelectStage={onSelectStage ?? (() => undefined)}
+            />
+          </div>
+          <ArchitectureDiagram
+            tasks={run.tasks}
+            {...(run.plan?.design ? { design: run.plan.design } : {})}
+            {...(selectedModuleId ? { selectedModuleId } : {})}
+            onSelectModule={onSelectModule ?? (() => undefined)}
+          />
+        </>
+      )}
       {nodes.length > 0 ? (
-        <div className="relative min-h-72 flex-1">
+        <div className="relative h-[440px] shrink-0">
           <div className="absolute inset-0">
             <ReactFlow
               nodes={nodes}
@@ -148,9 +182,20 @@ export const DagCanvas = memo(function DagCanvas({ run, selectedTaskId, onSelect
             </ReactFlow>
           </div>
         </div>
-      ) : (
-        <EmptyState icon={<Network />} title={emptyCopy.title} hint={emptyCopy.detail} />
-      )}
+      ) : run ? (
+        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6">
+          <p className="m-0 mb-3 text-sm text-ink-2">
+            架构还在拆任务。下面每一步都可以点开看正在发生什么，不用干等。
+          </p>
+          <ProcessDiagram
+            run={run}
+            events={events}
+            {...(selectedStageId ? { selectedStageId } : {})}
+            onSelectStage={onSelectStage ?? (() => undefined)}
+          />
+        </div>
+      ) : null}
+      </div>
     </section>
   );
 });

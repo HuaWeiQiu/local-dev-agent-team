@@ -1,3 +1,4 @@
+import { designIssues } from "../domain/architecture-design.js";
 import type { TaskPlan } from "../domain/contracts.js";
 import { taskPlanSchema } from "../domain/contracts.js";
 import { validateTaskPlan } from "../domain/plan.js";
@@ -25,6 +26,12 @@ export function parseEditedPlan(input: unknown, config: AgentTeamConfig): TaskPl
   }
   const plan = parsed.data;
   validateTaskPlan(plan);
+  if (plan.design) {
+    const issues = designIssues(plan);
+    if (issues.length > 0) {
+      throw new Error(`Edited plan design does not match its tasks: ${issues.join("; ")}`);
+    }
+  }
   const allowed = config.roles.worker?.allowedProfiles ?? [];
   for (const task of plan.tasks) {
     if (task.profile !== null && !allowed.includes(task.profile)) {

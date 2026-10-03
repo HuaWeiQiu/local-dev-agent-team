@@ -463,27 +463,14 @@ export const activeRunStatuses: ReadonlySet<string> = new Set([
 
 /**
  * Default main workspace panel when opening a run.
- * Prefer live activity when there is no task graph yet or the run failed early.
+ * The architecture view is the live process: stages stay clickable even
+ * before the architect has published a task graph.
  */
-export function preferredMonitorPanel(run: {
+export function preferredMonitorPanel(_run: {
   status: RunStatus;
   tasks: unknown[];
   error?: string;
 } | undefined): "graph" | "activity" {
-  if (!run) return "graph";
-  if (run.tasks.length > 0) return "graph";
-  if (
-    run.status === "orchestrating" ||
-    run.status === "exploring" ||
-    run.status === "architecting" ||
-    run.status === "created" ||
-    run.status === "blocked" ||
-    run.status === "cancelled" ||
-    run.status === "interrupted" ||
-    Boolean(run.error)
-  ) {
-    return "activity";
-  }
   return "graph";
 }
 

@@ -159,8 +159,8 @@ describe("web workbench projections", () => {
     expect(formatExperienceCondition("topology=parallel-dag")).toBe("拓扑：依赖并行");
     expect(formatExperienceTag("failure")).toBe("失败");
     expect(formatExperienceTag("tooling")).toBe("工具");
-    expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("activity");
-    expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("activity");
+    expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("graph");
+    expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("graph");
     expect(preferredMonitorPanel({ status: "implementing", tasks: [{}] })).toBe("graph");
   });
 
@@ -182,8 +182,8 @@ describe("web workbench projections", () => {
     expect(formatExperienceCondition("topology=parallel-dag")).toBe("拓扑：依赖并行");
     expect(formatExperienceTag("failure")).toBe("失败");
     expect(formatExperienceTag("tooling")).toBe("工具");
-    expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("activity");
-    expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("activity");
+    expect(preferredMonitorPanel({ status: "orchestrating", tasks: [] })).toBe("graph");
+    expect(preferredMonitorPanel({ status: "blocked", tasks: [], error: "x" })).toBe("graph");
     expect(preferredMonitorPanel({ status: "implementing", tasks: [{}] })).toBe("graph");
   });
 

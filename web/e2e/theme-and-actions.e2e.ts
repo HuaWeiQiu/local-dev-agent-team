@@ -31,7 +31,7 @@ test("dark color scheme renders workbench and strategy composer without errors",
     fullPage: false,
   });
   await openRun(page, "实现订单退款幂等控制并提供可视化审计");
-  await openRunTab(page, "任务图");
+  await openRunTab(page, "架构");
   await expect(page.locator(".react-flow__node").first()).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath(`${testInfo.project.name}-dark-workbench.png`),

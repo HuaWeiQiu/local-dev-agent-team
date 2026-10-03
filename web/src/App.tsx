@@ -125,14 +125,14 @@ export default function App({ demo = false }: { demo?: boolean }) {
         })
       : "graph";
     setSelectedRunId(runId);
-    setMonitorPanel(early === "activity" ? "activity" : "overview");
+    setMonitorPanel(early);
     setMonitorView("run");
     setWorkspaceMode("monitor");
     setNavOpen(false);
   }, [runs, setSelectedRunId]);
 
-  const handleSelectTask = useCallback((task: TaskRunState) => {
-    setSelectedTaskId(task.task.id);
+  const handleSelectTask = useCallback((task: TaskRunState | undefined) => {
+    setSelectedTaskId(task?.task.id);
   }, [setSelectedTaskId]);
 
   const selectProject = useCallback((projectId: string) => {

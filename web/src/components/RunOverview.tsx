@@ -17,6 +17,7 @@ interface RunOverviewProps {
   headline?: ExplainLine | undefined;
   onSelectTask(task: TaskRunState): void;
   onOpenActivity(): void;
+  onOpenArchitecture?(): void;
 }
 
 function verdictIcon(verdict: string | undefined, passed?: boolean) {
@@ -26,7 +27,7 @@ function verdictIcon(verdict: string | undefined, passed?: boolean) {
   return <CircleDashed className="size-4 text-muted/70" aria-label="未开始" />;
 }
 
-export function RunOverview({ run, events, headline, onSelectTask, onOpenActivity }: RunOverviewProps) {
+export function RunOverview({ run, events, headline, onSelectTask, onOpenActivity, onOpenArchitecture }: RunOverviewProps) {
   const timeline = useMemo(() => deriveTimeline(run, events).slice(-8).reverse(), [run, events]);
   if (!run) return <div className="grid h-full place-items-center text-sm text-muted">选择一个运行查看概览</div>;
 
@@ -65,7 +66,16 @@ export function RunOverview({ run, events, headline, onSelectTask, onOpenActivit
           <Card className="p-4">
             {run.plan?.summary && (
               <>
-                <SectionTitle>计划</SectionTitle>
+                <div className="flex items-center">
+                  <SectionTitle>计划</SectionTitle>
+                  <button
+                    type="button"
+                    onClick={() => onOpenArchitecture?.()}
+                    className="ml-auto cursor-pointer border-0 bg-transparent p-0 text-xs font-medium text-accent-ink hover:underline focus-ring"
+                  >
+                    打开架构图
+                  </button>
+                </div>
                 <p className="m-0 mt-1.5 text-sm leading-relaxed text-ink-2">{run.plan.summary}</p>
               </>
             )}

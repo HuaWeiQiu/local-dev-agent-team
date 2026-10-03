@@ -118,6 +118,14 @@ interface ContractPair {
   invalidSamples: unknown[];
 }
 
+const design = {
+  summary: "one module",
+  source: "architect",
+  elements: [{ id: "core", name: "Core", kind: "module", responsibility: "does the work", paths: ["src"] }],
+  relations: [],
+  sequence: [],
+};
+
 const task = {
   id: "task-1",
   title: "title",
@@ -149,9 +157,9 @@ const contracts: ContractPair[] = [
     zod: taskPlanSchema,
     json: taskPlanJsonSchema,
     validSamples: [
-      { summary: "s", tasks: [{ ...task, batchKey: null, evidenceKind: null }] },
-      { summary: "s", tasks: [{ ...task, batchKey: "wave-1", evidenceKind: null }] },
-      { summary: "s", tasks: [{ ...task, batchKey: null, evidenceKind: "host-evidence" }] },
+      { summary: "s", design, tasks: [{ ...task, batchKey: null, evidenceKind: null, elementId: "core" }] },
+      { summary: "s", design, tasks: [{ ...task, batchKey: "wave-1", evidenceKind: null, elementId: null }] },
+      { summary: "s", design, tasks: [{ ...task, batchKey: null, evidenceKind: "host-evidence", elementId: null }] },
     ],
     invalidSamples: [
       { summary: "s", tasks: [] },

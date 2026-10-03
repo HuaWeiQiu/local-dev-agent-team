@@ -24,6 +24,39 @@ export const taskSchema = z.object({
    * commands / review.
    */
   evidenceKind: z.enum(["commands", "host-evidence"]).nullable().optional(),
+  /** Element in `plan.design` this task implements. */
+  elementId: z.string().min(1).nullable().optional(),
+});
+
+export const architectureElementSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/),
+  name: z.string().min(1),
+  kind: z.enum(["module", "interface", "data"]),
+  responsibility: z.string().min(1),
+  paths: z.array(z.string().min(1)).min(1),
+});
+
+export const architectureRelationSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  kind: z.enum(["calls", "reads", "writes", "depends"]),
+  label: z.string().min(1).optional(),
+});
+
+export const architectureStepSchema = z.object({
+  order: z.number().int().positive(),
+  from: z.string().min(1),
+  to: z.string().min(1),
+  action: z.string().min(1),
+});
+
+export const architectureDesignSchema = z.object({
+  summary: z.string().min(1),
+  /** Who produced the model. Inferred diagrams are a fallback, not an architect deliverable. */
+  source: z.enum(["architect", "inferred", "controller"]).default("architect"),
+  elements: z.array(architectureElementSchema).min(1),
+  relations: z.array(architectureRelationSchema).default([]),
+  sequence: z.array(architectureStepSchema).default([]),
 });
 
 export const exploreSummarySchema = z.object({
@@ -38,6 +71,7 @@ export const exploreSummarySchema = z.object({
 export const taskPlanSchema = z.object({
   summary: z.string().min(1),
   tasks: z.array(taskSchema).min(1),
+  design: architectureDesignSchema.optional(),
 });
 
 export const findingSchema = z.object({
@@ -76,6 +110,8 @@ export type AdvisorVerdict = z.infer<typeof advisorVerdictSchema>;
 export type GoalIntake = z.infer<typeof goalIntakeSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type TaskPlan = z.infer<typeof taskPlanSchema>;
+export type ArchitectureDesign = z.infer<typeof architectureDesignSchema>;
+export type ArchitectureElement = z.infer<typeof architectureElementSchema>;
 export type ExploreSummary = z.infer<typeof exploreSummarySchema>;
 export type Finding = z.infer<typeof findingSchema>;
 export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>;

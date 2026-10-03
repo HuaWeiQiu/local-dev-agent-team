@@ -142,6 +142,12 @@ Authority is split deliberately:
   intents (steer, answer, edit plan); the supervisor validates the operator and
   target agent before acting, and sessions stay an optimization on top of
   Git-verified recovery.
+- The architect returns one design (`plan.design`: elements, relations,
+  sequence) and a task DAG that points at those elements. The system map and
+  the sequence are projections of that object. A plan whose paths or
+  dependencies disagree with the design is sent back to the architect. Runs
+  that never stored a design keep a path-prefix diagram labeled as inferred.
+  Explore writes `run.explore` so that stage stays readable after planning.
 
 ## Module Layout And Layering
 

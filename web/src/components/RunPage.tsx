@@ -1,5 +1,7 @@
 import { Bot, CircleHelp, FileCheck2, Gauge, Lightbulb, LayoutDashboard, PanelRight, ScrollText, Workflow } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { currentStageId, describeStage, stageForTask } from "../architecture";
+import type { StageId } from "../stages";
 import { deriveAgentActivity } from "../agent-activity";
 import { latestPendingApproval } from "../hooks/useRunEvents";
 import type { RunMonitor } from "../hooks/useRunEvents";
@@ -34,7 +36,7 @@ interface RunPageProps {
   monitorPanel: MonitorPanel;
   onMonitorPanelChange(panel: MonitorPanel): void;
   onReviewApproval(approval: ApprovalRequest): void;
-  onSelectTask(task: TaskRunState): void;
+  onSelectTask(task: TaskRunState | undefined): void;
   onExportEvents(): Promise<void>;
   onReadArtifact(path: string): Promise<EvidenceFilePreview>;
   onRefreshUsage(): void;
@@ -42,7 +44,7 @@ interface RunPageProps {
 
 const tabs: Array<{ value: MonitorPanel; label: string; icon: typeof Workflow }> = [
   { value: "overview", label: "概览", icon: LayoutDashboard },
-  { value: "graph", label: "任务图", icon: Workflow },
+  { value: "graph", label: "架构", icon: Workflow },
   { value: "details", label: "详情", icon: PanelRight },
   { value: "agents", label: "智能体", icon: Bot },
   { value: "activity", label: "活动日志", icon: ScrollText },
@@ -66,6 +68,13 @@ export function RunPage({
   const { selectedRunId, run, selectedTaskId, events, connected, evidence, evidenceLoading, usageReport, usageLoading } = monitor;
   const wide = useMediaQuery("(min-width: 1100px)");
   const selectedTask = useMemo(() => run?.tasks.find((task) => task.task.id === selectedTaskId), [run?.tasks, selectedTaskId]);
+  const [selectedStageId, setSelectedStageId] = useState<StageId | undefined>();
+  const [selectedModuleId, setSelectedModuleId] = useState<string | undefined>();
+  const activeStageId = selectedStageId ?? (run ? currentStageId(run) : undefined);
+  const stageBrief = useMemo(
+    () => (run && selectedStageId ? describeStage(run, selectedStageId, events) : undefined),
+    [selectedStageId, events, run],
+  );
   const liveStatus = useMemo(() => deriveLiveStatus(run, deriveAgentActivity(events, run?.status)), [run, events]);
   const pendingApproval = useMemo(() => latestPendingApproval(run), [run]);
   const done = run?.tasks.filter((task) => ["passed", "merged"].includes(task.status)).length ?? 0;
@@ -94,7 +103,16 @@ export function RunPage({
         </div>
         <h2 className="m-0 mt-1.5 line-clamp-2 text-xl font-semibold leading-snug tracking-tight text-ink" title={run.goal}>{run.goal}</h2>
         <div className="mt-3.5">
-          <StageStepper run={run} />
+          <StageStepper
+            run={run}
+            {...(activeStageId ? { selectedStageId: activeStageId } : {})}
+            onSelectStage={(id) => {
+              setSelectedStageId(id);
+              setSelectedModuleId(undefined);
+              onSelectTask(undefined);
+              onMonitorPanelChange("graph");
+            }}
+          />
         </div>
         <Tabs value={monitorPanel} onValueChange={(value) => onMonitorPanelChange(value as MonitorPanel)} className="mt-2">
           <TabsList role="tablist" aria-label="运行视图" className="scroll-thin -mb-px overflow-x-auto border-b-0">
@@ -136,21 +154,63 @@ export function RunPage({
               events={events}
               headline={insights.explanation?.headline}
               onSelectTask={(task) => {
+                setSelectedStageId(stageForTask(task));
+                setSelectedModuleId(undefined);
                 onSelectTask(task);
                 onMonitorPanelChange("graph");
               }}
               onOpenActivity={() => onMonitorPanelChange("activity")}
+              onOpenArchitecture={() => {
+                setSelectedModuleId(undefined);
+                onSelectTask(undefined);
+                onMonitorPanelChange("graph");
+              }}
             />
           </div>
           {!wide && (
             <Panel active={monitorPanel === "details"}>
-              <TaskInspector run={run} task={selectedTask} onLoadDiff={insights.loadDiff} />
+              <TaskInspector
+                run={run}
+                task={selectedTask}
+                {...(stageBrief && !selectedModuleId ? { stage: stageBrief } : {})}
+                {...(selectedModuleId ? { moduleId: selectedModuleId } : {})}
+                onSelectModule={setSelectedModuleId}
+                onSelectTask={(task) => {
+                  setSelectedStageId(stageForTask(task));
+                  setSelectedModuleId(undefined);
+                  onSelectTask(task);
+                }}
+                onLoadDiff={insights.loadDiff}
+              />
             </Panel>
           )}
           <Panel active={monitorPanel === "graph"}>
             {/* React Flow fits its viewport on mount, so it must mount while visible. */}
             {monitorPanel === "graph" && (
-              <DagCanvas run={run} selectedTaskId={selectedTaskId} onSelectTask={(task) => { onSelectTask(task); if (!wide) onMonitorPanelChange("details"); }} />
+              <DagCanvas
+                run={run}
+                events={events}
+                selectedTaskId={selectedTaskId}
+                {...(activeStageId ? { selectedStageId: activeStageId } : {})}
+                {...(selectedModuleId ? { selectedModuleId } : {})}
+                onSelectTask={(task) => {
+                  setSelectedStageId(stageForTask(task));
+                  setSelectedModuleId(undefined);
+                  onSelectTask(task);
+                  if (!wide) onMonitorPanelChange("details");
+                }}
+                onSelectStage={(id) => {
+                  setSelectedStageId(id);
+                  setSelectedModuleId(undefined);
+                  onSelectTask(undefined);
+                  if (!wide) onMonitorPanelChange("details");
+                }}
+                onSelectModule={(id) => {
+                  setSelectedModuleId(id);
+                  onSelectTask(undefined);
+                  if (!wide) onMonitorPanelChange("details");
+                }}
+              />
             )}
           </Panel>
           <Panel active={monitorPanel === "agents"}>
@@ -169,7 +229,22 @@ export function RunPage({
             <UsagePanel report={usageReport} loading={usageLoading} selectedRunId={selectedRunId} onRefresh={onRefreshUsage} />
           </Panel>
         </div>
-        {showInspector && wide && <TaskInspector run={run} task={selectedTask} onLoadDiff={insights.loadDiff} className="bd-l" />}
+        {showInspector && wide && (
+          <TaskInspector
+            run={run}
+            task={selectedTask}
+            {...(stageBrief && !selectedModuleId ? { stage: stageBrief } : {})}
+            {...(selectedModuleId ? { moduleId: selectedModuleId } : {})}
+            onSelectModule={setSelectedModuleId}
+            onSelectTask={(task) => {
+              setSelectedStageId(stageForTask(task));
+              setSelectedModuleId(undefined);
+              onSelectTask(task);
+            }}
+            onLoadDiff={insights.loadDiff}
+            className="bd-l"
+          />
+        )}
       </div>
 
     </section>

@@ -108,7 +108,7 @@ export function iso(offsetMs: number, base: number): string {
   return new Date(base + offsetMs).toISOString();
 }
 
-function task(id: string, title: string, dependsOn: string[], paths: string[], description = title): Task {
+function task(id: string, title: string, dependsOn: string[], paths: string[], description = title, elementId?: string): Task {
   return {
     id,
     title,
@@ -117,6 +117,7 @@ function task(id: string, title: string, dependsOn: string[], paths: string[], d
     ownedPaths: paths,
     acceptanceCommands: [{ command: "pnpm", args: ["test", "--run"] }],
     profile: null,
+    ...(elementId ? { elementId } : {}),
   };
 }
 
@@ -220,10 +221,10 @@ new file mode 100644
 export function buildDemoRuns(base: number): DemoRun[] {
   // 1) 等待最终审批：已规划、实现并通过评审，卡在人工门
   const t1 = [
-    task("task-coupon", "实现优惠券计算", [], ["src/cart/coupon.ts"]),
-    task("task-summary", "购物车汇总展示优惠与应付", ["task-coupon"], ["src/cart/CartSummary.tsx"]),
-    task("task-tests", "补充优惠券与汇总的单元测试", ["task-coupon"], ["test/cart/*.test.ts"]),
-    task("task-docs", "更新结算流程文档", ["task-summary"], ["docs/checkout.md"]),
+    task("task-coupon", "实现优惠券计算", [], ["src/cart/coupon.ts"], "实现优惠券计算", "cart"),
+    task("task-summary", "购物车汇总展示优惠与应付", ["task-coupon"], ["src/cart/CartSummary.tsx"], "购物车汇总展示优惠与应付", "cart"),
+    task("task-tests", "补充优惠券与汇总的单元测试", ["task-coupon"], ["test/cart/*.test.ts"], "补充优惠券与汇总的单元测试", "tests"),
+    task("task-docs", "更新结算流程文档", ["task-summary"], ["docs/checkout.md"], "更新结算流程文档", "docs"),
   ];
   const approval: ApprovalRequest = {
     id: "approval-demo-1",
@@ -235,7 +236,27 @@ export function buildDemoRuns(base: number): DemoRun[] {
     expiresAt: iso(54 * minute, base),
   };
   const awaiting = baseState("demo-awaiting-approval", "给购物车增加优惠券，并在汇总里展示优惠与应付金额", "awaiting-human", 52 * minute, base, {
-    plan: { summary: "先实现纯函数优惠券计算，再接入汇总组件，最后补测试与文档。", tasks: t1 },
+    plan: {
+      summary: "先实现纯函数优惠券计算，再接入汇总组件，最后补测试与文档。",
+      tasks: t1,
+      design: {
+        summary: "优惠计算留在购物车模块，测试和结算文档分别消费它。",
+        source: "architect",
+        elements: [
+          { id: "cart", name: "购物车", kind: "module", responsibility: "计算优惠并在汇总里展示应付金额。", paths: ["src/cart"] },
+          { id: "tests", name: "购物车测试", kind: "module", responsibility: "锁住优惠和汇总的主路径。", paths: ["test/cart"] },
+          { id: "docs", name: "结算文档", kind: "data", responsibility: "记录顾客能看到的结算步骤。", paths: ["docs"] },
+        ],
+        relations: [
+          { from: "cart", to: "tests", kind: "depends", label: "测试依赖优惠结果" },
+          { from: "cart", to: "docs", kind: "depends", label: "文档跟着汇总改" },
+        ],
+        sequence: [
+          { order: 1, from: "cart", to: "tests", action: "把优惠和应付金额交给测试断言" },
+          { order: 2, from: "cart", to: "docs", action: "按汇总结果更新结算说明" },
+        ],
+      },
+    },
     tasks: t1.map((item) => taskState(item, "merged")),
     approvals: [approval],
     finalQuality: {
@@ -258,14 +279,38 @@ export function buildDemoRuns(base: number): DemoRun[] {
 
   // 2) 执行中：5 个任务，2 已合并、2 进行中、1 待开始
   const t2 = [
-    task("task-schema", "设计订单导出的数据结构", [], ["src/export/schema.ts"]),
-    task("task-csv", "实现 CSV 导出器", ["task-schema"], ["src/export/csv.ts"]),
-    task("task-api", "新增 /api/orders/export 接口", ["task-schema"], ["src/api/export.ts"]),
-    task("task-ui", "订单页增加导出按钮与进度提示", ["task-api"], ["src/orders/ExportButton.tsx"]),
-    task("task-e2e", "补充导出流程的端到端测试", ["task-ui", "task-csv"], ["e2e/export.spec.ts"]),
+    task("task-schema", "设计订单导出的数据结构", [], ["src/export/schema.ts"], "设计订单导出的数据结构", "export"),
+    task("task-csv", "实现 CSV 导出器", ["task-schema"], ["src/export/csv.ts"], "实现 CSV 导出器", "export"),
+    task("task-api", "新增 /api/orders/export 接口", ["task-schema"], ["src/api/export.ts"], "新增 /api/orders/export 接口", "api"),
+    task("task-ui", "订单页增加导出按钮与进度提示", ["task-api"], ["src/orders/ExportButton.tsx"], "订单页增加导出按钮与进度提示", "orders-ui"),
+    task("task-e2e", "补充导出流程的端到端测试", ["task-ui", "task-csv"], ["e2e/export.spec.ts"], "补充导出流程的端到端测试", "e2e"),
   ];
   const running = baseState("demo-running", "为订单列表增加 CSV 导出，支持按时间范围筛选", "implementing", 18 * minute, base, {
-    plan: { summary: "先定数据结构，CSV 与接口并行，随后接 UI，最后补端到端测试。", tasks: t2 },
+    plan: {
+      summary: "先定数据结构，CSV 与接口并行，随后接 UI，最后补端到端测试。",
+      tasks: t2,
+      design: {
+        summary: "导出核心产出 CSV，接口把它交给订单页，端到端测试走完整条链路。",
+        source: "architect",
+        elements: [
+          { id: "export", name: "导出核心", kind: "module", responsibility: "定义订单导出结构并生成 CSV。", paths: ["src/export"] },
+          { id: "api", name: "导出接口", kind: "interface", responsibility: "按时间范围提供 /api/orders/export。", paths: ["src/api/export.ts"] },
+          { id: "orders-ui", name: "订单页", kind: "module", responsibility: "提供导出按钮和进度提示。", paths: ["src/orders"] },
+          { id: "e2e", name: "导出测试", kind: "module", responsibility: "从按钮走到下载文件。", paths: ["e2e"] },
+        ],
+        relations: [
+          { from: "export", to: "api", kind: "calls", label: "接口取 CSV" },
+          { from: "api", to: "orders-ui", kind: "calls", label: "按钮请求导出" },
+          { from: "orders-ui", to: "e2e", kind: "depends", label: "测试点击按钮" },
+          { from: "export", to: "e2e", kind: "depends", label: "测试核对文件" },
+        ],
+        sequence: [
+          { order: 1, from: "orders-ui", to: "api", action: "按时间范围请求导出" },
+          { order: 2, from: "api", to: "export", action: "生成 CSV" },
+          { order: 3, from: "e2e", to: "orders-ui", action: "点按钮并核对下载" },
+        ],
+      },
+    },
     tasks: [
       taskState(t2[0]!, "merged"),
       taskState(t2[1]!, "working"),
@@ -273,8 +318,17 @@ export function buildDemoRuns(base: number): DemoRun[] {
       taskState(t2[3]!, "pending"),
       taskState(t2[4]!, "pending"),
     ],
+    explore: {
+      summary: "订单导出集中在 src/export，接口和页面只消费它。",
+      modules: ["src/export", "src/api", "src/orders"],
+      riskPaths: ["src/orders/ExportButton.tsx"],
+      suggestedAcceptanceCommands: ["pnpm test --run"],
+      forbiddenPaths: [],
+      notes: ["时间范围筛选跟导出请求一起传，不另开模块。"],
+    },
     history: history(base, -18 * minute, [
-      ["created", "运行已创建", 0], ["orchestrating", "总控分析目标", 1], ["architecting", "架构拆分任务", 3], ["implementing", "开始实现", 7],
+      ["created", "运行已创建", 0], ["orchestrating", "总控分析目标", 1], ["exploring", "只读看过导出相关模块", 2],
+      ["architecting", "架构拆分任务", 3], ["implementing", "开始实现", 7],
     ]),
     usage: { agentInvocations: 6, agentDurationMs: 410_000, processOutputBytes: 180_000, truncatedStreams: 0, artifactBytes: 24_000, inputTokens: 188_000, cachedInputTokens: 96_000, outputTokens: 14_200, reportedCostUsd: 1.42 },
   });

@@ -37,7 +37,7 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await cleanupDialog.getByRole("button", { name: "关闭" }).click();
 
   await openRun(page, "校验跨服务接口契约与发布边界");
-  await openRunTab(page, "任务图");
+  await openRunTab(page, "架构");
   await expect(page.locator(".canvas-heading h2")).toContainText("独立校验服务接口契约");
   await expect(page.locator(".react-flow__node")).toHaveCount(1);
 
@@ -56,7 +56,7 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
   await approvalDialog.getByRole("button", { name: "关闭" }).click();
   await selectProject(page, "visual");
   await openRun(page, "实现订单退款幂等控制并提供可视化审计");
-  await openRunTab(page, "任务图");
+  await openRunTab(page, "架构");
   await expect(page.locator(".canvas-heading h2")).toContainText("按依赖波次执行");
   await expect(page.locator(".react-flow__node")).toHaveCount(4);
   await expect(page.locator(".react-flow__edge")).toHaveCount(4);
@@ -87,13 +87,13 @@ test("renders and operates the multi-agent workbench", async ({ page }, testInfo
     path: testInfo.outputPath(`${testInfo.project.name}-evidence.png`),
     fullPage: false,
   });
-  await openRunTab(page, "任务图");
+  await openRunTab(page, "架构");
 
   const ledgerNode = page.locator(".react-flow__node").filter({ hasText: "幂等账本" });
   await ledgerNode.click();
   await expect(page.getByRole("heading", { name: "任务详情" })).toBeVisible();
   if (testInfo.project.name === "mobile") {
-    await openRunTab(page, "任务图");
+    await openRunTab(page, "架构");
   }
 
   await openNav(page);

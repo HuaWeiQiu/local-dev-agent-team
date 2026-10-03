@@ -282,6 +282,41 @@ export interface LiveAgent {
   questions: LiveAgentQuestion[];
 }
 
+export type ArchitectureKind = "module" | "interface" | "data";
+export type ArchitectureRelationKind = "calls" | "reads" | "writes" | "depends";
+export type ArchitectureSource = "architect" | "inferred" | "controller";
+
+export interface ArchitectureElement {
+  id: string;
+  name: string;
+  kind: ArchitectureKind;
+  responsibility: string;
+  paths: string[];
+}
+
+export interface ArchitectureRelation {
+  from: string;
+  to: string;
+  kind: ArchitectureRelationKind;
+  label?: string;
+}
+
+export interface ArchitectureStep {
+  order: number;
+  from: string;
+  to: string;
+  action: string;
+}
+
+/** One system model. The map and the sequence are views of this object. */
+export interface ArchitectureDesign {
+  summary: string;
+  source: ArchitectureSource;
+  elements: ArchitectureElement[];
+  relations: ArchitectureRelation[];
+  sequence: ArchitectureStep[];
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -292,6 +327,8 @@ export interface Task {
   profile: string | null;
   batchKey?: string | null;
   evidenceKind?: "commands" | "host-evidence" | null;
+  /** Element in `plan.design` this task implements. */
+  elementId?: string | null;
 }
 
 export interface Finding {
@@ -377,7 +414,21 @@ export interface RunState {
   parentRunId?: string;
   createdAt: string;
   updatedAt: string;
-  plan?: { summary: string; tasks: Task[] };
+  plan?: { summary: string; tasks: Task[]; design?: ArchitectureDesign };
+  explore?: {
+    summary: string;
+    modules: string[];
+    riskPaths: string[];
+    suggestedAcceptanceCommands: string[];
+    forbiddenPaths: string[];
+    notes: string[];
+  };
+  intake?: {
+    goalSummary: string;
+    instructionsForArchitect: string;
+    constraints: string[];
+    risk: "low" | "medium" | "high";
+  };
   tasks: TaskRunState[];
   history: Array<{ at: string; status: RunStatus; message: string }>;
   finalQuality?: {

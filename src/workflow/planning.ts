@@ -4,6 +4,7 @@ import { singleTaskPlan } from "../flow/index.js";
 import { exploreSummarySchema, taskPlanSchema, type ExploreSummary, type TaskPlan } from "../domain/contracts.js";
 import { exploreSummaryJsonSchema, taskPlanJsonSchema } from "../domain/json-schemas.js";
 import { mkdir, writeFile } from "node:fs/promises";
+import { designIssues, resolveDesign } from "../domain/architecture-design.js";
 import { assessPlanCompleteness, fallbackHandoverTaskPlan, fallbackNamedTaskPlan, formatPlanCompletenessError, validateTaskPlan } from "../domain/plan.js";
 import { type RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
@@ -35,11 +36,11 @@ export class PlanningStage {
         "architecting",
         "目标已写明任务与路径，控制面直接生成 DAG（不调用架构模型）",
       );
-      plan = context.deterministicPlan;
+      plan = resolveDesign(context.deterministicPlan, "controller");
       message = `Controller produced ${plan.tasks.length} task(s) from the goal`;
     } else if (singleTask) {
       await store.transition(state, "architecting", "快速流程：整个目标作为单个任务（不调用架构模型）");
-      plan = singleTaskPlan(state.goal);
+      plan = resolveDesign(singleTaskPlan(state.goal), "controller");
       message = "Quick flow planned a single task";
     } else {
       plan = await this.architectPlan(context);
@@ -58,7 +59,7 @@ export class PlanningStage {
     const { verifiedExperiences, exploreSummary } = context;
     const intake = context.intake ?? state.intake;
     if (!intake) throw new Error("Architect planning requires goal intake");
-    await store.transition(state, "architecting", "架构正在拆分任务 DAG（plan）");
+    await store.transition(state, "architecting", "架构正在产出系统设计并拆分任务");
     const workerRole = this.env.loaded.config.roles.worker;
     if (!workerRole) {
       throw new Error("Required worker role is missing");
@@ -81,7 +82,8 @@ export class PlanningStage {
     });
     validateTaskPlan(architecture.value);
     let completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
-    if (completeness.status === "rejected") {
+    let design = designIssues(architecture.value);
+    if (completeness.status === "rejected" || design.length > 0) {
       architecture = await agent.runStructured({
         role: "architect",
         runId: state.id,
@@ -92,8 +94,11 @@ export class PlanningStage {
             ...intake,
             instructionsForArchitect: [
               intake.instructionsForArchitect,
-              `Previous plan was rejected: ${completeness.issues.join("；")}.`,
+              `Previous plan was rejected: ${[...completeness.issues, ...design].join("；")}.`,
               "Do not emit reconnaissance-only tasks. Produce one implementable task for each named T1–Tn / P0.x deliverable now.",
+              "Return design.elements (id, name, kind, responsibility, paths), relations, and sequence.",
+              "Every task.elementId must name an element whose paths cover that task's ownedPaths.",
+              "A cross-element task dependency needs a depends or calls relation in the same direction.",
             ].join(" "),
           },
           project: this.env.loaded.config.project,
@@ -109,6 +114,7 @@ export class PlanningStage {
       });
       validateTaskPlan(architecture.value);
       completeness = assessPlanCompleteness(architecture.value, planningGoal, { allowImpliedHandover });
+      design = designIssues(architecture.value);
     }
     if (completeness.status === "rejected") {
       const fallback =
@@ -118,11 +124,11 @@ export class PlanningStage {
         ? assessPlanCompleteness(fallback, planningGoal, { allowImpliedHandover })
         : undefined;
       if (fallback && fallbackReport && fallbackReport.status !== "rejected") {
-        return fallback;
+        return resolveDesign(fallback, "controller");
       }
       throw new Error(formatPlanCompletenessError(completeness));
     }
-    return architecture.value;
+    return resolveDesign(architecture.value, "inferred");
   }
 
   async maybeExplore(
@@ -175,6 +181,7 @@ export class PlanningStage {
       });
 
       const summary = result.value;
+      state.explore = summary;
       const artifactDir = store.artifactDirectory(state.id, "explore");
       await mkdir(artifactDir, { recursive: true });
       await writeFile(

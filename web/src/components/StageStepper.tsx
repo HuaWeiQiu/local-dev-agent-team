@@ -1,15 +1,30 @@
 import { Check, Loader2, Minus, X } from "lucide-react";
+import type { StageId } from "../stages";
 import { deriveStages } from "../stages";
 import type { RunState } from "../types";
 import { cn } from "../ui/cn";
 
-export function StageStepper({ run }: { run: Pick<RunState, "status" | "history"> }) {
+interface StageStepperProps {
+  run: Pick<RunState, "status" | "history">;
+  selectedStageId?: StageId;
+  onSelectStage?(id: StageId): void;
+}
+
+export function StageStepper({ run, selectedStageId, onSelectStage }: StageStepperProps) {
   const stages = deriveStages(run);
   return (
     <ol aria-label="运行阶段" className="scroll-thin relative m-0 flex list-none items-center gap-0 overflow-x-auto p-0 pb-1">
       {stages.map((stage, index) => (
         <li key={stage.id} aria-current={stage.state === "current" ? "step" : undefined} className="flex shrink-0 items-center">
-          <span className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onSelectStage?.(stage.id)}
+            aria-pressed={selectedStageId === stage.id}
+            className={cn(
+              "flex cursor-pointer items-center gap-1.5 rounded-md border-0 bg-transparent px-1 py-0.5 focus-ring",
+              selectedStageId === stage.id && "bg-accent-soft",
+            )}
+          >
             <span
               aria-hidden
               className={cn(
@@ -38,9 +53,10 @@ export function StageStepper({ run }: { run: Pick<RunState, "status" | "history"
               {stage.label}
               <span className="sr-only">
                 {stage.state === "done" ? "（已完成）" : stage.state === "current" ? "（进行中）" : stage.state === "failed" ? "（在此停止）" : stage.state === "skipped" ? "（已跳过）" : "（未开始）"}
+                ，点击查看
               </span>
             </span>
-          </span>
+          </button>
           {index < stages.length - 1 && (
             <span
               aria-hidden

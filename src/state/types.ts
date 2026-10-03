@@ -1,4 +1,5 @@
 import type {
+  ExploreSummary,
   FinalDecision,
   GoalIntake,
   ReviewVerdict,
@@ -180,6 +181,8 @@ export interface RunState {
   parentRunId?: string;
   purpose?: "evolution-evaluation" | "evolution-proposer";
   intake?: GoalIntake;
+  /** Read-only research written before planning. Absent when explore was skipped or failed open. */
+  explore?: ExploreSummary;
   plan?: TaskPlan;
   tasks: TaskRunState[];
   finalQuality?: QualityReport;

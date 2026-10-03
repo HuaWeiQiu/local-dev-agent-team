@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type {
+  ExploreSummary,
   FinalDecision,
   GoalIntake,
   ReviewVerdict,
@@ -123,6 +124,7 @@ export const runStateSchema = z.looseObject({
   parentRunId: z.string().optional(),
   purpose: z.enum(["evolution-evaluation", "evolution-proposer"]).optional(),
   intake: nested<GoalIntake>().optional(),
+  explore: nested<ExploreSummary>().optional(),
   plan: nested<TaskPlan>().optional(),
   tasks: z.array(taskRunStateSchema),
   finalQuality: nested<QualityReport>().optional(),
