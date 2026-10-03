@@ -1,6 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { cn } from "./cn";
 
 export interface ModalProps {
@@ -11,15 +11,28 @@ export interface ModalProps {
   children: ReactNode;
   footer?: ReactNode;
   className?: string;
+  /** Blocks Esc / outside-click dismissal, e.g. while a request is in flight. */
+  locked?: boolean;
 }
 
 /** Centered modal on a blurred scrim. The title doubles as the accessible name (e2e selects it by heading). */
-export function Modal({ open, onOpenChange, title, description, children, footer, className }: ModalProps) {
+export function Modal({ open, onOpenChange, title, description, children, footer, className, locked = false }: ModalProps) {
+  const contentRef = useRef<HTMLDivElement>(null);
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-scrim backdrop-blur-[2px] data-[state=open]:animate-[fade-in_120ms_ease-out]" />
         <DialogPrimitive.Content
+          ref={contentRef}
+          onOpenAutoFocus={(event) => {
+            const target = contentRef.current?.querySelector<HTMLElement>("[data-autofocus]");
+            if (target) {
+              event.preventDefault();
+              target.focus();
+            }
+          }}
+          onEscapeKeyDown={(event) => locked && event.preventDefault()}
+          onInteractOutside={(event) => locked && event.preventDefault()}
           {...(description ? {} : { "aria-describedby": undefined })}
           className={cn(
             "bd fixed left-1/2 top-1/2 z-50 flex max-h-[min(88vh,820px)] w-[min(640px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl bg-surface shadow-modal outline-none data-[state=open]:animate-[pop-in_160ms_cubic-bezier(0.2,0.8,0.2,1)]",
@@ -37,7 +50,8 @@ export function Modal({ open, onOpenChange, title, description, children, footer
             </div>
             <DialogPrimitive.Close
               aria-label="关闭"
-              className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-ink focus-ring"
+              disabled={locked}
+              className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-muted hover:bg-surface-3 hover:text-ink focus-ring disabled:opacity-40"
             >
               <X className="size-4" />
             </DialogPrimitive.Close>

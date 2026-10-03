@@ -471,9 +471,6 @@
     overflow-x: auto;
   }
 
-  .run-cleanup-dialog {
-    max-height: calc(100dvh - 24px);
-  }
 }
 
 @media (max-width: 520px) {
@@ -497,43 +494,4 @@
     grid-template-columns: 1fr;
   }
 
-  .profile-grid,
-  .strategy-segments {
-    grid-template-columns: 1fr;
-  }
-
-  .run-launcher > header,
-  .run-action-dialog > header {
-    padding: 15px 16px;
-  }
-
-  .run-launcher h2,
-  .run-action-dialog h2 {
-    font-size: var(--text-16);
-  }
-
-  .run-launcher form,
-  .run-action-dialog form {
-    padding: 16px;
-  }
-
-  .run-launcher footer,
-  .run-action-dialog footer {
-    bottom: -16px;
-    margin: 16px -16px -16px;
-    padding: 12px 16px;
-  }
-
-  .cleanup-controls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .cleanup-controls label {
-    justify-content: space-between;
-  }
-
-  .cleanup-controls .button {
-    width: 100%;
-  }
 }
