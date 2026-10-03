@@ -352,8 +352,6 @@ export const jevConfigSchema = z
 
 export const workflowConfigSchema = z
   .object({
-    /** `v1` runs the fixed pipeline with no template routing; kept for side-by-side comparison. */
-    engine: z.enum(["v1", "v2"]).default("v2"),
     /** `auto` lets the deterministic router pick per goal. */
     template: z.enum(["auto", "quick", "standard", "full"]).default("auto"),
     /** `auto` uses live Codex/Claude sessions (steer, interrupt, ask-user) when the CLI supports them. */

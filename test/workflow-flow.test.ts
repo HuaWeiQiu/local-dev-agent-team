@@ -196,7 +196,6 @@ describe("flow-driven workflow", () => {
       config.quality.commands = [{ command: process.execPath, args: ["-e", "process.exit(1)"] }];
       config.strategies = undefined;
       config.workflow = {
-        engine: "v2",
         template: "auto",
         sessions: "auto",
         stallSeconds: 600,
@@ -243,17 +242,23 @@ describe("flow-driven workflow", () => {
     expect(state.flow?.reasons.length).toBeGreaterThan(0);
   }, 30_000);
 
-  it("keeps the v1 pipeline free of flow state and events when engine is v1", async () => {
-    const loaded = await fixture("v1", (config) => {
-      config.workflow = { engine: "v1", template: "auto", sessions: "auto" };
-    });
+  it("resumes a run persisted before the flow engine existed on the default pipeline", async () => {
+    const loaded = await fixture("legacy");
+    const parked = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => new RecordingAgentService(),
+    }).run({ goal: "Create alpha", template: "full" });
+    expect(parked.status).toBe("awaiting-human");
+
+    const legacy = { ...parked };
+    delete legacy.flow;
     const { events, sink } = recorder();
-    const state = await new LocalWorkflowRunner(loaded, {
+    const resumed = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new RecordingAgentService(),
       eventSink: sink,
-    }).run({ goal: "Fix a typo in the README" });
-    expect(state.flow).toBeUndefined();
-    expect(events.some((event) => event.type.startsWith("flow."))).toBe(false);
-    expect(state.tasks.length).toBeGreaterThan(0);
+    }).resume(legacy, { mode: "recovery", actor: "operator", reason: "legacy run" });
+
+    expect(resumed.flow).toBeUndefined();
+    expect(events.some((event) => event.type === "flow.node")).toBe(false);
+    expect(["awaiting-human", "completed"]).toContain(resumed.status);
   }, 30_000);
 });

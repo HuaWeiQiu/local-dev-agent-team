@@ -220,9 +220,7 @@ export class LocalWorkflowRunner {
     const profileOverrides = options.profileOverrides ?? {};
     const resolvedStrategy = resolveStrategy(this.loaded.config, options.strategyName);
     const flowSelection = this.selectFlow(options);
-    const strategy = flowSelection
-      ? applyTemplateToStrategy(resolvedStrategy, flowTemplate(flowSelection.template))
-      : resolvedStrategy;
+    const strategy = applyTemplateToStrategy(resolvedStrategy, flowTemplate(flowSelection.template));
     const effectiveProfileOverrides = {
       ...strategy.roleProfiles,
       ...profileOverrides,
@@ -275,7 +273,7 @@ export class LocalWorkflowRunner {
           ? { roleBindings: persistedBindings }
           : {}),
         strategy,
-        ...(flowSelection ? { flow: flowSelection } : {}),
+        flow: flowSelection,
         ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
         ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
         ...(options.purpose ? { purpose: options.purpose } : {}),
@@ -307,7 +305,7 @@ export class LocalWorkflowRunner {
         ? { roleBindings: persistedBindings }
         : {}),
       strategy,
-      ...(flowSelection ? { flow: flowSelection } : {}),
+      flow: flowSelection,
       ...(options.supervisorId ? { supervisorId: options.supervisorId } : {}),
       ...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
       ...(options.purpose ? { purpose: options.purpose } : {}),
@@ -315,7 +313,7 @@ export class LocalWorkflowRunner {
       history: [{ at: now, status: "created", message: "Run created" }],
     };
     await store.save(state);
-    if (flowSelection) store.emit(runId, "flow.selected", flowSelection);
+    store.emit(runId, "flow.selected", flowSelection);
     const segmentStartedAt = Date.now();
     const deadline = createExecutionDeadline(strategy.executionTimeoutSeconds, options.signal);
     const workflowSignal = deadline.signal;
@@ -479,9 +477,8 @@ export class LocalWorkflowRunner {
     return completeness.status === "rejected" ? undefined : plan;
   }
 
-  private selectFlow(options: WorkflowRunOptions): FlowSelection | undefined {
+  private selectFlow(options: WorkflowRunOptions): FlowSelection {
     const workflow = this.loaded.config.workflow;
-    if (workflow?.engine === "v1") return undefined;
     return routeTemplate({
       goal: options.goal,
       ...(options.template ? { override: options.template } : {}),

@@ -18,8 +18,8 @@ function readDismissed(scope: ProjectScope): boolean {
 }
 
 /**
- * 首次运行向导的数据与状态：项目仍在使用内存默认值（无 agent-team.yaml）
- * 或没有任何质量命令时自动弹出；「先用默认值」按项目记住，不写文件。
+ * 首次运行向导的数据与状态：项目仍在使用内存默认值（无 agent-team.yaml）时自动弹出；
+ * 已有配置文件的项目只能从命令面板手动打开；「先用默认值」按项目记住，不写文件。
  */
 export function useOnboarding(scope: ProjectScope | undefined) {
   const [status, setStatus] = useState<OnboardingStatus>();

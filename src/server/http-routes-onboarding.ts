@@ -22,7 +22,7 @@ export interface OnboardingStatus {
   projectName: string;
   source: "file" | "detected";
   configPath: string;
-  /** True while the project still runs on in-memory defaults or has no quality gate. */
+  /** True while the project still runs on in-memory defaults (no agent-team.yaml). */
   needsSetup: boolean;
   detection: RepoDetection;
   current: { commands: Array<{ command: string; args: string[] }> };
@@ -50,7 +50,7 @@ async function buildStatus(context: ProjectHttpContext): Promise<OnboardingStatu
     projectName: loaded.config.project.name,
     source,
     configPath: loaded.path,
-    needsSetup: source === "detected" || loaded.config.quality.commands.length === 0,
+    needsSetup: source === "detected",
     detection,
     current: {
       commands: loaded.config.quality.commands.map((command) => ({

@@ -1,14 +1,62 @@
 # Configuration
 
-`agent-team.yaml` is the only project configuration file. The CLI searches the
-current directory and its parents, or accepts an explicit path with `--config`.
-Validate it before every first run:
+`agent-team.yaml` is the only project configuration file, and it is optional.
+The CLI searches the current directory and its parents, or accepts an explicit
+path with `--config`. Without a file, Agent Team runs on **detected defaults**
+(see [Zero-Config Start](#zero-config-start)). Validate before the first run:
 
 ```bash
 agent-team validate
 agent-team profiles
 agent-team doctor
 ```
+
+## Zero-Config Start
+
+Inside a Git repository with no `agent-team.yaml`, `agent-team serve`, `run`
+and `validate` build a configuration in memory:
+
+- **Agent CLI** — chosen from the installed, runnable, non-logged-out CLIs in
+  the order Codex, Claude, Kimi, Grok. Codex keeps the stock
+  `codex-planner` / `codex-worker` profiles; any other CLI gets the same shape
+  (`<cli>-planner` read-only, `<cli>-worker` workspace-write) with the CLI's
+  default model. Model names stay opaque.
+- **Quality commands** — detected from the repository root and always run
+  without a shell: `package.json` scripts (`typecheck`/`check`, `lint`, `test`;
+  `build` is offered but not pre-selected; the package manager follows the
+  lockfile), `pyproject.toml` (mypy, ruff, pytest), `Cargo.toml` (`cargo check`,
+  `cargo test`; clippy offered), `go.mod` (`go vet`, `go test`; build offered)
+  and Makefile `test`/`lint`/`typecheck` targets when nothing else provides
+  that role.
+- **Default branch** — the remote HEAD, or the current branch.
+- **State directory** — `.agent-team/` is added to `.git/info/exclude` so runs
+  do not dirty `git status`.
+
+Nothing is written until you customize. The web workbench opens a first-run
+wizard (reopen it from the command palette) that shows the detected CLIs and
+commands; **保存到 agent-team.yaml** writes the file (`PUT
+/api/onboarding/quality`), while **先用默认值** keeps using the in-memory
+defaults. `GET /api/onboarding` reports the source (`file` or `detected`).
+`agent-team init` remains available: it writes the same detected configuration
+to disk. An existing file always wins and is edited in place, keeping comments.
+
+## Workflow
+
+```yaml
+workflow:
+  template: auto        # auto | quick | standard | full
+  sessions: auto        # auto | off — live steer/interrupt/ask-user when supported
+  stallSeconds: 600     # 0 disables the stall watchdog
+  maxStallRecoveries: 2
+  flakyReruns: 1        # reruns of a failing quality command before it counts
+  taskBudget:           # optional per-task caps
+    maxAgentInvocations: 12
+    maxMinutes: 45
+```
+
+The whole block is optional. See [Flow Templates](workflow.md#flow-templates)
+and [Reliability](workflow.md#reliability) for behavior. `template` is only a
+project default: the run launcher and `POST /api/runs` (`template`) override it.
 
 ## Multi-Project Workspace
 

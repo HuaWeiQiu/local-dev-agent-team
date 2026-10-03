@@ -113,6 +113,36 @@ select `inherit`. A2A `1.0` remote task ingress is disabled because the loopback
 service has no remote identity or authorization layer; it must sit behind a
 separately authenticated HTTPS gateway before that boundary can change.
 
+## Sessions, Flow, Visibility And Onboarding (v2)
+
+Four layers sit on the workflow core. They were added by strangling the old
+pipeline in place rather than rewriting it (see
+[ADR 0018](adr/0018-agent-sessions-and-flow-engine.md)).
+
+```text
+onboarding  src/onboarding   repo detection -> in-memory starter config -> optional yaml
+flow        src/flow         templates as data, deterministic router, ledger fold
+sessions    src/sessions     AgentSession: Codex app-server, Claude stream-json, one-shot
+interventions src/interventions  live registry: steer / interrupt / answer, ledger-audited
+reliability src/reliability  stall watchdog, task budget; src/quality/flaky.ts
+visibility  src/visibility   explain, usage, transcript, replay as read-only projections
+```
+
+Authority is split deliberately:
+
+- **RunState is authoritative for Git recovery.** Resume trusts the checkpoint
+  and the Git-verified integration branch HEAD, never a session or the ledger.
+- **The event ledger is authoritative for flow progress and interventions**
+  (`flow.selected`, `flow.node`, `flow.triage`, `agent.stalled`,
+  `quality.flaky`, operator messages). Projections fold events; they never
+  write state.
+- A deterministic failure cannot be overridden by a model verdict in any
+  template, including `quick`.
+- Agent processes are still owned only by the supervisor. The browser sends
+  intents (steer, answer, edit plan); the supervisor validates the operator and
+  target agent before acting, and sessions stay an optimization on top of
+  Git-verified recovery.
+
 ## Workflow State
 
 ```text

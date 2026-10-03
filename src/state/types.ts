@@ -174,7 +174,7 @@ export interface RunState {
   /** CLI/model/reasoning actually bound per role (global picker or evolution defaults). */
   roleBindings?: Record<string, RunRoleBinding>;
   strategy: ResolvedStrategy;
-  /** Workflow template chosen for this run; absent on runs created by the v1 engine. */
+  /** Workflow template chosen for this run; absent only on runs persisted before the flow engine existed; those resume on the default pipeline. */
   flow?: FlowSelection;
   supervisorId?: string;
   parentRunId?: string;
