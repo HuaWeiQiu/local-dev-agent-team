@@ -140,6 +140,7 @@ export const DagCanvas = memo(function DagCanvas({
         <ArchitectureDiagram
           tasks={run.tasks}
           {...(run.plan?.design ? { design: run.plan.design } : {})}
+          {...(run.repoTrace ? { repoTrace: run.repoTrace } : {})}
           {...(selectedModuleId ? { selectedModuleId } : {})}
           onSelectModule={onSelectModule ?? (() => undefined)}
           {...(onClearModule ? { onClearModule } : {})}

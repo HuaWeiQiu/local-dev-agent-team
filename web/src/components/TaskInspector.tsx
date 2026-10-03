@@ -47,6 +47,7 @@ export const TaskInspector = memo(function TaskInspector({
               tasks={run.tasks}
               moduleId={moduleId}
               {...(run.plan?.design ? { design: run.plan.design } : {})}
+              {...(run.repoTrace ? { repoTrace: run.repoTrace } : {})}
               onSelectTask={onSelectTask}
               onSelectModule={onSelectModule}
               {...(onClearModule ? { onClearModule } : {})}

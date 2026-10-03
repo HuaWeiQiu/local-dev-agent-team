@@ -6,13 +6,14 @@ import {
   presentArchitecture,
   type ModuleStatus,
 } from "../../architecture";
-import type { ArchitectureDesign, TaskRunState } from "../../types";
+import type { ArchitectureDesign, RepoTrace, TaskRunState } from "../../types";
 import { cn } from "../../ui/cn";
 import { SequenceDiagram } from "./SequenceDiagram";
 
 interface ArchitectureDiagramProps {
   tasks: TaskRunState[];
   design?: ArchitectureDesign;
+  repoTrace?: RepoTrace;
   selectedModuleId?: string;
   onSelectModule(id: string): void;
   onClearModule?(): void;
@@ -41,8 +42,9 @@ const SOURCE_HINT = {
 } as const;
 
 /** System map and main-flow sequence. Both are views of the same design. */
-export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectModule, onClearModule }: ArchitectureDiagramProps) {
+export function ArchitectureDiagram({ tasks, design, repoTrace, selectedModuleId, onSelectModule, onClearModule }: ArchitectureDiagramProps) {
   const presentation = useMemo(() => presentArchitecture(tasks, design), [tasks, design]);
+  const tracePaths = traceLeaves(repoTrace);
   const [view, setView] = useState<"structure" | "sequence">("structure");
   const diagram = presentation.diagram;
   if (diagram.boxes.length === 0) return null;
@@ -67,6 +69,35 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
         <span className="rounded-full bg-surface-2 px-2 py-0.5 text-2xs text-muted">{ARCHITECTURE_SOURCE_LABEL[presentation.source]}</span>
       </div>
       {presentation.summary && <p className="m-0 mt-1 text-xs text-ink-2">{presentation.summary}</p>}
+      {repoTrace && tracePaths.length > 0 && (
+        <div className="bd mt-2 overflow-hidden rounded-lg">
+          <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 bg-surface-2 px-3 py-1.5 text-2xs text-muted">
+            <span>索引</span>
+            <span>{repoTrace.matched ? "目标命中" : "仓库目录"}</span>
+          </div>
+          <ul className="m-0 list-none divide-y p-0">
+            {tracePaths.map((path) => {
+              const moduleId = moduleForPath(diagram.boxes, path);
+              const active = focused !== undefined && moduleId === focused;
+              return (
+                <li key={path}>
+                  <button
+                    type="button"
+                    onClick={() => moduleId && onSelectModule(moduleId)}
+                    className={cn(
+                      "grid w-full cursor-pointer grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left hover:bg-surface-2 focus-ring",
+                      active && "bg-surface-2",
+                    )}
+                  >
+                    <span className="text-2xs text-muted">路径</span>
+                    <code className={cn("truncate text-xs", active ? "text-ink" : "text-ink-2")}>{path}</code>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {presentation.source !== "architect" && (
         <p className="m-0 mt-1 text-xs text-muted">{SOURCE_HINT[presentation.source]}</p>
       )}
@@ -179,4 +210,23 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
       )}
     </section>
   );
+}
+
+function traceLeaves(trace: RepoTrace | undefined): string[] {
+  if (!trace) return [];
+  const paths = trace.nodes.map((node) => node.path).filter((item) => item.length > 0);
+  const leaves = paths.filter((path) => !paths.some((other) => other !== path && other.startsWith(`${path}/`)));
+  return leaves.slice(0, 8);
+}
+
+function moduleForPath(boxes: Array<{ id: string; paths: string[] }>, path: string): string | undefined {
+  let best: { id: string; length: number } | undefined;
+  for (const box of boxes) {
+    for (const owned of box.paths) {
+      const covers = path === owned || path.startsWith(`${owned}/`) || owned.startsWith(`${path}/`);
+      if (!covers) continue;
+      if (!best || owned.length > best.length) best = { id: box.id, length: owned.length };
+    }
+  }
+  return best?.id;
 }

@@ -5,6 +5,7 @@ import { activeFlow, applyTemplateToStrategy, flowFactsFor, flowTemplate, routeT
 import { goalIntakeSchema } from "../domain/contracts.js";
 import { goalIntakeJsonSchema } from "../domain/json-schemas.js";
 import { canUseHandoverFallback, expandPlanningGoal } from "../domain/plan.js";
+import { buildRepoTree, traceRepo } from "../domain/repo-tree.js";
 import { GitManager } from "../git/manager.js";
 import { runQualityWithRerun } from "../quality/flaky.js";
 import { RunStateStore } from "../state/store.js";
@@ -25,6 +26,7 @@ import { AgentFactory } from "./agents.js";
 import { TaskAttemptRunner } from "./task-attempt.js";
 import { TaskScheduler } from "./scheduler.js";
 import { PlanningStage } from "./planning.js";
+import { scanRepoPaths } from "./repo-scan.js";
 import { DecisionStage } from "./decision.js";
 import { AdvisorService } from "./advisor.js";
 export type {
@@ -198,7 +200,8 @@ export class LocalWorkflowRunner {
       workflowSignal.throwIfAborted();
       await git.createWorktree(integrationBranch, baseCommit, integrationWorktree);
       await this.tasks.prepareWorktreeDependencies(integrationWorktree, workflowSignal, state.strategy.maxProcessOutputBytes);
-      const verifiedExperiences = await this.experience.loadPlanning(options.goal, store, runId);
+      await this.indexRepository(state, store, integrationWorktree);
+      const verifiedExperiences = await this.experience.loadPlanning(options.goal, store, runId, state.repoTrace);
       const planningGoal = expandPlanningGoal(options.goal, this.loaded.root);
       const allowImpliedHandover = canUseHandoverFallback(options.goal, this.loaded.root);
       const deterministicPlan = this.planning.controllerPlan(planningGoal, allowImpliedHandover);
@@ -535,6 +538,15 @@ export class LocalWorkflowRunner {
           : "execute";
     await this.driveFlow(context, startAt);
     return state;
+  }
+
+  /** Freeze a path index before planning. The model receives the walked chain, not this scan. */
+  private async indexRepository(state: RunState, store: RunStateStore, root: string): Promise<void> {
+    const tree = buildRepoTree(scanRepoPaths(root));
+    if (tree.nodes.length <= 1) return;
+    state.repoTree = tree;
+    state.repoTrace = traceRepo(tree, state.goal);
+    await store.save(state);
   }
 
   /**

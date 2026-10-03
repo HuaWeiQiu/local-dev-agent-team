@@ -8,6 +8,7 @@ import type {
   TaskPlan,
   TestVerdict,
 } from "../domain/contracts.js";
+import type { RepoTrace, RepoTree } from "../domain/repo-tree.js";
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
 import type { FlowSelection } from "../flow/types.js";
@@ -125,6 +126,8 @@ export const runStateSchema = z.looseObject({
   purpose: z.enum(["evolution-evaluation", "evolution-proposer"]).optional(),
   intake: nested<GoalIntake>().optional(),
   explore: nested<ExploreSummary>().optional(),
+  repoTree: nested<RepoTree>().optional(),
+  repoTrace: nested<RepoTrace>().optional(),
   plan: nested<TaskPlan>().optional(),
   tasks: z.array(taskRunStateSchema),
   finalQuality: nested<QualityReport>().optional(),

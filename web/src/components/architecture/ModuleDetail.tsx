@@ -1,6 +1,6 @@
 import { ArrowDownRight, ArrowUpRight, FolderTree, ListChecks } from "lucide-react";
 import { ARCHITECTURE_KIND_LABEL, ARCHITECTURE_RELATION_LABEL, presentArchitecture, type ModuleStatus } from "../../architecture";
-import type { ArchitectureDesign, TaskRunState } from "../../types";
+import type { ArchitectureDesign, RepoTrace, TaskRunState } from "../../types";
 import { TaskStatusPill } from "../../ui/status";
 import { InspectorSection } from "../run/inspector-parts";
 
@@ -15,16 +15,18 @@ const STATUS_LABEL: Record<ModuleStatus, string> = {
 interface ModuleDetailProps {
   tasks: TaskRunState[];
   design?: ArchitectureDesign;
+  repoTrace?: RepoTrace;
   moduleId: string;
   onSelectTask(task: TaskRunState): void;
   onSelectModule(id: string): void;
   onClearModule?(): void;
 }
 
-export function ModuleDetail({ tasks, design, moduleId, onSelectTask, onSelectModule, onClearModule }: ModuleDetailProps) {
+export function ModuleDetail({ tasks, design, repoTrace, moduleId, onSelectTask, onSelectModule, onClearModule }: ModuleDetailProps) {
   const diagram = presentArchitecture(tasks, design).diagram;
   const module = diagram.boxes.find((box) => box.id === moduleId);
   if (!module) return null;
+  const indexed = repoTrace?.nodes.find((node) => node.id === module.nodeId)?.path;
   const nameOf = (id: string) => diagram.boxes.find((box) => box.id === id)?.label ?? id;
   const incoming = diagram.edges.filter((edge) => edge.to === moduleId);
   const outgoing = diagram.edges.filter((edge) => edge.from === moduleId);
@@ -46,9 +48,18 @@ export function ModuleDetail({ tasks, design, moduleId, onSelectTask, onSelectMo
         )}
       </section>
       <InspectorSection icon={FolderTree} title="负责路径">
-        <ul className="m-0 flex list-none flex-col gap-1 p-0">
+        <ul className="m-0 list-none divide-y p-0">
+          {indexed && (
+            <li className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 py-1.5">
+              <span className="text-2xs text-muted">索引</span>
+              <code className="truncate text-xs text-ink-2">{indexed}</code>
+            </li>
+          )}
           {module.paths.map((path) => (
-            <li key={path}><code className="text-xs text-ink-2">{path}</code></li>
+            <li key={path} className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 py-1.5">
+              <span className="text-2xs text-muted">路径</span>
+              <code className="truncate text-xs text-ink-2">{path}</code>
+            </li>
           ))}
         </ul>
       </InspectorSection>

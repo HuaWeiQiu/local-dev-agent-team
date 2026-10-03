@@ -9,6 +9,7 @@ import {
   planEditIsEmpty,
   summarizePlanEdit,
 } from "../interventions/plan-edit.js";
+import { attachTreeNodes } from "../domain/architecture-design.js";
 import { SessionFactory } from "../sessions/factory.js";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
@@ -581,7 +582,7 @@ export class RunSupervisor {
     if (state.tasks.some((task) => task.status !== "pending")) {
       throw new Error("A plan cannot be edited after task execution has started");
     }
-    const plan = parseEditedPlan(input, this.loaded.config);
+    const plan = attachTreeNodes(parseEditedPlan(input, this.loaded.config), state.repoTree);
     const summary = summarizePlanEdit(state.plan, plan);
     if (planEditIsEmpty(summary)) return;
     state.plan = plan;

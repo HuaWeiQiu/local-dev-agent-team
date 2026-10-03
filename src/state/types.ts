@@ -7,6 +7,7 @@ import type {
   TaskPlan,
   TestVerdict,
 } from "../domain/contracts.js";
+import type { RepoTrace, RepoTree } from "../domain/repo-tree.js";
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
 import type { ApprovalGate } from "../config/schema.js";
@@ -183,6 +184,10 @@ export interface RunState {
   intake?: GoalIntake;
   /** Read-only research written before planning. Absent when explore was skipped or failed open. */
   explore?: ExploreSummary;
+  /** Bounded path index of the project root, frozen when the run starts. */
+  repoTree?: RepoTree;
+  /** The part of repoTree walked for this goal. Absent when the index is only the root. */
+  repoTrace?: RepoTrace;
   plan?: TaskPlan;
   tasks: TaskRunState[];
   finalQuality?: QualityReport;

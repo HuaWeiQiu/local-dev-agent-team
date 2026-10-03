@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
+import { selectExperiences, type RepoTrace } from "../domain/repo-tree.js";
 import { computeSuiteDigest, resolveEvaluationSuite } from "../evaluation/index.js";
 import type { RunState } from "../state/types.js";
 import { AttemptLog, signatureFromFeedback, type AttemptCard } from "./attempt-log.js";
@@ -24,6 +25,7 @@ export interface ExperiencePlanningBundle {
     tags: string[];
     scope: "project" | "shared";
     hitCount: number;
+    citations?: Array<{ nodeId: string; path: string }>;
   }>;
   strategyHints?: StrategyHint[];
   recentAttempts?: AttemptCard[];
@@ -281,7 +283,7 @@ export class ExperienceService {
 
   async retrieveForPlanning(
     goal: string,
-    options: { preview?: boolean } = {},
+    options: { preview?: boolean; trace?: RepoTrace } = {},
   ): Promise<ExperiencePlanningBundle | undefined> {
     if (!this.options.enabled || !this.options.injectIntoPlanning) return undefined;
     const bundle = await this.retrieveVerifiedBundle(
@@ -289,6 +291,7 @@ export class ExperienceService {
       "planning",
       this.options.maxInjected,
       options.preview === true,
+      options.trace,
     );
     const hints = this.options.writeStrategyHints
       ? await new StrategyHintStore(StrategyHintStore.pathFor(this.stateRoot)).list()
@@ -313,6 +316,7 @@ export class ExperienceService {
     taskTitle?: string;
     taskId?: string;
     limit?: number;
+    trace?: RepoTrace;
   }): Promise<ExperiencePlanningBundle | undefined> {
     if (!this.options.enabled || !this.options.injectIntoRework) return undefined;
     const query = [input.feedback, input.taskTitle, input.taskId, "失败", "返工"]
@@ -320,7 +324,7 @@ export class ExperienceService {
       .join(" ")
       .slice(0, 400);
     const limit = Math.min(input.limit ?? 5, this.options.maxInjected || 5);
-    const bundle = await this.retrieveVerifiedBundle(query, "rework", limit);
+    const bundle = await this.retrieveVerifiedBundle(query, "rework", limit, false, input.trace);
     const recentAttempts = this.options.recordAttemptCards
       ? await new AttemptLog(AttemptLog.pathFor(this.stateRoot)).recentMatching({
           feedback: input.feedback,
@@ -341,6 +345,7 @@ export class ExperienceService {
     purpose: "planning" | "rework",
     limit: number,
     preview = false,
+    trace?: RepoTrace,
   ): Promise<ExperiencePlanningBundle | undefined> {
     if (limit <= 0) return undefined;
     const actor = purpose === "rework" ? "system:rework" : "system:planning";
@@ -348,6 +353,9 @@ export class ExperienceService {
       purpose === "rework"
         ? "Inject verified experiences into worker rework context"
         : "Inject verified experiences into planning context";
+
+    const cited = await this.retrieveCited(trace, limit, preview, actor, reason);
+    if (cited) return cited;
 
     const shared = await this.shared.retrieveVerified({
       actor,
@@ -378,11 +386,49 @@ export class ExperienceService {
       items,
     };
   }
+
+  /** Path citations outrank token overlap. No citation keeps the existing token retrieval. */
+  private async retrieveCited(
+    trace: RepoTrace | undefined,
+    limit: number,
+    preview: boolean,
+    actor: string,
+    reason: string,
+  ): Promise<ExperiencePlanningBundle | undefined> {
+    if (!trace?.matched) return undefined;
+    const shared = (await this.shared.list("verified")).map((entry) => ({ ...entry, scope: "shared" as const }));
+    const project = (await this.project.list("verified")).map((entry) => ({ ...entry, scope: "project" as const }));
+    const ranked = selectExperiences([...shared, ...project], trace, limit);
+    if (ranked.length === 0) return undefined;
+    if (!preview) {
+      await this.shared.recordRetrieval(
+        ranked.filter((item) => item.entry.scope === "shared").map((item) => item.entry.id),
+        actor,
+        reason,
+      );
+      await this.project.recordRetrieval(
+        ranked.filter((item) => item.entry.scope === "project").map((item) => item.entry.id),
+        actor,
+        reason,
+      );
+    }
+    return {
+      note: "仅已验证经验，并按本次目标命中的仓库路径排序。条件匹配时优先参考；不得当作密钥、客户代码或隐藏答案。",
+      items: ranked.map((item) =>
+        toPlanningItem(
+          preview ? item.entry : { ...item.entry, hitCount: item.entry.hitCount + 1 },
+          item.entry.scope,
+          item.citations,
+        ),
+      ),
+    };
+  }
 }
 
 function toPlanningItem(
   entry: ExperienceEntry,
   scope: "project" | "shared",
+  citations?: Array<{ nodeId: string; path: string }>,
 ): ExperiencePlanningBundle["items"][number] {
   return {
     id: entry.id,
@@ -391,5 +437,6 @@ function toPlanningItem(
     tags: entry.tags,
     scope,
     hitCount: entry.hitCount,
+    ...(citations && citations.length > 0 ? { citations } : {}),
   };
 }

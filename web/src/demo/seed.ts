@@ -269,6 +269,17 @@ export function buildDemoRuns(base: number): DemoRun[] {
     },
     finalDecision: { decision: "ready", reason: "确定性检查全部通过，评审与测试均已批准。" },
     advisorConsultations: 1,
+    repoTrace: {
+      matched: true,
+      nodes: [
+        { id: "root", parentId: null, path: "", name: "root", kind: "directory" },
+        { id: "src", parentId: "root", path: "src", name: "src", kind: "directory" },
+        { id: "src-cart", parentId: "src", path: "src/cart", name: "cart", kind: "directory" },
+        { id: "test", parentId: "root", path: "test", name: "test", kind: "directory" },
+        { id: "test-cart", parentId: "test", path: "test/cart", name: "cart", kind: "directory" },
+        { id: "docs", parentId: "root", path: "docs", name: "docs", kind: "directory" },
+      ],
+    },
     history: history(base, -52 * minute, [
       ["created", "运行已创建", 0], ["orchestrating", "总控分析目标", 1], ["architecting", "架构拆分任务", 3],
       ["implementing", "开始实现", 7], ["reviewing-testing", "评审与测试", 25], ["integrating", "集成分支", 36],
@@ -293,10 +304,10 @@ export function buildDemoRuns(base: number): DemoRun[] {
         summary: "导出核心产出 CSV，接口把它交给订单页，端到端测试走完整条链路。",
         source: "architect",
         elements: [
-          { id: "export", name: "导出核心", kind: "module", responsibility: "定义订单导出结构并生成 CSV。", paths: ["src/export"] },
-          { id: "api", name: "导出接口", kind: "interface", responsibility: "按时间范围提供 /api/orders/export。", paths: ["src/api/export.ts"] },
-          { id: "orders-ui", name: "订单页", kind: "module", responsibility: "提供导出按钮和进度提示。", paths: ["src/orders"] },
-          { id: "e2e", name: "导出测试", kind: "module", responsibility: "从按钮走到下载文件。", paths: ["e2e"] },
+          { id: "export", name: "导出核心", kind: "module", responsibility: "定义订单导出结构并生成 CSV。", paths: ["src/export"], nodeId: "src-export" },
+          { id: "api", name: "导出接口", kind: "interface", responsibility: "按时间范围提供 /api/orders/export。", paths: ["src/api/export.ts"], nodeId: "src-api" },
+          { id: "orders-ui", name: "订单页", kind: "module", responsibility: "提供导出按钮和进度提示。", paths: ["src/orders"], nodeId: "src-orders" },
+          { id: "e2e", name: "导出测试", kind: "module", responsibility: "从按钮走到下载文件。", paths: ["e2e"], nodeId: "e2e" },
         ],
         relations: [
           { from: "export", to: "api", kind: "calls", label: "接口取 CSV" },
@@ -325,6 +336,17 @@ export function buildDemoRuns(base: number): DemoRun[] {
       suggestedAcceptanceCommands: ["pnpm test --run"],
       forbiddenPaths: [],
       notes: ["时间范围筛选跟导出请求一起传，不另开模块。"],
+    },
+    repoTrace: {
+      matched: true,
+      nodes: [
+        { id: "root", parentId: null, path: "", name: "root", kind: "directory" },
+        { id: "src", parentId: "root", path: "src", name: "src", kind: "directory" },
+        { id: "src-export", parentId: "src", path: "src/export", name: "export", kind: "directory" },
+        { id: "src-api", parentId: "src", path: "src/api", name: "api", kind: "directory" },
+        { id: "src-orders", parentId: "src", path: "src/orders", name: "orders", kind: "directory" },
+        { id: "e2e", parentId: "root", path: "e2e", name: "e2e", kind: "directory" },
+      ],
     },
     history: history(base, -18 * minute, [
       ["created", "运行已创建", 0], ["orchestrating", "总控分析目标", 1], ["exploring", "只读看过导出相关模块", 2],

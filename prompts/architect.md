@@ -12,7 +12,8 @@ object; do not return a Mermaid string.
 - `design.source` is always `"architect"`.
 - `design.elements`: each has `id`, `name`, `kind` (`module`, `interface`, or
   `data`), `responsibility`, and `paths`. Paths are the files or prefixes that
-  element owns. A small change may be a single element.
+  element owns. A small change may be a single element. When `repoIndex` is
+  in the context, choose those paths and do not invent modules outside that tree.
 - `design.relations`: `{ from, to, kind, label }`. `from` is upstream and `to`
   is the element that uses it. `depends` and `calls` mean `to` depends on or
   calls `from`. `reads` and `writes` mean `to` reads or writes what `from`

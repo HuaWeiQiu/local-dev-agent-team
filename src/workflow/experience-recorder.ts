@@ -1,4 +1,5 @@
 import type { LoadedConfig } from "../config/load.js";
+import type { RepoTrace } from "../domain/repo-tree.js";
 import { ExperienceService } from "../experience/service.js";
 import type { RunStateStore } from "../state/store.js";
 import type { RunState, TaskRunState } from "../state/types.js";
@@ -15,10 +16,11 @@ export class RunExperienceRecorder {
     goal: string,
     store: RunStateStore,
     runId: string,
+    trace?: RepoTrace,
   ): Promise<Awaited<ReturnType<ExperienceService["retrieveForPlanning"]>>> {
     try {
       const service = ExperienceService.forLoaded(this.loaded);
-      const bundle = await service.retrieveForPlanning(goal);
+      const bundle = await service.retrieveForPlanning(goal, { ...(trace ? { trace } : {}) });
       if (bundle) {
         store.emit(runId, "experience.retrieved", {
           purpose: "planning",
@@ -51,6 +53,7 @@ export class RunExperienceRecorder {
         taskId: input.taskId,
         taskTitle: input.taskTitle,
         limit: 5,
+        ...(state.repoTrace ? { trace: state.repoTrace } : {}),
       });
       if (bundle) {
         store.emit(state.id, "experience.retrieved", {

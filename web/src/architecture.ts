@@ -282,6 +282,8 @@ export interface ArchitectureModule {
   kind?: "module" | "interface" | "data";
   responsibility?: string;
   paths: string[];
+  /** Directory in the repository index that covers these paths. */
+  nodeId?: string;
   tasks: TaskRunState[];
   status: ModuleStatus;
 }
@@ -436,6 +438,7 @@ function diagramFromDesign(tasks: TaskRunState[], design: ArchitectureDesign): A
       kind: element.kind,
       responsibility: element.responsibility,
       paths: [...element.paths],
+      ...(element.nodeId ? { nodeId: element.nodeId } : {}),
       tasks: mine,
       status: "pending",
     });

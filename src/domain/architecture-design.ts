@@ -1,4 +1,5 @@
-import type { ArchitectureDesign, Task, TaskPlan } from "./contracts.js";
+import type { ArchitectureDesign, ArchitectureElement, Task, TaskPlan } from "./contracts.js";
+import { deepestDirectory, type RepoTree } from "./repo-tree.js";
 
 const DEPENDS_KINDS = new Set(["depends", "calls"]);
 
@@ -152,6 +153,29 @@ export function synthesizeDesign(plan: TaskPlan, source: "inferred" | "controlle
     design,
     tasks: plan.tasks.map((task) => ({ ...task, elementId: taskElement.get(task.id) ?? null })),
   };
+}
+
+/**
+ * Bind each element to the deepest directory that covers its paths.
+ * The model is not asked for this id; a missing tree clears any value that arrived with the plan.
+ */
+export function attachTreeNodes(plan: TaskPlan, tree: RepoTree | undefined): TaskPlan {
+  if (!plan.design) return plan;
+  return {
+    ...plan,
+    design: {
+      ...plan.design,
+      elements: plan.design.elements.map((element) => linkElement(element, tree)),
+    },
+  };
+}
+
+function linkElement(element: ArchitectureElement, tree: RepoTree | undefined): ArchitectureElement {
+  const nodeId = tree ? deepestDirectory(tree, element.paths) : undefined;
+  const next = { ...element } as ArchitectureElement & { nodeId?: string };
+  if (nodeId) next.nodeId = nodeId;
+  else delete next.nodeId;
+  return next;
 }
 
 /** Keep a valid architect design; otherwise replace it with an inferred one. */

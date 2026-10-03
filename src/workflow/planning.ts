@@ -4,7 +4,8 @@ import { singleTaskPlan } from "../flow/index.js";
 import { exploreSummarySchema, taskPlanSchema, type ExploreSummary, type TaskPlan } from "../domain/contracts.js";
 import { exploreSummaryJsonSchema, taskPlanJsonSchema } from "../domain/json-schemas.js";
 import { mkdir, writeFile } from "node:fs/promises";
-import { designIssues, resolveDesign } from "../domain/architecture-design.js";
+import { attachTreeNodes, designIssues, resolveDesign } from "../domain/architecture-design.js";
+import { repoIndex } from "../domain/repo-tree.js";
 import { assessPlanCompleteness, fallbackHandoverTaskPlan, fallbackNamedTaskPlan, formatPlanCompletenessError, validateTaskPlan } from "../domain/plan.js";
 import { type RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
@@ -46,6 +47,7 @@ export class PlanningStage {
       plan = await this.architectPlan(context);
       message = `Architect produced ${plan.tasks.length} task(s)`;
     }
+    plan = attachTreeNodes(plan, state.repoTree);
     state.plan = plan;
     state.tasks = plan.tasks.map((task) => ({ task, status: "pending", attempts: 0 }));
     await store.transition(state, "planned", message);
@@ -76,6 +78,7 @@ export class PlanningStage {
         roleProfiles: workerRole.allowedProfiles,
         ...(verifiedExperiences ? { verifiedExperiences } : {}),
         ...(exploreSummary ? { exploreSummary } : {}),
+        ...indexContext(state),
       },
       schema: taskPlanSchema,
       jsonSchema: taskPlanJsonSchema,
@@ -108,6 +111,7 @@ export class PlanningStage {
           completenessIssues: completeness.issues,
           ...(verifiedExperiences ? { verifiedExperiences } : {}),
           ...(exploreSummary ? { exploreSummary } : {}),
+          ...indexContext(state),
         },
         schema: taskPlanSchema,
         jsonSchema: taskPlanJsonSchema,
@@ -175,6 +179,7 @@ export class PlanningStage {
             "Return a structured summary of modules, risks, and constraints.",
           ],
           ...(verifiedExperiences ? { verifiedExperiences } : {}),
+          ...indexContext(state),
         },
         schema: exploreSummarySchema,
         jsonSchema: exploreSummaryJsonSchema,
@@ -220,4 +225,9 @@ export class PlanningStage {
       throw error;
     }
   }
+}
+
+function indexContext(state: RunState): { repoIndex: NonNullable<ReturnType<typeof repoIndex>> } | Record<string, never> {
+  const index = repoIndex(state.repoTrace);
+  return index ? { repoIndex: index } : {};
 }

@@ -292,6 +292,22 @@ export interface ArchitectureElement {
   kind: ArchitectureKind;
   responsibility: string;
   paths: string[];
+  /** Directory in the repository index that covers these paths. */
+  nodeId?: string;
+}
+
+export interface RepoTraceNode {
+  id: string;
+  parentId: string | null;
+  path: string;
+  name: string;
+  kind: "directory" | "file";
+}
+
+/** The repository walk frozen when the run started. */
+export interface RepoTrace {
+  matched: boolean;
+  nodes: RepoTraceNode[];
 }
 
 export interface ArchitectureRelation {
@@ -423,6 +439,8 @@ export interface RunState {
     forbiddenPaths: string[];
     notes: string[];
   };
+  /** Walked repository paths for this goal. Absent on runs started before the index existed. */
+  repoTrace?: RepoTrace;
   intake?: {
     goalSummary: string;
     instructionsForArchitect: string;
