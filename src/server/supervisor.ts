@@ -27,7 +27,7 @@ import {
 import {
   materializeRoleBindings,
   roleBindingsFromRunState,
-} from "../desktop/role-bindings.js";
+} from "../profiles/role-bindings.js";
 import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
 import type {

@@ -1,6 +1,6 @@
 import type { AgentProfile, AgentTeamConfig, Reasoning } from "../config/schema.js";
 import type { RunRoleBinding } from "../state/types.js";
-import type { RoleBinding } from "./settings.js";
+import type { RoleBinding } from "../desktop/settings.js";
 
 const READ_ONLY_ROLES = new Set([
   "orchestrator",

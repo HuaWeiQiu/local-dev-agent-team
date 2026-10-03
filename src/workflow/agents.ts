@@ -2,7 +2,7 @@ import { type RoleAgentService, ProfiledAgentService } from "../agents/service.j
 import { type RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { type RunBudgetTracker } from "../observability/budget.js";
-import { materializeRoleBindings, roleBindingsFromRunState } from "../desktop/role-bindings.js";
+import { materializeRoleBindings, roleBindingsFromRunState } from "../profiles/role-bindings.js";
 import type { AgentTeamConfig } from "../config/schema.js";
 import type { WorkflowRoleBindings, RunnerEnv } from "./types.js";
 

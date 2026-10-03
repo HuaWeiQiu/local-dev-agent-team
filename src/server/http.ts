@@ -17,13 +17,18 @@ import {
   singleHeader,
 } from "./http-common.js";
 import { onboardingRoutes } from "./http-routes-onboarding.js";
+import { experienceRoutes } from "./http-routes-experience.js";
+import { insightRoutes } from "./http-routes-insights.js";
+import { interventionRoutes } from "./http-routes-interventions.js";
+import { projectRoutes } from "./http-routes-project.js";
 import { runRoutes } from "./http-routes-runs.js";
+import { strategyRoutes } from "./http-routes-strategies.js";
 import { evolutionRoutes } from "./http-routes-evolution.js";
 import { dispatchDesktopApi } from "./http-routes-desktop.js";
 import { serveWebAsset } from "./http-static.js";
 
 export type { ProjectHttpContext } from "./http-common.js";
-export { buildPublicConfig } from "./http-routes-runs.js";
+export { buildPublicConfig } from "./http-routes-project.js";
 
 const desktopSessionPath = "/__agent_team/session";
 const desktopSessionTokenPattern = /^[a-f0-9]{64}$/;
@@ -327,7 +332,16 @@ async function handleWorkspaceRequest(
 // Route matching is unambiguous across slices (no two patterns share method,
 // segment count, and static segments), so concatenation order cannot change
 // which handler a request resolves to.
-const projectApiRoutes: ProjectApiRoute[] = [...runRoutes, ...evolutionRoutes, ...onboardingRoutes];
+const projectApiRoutes: ProjectApiRoute[] = [
+  ...projectRoutes,
+  ...runRoutes,
+  ...interventionRoutes,
+  ...insightRoutes(),
+  ...experienceRoutes,
+  ...strategyRoutes,
+  ...evolutionRoutes,
+  ...onboardingRoutes,
+];
 
 async function dispatchProjectApi(
   context: ProjectHttpContext,
