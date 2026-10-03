@@ -16,7 +16,7 @@ export function RunLiveBar({ status, onOpenActivity }: RunLiveBarProps) {
     <div
       role="status"
       aria-live="polite"
-      className="bd flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-surface px-3.5 py-2 text-sm shadow-card"
+      className="bd flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-surface px-3.5 py-2 text-sm"
     >
       <span className="inline-flex items-center gap-1.5 font-semibold text-accent-ink">
         {status.running ? (

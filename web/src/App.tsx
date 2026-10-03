@@ -244,7 +244,7 @@ export default function App({ demo = false }: { demo?: boolean }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="ui flex h-dvh min-h-0 bg-background text-ink" style={{ backgroundImage: "var(--glow)", backgroundRepeat: "no-repeat" }}>
+      <div className="ui flex h-dvh min-h-0 bg-background text-ink">
         <Sidebar
           workspace={workspace}
           selectedProjectId={selectedProjectId}

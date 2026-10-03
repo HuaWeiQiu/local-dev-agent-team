@@ -20,7 +20,7 @@ export function StrategyStageNode({ data, selected }: NodeProps) {
   return (
     <div
       className={cn(
-        "strategy-stage-node bd-strong relative flex min-h-[84px] w-[246px] items-center gap-3 overflow-hidden rounded-xl bg-surface px-3.5 py-3 shadow-pop transition-shadow",
+        "strategy-stage-node bd-strong relative flex min-h-[84px] w-[246px] items-center gap-3 overflow-hidden rounded-lg bg-surface px-3.5 py-3",
         selected && "outline-2 outline-offset-2 outline-accent",
       )}
     >

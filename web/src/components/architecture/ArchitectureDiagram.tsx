@@ -119,6 +119,7 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
               const x2 = to.x + to.width / 2;
               const y2 = to.y;
               const mid = (y1 + y2) / 2;
+              const vertical = Math.abs(x1 - x2) < 24;
               const caption = edge.label ?? (edge.kind ? ARCHITECTURE_RELATION_LABEL[edge.kind] : undefined);
               return (
                 <g key={`${edge.from}-${edge.to}-${edge.kind ?? "link"}`} opacity={faded ? 0.25 : 1}>
@@ -130,7 +131,13 @@ export function ArchitectureDiagram({ tasks, design, selectedModuleId, onSelectM
                     markerEnd="url(#arch-arrow)"
                   />
                   {caption && (
-                    <text x={(x1 + x2) / 2} y={mid - 4} textAnchor="middle" fill="var(--muted)" fontSize={10}>
+                    <text
+                      x={vertical ? Math.max(x1, x2) + 10 : (x1 + x2) / 2}
+                      y={vertical ? mid + 3 : mid - 4}
+                      textAnchor={vertical ? "start" : "middle"}
+                      fill="var(--muted)"
+                      fontSize={10}
+                    >
                       {caption}
                     </text>
                   )}

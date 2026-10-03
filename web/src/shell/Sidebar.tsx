@@ -89,8 +89,7 @@ export function Sidebar(props: SidebarProps) {
         <div className="flex items-center gap-2.5 px-1">
           <span
             aria-hidden
-            className="grid size-8 place-items-center rounded-lg text-on-accent shadow-card"
-            style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}
+            className="grid size-8 place-items-center rounded-md bg-accent text-on-accent"
           >
             <Bot className="size-[18px]" />
           </span>

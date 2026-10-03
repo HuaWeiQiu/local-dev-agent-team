@@ -24,7 +24,7 @@ export function TaskNode({ data, selected }: NodeProps) {
   return (
     <div
       className={cn(
-        "bd-strong relative w-[268px] cursor-pointer rounded-lg bg-surface px-3.5 pb-3 pt-3.5 shadow-card transition-shadow hover:shadow-pop",
+        "bd-strong relative w-[268px] cursor-pointer rounded-lg bg-surface px-3.5 pb-3 pt-3.5",
         selected && "outline-2 outline-offset-2 outline-accent",
       )}
     >

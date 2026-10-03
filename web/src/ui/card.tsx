@@ -2,7 +2,7 @@ import type { HTMLAttributes } from "react";
 import { cn } from "./cn";
 
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("bd rounded-lg bg-surface shadow-card", className)} {...props} />;
+  return <div className={cn("bd rounded-lg bg-surface", className)} {...props} />;
 }
 
 export function SectionTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {

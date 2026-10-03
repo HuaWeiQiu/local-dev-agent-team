@@ -99,7 +99,7 @@ export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, load
       </Card>
 
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 lg:h-[clamp(380px,58vh,640px)] lg:grid-cols-[minmax(220px,264px)_minmax(0,1fr)]">
-        <aside aria-label="证据索引" className="bd flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg bg-surface shadow-card">
+        <aside aria-label="证据索引" className="bd flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg bg-surface">
           <IndexButton selected={!file} onClick={() => { setFile(undefined); setFileError(undefined); }}>
             <GitCompareArrows aria-hidden className="size-4" />
             <span className="flex min-w-0 flex-col gap-0.5">
@@ -131,7 +131,7 @@ export const EvidenceCenter = memo(function EvidenceCenter({ run, evidence, load
           </div>
         </aside>
 
-        <section aria-label="证据预览" className="flex h-[420px] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-solid border-[var(--terminal-line)] bg-[var(--terminal-bg)] shadow-card lg:h-auto">
+        <section aria-label="证据预览" className="flex h-[420px] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-solid border-[var(--terminal-line)] bg-[var(--terminal-bg)] lg:h-auto">
           <header className="flex shrink-0 items-center justify-between gap-3 border-b border-solid border-[var(--terminal-line)] bg-[var(--terminal-raised)] px-3.5 py-2.5 text-[var(--terminal-ink)]">
             <div className="min-w-0">
               <span className="block text-2xs font-semibold uppercase tracking-wider text-[var(--terminal-muted)]">{file ? "交付物" : "集成差异"}</span>

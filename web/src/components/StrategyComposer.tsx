@@ -225,7 +225,7 @@ function StrategyWorkspace({
           </Callout>
         )}
 
-        <div className="composer-canvas-summary bd scroll-thin absolute inset-x-0 bottom-4 z-10 mx-auto flex w-fit max-w-[calc(100%-2rem)] overflow-x-auto rounded-xl bg-surface/90 text-xs shadow-card backdrop-blur">
+        <div className="composer-canvas-summary bd scroll-thin absolute inset-x-0 bottom-4 z-10 mx-auto flex w-fit max-w-[calc(100%-2rem)] overflow-x-auto rounded-lg bg-surface text-xs">
           <SummaryItem label="阶段" value={String(topology.stages.length)} />
           <SummaryItem label="拓扑" value={topologyModeLabel(draft.mode)} />
           <SummaryItem label="并行上限" value={String(sequential ? 1 : draft.maxParallel)} />

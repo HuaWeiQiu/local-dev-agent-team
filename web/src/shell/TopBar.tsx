@@ -15,7 +15,7 @@ interface TopBarProps {
 
 export function TopBar({ title, hint, onBack, backLabel = "返回看板", leading, actions, navOpen, onOpenNav }: TopBarProps) {
   return (
-    <header className="bd-b sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 bg-surface-glass px-3 backdrop-blur-md md:px-5">
+    <header className="bd-b sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 bg-surface px-3 md:px-5">
       <Button variant="ghost" size="icon" className="md:hidden" aria-label="打开导航" aria-expanded={navOpen} onClick={onOpenNav}>
         <Menu />
       </Button>

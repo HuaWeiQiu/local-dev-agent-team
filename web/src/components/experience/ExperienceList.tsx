@@ -69,7 +69,7 @@ export function ExperienceList({
 
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {entries.length > 0 ? (
-          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          <ul className="m-0 flex list-none flex-col divide-y divide-line p-0">
             {entries.map((entry) => {
               const selected = entry.id === selectedId;
               return (
@@ -80,8 +80,8 @@ export function ExperienceList({
                     aria-current={selected ? "true" : undefined}
                     onClick={() => onSelect(entry.id)}
                     className={cn(
-                      "bd flex w-full cursor-pointer flex-col gap-1.5 rounded-lg bg-surface p-3 text-left text-ink transition-colors hover:border-line-strong hover:bg-surface-2 focus-ring disabled:cursor-not-allowed disabled:opacity-60",
-                      selected && "border-accent-line bg-accent-soft/50 hover:bg-accent-soft/50",
+                      "flex w-full cursor-pointer flex-col gap-1 border-0 bg-transparent px-3 py-2.5 text-left text-ink hover:bg-surface-2 focus-ring disabled:cursor-not-allowed disabled:opacity-60",
+                      selected && "bg-accent-soft/60 hover:bg-accent-soft/60",
                     )}
                   >
                     <span className="flex items-center justify-between gap-2">

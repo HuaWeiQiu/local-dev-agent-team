@@ -8,7 +8,7 @@ import {
   Sparkles,
   Terminal,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getDesktopSettings,
   getProjectRoleSettings,
@@ -364,7 +364,7 @@ export function SettingsWorkbench({
     <section className="scroll-thin h-full overflow-y-auto" aria-label={isProject ? "项目设置" : "全局设置"}>
       <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
         <header className="flex flex-wrap items-start gap-4">
-          <span aria-hidden className="grid size-11 shrink-0 place-items-center rounded-xl bg-accent text-on-accent shadow-card [&_svg]:size-5">
+          <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-md bg-accent-soft text-accent-ink [&_svg]:size-4">
             {isProject ? <FolderCog /> : <Settings2 />}
           </span>
           <div className="min-w-0 flex-1 basis-72">
@@ -475,29 +475,22 @@ export function SettingsWorkbench({
                 : "尚未扫描"}
               actions={detectButton("手动检测", "sm")}
             />
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="bd divide-y overflow-hidden rounded-lg">
               {(inventory?.clis ?? []).map((cli) => (
-                <article key={cli.id} className={cn("bd flex flex-col gap-3 rounded-lg bg-surface-2 p-4", !cli.installed && "opacity-70")}>
-                  <header className="flex items-center justify-between gap-2">
-                    <strong className="text-sm font-semibold text-ink">{CLI_LABEL[cli.id]}</strong>
+                <article key={cli.id} className={cn("flex flex-col gap-1.5 px-3 py-2.5", !cli.installed && "opacity-70")}>
+                  <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <strong className="w-16 text-sm font-semibold text-ink">{CLI_LABEL[cli.id]}</strong>
                     <Badge tone={authTone(cli.auth.status)}>{authLabel(cli.auth.status)}</Badge>
+                    <span className="text-xs text-muted">{cli.installed ? "已安装" : "未找到"}</span>
+                    {cli.version && <span className="font-mono text-xs text-muted" title={cli.version}>{cli.version}</span>}
+                    <span className="text-xs text-muted">{cli.defaultModel ?? "—"}</span>
+                    <span className="text-xs text-muted">{cli.defaultReasoning ?? "—"}</span>
+                    <span className="ml-auto text-xs text-muted">{cli.runtimeSupported ? "可调用" : "仅展示"}</span>
                   </header>
-                  <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
-                    <Item label="安装">{cli.installed ? "已安装" : "未找到"}</Item>
-                    {cli.version && <Item label="版本" title={cli.version}>{cli.version}</Item>}
-                    {cli.binary && <Item label="路径" title={cli.binary} mono>{shortPath(cli.binary)}</Item>}
-                    <Item label="默认模型">{cli.defaultModel ?? "—"}</Item>
-                    <Item label="思考深度">{cli.defaultReasoning ?? "—"}</Item>
-                    <Item label="运行时">{cli.runtimeSupported ? "可调用" : "仅展示"}</Item>
-                    {cli.auth.detail && <Item label="授权说明">{cli.auth.detail}</Item>}
-                  </dl>
-                  {cli.models.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {cli.models.slice(0, 6).map((model) => (
-                        <code key={model.id} className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-2xs text-ink-2">{model.label}</code>
-                      ))}
-                      {cli.models.length > 6 && <span className="py-0.5 text-2xs text-muted">+{cli.models.length - 6}</span>}
-                    </div>
+                  {(cli.binary || cli.auth.detail) && (
+                    <p className="m-0 truncate font-mono text-2xs text-muted" title={cli.binary ?? cli.auth.detail}>
+                      {cli.binary ? shortPath(cli.binary) : cli.auth.detail}
+                    </p>
                   )}
                 </article>
               ))}
@@ -537,15 +530,6 @@ export function SettingsWorkbench({
         {isProject && scope && <JevPanel scope={scope} />}
       </div>
     </section>
-  );
-}
-
-function Item({ label, mono, title, children }: { label: string; mono?: boolean; title?: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted">{label}</dt>
-      <dd {...(title ? { title } : {})} className={cn("m-0 min-w-0 truncate text-ink", mono && "font-mono")}>{children}</dd>
-    </>
   );
 }
 

@@ -67,7 +67,7 @@ export function BoardPage({ runs, config, selectedRunId, busy, loading, demo, on
 
   return (
     <section aria-label="运行工作台" className="scroll-thin mx-auto flex h-full w-full max-w-[1280px] flex-col gap-6 overflow-y-auto px-4 pb-10 pt-6 md:px-8">
-      <div className="bd rounded-xl bg-surface p-1 shadow-card transition-shadow focus-within:shadow-pop">
+      <div className="bd rounded-lg bg-surface p-1">
         <label htmlFor="board-goal" className="sr-only">描述目标</label>
         <textarea
           id="board-goal"
@@ -124,7 +124,7 @@ export function BoardPage({ runs, config, selectedRunId, busy, loading, demo, on
               <Trash2 />清理历史
             </Button>
           </div>
-          <div className="grid items-start gap-4 lg:grid-cols-3">
+          <div className="flex flex-col gap-6">
             {(["attention", "active", "done"] as const).map((lane) => (
               <Lane key={lane} lane={lane} cards={board[lane]} selectedRunId={selectedRunId} busy={busy} loading={loading} onOpenRun={onOpenRun} onDeleteRun={onDeleteRun} />
             ))}
@@ -147,7 +147,7 @@ function Lane({ lane, cards, selectedRunId, busy, loading, onOpenRun, onDeleteRu
       {cards.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line px-4 py-8 text-center text-xs text-muted">{loading ? "加载中…" : meta.empty}</div>
       ) : (
-        <ul className="m-0 flex list-none flex-col gap-2 p-0">
+        <ul className="bd m-0 flex list-none flex-col divide-y divide-line overflow-hidden rounded-lg bg-surface p-0">
           {cards.map((card) => (
             <li key={card.run.id}>
               <RunCard card={card} selected={card.run.id === selectedRunId} busy={busy} onOpen={() => onOpenRun(card.run.id)} onDelete={() => onDeleteRun(card.run.id)} />
@@ -163,45 +163,43 @@ function RunCard({ card, selected, busy, onOpen, onDelete }: { card: BoardCard; 
   const { run, reason, progress } = card;
   const failure = humanizeFailure(run.error);
   const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const rail = card.lane === "attention" && reason?.tone === "danger"
+    ? "border-l-danger"
+    : card.lane === "attention"
+      ? "border-l-warning"
+      : card.lane === "active"
+        ? "border-l-accent"
+        : "border-l-success";
   return (
-    <article
-      className={cn(
-        "bd group relative rounded-lg bg-surface p-3 shadow-card transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-line-strong hover:shadow-pop",
-        selected && "border-accent-line",
-        card.lane === "attention" && reason?.tone === "warning" && "border-l-[3px] border-l-warning",
-        card.lane === "attention" && reason?.tone === "danger" && "border-l-[3px] border-l-danger",
-      )}
-    >
-      <button type="button" onClick={onOpen} className="block w-full cursor-pointer border-0 bg-transparent p-0 text-left focus-ring rounded-md" aria-label={`打开运行：${summarizeGoal(run.goal, 80)}`}>
-        <div className="flex items-start gap-2">
-          <h4 className="m-0 line-clamp-2 flex-1 text-sm font-medium leading-snug text-ink" title={run.goal}>{summarizeGoal(run.goal, 90)}</h4>
-        </div>
-        {failure && card.lane !== "active" && <p className="m-0 mt-1.5 line-clamp-2 text-xs leading-snug text-danger-ink">{failure}</p>}
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+    <article className={cn("group relative border-l-[3px] bg-surface", rail, selected && "bg-accent-soft/40")}>
+      <button type="button" onClick={onOpen} className="block w-full cursor-pointer border-0 bg-transparent px-3 py-2.5 text-left focus-ring" aria-label={`打开运行：${summarizeGoal(run.goal, 80)}`}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <h4 className="m-0 min-w-0 flex-1 truncate text-sm font-medium text-ink" title={run.goal}>{summarizeGoal(run.goal, 90)}</h4>
           {reason ? (
             <Badge tone={reason.tone === "neutral" ? "neutral" : reason.tone}>{reason.label}</Badge>
           ) : (
             <RunStatusPill status={run.status} />
           )}
           <span className="text-2xs text-muted">{strategyDisplayName(run.strategy)}</span>
-          <span className="ml-auto flex items-center gap-1 text-2xs text-muted"><Clock className="size-3" />{formatRelative(run.updatedAt)}</span>
+          <span className="flex items-center gap-1 text-2xs text-muted"><Clock className="size-3" />{formatRelative(run.updatedAt)}</span>
+          {progress.total > 0 && (
+            <span className="flex w-28 items-center gap-2">
+              <span
+                role="progressbar"
+                aria-label="任务进度"
+                aria-valuemin={0}
+                aria-valuemax={progress.total}
+                aria-valuenow={progress.done}
+                aria-valuetext={`${progress.done}/${progress.total} 个任务`}
+                className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3"
+              >
+                <span className={cn("block h-full rounded-full", card.lane === "attention" && reason?.tone === "danger" ? "bg-danger" : "bg-accent")} style={{ width: `${percent}%` }} />
+              </span>
+              <span className="text-2xs tabular-nums text-muted">{progress.done}/{progress.total}</span>
+            </span>
+          )}
         </div>
-        {progress.total > 0 && (
-          <div className="mt-2.5 flex items-center gap-2">
-            <div
-              role="progressbar"
-              aria-label="任务进度"
-              aria-valuemin={0}
-              aria-valuemax={progress.total}
-              aria-valuenow={progress.done}
-              aria-valuetext={`${progress.done}/${progress.total} 个任务`}
-              className="h-1 flex-1 overflow-hidden rounded-full bg-surface-3"
-            >
-              <div className={cn("h-full rounded-full transition-[width] duration-500", card.lane === "attention" && reason?.tone === "danger" ? "bg-danger" : "bg-accent")} style={{ width: `${percent}%` }} />
-            </div>
-            <span className="text-2xs tabular-nums text-muted">{progress.done}/{progress.total}</span>
-          </div>
-        )}
+        {failure && card.lane !== "active" && <p className="m-0 mt-1 line-clamp-1 text-xs text-danger-ink">{failure}</p>}
       </button>
       {deletableStatuses.has(run.status) && (
         <button
@@ -226,7 +224,7 @@ function Onboarding({ demo, onPick }: { demo: boolean; onPick(goal: string): voi
     ["你来把关", "确定性检查先行；到了审批门，只需要看证据并决定批准或驳回。"],
   ] as const;
   return (
-    <div className="bd rounded-xl bg-surface p-6 shadow-card md:p-8">
+    <div className="bd rounded-lg bg-surface p-6 md:p-8">
       <div className="flex items-center gap-2 text-accent-ink"><Sparkles className="size-4" /><span className="text-xs font-semibold uppercase tracking-wider">开始使用</span></div>
       <h2 className="m-0 mt-2 text-xl font-semibold tracking-tight text-ink">这个项目还没有运行</h2>
       <p className="m-0 mt-1.5 max-w-xl text-sm leading-relaxed text-muted">在上面的输入框里写下第一个目标，或者从下面的示例开始。</p>
