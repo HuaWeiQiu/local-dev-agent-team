@@ -9,6 +9,7 @@ import {
   getUsage,
 } from "../api";
 import { retainAgentMonitorEvents } from "../agent-activity";
+import { acceptNewEvents } from "../event-merge";
 import { runActionErrorMessage } from "../presentation";
 import type {
   ApprovalRequest,
@@ -204,12 +205,12 @@ export function useRunEvents(scope: ProjectScope | undefined, { evidenceVisible,
     const flushEvents = () => {
       eventFlushTimer.current = undefined;
       if (!active || eventBuffer.current.length === 0) return;
-      // 按 sequence 去重兜底：重连续传/重放可能带重复事件，保留原有顺序
-      const pending = eventBuffer.current.filter((event) => event.sequence > lastSequence);
+      // 重连续传/重放与实时尾部可能重叠：按 sequence 去重并排序
+      const result = acceptNewEvents(lastSequence, eventBuffer.current);
       eventBuffer.current = [];
-      if (pending.length === 0) return;
-      lastSequence = pending.reduce((max, event) => Math.max(max, event.sequence), lastSequence);
-      setEvents((current) => retainAgentMonitorEvents([...current, ...pending]));
+      if (result.accepted.length === 0) return;
+      lastSequence = result.lastSequence;
+      setEvents((current) => retainAgentMonitorEvents([...current, ...result.accepted]));
     };
     source.onmessage = (message) => {
       if (!active) return;

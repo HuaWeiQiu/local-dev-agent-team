@@ -14,7 +14,6 @@ import {
   type AdvisorVerdict,
   type ExploreSummary,
   type ReviewVerdict,
-  type Task,
   type TestVerdict,
 } from "../domain/contracts.js";
 import {
@@ -26,11 +25,10 @@ import {
   taskPlanJsonSchema,
   testVerdictJsonSchema,
 } from "../domain/json-schemas.js";
-import { access, mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import {
   assessPlanCompleteness,
   canUseHandoverFallback,
-  classifyTaskKind,
   expandPlanningGoal,
   fallbackHandoverTaskPlan,
   fallbackNamedTaskPlan,
@@ -54,10 +52,34 @@ import type {
   RunCheckpoint,
   RunRoleBinding,
   RunState,
-  RunStatus,
   TaskRunState,
 } from "../state/types.js";
+import { RunArtifactCleaner } from "./cleanup.js";
+import { RunExperienceRecorder } from "./experience-recorder.js";
 import { branchSegment, createRunId } from "./id.js";
+import {
+  latestCheckpoint,
+  truncateExploreSummary,
+  latestApproval,
+  requiresPlanApproval,
+  pathExists,
+  resetIncompleteTask,
+  isBudgetExceededError,
+  recoveryArtifactKey,
+  taskArtifactKey,
+  findTaskState,
+  terminalStatusAfterFailure,
+} from "./state-helpers.js";
+import {
+  isPlaceholderVerdict,
+  shouldAcceptDocsDespiteEscalate,
+  isHardSpecialistEscalation,
+  shouldTrustQualityOverReview,
+  passesTaskGates,
+  buildReworkFeedback,
+  compactQuality,
+} from "./verdict-policy.js";
+
 import {
   computeFailureSignature,
   isRepeatedFailure,
@@ -81,12 +103,19 @@ import {
   RunBudgetExceededError,
   RunBudgetTracker,
 } from "../observability/budget.js";
-import { ExperienceService } from "../experience/service.js";
 import {
   materializeRoleBindings,
   roleBindingsFromRunState,
 } from "../desktop/role-bindings.js";
 import type { AdvisorTrigger, AgentTeamConfig } from "../config/schema.js";
+
+export {
+  isHardSpecialistEscalation,
+  isPlaceholderVerdict,
+  shouldAcceptDocsDespiteEscalate,
+  shouldTrustQualityOverReview,
+} from "./verdict-policy.js";
+export { terminalStatusAfterFailure } from "./state-helpers.js";
 
 type WorkflowRoleBindings = Record<
   string,
@@ -128,6 +157,8 @@ export class LocalWorkflowRunner {
   private readonly runsDirectory: string;
   private readonly worktreesDirectory: string;
   private readonly forkAdvisor: ForkAdvisor | undefined;
+  private readonly experience: RunExperienceRecorder;
+  private readonly cleaner: RunArtifactCleaner;
 
   constructor(
     private readonly loaded: LoadedConfig,
@@ -136,6 +167,8 @@ export class LocalWorkflowRunner {
     const stateRoot = path.resolve(loaded.root, loaded.config.project.stateDirectory);
     this.runsDirectory = path.join(stateRoot, "runs");
     this.worktreesDirectory = path.join(stateRoot, "worktrees");
+    this.experience = new RunExperienceRecorder(loaded);
+    this.cleaner = new RunArtifactCleaner(this.worktreesDirectory);
     const jev = loaded.config.jev;
     this.forkAdvisor =
       dependencies.forkAdvisor ?? (jev?.enabled ? new JevClient(jev) : undefined);
@@ -250,7 +283,7 @@ export class LocalWorkflowRunner {
       workflowSignal.throwIfAborted();
       await git.createWorktree(integrationBranch, baseCommit, integrationWorktree);
       await this.prepareWorktreeDependencies(integrationWorktree, workflowSignal, state.strategy.maxProcessOutputBytes);
-      const verifiedExperiences = await this.loadPlanningExperiences(options.goal, store, runId);
+      const verifiedExperiences = await this.experience.loadPlanning(options.goal, store, runId);
       const planningGoal = expandPlanningGoal(options.goal, this.loaded.root);
       const allowImpliedHandover = canUseHandoverFallback(options.goal, this.loaded.root);
       const deterministicPlan = fallbackNamedTaskPlan(planningGoal);
@@ -434,8 +467,8 @@ export class LocalWorkflowRunner {
         state.error,
       );
       if (!paused) {
-        await this.recordExperienceFromRun(state, store);
-        await this.cleanupRunArtifacts(state, store, git);
+        await this.experience.extractFromRun(state, store);
+        await this.cleaner.cleanup(state, store, git);
       }
       return state;
     } finally {
@@ -533,8 +566,8 @@ export class LocalWorkflowRunner {
         state.error,
       );
       if (!paused) {
-        await this.recordExperienceFromRun(state, store);
-        await this.cleanupRunArtifacts(state, store, git);
+        await this.experience.extractFromRun(state, store);
+        await this.cleaner.cleanup(state, store, git);
       }
       return state;
     } finally {
@@ -665,8 +698,8 @@ export class LocalWorkflowRunner {
         "completed",
         "Automatic evolution evaluation completed without publication",
       );
-      await this.recordExperienceFromRun(state, store);
-      await this.cleanupRunArtifacts(state, store, git);
+      await this.experience.extractFromRun(state, store);
+      await this.cleaner.cleanup(state, store, git);
       return state;
     }
     const blockedAfterChecks = state.tasks.filter((task) => task.status === "blocked");
@@ -1009,7 +1042,7 @@ export class LocalWorkflowRunner {
         try {
           await git.removeWorktree(taskState.worktree, signal);
         } catch (error) {
-          await this.recordCleanupWarning(
+          await this.cleaner.warn(
             state,
             store,
             `Failed to remove task worktree '${taskState.worktree}': ${
@@ -1176,7 +1209,7 @@ export class LocalWorkflowRunner {
           await git.removeWorktree(taskState.worktree, signal);
         } catch (error) {
           // Worktree cleanup failure must not block an otherwise passing wave.
-          await this.recordCleanupWarning(
+          await this.cleaner.warn(
             state,
             store,
             `Failed to remove task worktree '${taskState.worktree}': ${
@@ -1414,7 +1447,7 @@ export class LocalWorkflowRunner {
       try {
         const reworkExperiences =
           attempt > 1 && feedback
-            ? await this.loadReworkExperiences(state, store, {
+            ? await this.experience.loadRework(state, store, {
                 feedback,
                 taskId: taskState.task.id,
                 taskTitle: taskState.task.title,
@@ -1454,7 +1487,7 @@ export class LocalWorkflowRunner {
         if (files.length === 0) {
           feedback = "No repository changes were produced. Implement the assigned task.";
           failureInput = { quality, errorMessage: feedback };
-          await this.recordAttemptCard(state, store, taskState, attempt, feedback);
+          await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
           continue;
         }
         try {
@@ -1462,7 +1495,7 @@ export class LocalWorkflowRunner {
         } catch (error) {
           feedback = error instanceof Error ? error.message : String(error);
           failureInput = { quality, errorMessage: feedback };
-          await this.recordAttemptCard(state, store, taskState, attempt, feedback);
+          await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
           continue;
         }
         const diff = await git.stagedDiff(taskState.worktree, 160_000, signal);
@@ -1487,7 +1520,7 @@ export class LocalWorkflowRunner {
           )
         ) {
           if (attempt > 1 && lastReworkExperienceIds.length > 0) {
-            await this.recordExperienceSuccess(state, store, lastReworkExperienceIds);
+            await this.experience.recordSuccess(state, store, lastReworkExperienceIds);
           }
           await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
           return;
@@ -1499,7 +1532,7 @@ export class LocalWorkflowRunner {
         }
         feedback = buildReworkFeedback(quality, review, test);
         failureInput = { quality, review, test };
-        await this.recordAttemptCard(state, store, taskState, attempt, feedback);
+        await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
         await store.transition(
           state,
           "reworking",
@@ -1513,7 +1546,7 @@ export class LocalWorkflowRunner {
         }
         feedback = error instanceof Error ? error.message : String(error);
         failureInput = { errorMessage: feedback };
-        await this.recordAttemptCard(state, store, taskState, attempt, feedback);
+        await this.experience.recordAttempt(state, store, taskState, attempt, feedback);
         if (feedback.startsWith("Specialist escalated")) {
           taskState.status = "blocked";
           taskState.error = feedback;
@@ -1897,16 +1930,6 @@ export class LocalWorkflowRunner {
     await store.save(state);
   }
 
-  private async recordCleanupWarning(
-    state: RunState,
-    store: RunStateStore,
-    message: string,
-  ): Promise<void> {
-    state.history.push({ at: new Date().toISOString(), status: state.status, message });
-    await store.save(state);
-    store.emit(state.id, "run.cleanup-warning", { message });
-  }
-
   /**
    * Accumulate the wall-clock time of one run/resume segment so the strategy
    * execution timeout is prorated instead of restarting on every resume.
@@ -1926,153 +1949,6 @@ export class LocalWorkflowRunner {
       await store.save(state);
     } catch {
       // Best-effort accounting.
-    }
-  }
-
-  /**
-   * Best-effort removal of a terminal run's task worktrees and task branches
-   * (including `-resume-N` variants). Failures only produce warnings. The
-   * integration worktree/branch is never touched: publication and pending
-   * approvals still need it.
-   */
-  private async cleanupRunArtifacts(
-    state: RunState,
-    store: RunStateStore,
-    git: GitManager,
-  ): Promise<void> {
-    if (!["completed", "blocked", "interrupted", "cancelled"].includes(state.status)) {
-      return;
-    }
-    const runWorktrees = path.join(this.worktreesDirectory, state.id);
-    let entries: string[] = [];
-    try {
-      entries = await readdir(runWorktrees);
-    } catch {
-      entries = [];
-    }
-    for (const entry of entries) {
-      if (entry === "integration") {
-        continue;
-      }
-      const worktree = path.join(runWorktrees, entry);
-      try {
-        await git.removeWorktree(worktree);
-      } catch (error) {
-        await this.recordCleanupWarning(
-          state,
-          store,
-          `Failed to remove task worktree '${worktree}': ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
-    try {
-      const prefix = `agent-team/${branchSegment(state.id)}/`;
-      for (const branch of await git.listBranches(`${prefix}*`)) {
-        if (branch === state.integrationBranch) {
-          continue;
-        }
-        try {
-          await git.deleteBranch(branch);
-        } catch (error) {
-          await this.recordCleanupWarning(
-            state,
-            store,
-            `Failed to delete task branch '${branch}': ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-    } catch (error) {
-      await this.recordCleanupWarning(
-        state,
-        store,
-        `Failed to list task branches for cleanup: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-
-  private async loadPlanningExperiences(
-    goal: string,
-    store: RunStateStore,
-    runId: string,
-  ): Promise<Awaited<ReturnType<ExperienceService["retrieveForPlanning"]>>> {
-    try {
-      const service = ExperienceService.forLoaded(this.loaded);
-      const bundle = await service.retrieveForPlanning(goal);
-      if (bundle) {
-        store.emit(runId, "experience.retrieved", {
-          purpose: "planning",
-          count: bundle.items.length,
-          scopes: {
-            shared: bundle.items.filter((item) => item.scope === "shared").length,
-            project: bundle.items.filter((item) => item.scope === "project").length,
-          },
-        });
-      }
-      return bundle;
-    } catch (error) {
-      store.emit(runId, "experience.retrieve-failed", {
-        purpose: "planning",
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return undefined;
-    }
-  }
-
-  private async loadReworkExperiences(
-    state: RunState,
-    store: RunStateStore,
-    input: { feedback: string; taskId: string; taskTitle: string },
-  ): Promise<Awaited<ReturnType<ExperienceService["retrieveForRework"]>>> {
-    try {
-      const service = ExperienceService.forLoaded(this.loaded);
-      const bundle = await service.retrieveForRework({
-        feedback: input.feedback,
-        taskId: input.taskId,
-        taskTitle: input.taskTitle,
-        limit: 5,
-      });
-      if (bundle) {
-        store.emit(state.id, "experience.retrieved", {
-          purpose: "rework",
-          taskId: input.taskId,
-          count: bundle.items.length,
-        });
-      }
-      return bundle;
-    } catch (error) {
-      store.emit(state.id, "experience.retrieve-failed", {
-        purpose: "rework",
-        taskId: input.taskId,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return undefined;
-    }
-  }
-
-  private async recordExperienceFromRun(
-    state: RunState,
-    store: RunStateStore,
-  ): Promise<void> {
-    try {
-      const service = ExperienceService.forLoaded(this.loaded);
-      const { created, autoPromoted } = await service.extractFromRun(state);
-      if (created.length > 0) {
-        store.emit(state.id, "experience.extracted", {
-          count: created.length,
-          ids: created.map((entry) => entry.id),
-          autoPromoted: autoPromoted.map((entry) => entry.id),
-        });
-      }
-    } catch (error) {
-      store.emit(state.id, "experience.extract-failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
     }
   }
 
@@ -2115,289 +1991,8 @@ export class LocalWorkflowRunner {
     }
     return bindingsSource;
   }
-
-  private async recordAttemptCard(
-    state: RunState,
-    store: RunStateStore,
-    taskState: TaskRunState,
-    attempt: number,
-    feedback: string,
-  ): Promise<void> {
-    try {
-      const service = ExperienceService.forLoaded(this.loaded);
-      const card = await service.recordAttempt({
-        runId: state.id,
-        taskId: taskState.task.id,
-        taskTitle: taskState.task.title,
-        attempt,
-        feedback,
-      });
-      if (card) {
-        store.emit(state.id, "experience.attempt-recorded", {
-          taskId: card.taskId,
-          attempt: card.attempt,
-          signature: card.signature,
-        });
-      }
-    } catch (error) {
-      store.emit(state.id, "experience.attempt-failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  private async recordExperienceSuccess(
-    state: RunState,
-    store: RunStateStore,
-    experienceIds: string[],
-  ): Promise<void> {
-    try {
-      const service = ExperienceService.forLoaded(this.loaded);
-      const updated = await service.recordSuccess(experienceIds);
-      if (updated > 0) {
-        store.emit(state.id, "experience.success-recorded", {
-          count: updated,
-          ids: experienceIds,
-        });
-      }
-    } catch (error) {
-      store.emit(state.id, "experience.success-failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-}
-
-function latestCheckpoint(state: RunState): RunCheckpoint {
-  const checkpoint = state.checkpoints?.at(-1);
-  if (!checkpoint) {
-    throw new Error(`Run '${state.id}' has no durable checkpoint`);
-  }
-  return checkpoint;
-}
-
-function truncateExploreSummary(summary: ExploreSummary, maxChars: number): ExploreSummary {
-  if (maxChars <= 0) {
-    return {
-      summary: summary.summary.slice(0, 200),
-      modules: [],
-      riskPaths: [],
-      suggestedAcceptanceCommands: [],
-      forbiddenPaths: [],
-      notes: [],
-    };
-  }
-  const clone: ExploreSummary = {
-    summary: summary.summary,
-    modules: [...summary.modules],
-    riskPaths: [...summary.riskPaths],
-    suggestedAcceptanceCommands: [...summary.suggestedAcceptanceCommands],
-    forbiddenPaths: [...summary.forbiddenPaths],
-    notes: [...summary.notes],
-  };
-  const encoded = () => JSON.stringify(clone);
-  if (encoded().length <= maxChars) {
-    return clone;
-  }
-  // Shrink arrays first, then summary text.
-  while (encoded().length > maxChars) {
-    if (clone.notes.length > 0) {
-      clone.notes.pop();
-      continue;
-    }
-    if (clone.suggestedAcceptanceCommands.length > 0) {
-      clone.suggestedAcceptanceCommands.pop();
-      continue;
-    }
-    if (clone.modules.length > 0) {
-      clone.modules.pop();
-      continue;
-    }
-    if (clone.riskPaths.length > 0) {
-      clone.riskPaths.pop();
-      continue;
-    }
-    if (clone.forbiddenPaths.length > 0) {
-      clone.forbiddenPaths.pop();
-      continue;
-    }
-    const budget = Math.max(80, maxChars - 40);
-    clone.summary = `${clone.summary.slice(0, budget)}…`;
-    break;
-  }
-  return clone;
-}
-
-function latestApproval(
-  state: RunState,
-  gate: ApprovalRequest["gate"],
-): ApprovalRequest | undefined {
-  for (let index = (state.approvals?.length ?? 0) - 1; index >= 0; index -= 1) {
-    const approval = state.approvals?.[index];
-    if (approval?.gate === gate) return approval;
-  }
-  return undefined;
-}
-
-/**
- * A plan needs human approval only when the strategy gates "plan".
- * Project quality.commands remain the real gate; agent-authored
- * acceptanceCommands must not force an extra plan stop.
- */
-function requiresPlanApproval(state: RunState): boolean {
-  return state.strategy.approvalGates.includes("plan");
-}
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function resetIncompleteTask(task: TaskRunState): void {  task.status = "pending";
-  // attempts intentionally preserved: the rework limit must count across
-  // resume segments, otherwise repeated pause/resume bypasses it.
-  delete task.branch;
-  delete task.worktree;
-  delete task.commit;
-  delete task.mergeCommit;
-  delete task.merging;
-  delete task.profile;
-  delete task.quality;
-  delete task.review;
-  delete task.test;
-  delete task.error;
-}
-
-function isBudgetExceededError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "RUN_BUDGET_EXCEEDED";
-}
-
-function recoveryArtifactKey(state: RunState, key: string): string {
-  return state.resumeCount ? `recoveries/${state.resumeCount}/${key}` : key;
-}
-
-function taskArtifactKey(
-  state: RunState,
-  taskId: string,
-  attempt: number,
-  artifact: string,
-): string {
-  return recoveryArtifactKey(state, `tasks/${taskId}/attempt-${attempt}/${artifact}`);
-}
-
-function findTaskState(state: RunState, taskId: string): TaskRunState {
-  const task = state.tasks.find((item) => item.task.id === taskId);
-  if (!task) {
-    throw new Error(`Missing state for task '${taskId}'`);
-  }
-  return task;
-}
-
-export function isPlaceholderVerdict(verdict: string, summary: string): boolean {
-  const text = `${verdict} ${summary}`.toLowerCase();
-  return (
-    /review in progress|placeholder will be replaced|still reading|before issuing|before judging|before any .+ verdict|need the full prompt|independent inspection|reading the full (review|tester) prompt|independently inspecting|inspecting .+ before issuing|正在检查|再给结论|正在阅读|正在读|先读完|尚未给出/.test(
-      text,
-    )
-  );
-}
-
-export function shouldAcceptDocsDespiteEscalate(
-  task: Task,
-  review: ReviewVerdict,
-  test: TestVerdict,
-): boolean {
-  const kind = classifyTaskKind(task);
-  if (kind !== "docs" && kind !== "host-evidence") {
-    return false;
-  }
-  return isHardSpecialistEscalation(review, test) || shouldTrustQualityOverReview(review, test);
-}
-
-export function isHardSpecialistEscalation(review: ReviewVerdict, test: TestVerdict): boolean {
-  const reviewEscalated = review.verdict === "escalate" && !isPlaceholderVerdict(review.verdict, review.summary);
-  const testEscalated = test.verdict === "escalate" && !isPlaceholderVerdict(test.verdict, test.summary);
-  return reviewEscalated || testEscalated;
-}
-
-export function shouldTrustQualityOverReview(review: ReviewVerdict, test: TestVerdict): boolean {
-  const reviewOk =
-    review.verdict === "approve"
-    || isPlaceholderVerdict(review.verdict, review.summary);
-  const testOk =
-    test.verdict === "approve"
-    || isPlaceholderVerdict(test.verdict, test.summary);
-  return reviewOk && testOk;
-}
-
-function passesTaskGates(
-  quality: QualityReport,
-  review: ReviewVerdict,
-  test: TestVerdict,
-): boolean {
-  return (
-    quality.passed &&
-    review.verdict === "approve" &&
-    !review.findings.some((finding) => finding.required) &&
-    test.verdict === "approve"
-  );
-}
-
-function buildReworkFeedback(
-  quality: QualityReport,
-  review: ReviewVerdict,
-  test: TestVerdict,
-): string {
-  return JSON.stringify(
-    {
-      deterministicChecks: compactQuality(quality),
-      review,
-      test,
-    },
-    null,
-    2,
-  );
 }
 
 function isRunState(value: RunState | WorkflowRoleBindings): value is RunState {
   return typeof value === "object" && value !== null && "id" in value && "profileOverrides" in value;
-}
-
-function compactQuality(report: QualityReport): unknown {
-  return {
-    passed: report.passed,
-    commands: report.commands.map((command) => ({
-      command: command.spec,
-      exitCode: command.exitCode,
-      timedOut: command.timedOut,
-      stdout: command.stdout.slice(-20_000),
-      stderr: command.stderr.slice(-20_000),
-    })),
-  };
-}
-
-/**
- * Map workflow failure to a terminal status.
- * Explicit user cancel → cancelled; control-plane shutdown / other aborts → interrupted
- * so the UI can offer checkpoint resume instead of a full restart.
- */
-export function terminalStatusAfterFailure(
-  error: unknown,
-  signal?: AbortSignal,
-): Extract<RunStatus, "cancelled" | "interrupted" | "blocked"> {
-  if (!signal?.aborted) return "blocked";
-  const message = error instanceof Error ? error.message : String(error);
-  // A user pause settles as interrupted: the run stays resumable from its
-  // latest checkpoint instead of being discarded like a cancellation.
-  if (/paused by user/i.test(message)) {
-    return "interrupted";
-  }
-  if (/cancelled by user/i.test(message) || /^Run cancelled\b/i.test(message)) {
-    return "cancelled";
-  }
-  return "interrupted";
 }
