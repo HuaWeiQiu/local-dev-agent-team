@@ -282,7 +282,7 @@ strategies:
 # loopback address; no credentials are stored here. Set enabled: true after
 # pointing baseUrl/model at your local OpenAI-compatible server.
 jev:
-  enabled: false
+  enabled: true
   protocol: laya
   baseUrl: http://127.0.0.1:9932
   model: laya-multilingual
