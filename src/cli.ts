@@ -518,6 +518,53 @@ experienceCommand
     },
   );
 
+experienceCommand
+  .command("promote")
+  .description("Promote a candidate to verified (the human gate for injection)")
+  .argument("<experience-id>", "experience identifier")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "why this candidate is trustworthy")
+  .option("-c, --config <path>", "configuration path")
+  .option("--json", "emit JSON", false)
+  .action(
+    async (
+      experienceId: string,
+      options: { actor: string; reason: string; config?: string; json: boolean },
+    ) => {
+      const loaded = await loadValidatedConfig(options.config);
+      const service = ExperienceService.forLoaded(loaded);
+      const promoted = await service.promote(
+        experienceId,
+        options.actor,
+        options.reason,
+      );
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(promoted, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`${promoted.id}\t${promoted.status}\t${promoted.summary}\n`);
+    },
+  );
+
+experienceCommand
+  .command("reject")
+  .description("Reject a candidate so it is never injected")
+  .argument("<experience-id>", "experience identifier")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "why it must not be used")
+  .option("-c, --config <path>", "configuration path")
+  .action(
+    async (
+      experienceId: string,
+      options: { actor: string; reason: string; config?: string },
+    ) => {
+      const loaded = await loadValidatedConfig(options.config);
+      const service = ExperienceService.forLoaded(loaded);
+      const rejected = await service.reject(experienceId, options.actor, options.reason);
+      process.stdout.write(`${rejected.id}\t${rejected.status}\n`);
+    },
+  );
+
 program
   .command("status")
   .description("Show one run or list recent runs")
