@@ -16,14 +16,14 @@ interface RunLauncherProps {
   open: boolean;
   config: PublicConfig;
   /** 有 scope 时目标输入区展示经验注入预览 */
-  scope?: ProjectScope;
-  initialStrategy?: string;
-  initialGoal?: string;
+  scope: ProjectScope | undefined;
+  initialStrategy: string | undefined;
+  initialGoal: string | undefined;
   busy: boolean;
   error: string | undefined;
   /** Global defaults + inventory for CLI picker */
-  roleDefaults?: Record<string, RoleBindingInput>;
-  inventory?: import("../types").CliInventory;
+  roleDefaults: Record<string, RoleBindingInput> | undefined;
+  inventory: import("../types").CliInventory | undefined;
   /** 「设置」中的新建运行选型开关；关闭时角色区只读展示当前绑定 */
   showCliPicker?: boolean;
   onClose(): void;

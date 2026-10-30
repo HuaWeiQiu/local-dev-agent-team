@@ -17,3 +17,18 @@ if (!window.matchMedia) {
     dispatchEvent: () => false,
   })) as unknown as typeof window.matchMedia;
 }
+
+// Radix panels observe resize; jsdom has no ResizeObserver.
+if (!("ResizeObserver" in window)) {
+  class ResizeObserverStub {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  (window as unknown as { ResizeObserver: unknown }).ResizeObserver = ResizeObserverStub;
+}
+
+// Radix command palette scrolls the active item into view.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView(): void {};
+}
