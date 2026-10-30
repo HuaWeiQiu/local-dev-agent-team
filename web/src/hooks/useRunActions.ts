@@ -1,25 +1,7 @@
 import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
-import {
-  cancelRun,
-  cleanupRuns,
-  deleteRun,
-  deleteStrategyBlueprint,
-  downloadRunEvents,
-  getEvidenceFile,
-  pauseRun,
-  preflightStrategyBlueprint,
-  previewRunCleanup,
-  publishRun,
-  respondApproval,
-  resumeRun,
-  retryRun,
-  saveStrategyBlueprint,
-  startRun,
-} from "../api";
-import { runActionErrorMessage, summarizeGoal } from "../presentation";
 import type { EditablePlan } from "../components/PlanEditor";
 import type { MonitorPanel } from "../components/RunPage";
-import type { RunMonitor } from "./useRunEvents";
+import { runActionErrorMessage } from "../presentation";
 import type {
   ApprovalRequest,
   EvidenceFilePreview,
@@ -29,6 +11,23 @@ import type {
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
 } from "../types";
+import {
+  cancelRunCommand,
+  confirmCleanupCommand,
+  createRunCommand,
+  deleteBlueprintCommand,
+  deleteRunCommand,
+  exportEventsCommand,
+  preflightBlueprintCommand,
+  previewCleanupCommand,
+  publishRunCommand,
+  readEvidenceCommand,
+  retryRunCommand,
+  saveBlueprintCommand,
+  submitRunActionCommand,
+} from "./run-actions/commands";
+import type { CommandDeps } from "./run-actions/commands";
+import type { RunMonitor } from "./useRunEvents";
 
 interface UseRunActionsOptions {
   scope: ProjectScope | undefined;
@@ -36,36 +35,20 @@ interface UseRunActionsOptions {
   monitor: RunMonitor;
   setMonitorPanel: Dispatch<SetStateAction<MonitorPanel>>;
   setMonitorView: Dispatch<SetStateAction<"board" | "run">>;
-  setWorkspaceMode: Dispatch<SetStateAction<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">>;
+  setWorkspaceMode: Dispatch<
+    SetStateAction<"monitor" | "design" | "evolution" | "experience" | "project" | "settings">
+  >;
   setLauncherOpen: Dispatch<SetStateAction<boolean>>;
   setLauncherStrategy: Dispatch<SetStateAction<string | undefined>>;
 }
 
 /**
- * 运行相关 mutation 封装：create/cancel/retry/delete/resume/respondApproval、
- * 批量清理、策略蓝图保存与证据/事件导出，含 busy/error 处理现状（自 App.tsx 原样搬移）。
+ * 运行相关 mutation 的动作表：每条命令在 `run-actions/commands.ts`，
+ * 这里只维护 busy/error 通道和本地弹窗状态。
  */
-export function useRunActions({
-  scope,
-  monitor,
-  setMonitorPanel,
-  setMonitorView,
-  setWorkspaceMode,
-  setLauncherOpen,
-  setLauncherStrategy,
-}: UseRunActionsOptions) {
-  const {
-    runs,
-    selectedRunId,
-    setSelectedRunId,
-    setRun,
-    setEvents,
-    setEvidence,
-    setError,
-    refreshRuns,
-    refreshRun,
-    refreshConfig,
-  } = monitor;
+export function useRunActions(options: UseRunActionsOptions) {
+  const { scope, monitor, setMonitorPanel, setMonitorView, setWorkspaceMode } = options;
+  const { setLauncherOpen, setLauncherStrategy } = options;
   const [busy, setBusy] = useState(false);
   const [runAction, setRunAction] = useState<{
     mode: "approval" | "resume" | "pause";
@@ -75,220 +58,39 @@ export function useRunActions({
   const [cleanupPreview, setCleanupPreview] = useState<RunCleanupPreview>();
   const [cleanupError, setCleanupError] = useState<string>();
 
-  const create = async (input: StartRunInput): Promise<boolean> => {
-    if (!scope) return false;
-    setBusy(true);
-    setError(undefined);
-    try {
-      const runId = await startRun(scope, input);
-      setLauncherOpen(false);
-      setLauncherStrategy(undefined);
-      setSelectedRunId(runId);
-      setMonitorPanel("activity");
-      setMonitorView("run");
-      setWorkspaceMode("monitor");
-      await refreshRuns();
-      return true;
-    } catch (requestError) {
-      // 启动失败：保留弹窗与用户输入，由调用方决定是否清空
-      setError(runActionErrorMessage(requestError));
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const preflightBlueprint = async (
-    name: string,
-    definition: StrategyBlueprintDefinition,
-  ): Promise<StrategyBlueprintResult> => {
-    if (!scope) throw new Error("当前项目尚未加载");
-    return await preflightStrategyBlueprint(scope, name, definition);
-  };
-
-  const saveBlueprint = async (
-    name: string,
-    definition: StrategyBlueprintDefinition,
-  ): Promise<StrategyBlueprintResult> => {
-    if (!scope) throw new Error("当前项目尚未加载");
-    const result = await saveStrategyBlueprint(scope, name, definition);
-    await refreshConfig();
-    return result;
-  };
-
-  const deleteBlueprint = async (name: string): Promise<void> => {
-    if (!scope) throw new Error("当前项目尚未加载");
-    await deleteStrategyBlueprint(scope, name);
-    await refreshConfig();
-  };
-
-  const openCleanup = useCallback(() => {
-    setCleanupPreview(undefined);
-    setCleanupError(undefined);
-    setCleanupOpen(true);
-  }, []);
-
-  const handleDeleteRun = useCallback(async (runId: string) => {
-    if (!scope) return;
-    const target = runs.find((item) => item.id === runId);
-    const label = target ? summarizeGoal(target.goal, 40) : runId;
-    if (!window.confirm(`确定删除运行「${label}」？本地记录与证据将永久删除。`)) {
-      return;
-    }
-    setBusy(true);
-    setError(undefined);
-    try {
-      await deleteRun(scope, runId);
-      if (selectedRunId === runId) {
-        setRun(undefined);
-        setEvidence(undefined);
-        setSelectedRunId(undefined);
-        setEvents([]);
+  /** One command at a time, with the shared error channel (or a dialog-local one). */
+  const run = useCallback(
+    async (operation: () => Promise<void>, onError?: (message: string) => void): Promise<void> => {
+      setBusy(true);
+      monitor.setError(undefined);
+      try {
+        await operation();
+      } catch (requestError) {
+        (onError ?? monitor.setError)(runActionErrorMessage(requestError));
+      } finally {
+        setBusy(false);
       }
-      await refreshRuns();
-    } catch (requestError) {
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  }, [refreshRuns, runs, scope, selectedRunId, setRun, setEvidence, setSelectedRunId, setEvents, setError]);
+    },
+    [monitor],
+  );
 
-  const cancel = async () => {
-    if (!scope || !selectedRunId) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await cancelRun(scope, selectedRunId);
-    } catch (requestError) {
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
+  const deps: CommandDeps = {
+    scope,
+    monitor,
+    setMonitorPanel,
+    setMonitorView,
+    setWorkspaceMode,
+    setLauncherOpen,
+    setLauncherStrategy,
+    setBusy,
+    setError: monitor.setError,
+    setCleanupOpen,
+    setCleanupPreview,
+    setCleanupError,
+    cleanupPreview,
+    setRunAction: () => setRunAction(undefined),
+    run,
   };
-
-  const retry = async () => {
-    if (!scope || !selectedRunId) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      const runId = await retryRun(scope, selectedRunId);
-      setSelectedRunId(runId);
-      setMonitorPanel("activity");
-      setMonitorView("run");
-      await refreshRuns();
-    } catch (requestError) {
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const publish = async () => {
-    if (!scope || !selectedRunId) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      const result = await publishRun(scope, selectedRunId);
-      await Promise.all([refreshRuns(), refreshRun(selectedRunId)]);
-      if (result.pullRequestUrl) {
-        setError(undefined);
-        window.open(result.pullRequestUrl, "_blank", "noopener");
-      }
-    } catch (requestError) {
-      // GitHub 相关失败会原样显示可操作的提示（未登录/身份缺失/token 权限等）。
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submitRunAction = async (input: {
-    decision?: "approved" | "rejected";
-    actor: string;
-    reason: string;
-    plan?: EditablePlan;
-  }) => {
-    if (!scope || !selectedRunId || !runAction) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      if (runAction.mode === "approval") {
-        if (!runAction.approval || !input.decision) return;
-        await respondApproval(scope, selectedRunId, {
-          requestId: runAction.approval.id,
-          decision: input.decision,
-          actor: input.actor,
-          reason: input.reason,
-          ...(input.plan ? { plan: input.plan } : {}),
-        });
-      } else if (runAction.mode === "pause") {
-        await pauseRun(scope, selectedRunId, {
-          actor: input.actor,
-          reason: input.reason,
-        });
-      } else {
-        await resumeRun(scope, selectedRunId, {
-          actor: input.actor,
-          reason: input.reason,
-        });
-      }
-      setRunAction(undefined);
-      await Promise.all([refreshRuns(), refreshRun(selectedRunId)]);
-    } catch (requestError) {
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const previewCleanup = async (days: number) => {
-    if (!scope) return;
-    setBusy(true);
-    setCleanupError(undefined);
-    try {
-      setCleanupPreview(await previewRunCleanup(scope, days));
-    } catch (requestError) {
-      setCleanupError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const confirmCleanup = async () => {
-    if (!scope || !cleanupPreview) return;
-    setBusy(true);
-    setCleanupError(undefined);
-    try {
-      await cleanupRuns(scope, cleanupPreview.token);
-      setCleanupOpen(false);
-      setCleanupPreview(undefined);
-      setRun(undefined);
-      setEvidence(undefined);
-      await refreshRuns();
-    } catch (requestError) {
-      setCleanupError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const readEvidenceArtifact = useCallback(async (artifactPath: string): Promise<EvidenceFilePreview> => {
-    if (!scope || !selectedRunId) throw new Error("当前运行尚未加载");
-    return await getEvidenceFile(scope, selectedRunId, artifactPath);
-  }, [scope, selectedRunId]);
-
-  const exportRunEvents = useCallback(async () => {
-    if (!scope || !selectedRunId) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await downloadRunEvents(scope, selectedRunId);
-    } catch (requestError) {
-      setError(runActionErrorMessage(requestError));
-    } finally {
-      setBusy(false);
-    }
-  }, [scope, selectedRunId, setError]);
 
   return {
     busy,
@@ -301,19 +103,36 @@ export function useRunActions({
     setCleanupOpen,
     setCleanupPreview,
     setCleanupError,
-    create,
-    cancel,
-    retry,
-    publish,
-    submitRunAction,
-    handleDeleteRun,
-    openCleanup,
-    previewCleanup,
-    confirmCleanup,
-    readEvidenceArtifact,
-    exportRunEvents,
-    preflightBlueprint,
-    saveBlueprint,
-    deleteBlueprint,
+    create: (input: StartRunInput): Promise<boolean> => createRunCommand(deps, input),
+    cancel: (): Promise<void> => cancelRunCommand(deps),
+    retry: (): Promise<void> => retryRunCommand(deps),
+    publish: (): Promise<void> => publishRunCommand(deps),
+    preflightBlueprint: (
+      name: string,
+      definition: StrategyBlueprintDefinition,
+    ): Promise<StrategyBlueprintResult> => preflightBlueprintCommand(deps, name, definition),
+    saveBlueprint: (
+      name: string,
+      definition: StrategyBlueprintDefinition,
+    ): Promise<StrategyBlueprintResult> => saveBlueprintCommand(deps, name, definition),
+    deleteBlueprint: (name: string): Promise<void> => deleteBlueprintCommand(deps, name),
+    openCleanup: (): void => {
+      setCleanupPreview(undefined);
+      setCleanupError(undefined);
+      setCleanupOpen(true);
+    },
+    handleDeleteRun: (runId: string): Promise<void> => deleteRunCommand(deps, runId),
+    submitRunAction: (input: {
+      decision?: "approved" | "rejected";
+      actor: string;
+      reason: string;
+      plan?: EditablePlan;
+    }): Promise<void> =>
+      submitRunActionCommand(deps, runAction?.mode ?? "resume", runAction?.approval?.id, input),
+    previewCleanup: (days: number): Promise<void> => previewCleanupCommand(deps, days),
+    confirmCleanup: (): Promise<void> => confirmCleanupCommand(deps),
+    readEvidenceArtifact: (path: string): Promise<EvidenceFilePreview> =>
+      readEvidenceCommand(deps, path),
+    exportRunEvents: (): Promise<void> => exportEventsCommand(deps),
   };
 }
