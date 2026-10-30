@@ -81,34 +81,49 @@ quality:
   要让「CRAP 从 31 降到 8」这种改进直接反映到分数，需要改动 `projectRunOutcome` 的评分
   口径（不在本次改动范围内，作为后续项）。
 
-## 5. 本仓实测基线（2026-10-30）
+## 5. 本仓实测基线（2026-10-30，含清理后复测）
+
+全仓（`--all`）：
 
 ```text
-函数总数            1788
-CRAP > 10           507
-覆盖率 0% 的函数     406
-按区域：src 404 个超阈值 / web 103 个超阈值
+函数总数            1846
+CRAP > 10            498
+覆盖率 0% 的函数      406
+按区域：src 397 个超阈值 / web 101 个超阈值
 ```
 
 `web/` 的组件没有单元测试（走 Playwright e2e），所以 CRAP 全部偏高——这说明
-**CRAP 不适合直接给 UI 组件打分**，全仓阈值在该区域无意义。
+**CRAP 不适合直接给 UI 组件打分**，全仓阈值在该区域无意义。这也正是门默认只查
+`--changed` 的原因。
 
-改动后新增代码（`experience.reasoning-bank`、`ExperienceCatalog.importCandidates`、
-`ExperienceService.importReasoningBank`、`ub-quality-gate` 的解析函数）实测均 < 10。
-仍然超阈值的 6 个是存量：
+改动范围（`--changed`，107 个函数）：**0 个超过 10，门为绿色（exit 0）**。
 
-| 函数 | CC | 覆盖率 | CRAP |
-| --- | --- | --- | --- |
-| `ExperienceService.extractFromRun` | 20 | 33% | 138.5 |
-| `experience.extract.humanizeErrorBrief` | 14 | 38% | 59.7 |
-| `ExperienceCatalog.recordRetrieval` | 6 | 5% | 37.3 |
-| `experience.extract.portableFailureLesson` | 16 | 59% | 33.5 |
-| `experience.extract.extractCandidatesFromRun` | 25 | 77% | 32.9 |
-| `RunSupervisor.startOwned` | 28 | 85% | 30.5 |
+清理前 → 清理后的对照：
 
-下一步按 CRAP 顺序拆分并补测，而不是先写新功能。
+| 函数 | 清理前 CC / 覆盖 / CRAP | 处理后 |
+| --- | --- | --- |
+| `RunSupervisor.startOwned` | 28 / 85% / 30.5 | 拆为 `launch` + `claimStart` + `emitQueued` + `startWorkflow` + `buildRunnerRequest` |
+| `ExperienceService.extractFromRun` | 20 / 33% / 138.5 | 拆为 `activeSuiteDigest` / `persistCandidates` / `autoPromoteWithSuite` / `promoteSuccess` |
+| `experience.extract.extractCandidatesFromRun` | 25 / 77% / 32.9 | 按分类拆为 evaluation / failure / success / rework / emptyPlan 构建器 + `buildContext` / `countTasks` / `touchedPaths` |
+| `experience.extract.portableFailureLesson` | 16 / 59% / 33.5 | 改为 `PORTABLE_RULES` 表驱动 |
+| `experience.extract.humanizeErrorBrief` | 14 / 38% / 59.7 | 改为 `ERROR_LABELS` 表驱动 |
+| `ExperienceCatalog.recordRetrieval` | 6 / 5% / 37.3 | 补测试（命中/未命中/未知 id/未晋升） |
+| `RunSupervisor.respondApproval` | 21 / 71% / 31.9 | 拆为 `pendingApproval` / `approvalReplay` / `expireLateApproval` / `applyPlanFromApproval` / `settleApproval` 等 |
+| `RunSupervisor.resume` | 12 / 50% / 30.0 | 拆为 `recoverable` + `assertPlanCheckpointApproved` |
+| `RunSupervisor.retry` | 13 / 56% / 27.8 | 拆为 `requireRetriable` + `retryRequest` + `copyRoleBindings` |
+| `RunSupervisor.discardQuarantineLeftovers` | 5 / 33% / 12.4 | 补隔离目录回收测试 |
+
+方法：先由门把清单和数字打出来，再按 CRAP 从高到低，一次一个函数——
+**先补行为测试锁住现状，再拆，再复测**。拆出来的纯函数（`buildRunnerRequest`、
+`retryRequest`、`pendingApproval`、`approvalReplay`、`assertPlanCheckpointApproved`）
+直接单测，覆盖率与可读性一起上去。
+
+全仓仍有 498 个函数超阈值（绝大多数是没有任何单测的 UI 组件），按本文件的立场，
+它们属于「要不要给前端补测试」的产品决策，不是质量门能自动消掉的债。
 
 ## 6. 与技能层的关系
 
 ub-mode 是本仓「Agent Skills」层里第一个带确定性工具链的真技能：`SKILL.md` + 三个可执行门。
 它同时也验证了技能层验收标准——技能不是文档，而是**能被跑起来、能判失败**的东西。
+2026-10-30 起它已从「只装给 Kimi Code」迁到共享目录 `~/.agents/skills/ub-mode`，
+再软链回 Kimi / Claude / Codex / Grok / Qwen / OpenCode / dsh，所有 agent 都能加载。
