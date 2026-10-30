@@ -166,6 +166,39 @@ describe("reasoning bank bridge", () => {
     ).rejects.toThrow(/ENOENT/);
   });
 
+  it("records a default audit reason and supports a single-entry dry run", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-rb-meta-"));
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-rb-home-"));
+    const agentMemory = path.join(projectRoot, "agent-memory");
+    await mkdir(agentMemory, { recursive: true });
+    const single = "### Only entry\n- applies when: a\n- strategy: b\n- source: success\n- status: active\n";
+    await writeFile(path.join(agentMemory, "reasoning-bank.md"), single, "utf8");
+
+    const loaded: LoadedConfig = {
+      root: projectRoot,
+      path: path.join(projectRoot, "agent-team.yaml"),
+      config: createDefaultConfig("demo"),
+    };
+    const service = ExperienceService.forLoaded(loaded, {
+      ...process.env,
+      AGENT_TEAM_HOME: home,
+    });
+
+    const dry = await service.importReasoningBank({ dryRun: true });
+    expect(dry.parsed).toBe(1);
+    expect(dry.added).toHaveLength(1);
+
+    const written = await service.importReasoningBank({});
+    expect(written.unchanged).toHaveLength(0);
+    const catalog = new ExperienceCatalog(
+      ExperienceCatalog.defaultPath(path.join(projectRoot, ".agent-team")),
+    );
+    const doc = await catalog.load();
+    expect(doc.audit.at(-1)?.reason).toBe(
+      "Imported 1 curated entry from agent-memory/reasoning-bank.md",
+    );
+  });
+
   it("reports a dry run without writing the catalog", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-reasoning-bank-dry-"));
     const catalog = new ExperienceCatalog(ExperienceCatalog.defaultPath(root));
