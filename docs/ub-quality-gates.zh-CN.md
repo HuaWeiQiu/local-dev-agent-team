@@ -127,3 +127,59 @@ ub-mode 是本仓「Agent Skills」层里第一个带确定性工具链的真技
 它同时也验证了技能层验收标准——技能不是文档，而是**能被跑起来、能判失败**的东西。
 2026-10-30 起它已从「只装给 Kimi Code」迁到共享目录 `~/.agents/skills/ub-mode`，
 再软链回 Kimi / Claude / Codex / Grok / Qwen / OpenCode / dsh，所有 agent 都能加载。
+
+## 7. 前端为什么必须「拆」而不能只「补测」
+
+`web/` 是这套门里最大的存量缺口：96 个函数超阈值、绝大多数覆盖率 0。一个常见的误判是
+「给组件补测试就好了」——**数学上不成立**：
+
+```
+CRAP = CC² × (1 - 覆盖)³ + CC
+```
+
+即使覆盖率补到 100%，`(1-覆盖)³ = 0`，CRAP 也只剩 `CC` 本身。也就是说
+`SettingsWorkbench`（CC 128）即便 100% 覆盖，CRAP 仍是 128，永远过不了 10 这条线。
+**覆盖率治不了高复杂度，只能治「简单但没测」；高 CC 必须靠拆。**
+
+### 7.1 第一批：设置工作台（已做完）
+
+`SettingsWorkbench` 原来是单个 587 行的组件函数（CC 128 / 覆盖 0 / CRAP 16512）。
+现在按职责拆成 4 个文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `components/settings/model.ts` | 纯函数：绑定校正（`syncRoleBindings`/`syncModel`/`syncReasoning`）、提示文案（`noticeFor`）、保存 payload、授权标签、缓存标签、角色名排序 |
+| `components/settings/actions.ts` | 只负责调 API：`rescanInventory` / `loadDesktopSettings` / `saveProjectRoles` / `saveGlobalSettings` |
+| `components/settings/useSettingsWorkbench.ts` | 状态与不变量（「安静刷新不得覆盖未保存的角色编辑」集中在这一处），拆出 `useAutoRefresh` / `useInventorySync` / `applyEnvelope` / `runRescan` / `runSave` |
+| `components/settings/sections.tsx` | 纯展示：`SettingsHeader` / `HeaderActions` / `SaveButton` / `SettingsTabs` / `CliDetectSection` / `CliInventorySection` / `CliRow` / `RolesSectionHeader` |
+
+拆完的结果（同一份测量）：
+
+| | 前 | 后 |
+| --- | --- | --- |
+| `SettingsWorkbench` | CC 128 / 0% / CRAP 16512 | **CC 3 / 100% / CRAP 3.0** |
+| 拆分出的 40+ 个函数 | — | 全部 ≤ CRAP 9.7 |
+| 组件测试 | 0 | 4 个交互测试 + 11 个模型测试 + 3 个阶段条测试 |
+
+新增测试覆盖：加载态、CLI 清单渲染（已安装/未安装/授权异常三种行）、手动重检、
+全局保存（含 UI 开关落到 payload）、项目保存（按角色生成覆盖 payload）、
+绑定校正的四种分支、提示文案的六个分支。
+
+### 7.2 剩余批次（按 CRAP 从高到低，尚未动）
+
+| 函数 | 命名空间 | CC | 覆盖 | CRAP |
+| --- | --- | --- | --- | --- |
+| `EvolutionWorkbench` | components.EvolutionWorkbench | 103 | 0% | 10712 |
+| `RunLauncher` | components.RunLauncher | 86 | 0% | 7482 |
+| `App` | App | 68 | 0% | 4692 |
+| `RunDetail` | components.run.RunDetail | 59 | 0% | 3540 |
+| `useRunEvents` | hooks.useRunEvents | 49 | 0% | 2450 |
+| `EvolutionProposalDialog` | components.EvolutionProposalDialog | 46 | 0% | 2162 |
+| `RunPage` | components.RunPage | 46 | 0% | 2162 |
+| `ArchitectureDiagram` | components.architecture.ArchitectureDiagram | 45 | 0% | 2070 |
+| `ExperienceWorkbench` | components.ExperienceWorkbench | 43 | 0% | 1892 |
+| `useRunActions` | hooks.useRunActions | 40 | 0% | 1640 |
+
+> 为什么不是 Playwright 覆盖率：e2e 覆盖率只能证明「路径被点到了」，不能降低 CC；
+> 上面证明了 CRAP 的下界就是 CC。e2e 能替代的是「行为验证」，替代不了「结构复杂度」。
+> 所以路线是：**组件拆到 CC ≤ 10 + jsdom 组件测试**，e2e 继续负责跨页流程。
