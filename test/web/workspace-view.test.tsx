@@ -3,7 +3,7 @@ import "./dom-setup.js";
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceViewProps } from "../../web/src/app/WorkspaceView.js";
-import type { PublicConfig, ProjectScope, RunState, WorkspaceInfo } from "../../web/src/types.js";
+import type { PublicConfig, ProjectScope, RunState } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
   getEvolution: vi.fn().mockResolvedValue(undefined),
