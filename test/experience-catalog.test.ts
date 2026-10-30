@@ -180,6 +180,34 @@ describe("experience extract + shared service", () => {
     expect(rework?.note).toMatch(/返工/);
   });
 
+  it("extracts a success candidate from a run that stopped at ready-to-merge", async () => {
+    const state = fixtureRun({
+      status: "ready-to-merge",
+      tasks: [
+        {
+          task: {
+            id: "T1",
+            title: "Add locale option",
+            description: "Render a zh greeting behind options.locale",
+            dependsOn: [],
+            ownedPaths: ["src/greet.js"],
+            acceptanceCommands: [],
+            profile: null,
+          },
+          status: "merged",
+          attempts: 1,
+        },
+      ],
+    });
+    const candidates = extractCandidatesFromRun(state, "demo");
+    const success = candidates.find((entry) => entry.tags?.includes("成功"));
+    expect(success).toBeDefined();
+    expect(success?.summary).toContain("完成 1 个任务");
+    expect(success?.conditions).toContain("状态：已就绪待合并");
+    expect(success?.conditions).toContain("涉及路径：src/greet.js");
+    expect(success?.sourceRunId).toBe(state.id);
+  });
+
   it("gates promote when requireSuiteForPromote is enabled", async () => {
     const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-suite-"));
     const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import { selectExperiences, type RepoTrace } from "../domain/repo-tree.js";
@@ -14,6 +15,7 @@ import {
   projectExperienceCatalogPath,
   sharedExperienceCatalogPath,
 } from "./paths.js";
+import { parseReasoningBank, toExperienceEntries } from "./reasoning-bank.js";
 import { StrategyHintStore, type StrategyHint } from "./strategy-hints.js";
 
 export interface ExperiencePlanningBundle {
@@ -193,6 +195,55 @@ export class ExperienceService {
     }
 
     return { created, autoPromoted };
+  }
+
+  /**
+   * Import curated `agent-memory/reasoning-bank.md` entries as candidates.
+   *
+   * This is where the second memory path finally lands in the same store the
+   * orchestrator retrieves from. Candidates are never injected: an operator (or
+   * the evaluation-digest path) still has to promote them.
+   */
+  async importReasoningBank(
+    options: {
+      filePath?: string;
+      actor?: string;
+      reason?: string;
+      dryRun?: boolean;
+    } = {},
+  ): Promise<{
+    filePath: string;
+    parsed: number;
+    imported: number;
+    added: ExperienceEntry[];
+    unchanged: ExperienceEntry[];
+  }> {
+    const filePath = path.resolve(
+      options.filePath ?? path.join(this.loaded.root, "agent-memory", "reasoning-bank.md"),
+    );
+    const markdown = await readFile(filePath, "utf8");
+    const sourcePath = path.relative(this.loaded.root, filePath) || filePath;
+    const now = new Date().toISOString();
+    const parsed = parseReasoningBank(markdown);
+    const items = toExperienceEntries(parsed, {
+      project: this.projectName,
+      sourcePath,
+      now,
+    });
+    const { added, unchanged } = await this.project.importCandidates(items, {
+      actor: options.actor ?? "operator",
+      reason:
+        options.reason ??
+        `Imported ${items.length} curated entr${items.length === 1 ? "y" : "ies"} from ${sourcePath}`,
+      ...(options.dryRun ? { dryRun: true } : {}),
+    });
+    return {
+      filePath,
+      parsed: parsed.length,
+      imported: items.length,
+      added,
+      unchanged,
+    };
   }
 
   async recordAttempt(input: {

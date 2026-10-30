@@ -1,13 +1,22 @@
 import type { RunState } from "../state/types.js";
 import type { ExtractExperienceInput } from "./catalog.js";
 
-const terminalStatuses = new Set(["completed", "blocked", "cancelled", "interrupted"]);
+const terminalStatuses = new Set([
+  "completed",
+  "blocked",
+  "cancelled",
+  "interrupted",
+  // A normal run stops here after the final human approval; without it the
+  // library could only ever learn from failures.
+  "ready-to-merge",
+]);
 
 const statusZh: Record<string, string> = {
   completed: "已完成",
   blocked: "已阻塞",
   cancelled: "已取消",
   interrupted: "已中断",
+  "ready-to-merge": "已就绪待合并",
 };
 
 const topologyZh: Record<string, string> = {
@@ -35,6 +44,11 @@ export function extractCandidatesFromRun(
     state.tasks.filter((task) => task.status === "passed" || task.status === "merged").length;
   const reworked = state.tasks.filter((task) => task.attempts > 1).length;
   const isEval = state.purpose === "evolution-evaluation";
+  // Retrieval cites experiences against repo paths and node names, so a
+  // strategy-level entry is unreachable unless it names what it touched.
+  const touchedPaths = [
+    ...new Set(state.tasks.flatMap((task) => task.task.ownedPaths ?? [])),
+  ].slice(0, 5);
 
   // Evaluation runs: only keep portable success patterns (no raw eval goals as failure dumps).
   if (isEval) {
@@ -94,15 +108,16 @@ export function extractCandidatesFromRun(
     }
   }
 
-  if (state.status === "completed" && taskTotal > 0) {
+  if ((state.status === "completed" || state.status === "ready-to-merge") && taskTotal > 0) {
     candidates.push({
       project: projectName,
       summary: `策略「${strategyName}」（${topologyLabel}）完成 ${taskTotal} 个任务，通过 ${passed} 个，可作同类目标参考。`,
       conditions: [
-        "状态：已完成",
+        `状态：${statusLabel}`,
         `策略：${strategyName}`,
         `拓扑：${topologyLabel}`,
         `任务数≥${Math.min(taskTotal, 8)}`,
+        ...(touchedPaths.length > 0 ? [`涉及路径：${touchedPaths.join("、")}`] : []),
       ],
       sourceRunId: state.id,
       sensitivity: "low",

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -119,6 +119,50 @@ describe("run supervisor", () => {
       status: "ready-to-merge",
       approvals: [{ status: "approved", response: { actor: "release-owner" } }],
     });
+    await supervisor.close();
+    events.close();
+  });
+
+  it("records the experience of a run whose final gate is approved after the runner exited", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeApprovalState("final-experience", "final");
+    state.tasks = [
+      {
+        task: {
+          id: "T1",
+          title: "Task T1",
+          description: "Do T1",
+          dependsOn: [],
+          ownedPaths: ["T1.txt"],
+          acceptanceCommands: [],
+          profile: null,
+        } as RunState["tasks"][number]["task"],
+        status: "merged",
+        attempts: 1,
+      },
+    ];
+    await states.save(state);
+    const supervisor = new RunSupervisor(loaded, events);
+
+    const action = await supervisor.respondApproval(state.id, {
+      requestId: state.approvals![0]!.id,
+      decision: "approved",
+      actor: "release-owner",
+      reason: "Reviewed integration diff",
+    });
+    expect(action.status).toBe("ready-to-merge");
+
+    const catalogPath = path.join(root, ".agent-team", "experience", "catalog.json");
+    const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      entries: { status: string; tags: string[]; summary: string; sourceRunId: string }[];
+    };
+    const learned = catalog.entries.find((entry) => entry.tags.includes("成功"));
+    expect(learned).toBeDefined();
+    expect(learned?.status).toBe("candidate");
+    expect(learned?.sourceRunId).toBe(state.id);
+
     await supervisor.close();
     events.close();
   });

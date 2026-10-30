@@ -39,6 +39,7 @@ import type {
 import { resolveStrategy } from "../strategies/resolve.js";
 import { createRunId } from "../workflow/id.js";
 import { LocalWorkflowRunner, type WorkflowResumeOptions } from "../workflow/runner.js";
+import { RunExperienceRecorder } from "../workflow/experience-recorder.js";
 import type {
   ApprovalResponseRequest,
   EditPlanRequest,
@@ -529,6 +530,11 @@ export class RunSupervisor {
           "ready-to-merge",
           `Final approval granted by ${response.actor}`,
         );
+        // An approval that arrives after the runnable process exited lands here
+        // (the runner process stops at `awaiting-human`). Without this call the
+        // successful run would never reach the experience library, so only
+        // failed runs would ever be learned from.
+        await new RunExperienceRecorder(this.loaded).extractFromRun(state, this.stateStore);
         return { runId, status: "ready-to-merge" };
       }
 
