@@ -269,6 +269,12 @@ quality:
     # Uncomment only when ocr is on PATH; agent-team doctor will warn if missing.
     # - command: ocr
     #   args: [review]
+    # Optional deterministic complexity gate from the ub-mode tool chain
+    # (https://github.com/unclebob/ub-mode): CRAP on the candidate's own changed
+    # files, exit 2 when a function exceeds the threshold. Install the tools
+    # first and point UB_BIN at them, otherwise the gate exits 3.
+    # - command: node
+    #   args: [scripts/ub-quality-gate.mjs, --threshold, "10"]
   maxReworkAttempts: 1
   commandTimeoutSeconds: 900
 
