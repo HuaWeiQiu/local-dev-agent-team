@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -8,10 +8,168 @@ import { createDefaultConfig } from "../src/config/defaults.js";
 import { loadConfig } from "../src/config/load.js";
 import { SqliteEventStore } from "../src/events/store.js";
 import type { RunState } from "../src/state/types.js";
-import { RunSupervisor } from "../src/server/supervisor.js";
+import {
+  RunSupervisor,
+  approvalReplay,
+  assertPlanCheckpointApproved,
+  buildRunnerRequest,
+  pendingApproval,
+  retryRequest,
+} from "../src/server/supervisor.js";
 import { RunStateStore } from "../src/state/store.js";
 
 describe("run supervisor", () => {
+  it("discards quarantined run leftovers during reconciliation", async () => {
+    const { root, loaded } = await fixtureConfig();
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const runsDirectory = path.join(root, ".agent-team", "runs");
+    const leftover = path.join(runsDirectory, ".deleting-half-gone");
+    await mkdir(leftover, { recursive: true });
+    await writeFile(path.join(leftover, "state.json"), "{}", "utf8");
+
+    const supervisor = new RunSupervisor(loaded, events);
+    await supervisor.reconcileInterruptedRuns();
+    await expect(readdir(runsDirectory)).resolves.not.toContain(".deleting-half-gone");
+
+    await supervisor.close();
+    events.close();
+  });
+
+  it("replays a stopped run as a new parented request", () => {
+    const source = fakeState("source-run", "Keep it working", "blocked");
+    source.profileOverrides = { worker: "p1" };
+    source.roleBindings = {
+      worker: { cli: "kimi", model: "m1" },
+      reviewer: { cli: "codex", reasoning: "high" },
+    };
+    source.strategy = { ...source.strategy, name: "demo" };
+
+    const request = retryRequest(source, undefined);
+    expect(request).toMatchObject({
+      goal: "Keep it working",
+      profileOverrides: { worker: "p1" },
+      strategy: "demo",
+      parentRunId: "source-run",
+      roleBindings: {
+        worker: { cli: "kimi", model: "m1" },
+        reviewer: { cli: "codex", reasoning: "high" },
+      },
+    });
+
+    const legacy = fakeState("legacy-run", "Old run", "interrupted");
+    legacy.strategy = { ...legacy.strategy, name: "legacy" };
+    legacy.roleBindings = undefined;
+    const fallback = { worker: { cli: "grok" as const } };
+    const legacyRequest = retryRequest(legacy, fallback);
+    expect(legacyRequest).not.toHaveProperty("strategy");
+    expect(legacyRequest.roleBindings).toEqual(fallback);
+
+    const emptyBindings = fakeState("empty-run", "No bindings", "blocked");
+    emptyBindings.roleBindings = {};
+    expect(retryRequest(emptyBindings, undefined)).not.toHaveProperty("roleBindings");
+  });
+
+  it("refuses to recover a plan checkpoint that was never approved", () => {
+    const state = fakeApprovalState("plan-recovery", "plan");
+    state.strategy = {
+      ...state.strategy,
+      approvalGates: ["plan", "final"],
+    };
+    const checkpoint = { ...state.checkpoints![0]!, stage: "plan-ready" as const };
+
+    expect(() => assertPlanCheckpointApproved(state, checkpoint)).toThrow(
+      /requires approval/,
+    );
+
+    state.approvals = [
+      { ...state.approvals![0]!, status: "approved", checkpointId: checkpoint.id },
+    ];
+    expect(() => assertPlanCheckpointApproved(state, checkpoint)).not.toThrow();
+
+    // A non-plan checkpoint is recoverable regardless of the plan gate.
+    const workerCheckpoint = { ...checkpoint, stage: "local-gates-passed" as const };
+    state.approvals = [];
+    expect(() => assertPlanCheckpointApproved(state, workerCheckpoint)).not.toThrow();
+  });
+
+  it("resolves the addressed approval and rejects replays or unknown ids", () => {
+    const state = fakeApprovalState("approval-lookup", "final");
+    const approval = state.approvals![0]!;
+    expect(pendingApproval(state, approval.id).id).toBe(approval.id);
+    expect(() => pendingApproval(state, randomUUID())).toThrow(/was not found/);
+
+    const response = {
+      requestId: approval.id,
+      decision: "approved" as const,
+      actor: "release-owner",
+      reason: "Reviewed",
+    };
+    expect(approvalReplay(approval, response)).toBeUndefined();
+
+    approval.status = "approved";
+    approval.response = {
+      decision: "approved",
+      actor: "release-owner",
+      reason: "Reviewed",
+      at: new Date().toISOString(),
+    };
+    expect(approvalReplay(approval, response)).toBe("unchanged");
+    expect(() => approvalReplay(approval, { ...response, reason: "Different" })).toThrow(
+      /already has a response/,
+    );
+  });
+
+  it("maps a start request onto runner options without leaking undefined fields", () => {
+    const signal = new AbortController().signal;
+    const prepared = { runConfig: createDefaultConfig("demo"), profileOverrides: {} };
+
+    const plain = buildRunnerRequest({
+      request: { goal: "Ship it", profileOverrides: {} },
+      runId: "run-1",
+      prepared,
+      signal,
+      supervisorId: "sup-1",
+    });
+    expect(plain).toEqual({
+      goal: "Ship it",
+      profileOverrides: {},
+      runId: "run-1",
+      signal,
+      supervisorId: "sup-1",
+    });
+
+    const full = buildRunnerRequest({
+      request: {
+        goal: "Ship it",
+        profileOverrides: { worker: "p1" },
+        template: "quick",
+        strategy: "demo",
+        parentRunId: "parent-1",
+      },
+      runId: "run-2",
+      prepared,
+      signal,
+      supervisorId: "sup-1",
+      purpose: "evolution-evaluation",
+    });
+    expect(full).toMatchObject({
+      template: "quick",
+      strategyName: "demo",
+      parentRunId: "parent-1",
+      purpose: "evolution-evaluation",
+    });
+
+    // `auto` means "let the router decide" — it must not be forwarded as a template.
+    const auto = buildRunnerRequest({
+      request: { goal: "Ship it", profileOverrides: {}, template: "auto" },
+      runId: "run-3",
+      prepared,
+      signal,
+      supervisorId: "sup-1",
+    });
+    expect(auto).not.toHaveProperty("template");
+  });
+
   it("deduplicates starts and cancels the managed run", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
