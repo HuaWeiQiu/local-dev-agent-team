@@ -16,3 +16,4 @@ coverage/
 .agent-team/
 *.log
 desktop-latest.json
+.metrics/
