@@ -40,25 +40,72 @@ export interface ComposerFeedback {
 
 export type DraftUpdater = (update: (current: StrategyDraft) => StrategyDraft) => void;
 
+/** Defaults for a draft that has never been edited, in one place. */
+const DRAFT_DEFAULTS = {
+  maxReworkAttempts: 0,
+  maxAgentInvocations: 64,
+  executionTimeoutSeconds: 14_400,
+  approvalTimeoutSeconds: 86_400,
+  maxProcessOutputBytes: 1_048_576,
+  maxArtifactBytes: 1_073_741_824,
+  advisorMaxConsultations: 3,
+  exploreMaxInjectedChars: 4_000,
+} as const;
+
 export function createDraft(definition: StrategyDefinition, config: PublicConfig): StrategyDraft {
-  const maxParallel = definition.maxParallel ?? config.project.maxParallel;
-  const swarm = definition.taskMorphology?.implement?.swarm?.maxConcurrency ?? maxParallel;
+  const maxParallel = orDefault(definition.maxParallel, config.project.maxParallel);
+  const swarm = orDefault(swarmConcurrencyOf(definition), maxParallel);
   return {
-    mode: definition.topology?.mode ?? definition.compiledTopology.mode,
+    mode: topologyModeOf(definition),
     maxParallel,
-    maxReworkAttempts: definition.maxReworkAttempts ?? 0,
-    maxAgentInvocations: definition.maxAgentInvocations ?? 64,
-    executionTimeoutSeconds: definition.executionTimeoutSeconds ?? 14_400,
-    approvalTimeoutSeconds: definition.approvalTimeoutSeconds ?? 86_400,
-    maxProcessOutputBytes: definition.maxProcessOutputBytes ?? 1_048_576,
-    maxArtifactBytes: definition.maxArtifactBytes ?? 1_073_741_824,
-    planApproval: definition.approvalGates?.includes("plan") ?? false,
-    exploreEnabled: definition.taskMorphology?.explore?.enabled === true,
-    advisorEnabled: definition.taskMorphology?.advisor?.enabled === true,
-    advisorMaxConsultations: definition.taskMorphology?.advisor?.maxConsultationsPerRun ?? 3,
+    maxReworkAttempts: orDefault(definition.maxReworkAttempts, DRAFT_DEFAULTS.maxReworkAttempts),
+    maxAgentInvocations: orDefault(definition.maxAgentInvocations, DRAFT_DEFAULTS.maxAgentInvocations),
+    executionTimeoutSeconds:
+      definition.executionTimeoutSeconds ?? DRAFT_DEFAULTS.executionTimeoutSeconds,
+    approvalTimeoutSeconds:
+      definition.approvalTimeoutSeconds ?? DRAFT_DEFAULTS.approvalTimeoutSeconds,
+    maxProcessOutputBytes:
+      definition.maxProcessOutputBytes ?? DRAFT_DEFAULTS.maxProcessOutputBytes,
+    maxArtifactBytes: orDefault(definition.maxArtifactBytes, DRAFT_DEFAULTS.maxArtifactBytes),
+    planApproval: includesPlanGate(definition),
+    exploreEnabled: exploreSettings(definition)?.enabled === true,
+    advisorEnabled: advisorSettings(definition)?.enabled === true,
+    advisorMaxConsultations: advisorConsultationsOf(definition),
     swarmMaxConcurrency: Math.min(swarm, maxParallel),
     roleProfiles: { ...(definition.roleProfiles ?? {}) },
   };
+}
+
+function topologyModeOf(definition: StrategyDefinition): StrategyDefinition["compiledTopology"]["mode"] {
+  return definition.topology?.mode ?? definition.compiledTopology.mode;
+}
+
+function swarmConcurrencyOf(definition: StrategyDefinition): number | undefined {
+  return definition.taskMorphology?.implement?.swarm?.maxConcurrency;
+}
+
+function exploreSettings(definition: StrategyDefinition) {
+  return definition.taskMorphology?.explore;
+}
+
+function advisorSettings(definition: StrategyDefinition) {
+  return definition.taskMorphology?.advisor;
+}
+
+function includesPlanGate(definition: StrategyDefinition): boolean {
+  return definition.approvalGates?.includes("plan") ?? false;
+}
+
+function advisorConsultationsOf(definition: StrategyDefinition): number {
+  return orDefault(
+    advisorSettings(definition)?.maxConsultationsPerRun,
+    DRAFT_DEFAULTS.advisorMaxConsultations,
+  );
+}
+
+/** One fallback rule for the whole module: undefined means "use the default". */
+function orDefault<T>(value: T | undefined, fallback: T): T {
+  return value ?? fallback;
 }
 
 export function buildBlueprintDefinition(
@@ -66,14 +113,10 @@ export function buildBlueprintDefinition(
   draft: StrategyDraft,
 ): StrategyBlueprintDefinition {
   const { compiledTopology: _compiledTopology, source: _source, ...persisted } = definition;
-  const maxParallel = draft.mode === "sequential" ? 1 : draft.maxParallel;
-  const swarmMaxConcurrency = draft.mode === "sequential"
-    ? 1
-    : Math.min(draft.swarmMaxConcurrency, maxParallel);
   return {
     ...persisted,
     topology: { mode: draft.mode },
-    maxParallel,
+    ...swarmLimits(draft),
     maxReworkAttempts: draft.maxReworkAttempts,
     maxAgentInvocations: draft.maxAgentInvocations,
     executionTimeoutSeconds: draft.executionTimeoutSeconds,
@@ -83,30 +126,57 @@ export function buildBlueprintDefinition(
     roleProfiles: { ...draft.roleProfiles },
     approvalGates: draft.planApproval ? ["plan", "final"] : ["final"],
     taskMorphology: {
-      explore: {
-        enabled: draft.exploreEnabled,
-        maxInjectedChars: definition.taskMorphology?.explore?.maxInjectedChars ?? 4_000,
-        failOpen: definition.taskMorphology?.explore?.failOpen ?? true,
-        ...(definition.taskMorphology?.explore?.profile
-          ? { profile: definition.taskMorphology.explore.profile }
-          : {}),
-      },
-      // Keep an existing advisor block (triggers/profile) even while it is off;
-      // only create one when the operator turns it on.
-      ...(draft.advisorEnabled || definition.taskMorphology?.advisor
-        ? {
-            advisor: {
-              ...definition.taskMorphology?.advisor,
-              enabled: draft.advisorEnabled,
-              maxConsultationsPerRun: draft.advisorMaxConsultations,
-            },
-          }
-        : {}),
+      explore: exploreBlock(definition, draft),
+      ...withAdvisor(definition, draft),
       plan: { role: "architect" },
       implement: {
         role: "worker",
-        swarm: { maxConcurrency: swarmMaxConcurrency },
+        swarm: { maxConcurrency: concurrencyFor(draft) },
       },
+    },
+  };
+}
+
+/** A sequential draft is pinned to one worker, whatever the sliders say. */
+function swarmLimits(draft: StrategyDraft): { maxParallel: number } {
+  return { maxParallel: draft.mode === "sequential" ? 1 : draft.maxParallel };
+}
+
+function concurrencyFor(draft: StrategyDraft): number {
+  if (draft.mode === "sequential") return 1;
+  return Math.min(draft.swarmMaxConcurrency, draft.maxParallel);
+}
+
+function exploreBlock(
+  definition: StrategyDefinition,
+  draft: StrategyDraft,
+): {
+  enabled: boolean;
+  maxInjectedChars: number;
+  failOpen: boolean;
+  profile?: string;
+} {
+  const existing = definition.taskMorphology?.explore;
+  return {
+    enabled: draft.exploreEnabled,
+    maxInjectedChars: existing?.maxInjectedChars ?? DRAFT_DEFAULTS.exploreMaxInjectedChars,
+    failOpen: existing?.failOpen ?? true,
+    ...(existing?.profile ? { profile: existing.profile } : {}),
+  };
+}
+
+/** Keep an existing advisor block (triggers/profile) even while it is off. */
+function withAdvisor(
+  definition: StrategyDefinition,
+  draft: StrategyDraft,
+): Pick<NonNullable<StrategyBlueprintDefinition["taskMorphology"]>, "advisor"> | Record<string, never> {
+  const existing = definition.taskMorphology?.advisor;
+  if (!draft.advisorEnabled && !existing) return {};
+  return {
+    advisor: {
+      ...existing,
+      enabled: draft.advisorEnabled,
+      maxConsultationsPerRun: draft.advisorMaxConsultations,
     },
   };
 }
@@ -115,29 +185,33 @@ export function blueprintNameFor(name: string, definition: StrategyDefinition): 
   return definition.source === "custom" ? name : `${name}-custom`;
 }
 
+const DRAFT_SCALARS = [
+  "mode",
+  "maxParallel",
+  "maxReworkAttempts",
+  "maxAgentInvocations",
+  "executionTimeoutSeconds",
+  "approvalTimeoutSeconds",
+  "maxProcessOutputBytes",
+  "maxArtifactBytes",
+  "planApproval",
+  "exploreEnabled",
+  "advisorEnabled",
+  "advisorMaxConsultations",
+  "swarmMaxConcurrency",
+] as const satisfies ReadonlyArray<keyof StrategyDraft>;
+
 export function sameDraft(left: StrategyDraft, right: StrategyDraft): boolean {
-  if (
-    left.mode !== right.mode ||
-    left.maxParallel !== right.maxParallel ||
-    left.maxReworkAttempts !== right.maxReworkAttempts ||
-    left.maxAgentInvocations !== right.maxAgentInvocations ||
-    left.executionTimeoutSeconds !== right.executionTimeoutSeconds ||
-    left.approvalTimeoutSeconds !== right.approvalTimeoutSeconds ||
-    left.maxProcessOutputBytes !== right.maxProcessOutputBytes ||
-    left.maxArtifactBytes !== right.maxArtifactBytes ||
-    left.planApproval !== right.planApproval ||
-    left.exploreEnabled !== right.exploreEnabled ||
-    left.advisorEnabled !== right.advisorEnabled ||
-    left.advisorMaxConsultations !== right.advisorMaxConsultations ||
-    left.swarmMaxConcurrency !== right.swarmMaxConcurrency
-  ) {
-    return false;
-  }
-  const roles = new Set([
-    ...Object.keys(left.roleProfiles),
-    ...Object.keys(right.roleProfiles),
-  ]);
-  return [...roles].every((role) => left.roleProfiles[role] === right.roleProfiles[role]);
+  const scalarsEqual = DRAFT_SCALARS.every((key) => left[key] === right[key]);
+  return scalarsEqual && sameRoleProfiles(left.roleProfiles, right.roleProfiles);
+}
+
+function sameRoleProfiles(
+  left: StrategyDraft["roleProfiles"],
+  right: StrategyDraft["roleProfiles"],
+): boolean {
+  const roles = new Set([...Object.keys(left), ...Object.keys(right)]);
+  return [...roles].every((role) => left[role] === right[role]);
 }
 
 export function buildPreviewTopology(
