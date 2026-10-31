@@ -72,7 +72,7 @@ export function mandateRevocation(
   policy: PolicySnapshot,
 ): Revocation | undefined {
   const actor = mandate.actor.id;
-  if (!policy.allowedActors.includes(actor)) {
+  if (!policy.allowedActors.includes("*") && !policy.allowedActors.includes(actor)) {
     return {
       code: "actor-not-allowed",
       detail: `actor '${actor}' is no longer allowed to originate work`,
