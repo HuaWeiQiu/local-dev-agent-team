@@ -47,109 +47,166 @@ function withDetail(detail: string | undefined): { detail?: string } {
   return detail ? { detail } : {};
 }
 
-function fromEvent(event: RunEvent): TimelineEntry | undefined {
-  const payload = record(event.payload);
-  const base = { key: `event:${event.sequence}`, at: event.occurredAt };
-  const role = agentRoleLabel(text(payload?.role) ?? "agent");
-  const profile = text(payload?.profile);
+interface EntryContext {
+  base: { key: string; at: string };
+  payload: Record<string, unknown> | undefined;
+  role: string;
+  profile: string | undefined;
+}
 
-  switch (event.type) {
-    case "agent.invocation.started":
-      return { ...base, kind: "agent", tone: "active", title: `${role} 开始工作`, ...withDetail(profile) };
-    case "agent.invocation.completed":
-      return payload?.success === true
-        ? { ...base, kind: "agent", tone: "success", title: `${role} 完成`, ...withDetail(profile) }
-        : { ...base, kind: "agent", tone: "danger", title: `${role} 失败`, ...withDetail(profile) };
-    case "agent.profile.failed":
-      return {
-        ...base,
-        kind: "issue",
-        tone: "danger",
-        title: `${role} 调用失败${profile ? `（${profile}）` : ""}`,
-        ...withDetail(failureText(payload?.failure)),
-      };
-    case "agent.profile.skipped":
-      return {
-        ...base,
-        kind: "issue",
-        tone: "warning",
-        title: `${role} 跳过 ${profile ?? "候选"}`,
-        ...withDetail(text(payload?.reason)),
-      };
-    case "run.wave.started":
-      return { ...base, kind: "flow", tone: "active", title: "任务批次开始", ...withDetail(taskList(payload?.taskIds)) };
-    case "run.wave.completed": {
-      const status = text(payload?.status);
-      const tone: TimelineTone = status === "blocked" ? "danger" : status === "rework" ? "warning" : "success";
-      return { ...base, kind: "flow", tone, title: "任务批次结束", ...withDetail(taskList(payload?.taskIds)) };
-    }
-    case "run.explore.started":
-      return { ...base, kind: "flow", tone: "active", title: "开始探索代码库" };
-    case "run.explore.completed":
-      return payload?.success === true
-        ? { ...base, kind: "flow", tone: "success", title: "探索完成" }
-        : { ...base, kind: "issue", tone: "warning", title: "探索失败，已继续", ...withDetail(text(payload?.error)) };
-    case "approval.requested":
-      return { ...base, kind: "gate", tone: "warning", title: "等待人工审批", ...withDetail(text(payload?.gate)) };
-    case "approval.responded":
-      return payload?.decision === "approved"
-        ? { ...base, kind: "gate", tone: "success", title: "审批已通过", ...withDetail(text(payload?.gate)) }
-        : { ...base, kind: "gate", tone: "danger", title: "审批已驳回", ...withDetail(text(payload?.reason) ?? text(payload?.gate)) };
-    case "run.advisor.consulted": {
-      const trigger = advisorTriggerLabel(text(payload?.trigger) ?? "");
-      const recommendation = text(payload?.recommendation);
-      return {
-        ...base,
-        kind: "advisor",
-        tone: recommendation === "stop" ? "danger" : "success",
-        title: `架构顾问 · ${trigger}`,
-        ...withDetail(
-          [recommendation ? advisorRecommendationLabel(recommendation) : undefined, text(payload?.summary)]
-            .filter(Boolean)
-            .join("：") || undefined,
-        ),
-      };
-    }
-    case "run.advisor.skipped":
-      return { ...base, kind: "advisor", tone: "warning", title: "顾问已跳过", detail: "达到本次运行的顾问次数上限" };
-    case "run.advisor.failed":
-      return {
-        ...base,
-        kind: "issue",
-        tone: "warning",
-        title: "顾问调用失败，已放行",
-        ...withDetail(text(payload?.error)),
-      };
-    case "run.jev.decided": {
-      const source = payload?.source;
-      if (source !== "jev" && source !== "deterministic") return undefined;
-      return {
-        ...base,
-        kind: "advisor",
-        tone: "neutral",
-        title: "Jev 分流",
-        detail: jevEntryText({
-          source,
-          ...(text(payload?.decision) ? { decision: text(payload?.decision)! } : {}),
-          ...(typeof payload?.confidence === "number" ? { confidence: payload.confidence } : {}),
-          consult: payload?.consult === true,
-          changedOutcome: payload?.changedOutcome === true,
-        }),
-      };
-    }
-    case "run.crashed":
-      return { ...base, kind: "issue", tone: "danger", title: "运行崩溃", ...withDetail(text(payload?.error)) };
-    case "run.pause-requested":
-      return { ...base, kind: "flow", tone: "neutral", title: "已请求暂停" };
-    case "run.cancel-requested":
-      return { ...base, kind: "flow", tone: "neutral", title: "已请求取消" };
-    case "run.resume-requested":
-      return { ...base, kind: "flow", tone: "active", title: "已请求恢复" };
-    case "run.recovered":
-      return { ...base, kind: "flow", tone: "neutral", title: "已从检查点恢复" };
-    default:
-      return undefined;
-  }
+type Builder = (ctx: EntryContext) => TimelineEntry | undefined;
+
+function contextOf(event: RunEvent): EntryContext {
+  const payload = record(event.payload);
+  return {
+    base: { key: `event:${event.sequence}`, at: event.occurredAt },
+    payload,
+    role: agentRoleLabel(text(payload?.role) ?? "agent"),
+    profile: text(payload?.profile),
+  };
+}
+
+function fromEvent(event: RunEvent): TimelineEntry | undefined {
+  const builder = BUILDERS[event.type];
+  if (!builder) return undefined;
+  return builder(contextOf(event));
+}
+
+/** One builder per event type: the table below is the whole mapping. */
+const BUILDERS: Record<string, Builder> = {
+  "agent.invocation.started": ({ base, role, profile }) => ({
+    ...base,
+    kind: "agent",
+    tone: "active",
+    title: `${role} 开始工作`,
+    ...withDetail(profile),
+  }),
+  "agent.invocation.completed": ({ base, role, profile, payload }) => ({
+    ...base,
+    kind: "agent",
+    tone: payload?.success === true ? "success" : "danger",
+    title: `${role} ${payload?.success === true ? "完成" : "失败"}`,
+    ...withDetail(profile),
+  }),
+  "agent.profile.failed": ({ base, role, profile, payload }) => ({
+    ...base,
+    kind: "issue",
+    tone: "danger",
+    title: `${role} 调用失败${profile ? `（${profile}）` : ""}`,
+    ...withDetail(failureText(payload?.failure)),
+  }),
+  "agent.profile.skipped": ({ base, role, profile, payload }) => ({
+    ...base,
+    kind: "issue",
+    tone: "warning",
+    title: `${role} 跳过 ${profile ?? "候选"}`,
+    ...withDetail(text(payload?.reason)),
+  }),
+  "run.wave.started": ({ base, payload }) => ({
+    ...base,
+    kind: "flow",
+    tone: "active",
+    title: "任务批次开始",
+    ...withDetail(taskList(payload?.taskIds)),
+  }),
+  "run.wave.completed": ({ base, payload }) => ({
+    ...base,
+    kind: "flow",
+    tone: waveTone(text(payload?.status)),
+    title: "任务批次结束",
+    ...withDetail(taskList(payload?.taskIds)),
+  }),
+  "run.explore.started": ({ base }) => ({
+    ...base,
+    kind: "flow",
+    tone: "active",
+    title: "开始探索代码库",
+  }),
+  "run.explore.completed": ({ base, payload }) => ({
+    ...base,
+    kind: payload?.success === true ? "flow" : "issue",
+    tone: payload?.success === true ? "success" : "warning",
+    title: payload?.success === true ? "探索完成" : "探索失败，已继续",
+    ...(payload?.success === true ? {} : withDetail(text(payload?.error))),
+  }),
+  "approval.requested": ({ base, payload }) => ({
+    ...base,
+    kind: "gate",
+    tone: "warning",
+    title: "等待人工审批",
+    ...withDetail(text(payload?.gate)),
+  }),
+  "approval.responded": ({ base, payload }) => ({
+    ...base,
+    kind: "gate",
+    tone: payload?.decision === "approved" ? "success" : "danger",
+    title: payload?.decision === "approved" ? "审批已通过" : "审批已驳回",
+    ...withDetail(
+      payload?.decision === "approved"
+        ? text(payload?.gate)
+        : (text(payload?.reason) ?? text(payload?.gate)),
+    ),
+  }),
+  "run.advisor.consulted": ({ base, payload }) => ({
+    ...base,
+    kind: "advisor",
+    tone: text(payload?.recommendation) === "stop" ? "danger" : "success",
+    title: `架构顾问 · ${advisorTriggerLabel(text(payload?.trigger) ?? "")}`,
+    ...withDetail(advisorDetail(text(payload?.recommendation), text(payload?.summary))),
+  }),
+  "run.advisor.skipped": ({ base }) => ({
+    ...base,
+    kind: "advisor",
+    tone: "warning",
+    title: "顾问已跳过",
+    detail: "达到本次运行的顾问次数上限",
+  }),
+  "run.advisor.failed": ({ base, payload }) => ({
+    ...base,
+    kind: "issue",
+    tone: "warning",
+    title: "顾问调用失败，已放行",
+    ...withDetail(text(payload?.error)),
+  }),
+  "run.jev.decided": ({ base, payload }) => {
+    const source = payload?.source;
+    if (source !== "jev" && source !== "deterministic") return undefined;
+    return {
+      ...base,
+      kind: "advisor",
+      tone: "neutral",
+      title: "Jev 分流",
+      detail: jevEntryText({
+        source,
+        ...(text(payload?.decision) ? { decision: text(payload?.decision)! } : {}),
+        ...(typeof payload?.confidence === "number" ? { confidence: payload.confidence } : {}),
+        consult: payload?.consult === true,
+        changedOutcome: payload?.changedOutcome === true,
+      }),
+    };
+  },
+  "run.crashed": ({ base, payload }) => ({
+    ...base,
+    kind: "issue",
+    tone: "danger",
+    title: "运行崩溃",
+    ...withDetail(text(payload?.error)),
+  }),
+  "run.pause-requested": ({ base }) => ({ ...base, kind: "flow", tone: "neutral", title: "已请求暂停" }),
+  "run.cancel-requested": ({ base }) => ({ ...base, kind: "flow", tone: "neutral", title: "已请求取消" }),
+  "run.resume-requested": ({ base }) => ({ ...base, kind: "flow", tone: "active", title: "已请求恢复" }),
+  "run.recovered": ({ base }) => ({ ...base, kind: "flow", tone: "neutral", title: "已从检查点恢复" }),
+};
+
+function waveTone(status: string | undefined): TimelineTone {
+  if (status === "blocked") return "danger";
+  return status === "rework" ? "warning" : "success";
+}
+
+function advisorDetail(recommendation: string | undefined, summary: string | undefined): string | undefined {
+  const label = recommendation ? advisorRecommendationLabel(recommendation) : undefined;
+  const parts = [label, summary].filter(Boolean);
+  return parts.length > 0 ? parts.join("：") : undefined;
 }
 
 const historyTone: Record<string, TimelineTone> = {

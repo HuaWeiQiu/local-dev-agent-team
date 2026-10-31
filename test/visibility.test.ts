@@ -270,6 +270,107 @@ describe("buildReplay", () => {
   });
 });
 
+describe("replay event builders", () => {
+  function step(type: string, payload: unknown) {
+    return buildReplay(baseState({ history: [] }), [event(type, payload)])[0];
+  }
+
+  it("maps flow, triage and quality events", () => {
+    expect(step("flow.selected", { template: "standard", reasons: ["a", "b"] })).toMatchObject({
+      title: "选择流程 standard",
+      detail: "a；b",
+    });
+    expect(step("flow.node", { nodeId: "plan", status: "failed", reason: "bad" })).toMatchObject({
+      tone: "bad",
+      nodeId: "plan",
+      detail: "bad",
+    });
+    expect(step("flow.node", { nodeId: "plan", status: "parked" })).toMatchObject({ tone: "warn" });
+    expect(step("flow.node", { nodeId: "plan", status: "completed" })).toMatchObject({ tone: "good" });
+    expect(step("flow.node", { nodeId: "plan", status: "running" })).toMatchObject({ tone: "neutral" });
+    expect(step("flow.node", {})).toMatchObject({ tone: "neutral" });
+
+    expect(step("flow.triage", { taskId: "T1", attempt: 2, decision: "stop", reason: "same" })).toMatchObject({
+      kind: "triage",
+      tone: "bad",
+      taskId: "T1",
+    });
+    expect(step("flow.triage", { taskId: "T1", attempt: 1, decision: "continue", reason: "x" })).toMatchObject({
+      tone: "neutral",
+    });
+
+    expect(step("quality.flaky", { commands: ["pnpm test", "pnpm test"] })).toMatchObject({
+      kind: "quality",
+      detail: "pnpm test；pnpm test",
+    });
+    expect(step("quality.flaky", { commands: [] })).toMatchObject({ kind: "quality" });
+    expect(step("quality.flaky", {})).toMatchObject({ kind: "quality" });
+  });
+
+  it("maps agent lifecycle events", () => {
+    expect(step("agent.invocation.completed", { role: "worker", durationMs: 1500 })).toMatchObject({
+      tone: "neutral",
+      title: "worker 完成（1.5s）",
+    });
+    expect(step("agent.invocation.completed", { role: "worker", success: false, error: "boom" })).toMatchObject({
+      tone: "bad",
+      detail: "boom",
+    });
+    expect(step("agent.invocation.completed", { artifactKey: "runs/r1/tasks/T9/x.json" })).toMatchObject({
+      taskId: "T9",
+    });
+    expect(step("agent.invocation.completed", { artifactKey: "no-match" })).toMatchObject({ kind: "agent" });
+
+    expect(step("agent.steered", { actor: "op", role: "worker", text: "go", taskId: "T1" })).toMatchObject({
+      title: "op 引导了 worker",
+      detail: "go",
+      taskId: "T1",
+    });
+    expect(step("agent.steered", {})).toMatchObject({ title: "操作者 引导了 agent" });
+    expect(step("agent.interrupted", { actor: "op", role: "worker", note: "stop" })).toMatchObject({
+      tone: "warn",
+      detail: "stop",
+    });
+    expect(step("agent.question", { role: "worker", prompt: "which?" })).toMatchObject({ detail: "which?" });
+    expect(step("agent.question", {})).toMatchObject({ kind: "operator", tone: "warn" });
+    expect(step("agent.answered", { actor: "op" })).toMatchObject({ title: "op 回答了提问" });
+    expect(step("agent.answered", {})).toMatchObject({ title: "操作者 回答了提问" });
+  });
+
+  it("maps operator, approval, advice and wave events", () => {
+    expect(step("plan.edited", { actor: "op", reason: "split" })).toMatchObject({
+      title: "op 编辑了计划",
+      detail: "split",
+    });
+    expect(step("plan.edited", {})).toMatchObject({ title: "操作者 编辑了计划" });
+
+    expect(step("approval.requested", { gate: "plan" })).toMatchObject({ title: "等待审批：plan" });
+    expect(step("approval.responded", { actor: "op", gate: "final", decision: "approved" })).toMatchObject({
+      tone: "good",
+    });
+    expect(step("approval.responded", { decision: "rejected", comment: "no" })).toMatchObject({
+      tone: "bad",
+      detail: "no",
+    });
+
+    expect(step("run.advisor.consulted", { recommendation: "stop", summary: "risky" })).toMatchObject({
+      tone: "bad",
+      detail: "risky",
+    });
+    expect(step("run.advisor.consulted", { recommendation: "continue" })).toMatchObject({ tone: "neutral" });
+    expect(step("run.jev.decided", { consult: true, reason: "low confidence" })).toMatchObject({
+      title: "Jev 判断：咨询架构顾问",
+      detail: "low confidence",
+    });
+    expect(step("run.jev.decided", {})).toMatchObject({ title: "Jev 判断：继续重试" });
+
+    expect(step("run.wave.started", { taskIds: ["T1", "T2"] })).toMatchObject({ title: "开始并行波次：T1, T2" });
+    expect(step("run.wave.started", {})).toMatchObject({ title: "开始并行波次：" });
+    expect(step("run.wave.completed", { status: "failed", taskIds: ["T1"] })).toMatchObject({ tone: "bad" });
+    expect(step("run.wave.completed", { status: "ok", taskIds: ["T1"] })).toMatchObject({ tone: "good" });
+  });
+});
+
 describe("insight routes", () => {
   it("serves explain, usage, replay, transcripts and task diffs for a run", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-insights-"));
