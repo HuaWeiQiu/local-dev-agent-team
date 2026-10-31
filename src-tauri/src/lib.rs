@@ -252,58 +252,83 @@ async fn desktop_release_project_lease(
 }
 
 fn boot_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
-    {
-        let mut state = lock_runtime(runtime);
-        if let Some(service) = state.service.as_mut() {
-            match service.child.try_wait() {
-                Ok(None) => {
-                    let status = ready_status(service);
-                    if let Err(error) = navigate_to(app, &service.bootstrap_url) {
-                        return error_status("工作台已启动，但页面暂时无法打开", None, error);
-                    }
-                    return status;
-                }
-                Ok(Some(exit)) => {
-                    let project_root = service.project_root.clone();
-                    let focus = state.pending_project.clone().unwrap_or(project_root);
-                    stop_service_locked(&mut state);
-                    drop(state);
-                    eprintln!(
-                        "Agent Team desktop: 控制服务已退出（{exit}），正在重新拉起工作台"
-                    );
-                    return match open_registered_workspace_sync(app, runtime, Some(focus)) {
-                        Ok(status) => status,
-                        Err(detail) => error_status("控制服务已停止，重新启动失败", None, detail),
-                    };
-                }
-                Err(error) => {
-                    return error_status("无法检查工作台状态", None, error.to_string());
-                }
-            }
-        }
+    if let Some(status) = resume_running_service(app, runtime) {
+        return status;
     }
-
     if let Some(path) = std::env::var_os("AGENT_TEAM_DESKTOP_PROJECT") {
-        return match canonical_project_root(Path::new(&path)) {
-            Ok(root) => open_project_sync(app, runtime, root),
-            Err(detail) => error_status("测试项目不可用", None, detail),
-        };
+        return boot_from_env(app, runtime, &path);
     }
+    boot_from_settings(app, runtime)
+}
 
+/// A service that is already running (or just died) decides the answer.
+fn resume_running_service(app: &AppHandle, runtime: &DesktopRuntime) -> Option<DesktopStatus> {
+    let mut state = lock_runtime(runtime);
+    let service = state.service.as_mut()?;
+    match service.child.try_wait() {
+        Ok(None) => Some(reuse_running_service(app, service)),
+        Ok(Some(exit)) => Some(restart_after_exit(app, runtime, state, exit)),
+        Err(error) => Some(error_status("无法检查工作台状态", None, error.to_string())),
+    }
+}
+
+fn reuse_running_service(app: &AppHandle, service: &ManagedService) -> DesktopStatus {
+    let status = ready_status(service);
+    match navigate_to(app, &service.bootstrap_url) {
+        Ok(()) => status,
+        Err(error) => error_status("工作台已启动，但页面暂时无法打开", None, error),
+    }
+}
+
+/// The child is gone: stop the bookkeeping and bring the workspace back up.
+fn restart_after_exit(
+    app: &AppHandle,
+    runtime: &DesktopRuntime,
+    mut state: std::sync::MutexGuard<'_, RuntimeState>,
+    exit: std::process::ExitStatus,
+) -> DesktopStatus {
+    let project_root = state
+        .service
+        .as_ref()
+        .map(|service| service.project_root.clone());
+    let focus = state.pending_project.clone().or(project_root);
+    stop_service_locked(&mut state);
+    drop(state);
+    eprintln!("Agent Team desktop: 控制服务已退出（{exit}），正在重新拉起工作台");
+    match open_registered_workspace_sync(app, runtime, focus) {
+        Ok(status) => status,
+        Err(detail) => error_status("控制服务已停止，重新启动失败", None, detail),
+    }
+}
+
+/// The e2e harness pins a project through the environment.
+fn boot_from_env(app: &AppHandle, runtime: &DesktopRuntime, path: &std::ffi::OsStr) -> DesktopStatus {
+    match canonical_project_root(Path::new(path)) {
+        Ok(root) => open_project_sync(app, runtime, root),
+        Err(detail) => error_status("测试项目不可用", None, detail),
+    }
+}
+
+fn boot_from_settings(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
     match load_settings(app) {
         Ok(Some(settings)) if !settings.project_roots.is_empty() => {
-            open_registered_workspace_sync(app, runtime, settings.active_project_root.clone())
-                .unwrap_or_else(|detail| {
-                    let status = error_status("无法打开已保存的项目列表", None, detail);
-                    with_projects(status, &settings)
-                })
+            open_saved_workspace(app, runtime, &settings)
         }
-        Ok(_) => with_projects(
-            needs_project_status(),
-            &load_settings(app).ok().flatten().unwrap_or_default(),
-        ),
+        Ok(_) => with_projects(needs_project_status(), &load_settings(app).ok().flatten().unwrap_or_default()),
         Err(detail) => error_status("无法读取上次的项目", None, detail),
     }
+}
+
+fn open_saved_workspace(
+    app: &AppHandle,
+    runtime: &DesktopRuntime,
+    settings: &DesktopSettings,
+) -> DesktopStatus {
+    open_registered_workspace_sync(app, runtime, settings.active_project_root.clone())
+        .unwrap_or_else(|detail| {
+            let status = error_status("无法打开已保存的项目列表", None, detail);
+            with_projects(status, settings)
+        })
 }
 
 fn retry_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
@@ -1387,95 +1412,137 @@ fn write_desktop_workspace_manifest(
     app: &AppHandle,
     roots: &[PathBuf],
 ) -> Result<DesktopWorkspaceBundle, String> {
+    let directory = workspace_directory(app)?;
+    let path = directory.join("desktop-workspace.yaml");
+    let registry_path = directory.join("desktop-project-registry.json");
+    let entry = WorkspaceEntries::collect(roots);
+    if entry.projects.is_empty() {
+        return Err(entry.empty_message());
+    }
+    fs::write(&path, entry.yaml()).map_err(|error| error.to_string())?;
+    fs::write(&registry_path, entry.registry_json()?).map_err(|error| error.to_string())?;
+    Ok(DesktopWorkspaceBundle {
+        workspace_path: path,
+        registry_path,
+    })
+}
+
+fn workspace_directory(app: &AppHandle) -> Result<PathBuf, String> {
     let directory = settings_path(app)?
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "无法定位桌面工作区清单路径".to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join("desktop-workspace.yaml");
-    let registry_path = directory.join("desktop-project-registry.json");
+    Ok(directory)
+}
 
-    let mut used_ids = HashSet::new();
-    let mut projects = Vec::new();
-    let mut skipped = Vec::new();
-    let mut registry_entries = Vec::new();
-    for root in roots {
-        let id = unique_project_id(root, &mut used_ids);
+/// The projects that may join the workspace, and the ones we had to skip.
+struct WorkspaceEntries {
+    projects: Vec<String>,
+    skipped: Vec<String>,
+    registry: Vec<serde_json::Value>,
+}
+
+impl WorkspaceEntries {
+    fn collect(roots: &[PathBuf]) -> Self {
+        let mut entries = WorkspaceEntries {
+            projects: Vec::new(),
+            skipped: Vec::new(),
+            registry: Vec::new(),
+        };
+        let mut used_ids = HashSet::new();
+        for root in roots {
+            let id = unique_project_id(root, &mut used_ids);
+            entries.consider(root, id);
+        }
+        entries
+    }
+
+    /// A project joins when it is not foreign-occupied and has a config.
+    fn consider(&mut self, root: &Path, id: String) {
         let name = project_name(root);
-        let lease = read_control_lease(root).ok().flatten();
-        let lease_alive = lease
-            .as_ref()
-            .map(|entry| lease_owner_is_alive(entry))
-            .unwrap_or(false);
-        let foreign = lease_alive
-            && lease
-                .as_ref()
-                .map(|entry| !is_our_control_pid(entry.pid))
-                .unwrap_or(false);
-        if foreign {
-            skipped.push(name.clone());
-            registry_entries.push(serde_json::json!({
-                "id": id,
-                "name": name,
-                "path": root.to_string_lossy(),
-                "connected": false,
-                "occupancy": if project_has_active_run(root) { "active-run" } else { "foreign" },
-                "reason": lease.as_ref().map(|entry| format!("其他进程占用 PID {}", entry.pid)).unwrap_or_else(|| "其他窗口占用".into()),
-            }));
-            continue;
+        if let Some(reason) = foreign_occupancy(root) {
+            self.skipped.push(name.clone());
+            self.registry.push(self.entry(root, &id, &name, false, &reason));
+            return;
         }
         let Some(config) = discover_project_config(root) else {
-            skipped.push(format!("{name}(无配置)"));
-            registry_entries.push(serde_json::json!({
-                "id": id,
-                "name": name,
-                "path": root.to_string_lossy(),
-                "connected": false,
-                "occupancy": "unconfigured",
-                "reason": "缺少 agent-team.yaml",
-            }));
-            continue;
+            self.skipped.push(format!("{name}(无配置)"));
+            self.registry.push(self.entry(root, &id, &name, false, "缺少 agent-team.yaml"));
+            return;
         };
-        projects.push(format!(
+        self.projects.push(format!(
             "  - id: {id}\n    config: {}\n",
             yaml_quote(&config.to_string_lossy())
         ));
-        registry_entries.push(serde_json::json!({
+        self.registry.push(self.entry(root, &id, &name, true, "已接入当前工作区"));
+    }
+
+    fn entry(
+        &self,
+        root: &Path,
+        id: &str,
+        name: &str,
+        connected: bool,
+        reason: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
             "id": id,
             "name": name,
             "path": root.to_string_lossy(),
-            "connected": true,
-            "occupancy": "ours",
-            "reason": "已接入当前工作区",
-        }));
+            "connected": connected,
+            "occupancy": occupancy_label(root, connected),
+            "reason": reason,
+        })
     }
-    if projects.is_empty() {
-        if skipped.is_empty() {
-            return Err("没有可加入工作区的已配置项目".into());
+
+    fn empty_message(&self) -> String {
+        if self.skipped.is_empty() {
+            return "没有可加入工作区的已配置项目".into();
         }
-        return Err(format!(
+        format!(
             "没有可启动的空闲项目（已跳过：{}）。请在启动页对占用项目点「释放占用」",
-            skipped.join("、")
-        ));
+            self.skipped.join("、")
+        )
     }
-    let mut body = format!("version: 1\nprojects:\n{}", projects.join(""));
-    if !skipped.is_empty() {
-        body.push_str(&format!(
-            "# skipped busy or unconfigured: {}\n",
-            skipped.join(", ")
-        ));
+
+    fn yaml(&self) -> String {
+        let mut body = format!("version: 1\nprojects:\n{}", self.projects.join(""));
+        if !self.skipped.is_empty() {
+            body.push_str(&format!("# skipped busy or unconfigured: {}\n", self.skipped.join(", ")));
+        }
+        body
     }
-    fs::write(&path, body).map_err(|error| error.to_string())?;
-    let registry_body = serde_json::to_vec_pretty(&serde_json::json!({
-        "generatedAt": chrono_like_now(),
-        "projects": registry_entries,
-    }))
-    .map_err(|error| error.to_string())?;
-    fs::write(&registry_path, registry_body).map_err(|error| error.to_string())?;
-    Ok(DesktopWorkspaceBundle {
-        workspace_path: path,
-        registry_path,
-    })
+
+    fn registry_json(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "generatedAt": chrono_like_now(),
+            "projects": self.registry,
+        }))
+        .map_err(|error| error.to_string())
+    }
+}
+
+/// A live lease held by someone else keeps the project out of this workspace.
+fn foreign_occupancy(root: &Path) -> Option<String> {
+    let lease = read_control_lease(root).ok().flatten()?;
+    if !lease_owner_is_alive(&lease) || is_our_control_pid(lease.pid) {
+        return None;
+    }
+    Some(format!("其他进程占用 PID {}", lease.pid))
+}
+
+fn occupancy_label(root: &Path, connected: bool) -> &'static str {
+    if connected {
+        return "ours";
+    }
+    if project_has_active_run(root) {
+        return "active-run";
+    }
+    if discover_project_config(root).is_some() {
+        return "foreign";
+    }
+    "unconfigured"
 }
 
 fn chrono_like_now() -> String {
@@ -1530,61 +1597,80 @@ fn process_is_zombie(pid: u32) -> bool {
 
 fn start_service_watch(app: &AppHandle, runtime: &DesktopRuntime) {
     let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut state = lock_runtime(runtime);
-        if let Some(previous) = state.watch_cancel.replace(Arc::clone(&cancel)) {
-            previous.store(true, Ordering::SeqCst);
-        }
-    }
+    install_cancel_flag(runtime, &cancel);
     let app = app.clone();
     let runtime = runtime.clone();
-    thread::spawn(move || {
-        while !cancel.load(Ordering::SeqCst) {
-            thread::sleep(SERVICE_WATCH_INTERVAL);
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
-            let exited = {
-                let mut state = lock_runtime(&runtime);
-                match state.service.as_mut() {
-                    Some(service) => match service.child.try_wait() {
-                        Ok(Some(status)) => Some(status.to_string()),
-                        Ok(None) => None,
-                        Err(error) => Some(error.to_string()),
-                    },
-                    None => {
-                        break;
-                    }
-                }
-            };
-            let Some(detail) = exited else {
-                continue;
-            };
-            eprintln!(
-                "Agent Team desktop: 控制服务已退出（{detail}），正在重新拉起工作台"
-            );
-            thread::sleep(SERVICE_RESTART_BACKOFF);
-            if cancel.load(Ordering::SeqCst) {
-                break;
-            }
-            let focus = {
-                let mut state = lock_runtime(&runtime);
-                let focus = state.pending_project.clone().or_else(|| {
-                    state.service.as_ref().map(|service| service.project_root.clone())
-                });
-                // Reap the zombie handle so the next start can claim the lock.
-                if let Some(mut service) = state.service.take() {
-                    let _ = service.child.try_wait();
-                }
-                focus
-            };
-            if let Err(error) = open_registered_workspace_sync(&app, &runtime, focus) {
-                eprintln!("Agent Team desktop: 控制服务重启失败：{error}");
-                break;
-            }
-            break;
+    thread::spawn(move || watch_service_loop(&app, &runtime, &cancel));
+}
+
+/// Only one watch runs at a time: the previous one is told to stop.
+fn install_cancel_flag(runtime: &DesktopRuntime, cancel: &Arc<AtomicBool>) {
+    let mut state = lock_runtime(runtime);
+    if let Some(previous) = state.watch_cancel.replace(Arc::clone(cancel)) {
+        previous.store(true, Ordering::SeqCst);
+    }
+}
+
+fn watch_service_loop(app: &AppHandle, runtime: &DesktopRuntime, cancel: &Arc<AtomicBool>) {
+    while !cancel.load(Ordering::SeqCst) {
+        thread::sleep(SERVICE_WATCH_INTERVAL);
+        if cancel.load(Ordering::SeqCst) {
+            return;
         }
-    });
+        let Some(detail) = exited_service(runtime) else {
+            continue;
+        };
+        eprintln!("Agent Team desktop: 控制服务已退出（{detail}），正在重新拉起工作台");
+        thread::sleep(SERVICE_RESTART_BACKOFF);
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        if !restart_watched_service(app, runtime) {
+            return;
+        }
+        return;
+    }
+}
+
+/// `None` means "still running"; a detail string means it exited or failed.
+fn exited_service(runtime: &DesktopRuntime) -> Option<String> {
+    let mut state = lock_runtime(runtime);
+    match state.service.as_mut() {
+        Some(service) => child_state(service),
+        None => Some(String::from("服务句柄已释放")),
+    }
+}
+
+fn child_state(service: &mut ManagedService) -> Option<String> {
+    match service.child.try_wait() {
+        Ok(Some(status)) => Some(status.to_string()),
+        Ok(None) => None,
+        Err(error) => Some(error.to_string()),
+    }
+}
+
+/// Reap the zombie handle so the next start can claim the lock, then restart.
+fn restart_watched_service(app: &AppHandle, runtime: &DesktopRuntime) -> bool {
+    let focus = {
+        let mut state = lock_runtime(runtime);
+        let focus = state.pending_project.clone().or_else(|| {
+            state
+                .service
+                .as_ref()
+                .map(|service| service.project_root.clone())
+        });
+        if let Some(mut service) = state.service.take() {
+            let _ = service.child.try_wait();
+        }
+        focus
+    };
+    match open_registered_workspace_sync(app, runtime, focus) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("Agent Team desktop: 控制服务重启失败：{error}");
+            false
+        }
+    }
 }
 
 fn yaml_quote(value: &str) -> String {
