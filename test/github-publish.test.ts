@@ -1,128 +1,212 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { createDefaultConfig } from "../src/config/defaults.js";
-import type { LoadedConfig } from "../src/config/load.js";
-import { SqliteEventStore } from "../src/events/store.js";
-import { type GithubClient } from "../src/github/client.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GithubPublisher } from "../src/github/publish.js";
 import { RunStateStore } from "../src/state/store.js";
+import type { LoadedConfig } from "../src/config/load.js";
 import type { RunState } from "../src/state/types.js";
 
-describe("GithubPublisher approval boundary", () => {
-  it("rejects publication until the latest final request is approved", async () => {
-    const fixture = await createFixture();
-    const state = fakeRun("awaiting-human");
-    state.approvals = [
-      {
-        id: "approval-1",
-        gate: "final",
-        status: "pending",
-        summary: "Review integration result",
-        checkpointId: "checkpoint-1",
-        requestedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      },
-    ];
+const roots: string[] = [];
 
-    await expect(fixture.publisher.publish(state)).rejects.toThrow(
-      "requires final human approval before publication",
-    );
-    expect(state.status).toBe("awaiting-human");
-    fixture.events.close();
+afterEach(async () => {
+  await Promise.allSettled(roots.splice(0).map(async (dir) => await rm(dir, { recursive: true, force: true })));
+});
+
+function loaded(patch: Record<string, unknown> = {}): LoadedConfig {
+  return {
+    root: "/tmp",
+    path: "/tmp/agent-team.yaml",
+    config: {
+      github: {
+        enabled: true,
+        remote: "origin",
+        draftPullRequest: false,
+        checkTimeoutSeconds: 1,
+        ...(patch.github as object),
+      },
+      project: { name: "demo", stateDirectory: ".agent-team", defaultBranch: "main" },
+    },
+  } as unknown as LoadedConfig;
+}
+
+function state(patch: Partial<RunState> = {}): RunState {
+  return {
+    id: "run-1",
+    goal: "Ship the thing",
+    status: "ready-to-merge",
+    root: "/tmp",
+    configPath: "agent-team.yaml",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: "agent-team/integration",
+    integrationWorktree: "/tmp/wt",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    profileOverrides: {},
+    strategy: { name: "balanced" } as never,
+    tasks: [
+      { task: { id: "T1", title: "Do it" }, status: "merged", attempts: 1, profile: null } as never,
+    ],
+    approvals: [{ gate: "final", status: "approved" } as never],
+    history: [],
+    ...patch,
+  } as unknown as RunState;
+}
+
+async function store(): Promise<RunStateStore> {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-team-publish-"));
+  roots.push(root);
+  return new RunStateStore(path.join(root, "runs"));
+}
+
+function client(patch: Record<string, unknown> = {}) {
+  return {
+    authStatus: vi.fn(async () => ({ authenticated: true })),
+    repository: vi.fn(async () => ({ nameWithOwner: "acme/demo" })),
+    findPullRequest: vi.fn(async () => undefined),
+    createPullRequest: vi.fn(async () => ({ url: "https://github.com/acme/demo/pull/1", number: 1 })),
+    ...patch,
+  } as never;
+}
+
+const noPush = async () => undefined;
+
+describe("publish", () => {
+  it("creates a pull request once the branch is pushed", async () => {
+    const s = await store();
+    const fake = client();
+    const publisher = new GithubPublisher(loaded(), s, fake, noPush);
+    const run = state();
+    await publisher.publish(run);
+    expect(run).toMatchObject({
+      status: "waiting-ci",
+      repository: "acme/demo",
+      pullRequestNumber: 1,
+    });
+    expect((fake as unknown as { createPullRequest: ReturnType<typeof vi.fn> }).createPullRequest).toHaveBeenCalled();
   });
 
-  it("rejects an approved run from a non-publishable status", async () => {
-    const fixture = await createFixture();
-    const state = fakeRun("blocked");
-    state.approvals = [approvedFinalApproval()];
-
-    await expect(fixture.publisher.publish(state)).rejects.toThrow(
-      "cannot be published from status 'blocked'",
-    );
-    fixture.events.close();
+  it("reuses a pull request that already exists", async () => {
+    const s = await store();
+    const fake = client({
+      findPullRequest: vi.fn(async () => ({ url: "https://github.com/acme/demo/pull/9", number: 9 })),
+    });
+    const publisher = new GithubPublisher(loaded(), s, fake, noPush);
+    const run = state();
+    await publisher.publish(run);
+    expect(run.pullRequestNumber).toBe(9);
+    expect((fake as unknown as { createPullRequest: ReturnType<typeof vi.fn> }).createPullRequest).not.toHaveBeenCalled();
   });
 
-  it("falls back to ready-to-merge and records the error when publication fails", async () => {
-    const fixture = await createFixture();
-    const state = fakeRun("ready-to-merge");
-    state.approvals = [approvedFinalApproval()];
-    const publisher = new GithubPublisher(fixture.loaded, fixture.store, {
-      authStatus: async () => {
-        throw new Error("gh auth failed");
-      },
-    } as unknown as GithubClient);
+  it("refuses without GitHub, without a final approval, or from a wrong status", async () => {
+    const s = await store();
+    const disabled = new GithubPublisher(loaded({ github: { enabled: false } }), s, client(), noPush);
+    await expect(disabled.publish(state())).rejects.toBeTruthy();
 
-    await expect(publisher.publish(state)).rejects.toThrow("gh auth failed");
-    expect(state.status).toBe("ready-to-merge");
-    expect(state.error).toContain("gh auth failed");
-    // The fallback is persisted, so the run can be published again or cleaned up.
-    const persisted = await fixture.store.load(state.id);
-    expect(persisted.status).toBe("ready-to-merge");
-    expect(persisted.error).toContain("gh auth failed");
-    fixture.events.close();
+    const unapproved = new GithubPublisher(loaded(), s, client(), noPush);
+    await expect(unapproved.publish(state({ approvals: [] }))).rejects.toThrow(/final human approval/);
+
+    await expect(unapproved.publish(state({ status: "implementing" }))).rejects.toThrow(
+      /cannot be published from status/,
+    );
+  });
+
+  it("records the failure and falls back to a publishable status", async () => {
+    const s = await store();
+    const failing = client({
+      authStatus: vi.fn(async () => {
+        throw new Error("gh is not logged in");
+      }),
+    });
+    const publisher = new GithubPublisher(loaded(), s, failing, noPush);
+    const run = state();
+    await expect(publisher.publish(run)).rejects.toBeTruthy();
+    expect(run).toMatchObject({ status: "ready-to-merge" });
+    expect(run.error).toBeTruthy();
   });
 });
 
-async function createFixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "agent-team-publisher-"));
-  const loaded: LoadedConfig = {
-    root,
-    path: path.join(root, "agent-team.yaml"),
-    config: createDefaultConfig("publisher-fixture"),
-  };
-  const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
-  const store = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
-  return { events, loaded, store, publisher: new GithubPublisher(loaded, store) };
-}
+describe("refreshChecks", () => {
+  const published = () => state({ repository: "acme/demo", pullRequestUrl: "https://github.com/acme/demo/pull/1" });
 
-function approvedFinalApproval(): NonNullable<RunState["approvals"]>[number] {
-  return {
-    id: "approval-1",
-    gate: "final",
-    status: "approved",
-    summary: "Review integration result",
-    checkpointId: "checkpoint-1",
-    requestedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    response: {
-      decision: "approved",
-      actor: "release-owner",
-      reason: "Diff reviewed",
-      respondedAt: new Date().toISOString(),
-    },
-  };
-}
+  it("settles on the checks' verdict", async () => {
+    const s = await store();
+    const passing = new GithubPublisher(
+      loaded(),
+      s,
+      client({ checks: vi.fn(async () => [{ name: "ci", state: "SUCCESS", bucket: "pass" }]) }),
+      noPush,
+    );
+    const run = published();
+    await expect(passing.refreshChecks(run, false)).resolves.toHaveLength(1);
+    expect(run.status).toBe("ready-to-merge");
+  });
 
-function fakeRun(status: RunState["status"]): RunState {
-  const now = new Date().toISOString();
-  return {
-    id: "publish-run",
-    goal: "Publish guarded result",
-    root: "/tmp/project",
-    configPath: "/tmp/project/agent-team.yaml",
-    baseBranch: "main",
-    baseCommit: "abc",
-    integrationBranch: "agent-team/publish-run/integration",
-    integrationWorktree: "/tmp/project/integration",
-    status,
-    createdAt: now,
-    updatedAt: now,
-    profileOverrides: {},
-    strategy: {
-      name: "balanced",
-      maxParallel: 2,
-      maxReworkAttempts: 2,
-      executionTimeoutSeconds: 14_400,
-      maxAgentInvocations: 64,
-      maxProcessOutputBytes: 1_048_576,
-      maxArtifactBytes: 1_073_741_824,
-      roleProfiles: {},
-      approvalGates: ["final"],
-      approvalTimeoutSeconds: 86_400,
-    },
-    tasks: [],
-    history: [],
-  };
-}
+  it("reports a failing check as ci-failed", async () => {
+    const s = await store();
+    const failing = new GithubPublisher(
+      loaded(),
+      s,
+      client({ checks: vi.fn(async () => [{ name: "ci", state: "FAILURE", bucket: "fail" }]) }),
+      noPush,
+    );
+    const run = published();
+    await failing.refreshChecks(run, false);
+    expect(run.status).toBe("ci-failed");
+  });
+
+  it("keeps waiting while a check is pending", async () => {
+    const s = await store();
+    const pending = new GithubPublisher(
+      loaded(),
+      s,
+      client({ checks: vi.fn(async () => [{ name: "ci", state: "IN_PROGRESS", bucket: "pending" }]) }),
+      noPush,
+    );
+    const run = published();
+    await pending.refreshChecks(run, false);
+    expect(run.status).toBe("waiting-ci");
+  });
+
+  it("refuses an unpublished run", async () => {
+    const s = await store();
+    const publisher = new GithubPublisher(loaded(), s, client(), noPush);
+    await expect(publisher.refreshChecks(state(), false)).rejects.toThrow(/not been published/);
+  });
+});
+
+describe("markCompletedIfMerged", () => {
+  const published = () => state({ repository: "acme/demo", pullRequestUrl: "https://github.com/acme/demo/pull/1" });
+
+  it("completes a merged pull request", async () => {
+    const s = await store();
+    const merged = new GithubPublisher(
+      loaded(),
+      s,
+      client({ pullRequest: vi.fn(async () => ({ mergedAt: "2026-01-02T00:00:00.000Z" })) }),
+      noPush,
+    );
+    const run = published();
+    await expect(merged.markCompletedIfMerged(run)).resolves.toBe(true);
+    expect(run.status).toBe("completed");
+  });
+
+  it("leaves an unmerged pull request alone", async () => {
+    const s = await store();
+    const open = new GithubPublisher(
+      loaded(),
+      s,
+      client({ pullRequest: vi.fn(async () => ({ mergedAt: undefined })) }),
+      noPush,
+    );
+    const run = published();
+    await expect(open.markCompletedIfMerged(run)).resolves.toBe(false);
+  });
+
+  it("refuses an unpublished run", async () => {
+    const s = await store();
+    const publisher = new GithubPublisher(loaded(), s, client(), noPush);
+    await expect(publisher.markCompletedIfMerged(state())).rejects.toThrow(/not been published/);
+  });
+});

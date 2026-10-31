@@ -16,66 +16,23 @@ export class GithubPublisher {
     private readonly loaded: LoadedConfig,
     private readonly store: RunStateStore,
     private readonly client = new GithubClient(),
+    /** The one write to the remote; injected so publication can be tested without a repo. */
+    private readonly push: (state: RunState) => Promise<void> = async (state) =>
+      await this.gitFor(state).push(
+        state.integrationWorktree,
+        this.loaded.config.github.remote,
+        state.integrationBranch,
+      ),
   ) {}
 
   async publish(state: RunState): Promise<RunState> {
-    if (!this.loaded.config.github.enabled) {
-      throw githubActionError(
-        "github-disabled",
-        "GitHub integration is disabled in agent-team.yaml",
-      );
-    }
-    const finalApproval = state.approvals
-      ?.filter((approval) => approval.gate === "final")
-      .at(-1);
-    if (finalApproval?.status !== "approved") {
-      throw githubActionError(
-        "other",
-        `Run '${state.id}' requires final human approval before publication`,
-      );
-    }
-    if (!["waiting-ci", "ci-failed", "ready-to-merge"].includes(state.status)) {
-      throw githubActionError(
-        "other",
-        `Run '${state.id}' cannot be published from status '${state.status}'`,
-      );
-    }
+    this.assertPublishable(state);
     await this.store.transition(state, "publishing", "Publishing integration branch to GitHub");
     try {
       await this.client.authStatus(state.integrationWorktree);
       const repository = await this.client.repository(state.integrationWorktree);
-      const worktreesRoot = path.resolve(
-        this.loaded.root,
-        this.loaded.config.project.stateDirectory,
-        "worktrees",
-      );
-      const git = new GitManager(this.loaded.root, worktreesRoot);
-      await git.push(
-        state.integrationWorktree,
-        this.loaded.config.github.remote,
-        state.integrationBranch,
-      );
-
-      let pullRequest = await this.client.findPullRequest(
-        state.integrationWorktree,
-        repository.nameWithOwner,
-        state.integrationBranch,
-      );
-      if (!pullRequest) {
-        const artifactDirectory = this.store.artifactDirectory(state.id, "github");
-        await mkdir(artifactDirectory, { recursive: true });
-        const bodyFile = path.join(artifactDirectory, "pull-request.md");
-        await writeFile(bodyFile, renderPullRequestBody(state), "utf8");
-        pullRequest = await this.client.createPullRequest({
-          cwd: state.integrationWorktree,
-          repository: repository.nameWithOwner,
-          base: state.baseBranch,
-          head: state.integrationBranch,
-          title: `[agent-team] ${state.intake?.goalSummary ?? state.goal}`.slice(0, 120),
-          bodyFile,
-          draft: this.loaded.config.github.draftPullRequest,
-        });
-      }
+      await this.push(state);
+      const pullRequest = await this.ensurePullRequest(state, repository.nameWithOwner);
       state.repository = repository.nameWithOwner;
       state.pullRequestUrl = pullRequest.url;
       state.pullRequestNumber = pullRequest.number;
@@ -90,6 +47,61 @@ export class GithubPublisher {
       await this.store.transition(state, "ready-to-merge", `Publication failed: ${state.error}`);
       throw classified;
     }
+  }
+
+  /** Publication needs integration enabled, a final approval and a publishable status. */
+  private assertPublishable(state: RunState): void {
+    if (!this.loaded.config.github.enabled) {
+      throw githubActionError(
+        "github-disabled",
+        "GitHub integration is disabled in agent-team.yaml",
+      );
+    }
+    const finalApproval = state.approvals?.filter((approval) => approval.gate === "final").at(-1);
+    if (finalApproval?.status !== "approved") {
+      throw githubActionError(
+        "other",
+        `Run '${state.id}' requires final human approval before publication`,
+      );
+    }
+    if (!["waiting-ci", "ci-failed", "ready-to-merge"].includes(state.status)) {
+      throw githubActionError(
+        "other",
+        `Run '${state.id}' cannot be published from status '${state.status}'`,
+      );
+    }
+  }
+
+  private gitFor(state: RunState): GitManager {
+    const worktreesRoot = path.resolve(
+      this.loaded.root,
+      this.loaded.config.project.stateDirectory,
+      "worktrees",
+    );
+    return new GitManager(this.loaded.root, worktreesRoot);
+  }
+
+  /** An open pull request for this branch is reused; otherwise one is created. */
+  private async ensurePullRequest(state: RunState, repository: string) {
+    const existing = await this.client.findPullRequest(
+      state.integrationWorktree,
+      repository,
+      state.integrationBranch,
+    );
+    if (existing) return existing;
+    const artifactDirectory = this.store.artifactDirectory(state.id, "github");
+    await mkdir(artifactDirectory, { recursive: true });
+    const bodyFile = path.join(artifactDirectory, "pull-request.md");
+    await writeFile(bodyFile, renderPullRequestBody(state), "utf8");
+    return await this.client.createPullRequest({
+      cwd: state.integrationWorktree,
+      repository,
+      base: state.baseBranch,
+      head: state.integrationBranch,
+      title: `[agent-team] ${state.intake?.goalSummary ?? state.goal}`.slice(0, 120),
+      bodyFile,
+      draft: this.loaded.config.github.draftPullRequest,
+    });
   }
 
   async refreshChecks(state: RunState, wait: boolean): Promise<GithubCheck[]> {
