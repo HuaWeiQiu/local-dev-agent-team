@@ -29,6 +29,91 @@ export interface RunBudgetTrackerOptions {
 
 const defaultArtifactBytesCacheTtlMs = 2_000;
 
+/** Wall-clock and stream volume for one invocation, however the adapter reported it. */
+function addProcessUsage(
+  usage: NonNullable<RunState["usage"]>,
+  process: NonNullable<AgentInvocationObservation["result"]>["process"] | undefined,
+  fallbackDurationMs: number,
+): void {
+  usage.agentDurationMs += process?.durationMs ?? fallbackDurationMs;
+  usage.processOutputBytes += streamBytes(process);
+  usage.truncatedStreams += truncatedStreams(process);
+}
+
+/** Bytes as the adapter counted them, or measured from the stream it kept. */
+export function streamBytes(
+  process: NonNullable<AgentInvocationObservation["result"]>["process"] | undefined,
+): number {
+  return measuredBytes(process, "stdout") + measuredBytes(process, "stderr");
+}
+
+function measuredBytes(
+  process: NonNullable<AgentInvocationObservation["result"]>["process"] | undefined,
+  stream: "stdout" | "stderr",
+): number {
+  const counted = stream === "stdout" ? process?.stdoutBytes : process?.stderrBytes;
+  return counted ?? Buffer.byteLength(process?.[stream] ?? "");
+}
+
+function truncatedStreams(
+  process: NonNullable<AgentInvocationObservation["result"]>["process"] | undefined,
+): number {
+  return Number(process?.stdoutTruncated === true) + Number(process?.stderrTruncated === true);
+}
+
+/** The `agent.invocation.completed` event: what ran, how it ended, and why. */
+function invocationEvent(
+  state: RunState,
+  observation: AgentInvocationObservation,
+): Record<string, unknown> {
+  const process = observation.result?.process;
+  const overArtifactBudget = state.usage!.artifactBytes > state.strategy.maxArtifactBytes;
+  return {
+    invocationId: observation.invocationId,
+    role: observation.role,
+    profile: observation.profile,
+    adapter: observation.adapter,
+    model: observation.model,
+    permission: observation.permission,
+    externalTools: observation.externalTools,
+    artifactKey: observation.artifactKey,
+    durationMs: process?.durationMs ?? observation.durationMs,
+    success: !observation.error && !overArtifactBudget,
+    ...processVolume(process),
+    ...(observation.result?.usage ? { usage: observation.result.usage } : {}),
+    ...(observation.error ? { error: errorMessage(observation.error) } : {}),
+    ...failureFields(observation.error),
+    ...(overArtifactBudget
+      ? { error: `Artifact budget of ${state.strategy.maxArtifactBytes} bytes exceeded` }
+      : {}),
+  };
+}
+
+/** Only the byte counts the adapter actually reported are echoed. */
+function processVolume(
+  process: NonNullable<AgentInvocationObservation["result"]>["process"] | undefined,
+): Record<string, unknown> {
+  return {
+    ...(process?.stdoutBytes !== undefined ? { stdoutBytes: process.stdoutBytes } : {}),
+    ...(process?.stderrBytes !== undefined ? { stderrBytes: process.stderrBytes } : {}),
+    ...(process?.stdoutTruncated ? { stdoutTruncated: true } : {}),
+    ...(process?.stderrTruncated ? { stderrTruncated: true } : {}),
+  };
+}
+
+/** A failed invocation carries its classification, so the panel can group it. */
+function failureFields(error: unknown): Record<string, unknown> {
+  if (error === undefined) return {};
+  const failure =
+    error instanceof AgentInvocationError ? error.classification : classifyError(error);
+  return {
+    failureCode: failure.code,
+    failureCategory: failure.category,
+    infrastructureFailure: failure.infrastructure,
+    pauseEvolution: failure.pauseEvolution,
+  };
+}
+
 export class RunBudgetTracker implements AgentInvocationObserver {
   readonly maxProcessOutputBytes: number;
   private artifactBytesCache?: { measuredAt: number; bytes: number };
@@ -107,53 +192,14 @@ export class RunBudgetTracker implements AgentInvocationObserver {
   async afterInvocation(observation: AgentInvocationObservation): Promise<void> {
     const usage = this.state.usage!;
     const process = observation.result?.process;
-    usage.agentDurationMs += process?.durationMs ?? observation.durationMs;
-    usage.processOutputBytes +=
-      (process?.stdoutBytes ?? Buffer.byteLength(process?.stdout ?? "")) +
-      (process?.stderrBytes ?? Buffer.byteLength(process?.stderr ?? ""));
-    usage.truncatedStreams += Number(process?.stdoutTruncated === true);
-    usage.truncatedStreams += Number(process?.stderrTruncated === true);
+    addProcessUsage(usage, process, observation.durationMs);
     addReportedUsage(usage, observation.result?.usage);
     await this.refreshArtifactBytes();
     await this.store.save(this.state);
-    const overArtifactBudget = usage.artifactBytes > this.state.strategy.maxArtifactBytes;
-    const failure =
-      observation.error === undefined
-        ? undefined
-        : observation.error instanceof AgentInvocationError
-          ? observation.error.classification
-          : classifyError(observation.error);
-    this.store.emit(this.state.id, "agent.invocation.completed", {
-      invocationId: observation.invocationId,
-      role: observation.role,
-      profile: observation.profile,
-      adapter: observation.adapter,
-      model: observation.model,
-      permission: observation.permission,
-      externalTools: observation.externalTools,
-      artifactKey: observation.artifactKey,
-      durationMs: process?.durationMs ?? observation.durationMs,
-      success: !observation.error && !overArtifactBudget,
-      ...(process?.stdoutBytes !== undefined ? { stdoutBytes: process.stdoutBytes } : {}),
-      ...(process?.stderrBytes !== undefined ? { stderrBytes: process.stderrBytes } : {}),
-      ...(process?.stdoutTruncated ? { stdoutTruncated: true } : {}),
-      ...(process?.stderrTruncated ? { stderrTruncated: true } : {}),
-      ...(observation.result?.usage ? { usage: observation.result.usage } : {}),
-      ...(observation.error ? { error: errorMessage(observation.error) } : {}),
-      ...(failure
-        ? {
-            failureCode: failure.code,
-            failureCategory: failure.category,
-            infrastructureFailure: failure.infrastructure,
-            pauseEvolution: failure.pauseEvolution,
-          }
-        : {}),
-      ...(overArtifactBudget
-        ? { error: `Artifact budget of ${this.state.strategy.maxArtifactBytes} bytes exceeded` }
-        : {}),
-    });
+    this.store.emit(this.state.id, "agent.invocation.completed", invocationEvent(this.state, observation));
     this.assertArtifactBudget();
   }
+
 
   async recordQuality(report: QualityReport): Promise<void> {
     const usage = this.state.usage!;
@@ -264,7 +310,7 @@ async function directorySize(directory: string): Promise<number> {
   return bytes;
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length <= 2_000 ? message : `${message.slice(0, 2_000)} [truncated]`;
 }
