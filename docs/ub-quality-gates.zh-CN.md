@@ -194,3 +194,49 @@ CRAP = CC² × (1 - 覆盖)³ + CC
 > 为什么不是 Playwright 覆盖率：e2e 覆盖率只能证明「路径被点到了」，不能降低 CC；
 > 上面证明了 CRAP 的下界就是 CC。e2e 能替代的是「行为验证」，替代不了「结构复杂度」。
 > 所以路线是：**组件拆到 CC ≤ 10 + jsdom 组件测试**，e2e 继续负责跨页流程。
+
+## 8. 2026-10 收口：CRAP > 100 归零
+
+起点（本轮清理开始时的 `main`）：**2683 个函数里 462 个 CRAP > 10，其中 58 个 > 100**，
+最差的是 `deriveAgentActivity`（CC 81）、`ResearchPanel`（CC 81）、`SettingsWorkbench`
+（CC 128 / 覆盖 0 / CRAP 16512）。
+
+终点（`52b3e9f`）：**CRAP > 100 归零**，> 10 剩 280 个，全部冻结进 `.ub-crap-baseline.json`。
+
+| 指标 | 起点 | 终点 |
+| --- | --- | --- |
+| CRAP > 1000 | 5 | 0 |
+| CRAP > 500 | 10 | 0 |
+| CRAP > 100 | 58 | **0** |
+| CRAP > 10 | 462 | 280（已冻结） |
+| 测试数 | 1188 | 1312 |
+
+### 剩余 280 个为什么停在这里
+
+它们的 CRAP 集中在 10–99 区间，前十名是 `refineProposalInvariants`(98.6)、
+`RunActionDialog`(96.1)、`maybeRecordFromExperience`(96.0)、`useDesktopProject`(90.0)、
+`useOnboarding`(90.0)。这些函数**不是靠拆就能降**的：它们的 CC 已经不高
+（`useDesktopProject` 只有 9），CRAP 高是因为**覆盖率低**——`useDesktopProject` 和
+`useOnboarding` 都是 0%。继续降要么补集成测试，要么把 hook 的 effect 抽成可测单元，
+这是另一条独立的工程线，不适合塞进「CRAP > 100 清零」这个目标。
+
+### baseline 冻结方式
+
+```bash
+node scripts/ub-quality-gate.mjs --update-baseline   # 记录当前 > 10 的函数
+node scripts/ub-quality-gate.mjs                     # 之后任何回退按 regression 报错
+```
+
+**注意**：baseline 必须用**和校验时相同的模式**生成。用 `--all` 生成、用默认模式校验
+会报假的 regression——两种模式分析的函数集合不同，vitest 覆盖率的分母也就不同，
+同一个函数的 CRAP 会差出 15% 以上（实测 `desktop.settings#getInventory` 23.9 vs 20.2）。
+
+### 这轮用到的四个套路
+
+| 套路 | 例子 |
+| --- | --- |
+| 决策变数据 | `EVOLUTION_ERROR_STATUS`（错误类→状态码）、`SERVER_REPLIES`、`NOTIFICATIONS`、`BINDING_FIELDS` |
+| 不变量集中一处 | `evolution/audit-trail.ts`（哪些审计记录能在提案消失后保留）原来有两份拷贝 |
+| 查表代替分支链 | `pickSituation` 把崩溃恢复的 2×2 矩阵变成四行 |
+| 先钉行为再改结构 | `planning.ts` 拆 `architectPlan` 时，「重试条件」和「放弃条件」曾被合并——5 个测试立刻挂掉 |
+
