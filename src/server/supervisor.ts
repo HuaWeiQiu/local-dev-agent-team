@@ -9,6 +9,8 @@ import {
   planEditIsEmpty,
   summarizePlanEdit,
 } from "../interventions/plan-edit.js";
+import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
+import { policyFactsFrom, policySnapshot } from "../authority/policy.js";
 import { attachTreeNodes } from "../domain/architecture-design.js";
 import { SessionFactory } from "../sessions/factory.js";
 import path from "node:path";
@@ -627,6 +629,7 @@ export class RunSupervisor {
   async resume(runId: string, request: ResumeRunRequest): Promise<RunActionResult> {
     return await this.serializeAction(runId, async () => {
       const { state, checkpoint } = await this.recoverable(runId);
+      this.assertMandateFor(state, "resume");
       this.events.emit(runId, "run.resume-requested", {
         actor: request.actor,
         reason: request.reason,
@@ -906,12 +909,51 @@ export class RunSupervisor {
       ...response,
       respondedAt: new Date().toISOString(),
     };
+    this.grantMandateFor(state, approval);
     await this.stateStore.save(state);
     this.events.emit(state.id, "approval.responded", {
       requestId: approval.id,
       gate: approval.gate,
       ...approval.response,
     });
+  }
+
+  /**
+   * Continuing work needs the authority it was granted. A run that predates
+   * Mandates keeps its old behaviour; a run that has one is revalidated against
+   * the policy as it stands now, so a policy change cannot silently outlive it.
+   */
+  private assertMandateFor(state: RunState, action: "resume" | "retry"): void {
+    if (!needsMandate(state)) return;
+    assertMandateUsable(
+      state.mandate,
+      policySnapshot(policyFactsFrom(this.loaded.config, state.strategy.name)),
+      action,
+    );
+  }
+
+  /**
+   * An approval that lets work proceed also records the authority it proceeds
+   * under (ADR 0019). A rejected approval grants nothing.
+   */
+  private grantMandateFor(state: RunState, approval: ApprovalRequest): void {
+    if (approval.response?.decision !== "approved") return;
+    const facts = policyFactsFrom(this.loaded.config, state.strategy.name);
+    try {
+      state.mandate = grantMandate({
+        runId: state.id,
+        approvalId: approval.id,
+        response: approval.response,
+        policy: policySnapshot(facts),
+        scope: planScope(state),
+        strength: "explicit",
+      });
+    } catch (error) {
+      // A plan with no owned paths cannot be mandated; leave the run unmarshalled
+      // so a later resume reports the missing authority instead of inventing one.
+      if (error instanceof MandateError) return;
+      throw error;
+    }
   }
 
   private async requireRun(runId: string): Promise<RunState> {

@@ -1,3 +1,4 @@
+import type { Mandate } from "../authority/types.js";
 import type {
   ExploreSummary,
   FinalDecision,
@@ -194,6 +195,12 @@ export interface RunState {
   finalDecision?: FinalDecision;
   checkpoints?: RunCheckpoint[];
   approvals?: ApprovalRequest[];
+  /**
+   * The authority this run continues under, granted once when a person approved
+   * a gate (ADR 0019). Absent on runs persisted before Mandates existed; those
+   * resume as they always did.
+   */
+  mandate?: Mandate;
   recoveries?: RecoveryRecord[];
   resumeCount?: number;
   /**
