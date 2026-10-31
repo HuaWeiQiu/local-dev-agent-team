@@ -22,6 +22,7 @@ import { insightRoutes } from "./http-routes-insights.js";
 import { interventionRoutes } from "./http-routes-interventions.js";
 import { projectRoutes } from "./http-routes-project.js";
 import { runRoutes } from "./http-routes-runs.js";
+import { intakeRoutes } from "./http-routes-intake.js";
 import { strategyRoutes } from "./http-routes-strategies.js";
 import { evolutionRoutes } from "./http-routes-evolution.js";
 import { dispatchDesktopApi } from "./http-routes-desktop.js";
@@ -405,6 +406,7 @@ const projectApiRoutes: ProjectApiRoute[] = [
   ...strategyRoutes,
   ...evolutionRoutes,
   ...onboardingRoutes,
+  ...intakeRoutes,
 ];
 
 async function dispatchProjectApi(
