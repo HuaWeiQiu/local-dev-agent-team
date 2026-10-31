@@ -910,3 +910,57 @@ async function git(root: string, args: string[]): Promise<void> {
   const result = await runProcess({ command: "git", args, cwd: root, timeoutMs: 10_000 });
   if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout);
 }
+
+describe("evolution request validation", () => {
+  it("rejects a non-JSON content type and a compressed body", async () => {
+    const service = await startFixtureService("request-validation");
+    const cookie = await bootstrapSession(service.url);
+    const origin = new URL(service.url).origin;
+    const target = `${service.url}/api/evolution/automation/start`;
+
+    const wrongType = await fetch(target, {
+      method: "POST",
+      headers: { cookie, origin, "content-type": "text/plain", "idempotency-key": "bad-type" },
+      body: "{}",
+    });
+    expect(wrongType.status).toBe(415);
+    await expect(expectJson<{ code: string }>(wrongType)).resolves.toMatchObject({
+      code: "UNSUPPORTED_MEDIA_TYPE",
+    });
+
+    const compressed = await fetch(target, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin,
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "idempotency-key": "compressed",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(compressed.status).toBe(415);
+    await expect(expectJson<{ code: string }>(compressed)).resolves.toMatchObject({
+      code: "UNSUPPORTED_MEDIA_TYPE",
+    });
+  });
+
+  it("accepts an identity content encoding", async () => {
+    const service = await startFixtureService("request-validation-identity");
+    const cookie = await bootstrapSession(service.url);
+    const origin = new URL(service.url).origin;
+    const response = await fetch(`${service.url}/api/evolution/automation/start`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin,
+        "content-type": "application/json; charset=utf-8",
+        "content-encoding": "identity",
+        "idempotency-key": "identity",
+      },
+      body: JSON.stringify({ maxCycles: 1 }),
+    });
+    // The body is read; the project simply has no automation configured.
+    expect(response.status).toBe(403);
+  });
+});

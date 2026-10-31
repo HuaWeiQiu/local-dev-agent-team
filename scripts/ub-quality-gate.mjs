@@ -160,7 +160,13 @@ export function changedSources(cwd = process.cwd()) {
     .map((line) => line.slice(3).trim())
     .filter(Boolean)
     .map((entry) => entry.split(" -> ").pop() ?? entry);
-  return files.filter((file) => /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|rs)$/.test(file));
+  return files.filter(isScoredSource);
+}
+
+/** crapper skips test paths when it walks the tree; a changed list must match. */
+export function isScoredSource(file) {
+  if (/\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|rs)$/.test(file) === false) return false;
+  return !(file.startsWith("test/") || file.includes("/e2e/") || /\.(test|spec)\.[a-z]+$/.test(file));
 }
 
 /** Worst CRAP per function, read from the EDN crapper writes. */
