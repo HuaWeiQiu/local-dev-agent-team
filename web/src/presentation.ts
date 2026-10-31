@@ -141,6 +141,11 @@ export interface ProfileLabelHint {
 }
 
 /** Profile id for config; Chinese/readable label for operators. */
+const ADAPTER_LABELS: Record<string, string> = { codex: "Codex", grok: "Grok" };
+
+/** Model values that mean "use whatever the adapter defaults to". */
+const INHERITED_MODELS = new Set(["inherit", "grok"]);
+
 export function profileDisplayName(
   name: string | undefined | null,
   hint?: ProfileLabelHint,
@@ -148,14 +153,8 @@ export function profileDisplayName(
   if (!name?.trim()) return "未指定";
   if (profileLabels[name]) return profileLabels[name];
   if (hint?.adapter) {
-    const adapter =
-      hint.adapter === "codex" ? "Codex"
-        : hint.adapter === "grok" ? "Grok"
-          : hint.adapter;
-    const model = hint.model && hint.model !== "inherit" && hint.model !== "grok"
-      ? ` · ${hint.model}`
-      : "";
-    return `${adapter}${model} · ${name}`;
+    const model = hint.model && !INHERITED_MODELS.has(hint.model) ? ` · ${hint.model}` : "";
+    return `${ADAPTER_LABELS[hint.adapter] ?? hint.adapter}${model} · ${name}`;
   }
   return name;
 }
@@ -206,43 +205,65 @@ export function errorMessage(error: unknown): string {
  */
 export function runActionErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 401 || error.code === "SESSION_REQUIRED") {
-      return "本地控制会话尚未建立，请从服务启动时输出的地址重新打开应用。";
-    }
-    if (error.code === "ORIGIN_DENIED") {
-      return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
-    }
-    if (error.status === 404) return "目标运行已不存在，请刷新列表后重试。";
-    if (error.code === "REQUEST_TOO_LARGE") return "请求内容过大，请精简后重试。";
+    const byCode = apiErrorCopy(error);
+    if (byCode) return byCode;
   }
   const text = errorMessage(error);
-  if (/Run '.*' was not found/i.test(text)) return "目标运行已不存在，请刷新列表后重试。";
-  if (/cannot be retried from status/i.test(text)) return "当前状态不允许重试，请刷新列表确认最新状态。";
-  if (/cannot resume from status/i.test(text)) return "当前状态不允许继续，请刷新列表确认最新状态。";
-  if (/no recoverable task-boundary checkpoint/i.test(text)) {
-    return "没有可恢复的任务边界检查点，请改用「重试为新运行」。";
-  }
-  if (/is already active/i.test(text)) return "该运行已在执行中，无需重复操作。";
-  if (/is still active; cancel it first/i.test(text)) return "运行仍在执行中，请先取消再删除。";
-  if (/still has an active child run/i.test(text)) {
-    return "该运行是后续运行的来源，请先取消或结束上面正在执行的运行，再删除这条记录。";
-  }
-  if (/still referenced as a parent/i.test(text)) {
-    return "该运行仍被后续运行引用，请先删除或处理那些后续运行。";
-  }
-  if (/Approval request '.*' was not found/i.test(text)) return "审批请求已不存在，请刷新后重试。";
-  if (/already has a response/i.test(text)) return "该审批已处理过，请刷新查看最新状态。";
-  if (/expired at/i.test(text)) return "审批已过期，请刷新列表查看运行最新状态。";
-  if (/is not the latest request/i.test(text)) return "已有更新的审批请求，请刷新后处理最新一条。";
-  if (/cannot accept an approval response/i.test(text)) return "运行正在执行中，暂时不能响应审批。";
-  if (/Cleanup preview is missing or expired|changed after preview/i.test(text)) {
-    return "清理预览已过期或状态已变化，请重新生成预览后再确认。";
-  }
+  const rule = ACTION_RULES.find((candidate) => candidate.test.test(text));
+  if (rule) return rule.copy;
   if (error instanceof ApiError && error.status === 409) {
     return "运行状态已变化或不由当前服务管理，请刷新列表后重试。";
   }
   return text;
 }
+
+const NOT_FOUND = "目标运行已不存在，请刷新列表后重试。";
+
+/** Status and machine code first: they are exact. */
+function apiErrorCopy(error: ApiError): string | undefined {
+  if (error.status === 401 || error.code === "SESSION_REQUIRED") {
+    return "本地控制会话尚未建立，请从服务启动时输出的地址重新打开应用。";
+  }
+  if (error.code === "ORIGIN_DENIED") {
+    return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
+  }
+  if (error.status === 404) return NOT_FOUND;
+  if (error.code === "REQUEST_TOO_LARGE") return "请求内容过大，请精简后重试。";
+  return undefined;
+}
+
+interface ActionRule {
+  test: RegExp;
+  copy: string;
+}
+
+/** Then the server's message text, which carries the remaining reasons. */
+const ACTION_RULES: ActionRule[] = [
+  { test: /Run '.*' was not found/i, copy: NOT_FOUND },
+  { test: /cannot be retried from status/i, copy: "当前状态不允许重试，请刷新列表确认最新状态。" },
+  { test: /cannot resume from status/i, copy: "当前状态不允许继续，请刷新列表确认最新状态。" },
+  {
+    test: /no recoverable task-boundary checkpoint/i,
+    copy: "没有可恢复的任务边界检查点，请改用「重试为新运行」。",
+  },
+  { test: /is already active/i, copy: "该运行已在执行中，无需重复操作。" },
+  { test: /is still active; cancel it first/i, copy: "运行仍在执行中，请先取消再删除。" },
+  {
+    test: /still has an active child run/i,
+    copy: "该运行是后续运行的来源，请先取消或结束上面正在执行的运行，再删除这条记录。",
+  },
+  { test: /still referenced as a parent/i, copy: "该运行仍被后续运行引用，请先删除或处理那些后续运行。" },
+  { test: /Approval request '.*' was not found/i, copy: "审批请求已不存在，请刷新后重试。" },
+  { test: /already has a response/i, copy: "该审批已处理过，请刷新查看最新状态。" },
+  { test: /expired at/i, copy: "审批已过期，请刷新列表查看运行最新状态。" },
+  { test: /is not the latest request/i, copy: "已有更新的审批请求，请刷新后处理最新一条。" },
+  { test: /cannot accept an approval response/i, copy: "运行正在执行中，暂时不能响应审批。" },
+  {
+    test: /Cleanup preview is missing or expired|changed after preview/i,
+    copy: "清理预览已过期或状态已变化，请重新生成预览后再确认。",
+  },
+];
+
 
 /** First line of goal as a short human title for lists. */
 export function summarizeGoal(goal: string, maxLength = 48): string {
@@ -259,53 +280,91 @@ export function summarizeGoal(goal: string, maxLength = 48): string {
 export function humanizeFailure(message: string | undefined | null): string {
   if (!message?.trim()) return "";
   const text = message.replace(/\s+/g, " ").trim();
-  if (/ENOENT/i.test(text) && /codex/i.test(text)) {
-    return "找不到 Codex 命令（桌面环境 PATH 可能未包含 Homebrew，请重启 App 或检查 codex 安装）";
-  }
-  if (/ENOENT/i.test(text) && /grok/i.test(text)) {
-    return "找不到 Grok 命令（请确认已安装并在 PATH 中）";
-  }
-  if (/circuit open/i.test(text) || /MODEL_PROCESS_ERROR/i.test(text) && /circuit/i.test(text)) {
-    return "模型调用熔断冷却中，请稍后再试";
-  }
-  if (/MODEL_QUOTA_EXHAUSTED|quota|额度/i.test(text)) {
-    return "模型额度已用尽，请更换账号/额度后再试";
-  }
-  if (/MODEL_RATE_LIMITED|rate.?limit|429/i.test(text)) {
-    return "模型请求被限流，请稍后重试";
-  }
-  if (/MODEL_AUTH_FAILED|unauthorized|401|authentication/i.test(text)) {
-    return "模型认证失败，请检查登录状态";
-  }
-  if (/Control service is shutting down|owning control service stopped/i.test(text)) {
-    return "控制服务已关闭，运行被中断；有检查点时可点「从检查点继续」";
-  }
-  if (/All profiles failed for role/i.test(text)) {
-    const role = text.match(/role '([^']+)'/i)?.[1];
-    return role
-      ? `角色「${agentRoleLabel(role)}」的所有模型配置均失败`
-      : "所有备用模型配置均失败";
-  }
-  if (/not valid JSON|invalid structured/i.test(text)) {
-    return "模型返回格式无效，未能解析为结构化结果";
-  }
-  if (/Plan completeness rejected/i.test(text)) {
-    return `计划不完备，已打回架构：${text.replace(/^Plan completeness rejected:\s*/i, "")}`;
-  }
-  if (/Integration quality commands failed/i.test(text)) {
-    const detail = text.replace(/^Integration quality commands failed:?\s*/i, "");
-    const envHint = /node_modules missing|tsc: command not found/i.test(text) ? "（缺依赖）" : "";
-    return detail
-      ? `任务已合并，集成质量门失败${envHint}：${detail}`
-      : `任务已合并，集成质量门失败${envHint}`;
-  }
-  if (/node_modules missing|tsc: command not found/i.test(text)) {
-    const short = text.length > 160 ? `${text.slice(0, 159)}…` : text;
-    return `环境门禁失败（缺依赖）：${short}`;
-  }
-  if (text.length > 160) return `${text.slice(0, 159)}…`;
-  return text;
+  const rule = FAILURE_RULES.find((candidate) => candidate.test.test(text));
+  return rule ? rule.render(text) : clipped(text);
 }
+
+interface FailureRule {
+  test: RegExp;
+  render(text: string): string;
+}
+
+/** Ordered: the first pattern that matches owns the copy. */
+const FAILURE_RULES: FailureRule[] = [
+  {
+    test: /ENOENT/i,
+    render: (text) => {
+      if (/codex/i.test(text)) {
+        return "找不到 Codex 命令（桌面环境 PATH 可能未包含 Homebrew，请重启 App 或检查 codex 安装）";
+      }
+      if (/grok/i.test(text)) return "找不到 Grok 命令（请确认已安装并在 PATH 中）";
+      return clipped(text);
+    },
+  },
+  {
+    test: /circuit open|MODEL_PROCESS_ERROR/i,
+    render: () => "模型调用熔断冷却中，请稍后再试",
+  },
+  {
+    test: /MODEL_QUOTA_EXHAUSTED|quota|额度/i,
+    render: () => "模型额度已用尽，请更换账号/额度后再试",
+  },
+  { test: /MODEL_RATE_LIMITED|rate.?limit|429/i, render: () => "模型请求被限流，请稍后重试" },
+  {
+    test: /MODEL_AUTH_FAILED|unauthorized|401|authentication/i,
+    render: () => "模型认证失败，请检查登录状态",
+  },
+  {
+    test: /Control service is shutting down|owning control service stopped/i,
+    render: () => "控制服务已关闭，运行被中断；有检查点时可点「从检查点继续」",
+  },
+  {
+    test: /All profiles failed for role/i,
+    render: (text) => allProfilesFailedCopy(text),
+  },
+  {
+    test: /not valid JSON|invalid structured/i,
+    render: () => "模型返回的结构化结果无法解析，请重试或更换模型",
+  },
+  {
+    test: /Plan completeness rejected/i,
+    render: (text) => `计划不完备，已打回架构：${text.replace(/^Plan completeness rejected:\s*/i, "")}`,
+  },
+  {
+    test: /Integration quality commands failed/i,
+    render: (text) => integrationFailureCopy(text),
+  },
+  {
+    test: /node_modules missing|tsc: command not found/i,
+    render: (text) => `环境门禁失败（缺依赖）：${clipped(text)}`,
+  },
+];
+
+function allProfilesFailedCopy(text: string): string {
+  const role = text.match(/role '([^']+)'/i)?.[1];
+  return role ? `角色「${agentRoleLabel(role)}」的所有模型配置均失败` : "所有备用模型配置均失败";
+}
+
+function integrationFailureCopy(text: string): string {
+  const detail = text.replace(/^Integration quality commands failed:?\s*/i, "");
+  const envHint = /node_modules missing|tsc: command not found/i.test(text) ? "（缺依赖）" : "";
+  return detail
+    ? `任务已合并，集成质量门失败${envHint}：${detail}`
+    : `任务已合并，集成质量门失败${envHint}`;
+}
+
+function clipped(text: string): string {
+  return text.length > 160 ? `${text.slice(0, 159)}…` : text;
+}
+
+
+/** What the list says before the run has any tasks. */
+const PRE_SPLIT_COPY: Partial<Record<RunStatus, string>> = {
+  orchestrating: "总控正在分析目标",
+  exploring: "正在只读探索代码库",
+  architecting: "架构正在拆分任务",
+  blocked: "在任务规划前失败",
+};
 
 export function runListSubtitle(run: {
   status: RunStatus;
@@ -318,13 +377,7 @@ export function runListSubtitle(run: {
   const total = Object.values(run.taskCounts).reduce((sum, count) => sum + count, 0);
   const done =
     (run.taskCounts.merged ?? 0) + (run.taskCounts.passed ?? 0);
-  if (total === 0) {
-    if (run.status === "orchestrating") return "总控正在分析目标";
-    if (run.status === "exploring") return "正在只读探索代码库";
-    if (run.status === "architecting") return "架构正在拆分任务";
-    if (run.status === "blocked") return "在任务规划前失败";
-    return "尚未拆分任务";
-  }
+  if (total === 0) return PRE_SPLIT_COPY[run.status] ?? "尚未拆分任务";
   return `${done}/${total} 个任务 · ${strategyDisplayName(run.strategy)}`;
 }
 
@@ -338,14 +391,36 @@ export function morphologySummary(definition: {
   };
 } | undefined, projectMaxParallel?: number): string {
   if (!definition) return "";
-  const exploreOn = definition.taskMorphology?.explore?.enabled === true;
-  const maxParallel = definition.maxParallel ?? projectMaxParallel ?? 1;
-  const swarm = definition.taskMorphology?.implement?.swarm?.maxConcurrency;
-  const swarmLabel = swarm !== undefined
-    ? `Swarm ≤${Math.min(swarm, maxParallel)}`
-    : `Swarm ≤${maxParallel}`;
-  const advisorOn = definition.taskMorphology?.advisor?.enabled === true;
-  return `${exploreOn ? "探索开" : "探索关"} · ${swarmLabel}${advisorOn ? " · 顾问开" : ""}`;
+  return morphologyParts(definition, projectMaxParallel).join(" · ");
+}
+
+/** Explore, swarm and advisor, in that order; absent flags drop out. */
+function morphologyParts(
+  definition: NonNullable<Parameters<typeof morphologySummary>[0]>,
+  projectMaxParallel: number | undefined,
+): string[] {
+  const morphology = definition.taskMorphology;
+  const parity = definition.maxParallel ?? projectMaxParallel ?? 1;
+  return [
+    toggleLabel(morphology?.explore?.enabled, "探索开", "探索关"),
+    swarmLabel(parity, morphology?.implement?.swarm?.maxConcurrency),
+    toggleLabel(morphology?.advisor?.enabled, "顾问开", undefined),
+  ].filter((part): part is string => Boolean(part));
+}
+
+/** A flag renders as its on-label, or its off-label when one is given. */
+function toggleLabel(
+  enabled: boolean | undefined,
+  on: string,
+  off: string | undefined,
+): string | undefined {
+  if (enabled === true) return on;
+  return off;
+}
+
+/** The swarm cap never exceeds the run's parallelism. */
+function swarmLabel(maxParallel: number, swarm: number | undefined): string {
+  return `Swarm ≤${swarm === undefined ? maxParallel : Math.min(swarm, maxParallel)}`;
 }
 
 const advisorTriggerLabels: Record<string, string> = {
@@ -368,6 +443,23 @@ export function advisorRecommendationLabel(recommendation: string): string {
 }
 
 /** One-line summary of a Jev fork decision; low confidence or outages are shown as deterministic fallback. */
+/** What the log says when the model answer was not trusted. */
+function deterministicEntryText(jev: {
+  decision?: string;
+  confidence?: number;
+  consult: boolean;
+}): string {
+  const heard = jevHeard(jev);
+  const action = jev.consult ? "升级给顾问" : "直接重试";
+  return `${heard}，按确定性规则${action}`;
+}
+
+function jevHeard(jev: { decision?: string; confidence?: number }): string {
+  if (jev.decision === undefined || jev.confidence === undefined) return "Jev 无响应";
+  const lean = jev.decision === "consult" ? "升级" : "重试";
+  return `Jev 倾向${lean}(置信度 ${jev.confidence.toFixed(2)})但不够确定`;
+}
+
 export function jevEntryText(jev: {
   source: "jev" | "deterministic";
   decision?: string;
@@ -375,13 +467,7 @@ export function jevEntryText(jev: {
   consult: boolean;
   changedOutcome: boolean;
 }): string {
-  if (jev.source === "deterministic") {
-    const heard =
-      jev.decision !== undefined && jev.confidence !== undefined
-        ? `Jev 倾向${jev.decision === "consult" ? "升级" : "重试"}(置信度 ${jev.confidence.toFixed(2)})但不够确定`
-        : "Jev 无响应";
-    return `${heard}，按确定性规则${jev.consult ? "升级给顾问" : "直接重试"}`;
-  }
+  if (jev.source === "deterministic") return deterministicEntryText(jev);
   const confidence = jev.confidence !== undefined ? `(置信度 ${jev.confidence.toFixed(2)})` : "";
   const action = jev.consult ? "升级给顾问" : "直接重试";
   return `Jev${confidence}：${action}${jev.changedOutcome ? (jev.consult ? "，比规则更早" : "，跳过了顾问") : "，与规则一致"}`;
@@ -416,34 +502,29 @@ export function canvasEmptyCopy(run: {
   if (!run) {
     return { title: "选择一条运行", detail: "从左侧列表点开后，这里显示任务依赖图" };
   }
+  if (run.tasks.length > 0) return { title: "暂无任务节点", detail: "" };
   const failure = humanizeFailure(run.error);
-  if (run.tasks.length === 0) {
-    if (run.status === "blocked" || run.status === "cancelled" || run.status === "interrupted") {
-      return {
-        title: run.status === "interrupted" ? "运行已中断" : run.status === "cancelled" ? "运行已取消" : "运行已阻塞",
-        detail: failure || "任务规划尚未完成，因此没有任务图可显示",
-      };
-    }
-    if (
-      run.status === "orchestrating"
-      || run.status === "exploring"
-      || run.status === "architecting"
-      || run.status === "created"
-    ) {
-      return {
-        title: "架构正在拆任务图",
-        detail: run.status === "exploring"
-          ? "只读探索完成后，架构会拆分任务依赖图"
-          : "总控与架构完成后，任务依赖图会实时出现在这里",
-      };
-    }
-    return {
-      title: "暂无任务节点",
-      detail: failure || "当前还没有可展示的任务",
-    };
-  }
-  return { title: "暂无任务节点", detail: "" };
+  const settled = SETTLED_EMPTY[run.status];
+  if (settled) return { title: settled, detail: failure || "任务规划尚未完成，因此没有任务图可显示" };
+  const pending = PENDING_EMPTY[run.status];
+  if (pending) return { title: "架构正在拆任务图", detail: pending };
+  return { title: "暂无任务节点", detail: failure || "当前还没有可展示的任务" };
 }
+
+/** A run that ended without tasks says how it ended. */
+const SETTLED_EMPTY: Partial<Record<RunStatus, string>> = {
+  blocked: "运行已阻塞",
+  cancelled: "运行已取消",
+  interrupted: "运行已中断",
+};
+
+/** A run that has not split tasks yet says what it is doing instead. */
+const PENDING_EMPTY: Partial<Record<RunStatus, string>> = {
+  orchestrating: "总控与架构完成后，任务依赖图会实时出现在这里",
+  exploring: "只读探索完成后，架构会拆分任务依赖图",
+  architecting: "总控与架构完成后，任务依赖图会实时出现在这里",
+  created: "总控与架构完成后，任务依赖图会实时出现在这里",
+};
 
 export const activeRunStatuses: ReadonlySet<string> = new Set([
   "created",
@@ -500,18 +581,25 @@ export function formatExperienceCondition(condition: string): string {
     "error=invalid-structured-output": "错误：结构化输出无效",
     "platform=desktop-or-gui": "场景：桌面/GUI",
   };
-  if (map[text]) return map[text];
+  const known = map[text];
+  if (known) return known;
+  return formatParameterisedCondition(text);
+}
 
-  const strategy = text.match(/^strategy=(.+)$/i);
-  if (strategy) return `策略：${strategyDisplayName(strategy[1]!)}`;
-  const topology = text.match(/^topology=(.+)$/i);
-  if (topology) return `拓扑：${topologyDisplayName(topology[1]!)}`;
-  const status = text.match(/^status=(.+)$/i);
-  if (status) return `状态：${runStatusLabel(status[1]!)}`;
-  const tasks = text.match(/^tasks>=(\d+)$/i);
-  if (tasks) return `任务数≥${tasks[1]}`;
-  const role = text.match(/^role=(.+)$/i);
-  if (role) return `角色：${agentRoleLabel(role[1]!)}`;
+/** `key=value` conditions that render through a label function. */
+const CONDITION_PATTERNS: Array<{ test: RegExp; render(value: string): string }> = [
+  { test: /^strategy=(.+)$/i, render: (value) => `策略：${strategyDisplayName(value)}` },
+  { test: /^topology=(.+)$/i, render: (value) => `拓扑：${topologyDisplayName(value)}` },
+  { test: /^status=(.+)$/i, render: (value) => `状态：${runStatusLabel(value)}` },
+  { test: /^tasks>=(\d+)$/i, render: (value) => `任务数≥${value}` },
+  { test: /^role=(.+)$/i, render: (value) => `角色：${agentRoleLabel(value)}` },
+];
+
+function formatParameterisedCondition(text: string): string {
+  for (const pattern of CONDITION_PATTERNS) {
+    const match = text.match(pattern.test);
+    if (match) return pattern.render(match[1]!);
+  }
   return text;
 }
 
