@@ -99,6 +99,11 @@ export class ProjectMutationConflictError extends Error {
 }
 
 export interface SupervisorDependencies {
+  /**
+   * Whether a webhook may start work (ADR 0019). Off unless the deployment says
+   * so: the default has to be "nothing starts work nobody asked for in person".
+   */
+  intake?: { enabled: boolean; agentLogins?: readonly string[] };
   runWorkflow?: (
     request: StartRunRequest,
     context: {
@@ -453,11 +458,56 @@ export class RunSupervisor {
    * what it did — which Trigger became which Ticket and which run, and which
    * Trigger was refused and why.
    */
+  /** One candidate: either it starts a run, or it is refused with a reason. */
+  private async admitOne(candidate: {
+    trigger: Trigger;
+    addressed: boolean;
+  }): Promise<
+    | { admitted: { triggerId: string; ticketId: string; runId: string } }
+    | { refused: { triggerId: string; code: string } }
+  > {
+    const admission = await this.ticketService().admit({
+      trigger: candidate.trigger,
+      addressed: candidate.addressed,
+      scope: [],
+    });
+    if (admission.decision.outcome !== "accept" || !admission.ticket) {
+      return {
+        refused: {
+          triggerId: candidate.trigger.id,
+          code: admission.decision.reasons[0]?.code ?? "refused",
+        },
+      };
+    }
+    const started = this.start({
+      goal: goalFromTrigger(candidate.trigger),
+      profileOverrides: {},
+      ticketId: admission.ticket.id,
+    });
+    return {
+      admitted: {
+        triggerId: candidate.trigger.id,
+        ticketId: admission.ticket.id,
+        runId: started.runId,
+      },
+    };
+  }
+
+  /** Whether this deployment accepts work from a webhook. */
+  get intakeEnabled(): boolean {
+    return this.dependencies.intake?.enabled === true;
+  }
+
+  /** The logins that count as the agent speaking, for an event to address. */
+  get intakeLogins(): readonly string[] {
+    return this.dependencies.intake?.agentLogins ?? [];
+  }
+
   async admitEvent(input: {
     event: string;
     payload: unknown;
-    agentLogins: readonly string[];
-    instanceId?: string;
+    agentLogins: readonly string[] | undefined;
+    instanceId: string | undefined;
   }): Promise<{
     admitted: Array<{ triggerId: string; ticketId: string; runId: string }>;
     refused: Array<{ triggerId: string; code: string }>;
@@ -467,35 +517,16 @@ export class RunSupervisor {
       request: {
         event: input.event,
         payload: input.payload,
-        agentLogins: input.agentLogins,
+        agentLogins: input.agentLogins ?? this.intakeLogins,
         ...(input.instanceId ? { instanceId: input.instanceId } : {}),
       },
     });
     const admitted: Array<{ triggerId: string; ticketId: string; runId: string }> = [];
     const refused: Array<{ triggerId: string; code: string }> = [];
     for (const candidate of reading.candidates) {
-      const admission = await this.ticketService().admit({
-        trigger: candidate.trigger,
-        addressed: candidate.addressed,
-        scope: [],
-      });
-      if (admission.decision.outcome !== "accept" || !admission.ticket) {
-        refused.push({
-          triggerId: candidate.trigger.id,
-          code: admission.decision.reasons[0]?.code ?? "refused",
-        });
-        continue;
-      }
-      const started = this.start({
-        goal: goalFromTrigger(candidate.trigger),
-        profileOverrides: {},
-        ticketId: admission.ticket.id,
-      });
-      admitted.push({
-        triggerId: candidate.trigger.id,
-        ticketId: admission.ticket.id,
-        runId: started.runId,
-      });
+      const outcome = await this.admitOne(candidate);
+      if ("admitted" in outcome) admitted.push(outcome.admitted);
+      else refused.push(outcome.refused);
     }
     return { admitted, refused, dropped: reading.dropped };
   }
