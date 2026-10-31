@@ -165,20 +165,31 @@ CRAP = CC² × (1 - 覆盖)³ + CC
 全局保存（含 UI 开关落到 payload）、项目保存（按角色生成覆盖 payload）、
 绑定校正的四种分支、提示文案的六个分支。
 
-### 7.2 剩余批次（按 CRAP 从高到低，尚未动）
+### 7.2 其余组件（已全部完成）
 
-| 函数 | 命名空间 | CC | 覆盖 | CRAP |
-| --- | --- | --- | --- | --- |
-| `EvolutionWorkbench` | components.EvolutionWorkbench | 103 | 0% | 10712 |
-| `RunLauncher` | components.RunLauncher | 86 | 0% | 7482 |
-| `App` | App | 68 | 0% | 4692 |
-| `RunDetail` | components.run.RunDetail | 59 | 0% | 3540 |
-| `useRunEvents` | hooks.useRunEvents | 49 | 0% | 2450 |
-| `EvolutionProposalDialog` | components.EvolutionProposalDialog | 46 | 0% | 2162 |
-| `RunPage` | components.RunPage | 46 | 0% | 2162 |
-| `ArchitectureDiagram` | components.architecture.ArchitectureDiagram | 45 | 0% | 2070 |
-| `ExperienceWorkbench` | components.ExperienceWorkbench | 43 | 0% | 1892 |
-| `useRunActions` | hooks.useRunActions | 40 | 0% | 1640 |
+同一套方法（纯规则 → API → hook → 展示）陆续套用到 web 层其余 10 个超阈值组件：
+
+| 组件 | 处理前 | 处理后 |
+| --- | --- | --- |
+| `EvolutionWorkbench` | CC 103 / 0% / 10712 | CC 4 / 80% / 4.13 |
+| `RunLauncher` | CC 86 / 0% / 7482 | CC 6 / 89% / 6.05 |
+| `App` | CC 68 / 0% / 4692 | CC 6 / 100% / 6.0 |
+| `RunPage` | CC 46 / 0% / 2162 | CC 3 / 100% / 3.0 |
+| `RunDetail` | CC 59 / 0% / 3540 | CC 1 / 100% / 1.0 |
+| `useRunEvents` | CC 49 / 0% / 2450 | CC 1 / 100% / 1.0 |
+| `useRunActions` | CC 40 / 0% / 1640 | CC 7 / 95% / 7.0 |
+| `EvolutionProposalDialog` | CC 46 / 0% / 2162 | CC 7 / 83% / 7.23 |
+| `ArchitectureDiagram` | CC 45 / 0% / 2070 | CC 8 / 91% / 8.05 |
+| `ExperienceWorkbench` | CC 43 / 0% / 1892 | CC 9 / 78% / 9.89 |
+
+做法上的几条固定套路：
+
+- **决策变数据**：审批/决议五种 mode 用 `DECISION_HANDLERS` 表分发，`describeDecision` 负责参数与过期校验；
+- **不变量集中**：mutation latch（`runMutation`）、弹窗关闭守卫（`useDialogClosers`）、
+  「安静刷新不得覆盖未保存编辑」（settings 的 `rolesDirty`）各只有一处实现；
+- **effect 拆成 hook**：SSE 订阅（`useRunStream`/`useProjectStream`）、初始加载、证据/用量拉取各自独立，
+  每个都带自己的 active 标记与清理；
+- **props 用 `T | undefined`**：调用方不再写条件展开，每个 `...(x ? {x} : {})` 都是一个 CC 分支。
 
 > 为什么不是 Playwright 覆盖率：e2e 覆盖率只能证明「路径被点到了」，不能降低 CC；
 > 上面证明了 CRAP 的下界就是 CC。e2e 能替代的是「行为验证」，替代不了「结构复杂度」。
