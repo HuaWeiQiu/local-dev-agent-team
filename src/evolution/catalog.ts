@@ -1,3 +1,4 @@
+import { auditTrailViolation } from "./audit-trail.js";
 import {
   archiveProposal,
   assertPromotionRecordMatchesProposal,
@@ -691,6 +692,18 @@ function validateRestoreMaterial(
   trust: EvolutionTrustContext,
   material: EvolutionCatalogRestoreMaterial,
 ): EvolutionCatalogRestoreMaterial {
+  assertRestoreShape(material);
+  const proposalById = proposalsById(material.proposals, trust);
+  const storedPromotionById = promotionsById(material.promotionRecords, proposalById);
+  const activeProposals = parseActivePointers(material.activeProposals);
+  const auditRecords = parseAuditRecords(material.auditRecords);
+  assertProvenanceMatches(auditRecords, proposalById, storedPromotionById);
+  assertActivePointers(activeProposals, auditRecords, proposalById);
+  return material;
+}
+
+/** Shape before content: an object with exactly the four arrays. */
+function assertRestoreShape(material: EvolutionCatalogRestoreMaterial): void {
   if (!material || typeof material !== "object" || Array.isArray(material)) {
     throw new EvolutionValidationError("restore material must be an object");
   }
@@ -707,10 +720,14 @@ function validateRestoreMaterial(
   ) {
     throw new EvolutionValidationError("restore material fields must be arrays");
   }
+}
 
-  const proposals: EvolutionProposal[] = [];
+function proposalsById(
+  raws: readonly unknown[],
+  trust: EvolutionTrustContext,
+): Map<string, EvolutionProposal> {
   const proposalById = new Map<string, EvolutionProposal>();
-  for (const raw of material.proposals) {
+  for (const raw of raws) {
     const proposal = parseEvolutionProposal(raw, trust);
     if (proposalById.has(proposal.id)) {
       throw new EvolutionCatalogConflictError(
@@ -718,14 +735,18 @@ function validateRestoreMaterial(
       );
     }
     proposalById.set(proposal.id, proposal);
-    proposals.push(proposal);
   }
+  return proposalById;
+}
 
-  const promotionRecords: PromotionRecord[] = [];
-  const storedPromotionById = new Map<string, PromotionRecord>();
-  for (const raw of material.promotionRecords) {
+function promotionsById(
+  raws: readonly unknown[],
+  proposalById: Map<string, EvolutionProposal>,
+): Map<string, PromotionRecord> {
+  const stored = new Map<string, PromotionRecord>();
+  for (const raw of raws) {
     const promotion = parsePromotionRecord(raw);
-    if (storedPromotionById.has(promotion.proposalId)) {
+    if (stored.has(promotion.proposalId)) {
       throw new EvolutionCatalogConflictError(
         `Duplicate promotion record for proposal '${promotion.proposalId}' in restore material`,
       );
@@ -737,34 +758,68 @@ function validateRestoreMaterial(
       );
     }
     assertPromotionRecordMatchesProposal(promotion, proposal);
-    storedPromotionById.set(promotion.proposalId, promotion);
-    promotionRecords.push(promotion);
+    stored.set(promotion.proposalId, promotion);
   }
+  return stored;
+}
 
-  const auditRecords: AuditRecord[] = [];
-  for (const raw of material.auditRecords) {
+function parseAuditRecords(raws: readonly unknown[]): AuditRecord[] {
+  return raws.map((raw) => {
     const parsed = auditRecordSchema.safeParse(raw);
     if (!parsed.success) {
       throw new EvolutionValidationError("restore material contains a malformed audit record");
     }
-    auditRecords.push(parsed.data);
-  }
+    return parsed.data;
+  });
+}
 
+/** The declared promotion records must be exactly what the audit replays to. */
+function assertProvenanceMatches(
+  auditRecords: AuditRecord[],
+  proposalById: Map<string, EvolutionProposal>,
+  stored: Map<string, PromotionRecord>,
+): void {
   const replayed = replayRestoreAudit(auditRecords, proposalById);
-  if (storedPromotionById.size !== replayed.promotionByProposal.size) {
+  if (stored.size !== replayed.promotionByProposal.size) {
     throw new EvolutionCatalogError("Promotion provenance does not match restore audit history");
   }
   for (const [proposalId, promotion] of replayed.promotionByProposal) {
-    if (!deepEqual(storedPromotionById.get(proposalId), promotion)) {
+    if (!deepEqual(stored.get(proposalId), promotion)) {
       throw new EvolutionCatalogError(
         `Promotion provenance for '${proposalId}' does not match restore audit history`,
       );
     }
   }
+}
 
-  const activeProposals = material.activeProposals.map((raw, index) =>
-    parseRestoreActivePointer(raw, index),
-  );
+function parseActivePointers(raws: readonly unknown[]): EvolutionActiveProposalPointer[] {
+  return raws.map((raw, index) => parseRestoreActivePointer(raw, index));
+}
+
+function assertActivePointers(
+  activeProposals: EvolutionActiveProposalPointer[],
+  auditRecords: AuditRecord[],
+  proposalById: Map<string, EvolutionProposal>,
+): void {
+  const activeByTarget = activeByTargetOf(activeProposals, proposalById);
+  const replayed = replayRestoreAudit(auditRecords, proposalById);
+  if (activeByTarget.size !== replayed.activeByTarget.size) {
+    throw new EvolutionCatalogError("Active pointers do not match restore audit history");
+  }
+  for (const [targetKey, proposalId] of replayed.activeByTarget) {
+    if (activeByTarget.get(targetKey) !== proposalId) {
+      throw new EvolutionCatalogError(
+        `Active pointer for '${targetKey}' does not match replayed proposal '${proposalId}'`,
+      );
+    }
+  }
+}
+
+/** Every pointer must name a promoted proposal for its own target. */
+function activeByTargetOf(
+  activeProposals: EvolutionActiveProposalPointer[],
+  proposalById: Map<string, EvolutionProposal>,
+): Map<string, string> {
   const activeByTarget = new Map<string, string>();
   for (const pointer of activeProposals) {
     const targetKey = candidateTargetKeyFromTarget(pointer.target);
@@ -785,18 +840,7 @@ function validateRestoreMaterial(
     }
     activeByTarget.set(targetKey, pointer.proposalId);
   }
-  if (activeByTarget.size !== replayed.activeByTarget.size) {
-    throw new EvolutionCatalogError("Active pointers do not match restore audit history");
-  }
-  for (const [targetKey, proposalId] of replayed.activeByTarget) {
-    if (activeByTarget.get(targetKey) !== proposalId) {
-      throw new EvolutionCatalogError(
-        `Active pointer for '${targetKey}' does not match replayed proposal '${proposalId}'`,
-      );
-    }
-  }
-
-  return deepFreeze({ proposals, auditRecords, activeProposals, promotionRecords });
+  return activeByTarget;
 }
 
 function replayRestoreAudit(
@@ -806,178 +850,228 @@ function replayRestoreAudit(
   promotionByProposal: Map<string, PromotionRecord>;
   activeByTarget: Map<string, string>;
 } {
-  const promotionByProposal = new Map<string, PromotionRecord>();
-  const activeByTarget = new Map<string, string>();
-  const counts = new Map<string, { promotion: number; rejection: number; rollback: number }>();
-  const applicationCommandIds = new Set<string>();
-  const archivalStates = new Map<string, { archived: boolean; at: string | null }>();
-  const deletedTrails = new Map<string, AuditRecord[]>();
+  const replay: RestoreReplay = {
+    proposalById,
+    promotionByProposal: new Map(),
+    activeByTarget: new Map(),
+    counts: new Map(),
+    applicationCommandIds: new Set(),
+    archivalStates: new Map(),
+    deletedTrails: new Map(),
+  };
+  for (const audit of auditRecords) applyAudit(replay, audit);
+  finishReplay(replay);
+  return { promotionByProposal: replay.promotionByProposal, activeByTarget: replay.activeByTarget };
+}
 
-  for (const audit of auditRecords) {
-    const proposal = proposalById.get(audit.proposalId);
-    if (!proposal) {
-      // Only the retained trail of a deleted proposal (its rejection, any
-      // archival markers, and the deletion tombstone) may reference a proposal
-      // that is no longer present.
-      if (
-        audit.kind !== "rejection" &&
-        audit.kind !== "archive" &&
-        audit.kind !== "unarchive" &&
-        audit.kind !== "delete"
-      ) {
-        throw new EvolutionCatalogError(
-          `Audit record references missing proposal '${audit.proposalId}'`,
-        );
-      }
-      const trail = deletedTrails.get(audit.proposalId) ?? [];
-      trail.push(audit);
-      deletedTrails.set(audit.proposalId, trail);
-      continue;
-    }
-    if (audit.kind === "delete") {
-      throw new EvolutionCatalogError(
-        `Deletion audit references live proposal '${proposal.id}'`,
-      );
-    }
-    const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
-    if (commandId !== undefined) {
-      if (applicationCommandIds.has(commandId)) {
-        throw new EvolutionCatalogError(
-          `Application command '${commandId}' owns multiple audit records`,
-        );
-      }
-      applicationCommandIds.add(commandId);
-    }
+interface RestoreReplay {
+  proposalById: ReadonlyMap<string, EvolutionProposal>;
+  promotionByProposal: Map<string, PromotionRecord>;
+  activeByTarget: Map<string, string>;
+  counts: Map<string, { promotion: number; rejection: number; rollback: number }>;
+  applicationCommandIds: Set<string>;
+  archivalStates: Map<string, { archived: boolean; at: string | null }>;
+  deletedTrails: Map<string, AuditRecord[]>;
+}
 
-    if (audit.kind === "archive" || audit.kind === "unarchive") {
-      const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
-      if (audit.kind === "archive") {
-        if (state.archived) {
-          throw new EvolutionCatalogError(`Duplicate archive audit for '${proposal.id}'`);
-        }
-        archivalStates.set(proposal.id, { archived: true, at: audit.at });
-      } else {
-        if (!state.archived) {
-          throw new EvolutionCatalogError(
-            `Unarchive audit for '${proposal.id}' is out of order`,
-          );
-        }
-        archivalStates.set(proposal.id, { archived: false, at: null });
-      }
-      continue;
-    }
-
-    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
-    count[audit.kind] += 1;
-    counts.set(proposal.id, count);
-    const targetKey = candidateTargetKey(proposal.candidate);
-
-    if (audit.kind === "promotion") {
-      if (count.promotion !== 1) {
-        throw new EvolutionCatalogError(`Duplicate promotion audit for '${proposal.id}'`);
-      }
-      assertPromotionRecordMatchesProposal(audit, proposal);
-      assertRestoreTransitionAt(proposal, "evaluated", "promoted", audit.at);
-      const previousActive = activeByTarget.get(targetKey) ?? null;
-      if (audit.previousActiveProposalId !== previousActive) {
-        throw new EvolutionCatalogError(
-          `Promotion previous active for '${proposal.id}' does not match replay history`,
-        );
-      }
-      if (previousActive !== null) {
-        const previous = proposalById.get(previousActive);
-        if (
-          !previous ||
-          candidateTargetKey(previous.candidate) !== targetKey ||
-          !promotionByProposal.has(previous.id)
-        ) {
-          throw new EvolutionCatalogError(
-            `Promotion previous active '${previousActive}' is not a prior promotion for the same target`,
-          );
-        }
-      }
-      promotionByProposal.set(proposal.id, audit);
-      activeByTarget.set(targetKey, proposal.id);
-      continue;
-    }
-
-    if (audit.kind === "rollback") {
-      if (count.rollback !== 1) {
-        throw new EvolutionCatalogError(`Duplicate rollback audit for '${proposal.id}'`);
-      }
-      const promotion = promotionByProposal.get(proposal.id);
-      if (!promotion || activeByTarget.get(targetKey) !== proposal.id) {
-        throw new EvolutionCatalogError(`Rollback audit for '${proposal.id}' is out of order`);
-      }
-      assertRestoreTransitionAt(proposal, "promoted", "rolled-back", audit.at);
-      if (audit.restoredActiveProposalId !== promotion.previousActiveProposalId) {
-        throw new EvolutionCatalogError(
-          `Rollback restoration for '${proposal.id}' does not match promotion provenance`,
-        );
-      }
-      if (audit.restoredActiveProposalId === null) {
-        activeByTarget.delete(targetKey);
-      } else {
-        const restored = proposalById.get(audit.restoredActiveProposalId);
-        if (
-          !restored ||
-          candidateTargetKey(restored.candidate) !== targetKey ||
-          !promotionByProposal.has(restored.id)
-        ) {
-          throw new EvolutionCatalogError(
-            `Rollback target '${audit.restoredActiveProposalId}' is not a prior promotion for the same target`,
-          );
-        }
-        activeByTarget.set(targetKey, restored.id);
-      }
-      continue;
-    }
-
-    if (count.rejection !== 1) {
-      throw new EvolutionCatalogError(`Duplicate rejection audit for '${proposal.id}'`);
-    }
-    assertRestoreTransitionAt(proposal, "evaluated", "rejected", audit.at);
-    if (!proposal.evaluation || !deepEqual(audit.evaluation, proposal.evaluation.result)) {
-      throw new EvolutionCatalogError(
-        `Rejection evaluation for '${proposal.id}' does not match proposal evidence`,
-      );
-    }
+/** Three destinations: a deleted proposal's trail, an archival marker, or a decision. */
+function applyAudit(replay: RestoreReplay, audit: AuditRecord): void {
+  const proposal = replay.proposalById.get(audit.proposalId);
+  if (!proposal) {
+    recordDeletedTrail(replay, audit);
+    return;
   }
+  if (audit.kind === "delete") {
+    throw new EvolutionCatalogError(`Deletion audit references live proposal '${proposal.id}'`);
+  }
+  claimApplicationCommand(replay, audit);
+  if (audit.kind === "archive" || audit.kind === "unarchive") {
+    applyArchival(replay, audit, proposal);
+    return;
+  }
+  applyDecision(replay, audit, proposal);
+}
 
-  for (const [proposalId, trail] of deletedTrails) {
+/** Only a rejection, archival markers and the tombstone may outlive a proposal. */
+const DELETED_TRAIL_KINDS = new Set(["rejection", "archive", "unarchive", "delete"]);
+
+function recordDeletedTrail(replay: RestoreReplay, audit: AuditRecord): void {
+  if (!DELETED_TRAIL_KINDS.has(audit.kind)) {
+    throw new EvolutionCatalogError(
+      `Audit record references missing proposal '${audit.proposalId}'`,
+    );
+  }
+  const trail = replay.deletedTrails.get(audit.proposalId) ?? [];
+  trail.push(audit);
+  replay.deletedTrails.set(audit.proposalId, trail);
+}
+
+/** One application command owns one audit record. */
+function claimApplicationCommand(replay: RestoreReplay, audit: AuditRecord): void {
+  const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
+  if (commandId === undefined) return;
+  if (replay.applicationCommandIds.has(commandId)) {
+    throw new EvolutionCatalogError(
+      `Application command '${commandId}' owns multiple audit records`,
+    );
+  }
+  replay.applicationCommandIds.add(commandId);
+}
+
+function applyArchival(
+  replay: RestoreReplay,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+): void {
+  const state = replay.archivalStates.get(proposal.id) ?? { archived: false, at: null };
+  const archiving = audit.kind === "archive";
+  if (archiving === state.archived) {
+    throw new EvolutionCatalogError(
+      archiving
+        ? `Duplicate archive audit for '${proposal.id}'`
+        : `Unarchive audit for '${proposal.id}' is out of order`,
+    );
+  }
+  replay.archivalStates.set(proposal.id, { archived: archiving, at: archiving ? audit.at : null });
+}
+
+type DecisionKind = "promotion" | "rejection" | "rollback";
+
+function applyDecision(
+  replay: RestoreReplay,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+): void {
+  const kind = audit.kind as DecisionKind;
+  const count = replay.counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
+  count[kind] += 1;
+  replay.counts.set(proposal.id, count);
+  if (kind === "promotion") return applyPromotion(replay, audit, proposal, count);
+  if (kind === "rollback") return applyRollback(replay, audit, proposal, count);
+  applyRejection(replay, audit, proposal, count);
+}
+
+function applyPromotion(
+  replay: RestoreReplay,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { promotion: number },
+): void {
+  if (count.promotion !== 1) {
+    throw new EvolutionCatalogError(`Duplicate promotion audit for '${proposal.id}'`);
+  }
+  const promotion = audit as Extract<AuditRecord, { kind: "promotion" }>;
+  assertPromotionRecordMatchesProposal(promotion, proposal);
+  assertRestoreTransitionAt(proposal, "evaluated", "promoted", promotion.at);
+  const targetKey = candidateTargetKey(proposal.candidate);
+  assertPromotionChain(replay, promotion, proposal.id, targetKey);
+  replay.promotionByProposal.set(proposal.id, promotion);
+  replay.activeByTarget.set(targetKey, proposal.id);
+}
+
+function applyRollback(
+  replay: RestoreReplay,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { rollback: number },
+): void {
+  if (count.rollback !== 1) {
+    throw new EvolutionCatalogError(`Duplicate rollback audit for '${proposal.id}'`);
+  }
+  const rollback = audit as Extract<AuditRecord, { kind: "rollback" }>;
+  const targetKey = candidateTargetKey(proposal.candidate);
+  const promotion = replay.promotionByProposal.get(proposal.id);
+  if (!promotion || replay.activeByTarget.get(targetKey) !== proposal.id) {
+    throw new EvolutionCatalogError(`Rollback audit for '${proposal.id}' is out of order`);
+  }
+  assertRestoreTransitionAt(proposal, "promoted", "rolled-back", rollback.at);
+  if (rollback.restoredActiveProposalId !== promotion.previousActiveProposalId) {
+    throw new EvolutionCatalogError(
+      `Rollback restoration for '${proposal.id}' does not match promotion provenance`,
+    );
+  }
+  restoreActive(replay, targetKey, rollback.restoredActiveProposalId);
+}
+
+function restoreActive(replay: RestoreReplay, targetKey: string, restoredId: string | null): void {
+  if (restoredId === null) {
+    replay.activeByTarget.delete(targetKey);
+    return;
+  }
+  if (!isPriorPromotion(replay, restoredId, targetKey)) {
+    throw new EvolutionCatalogError(
+      `Rollback target '${restoredId}' is not a prior promotion for the same target`,
+    );
+  }
+  replay.activeByTarget.set(targetKey, restoredId);
+}
+
+/** The declared predecessor must be the one the replay already promoted. */
+function assertPromotionChain(
+  replay: RestoreReplay,
+  promotion: Extract<AuditRecord, { kind: "promotion" }>,
+  proposalId: string,
+  targetKey: string,
+): void {
+  const previousActive = replay.activeByTarget.get(targetKey) ?? null;
+  if (promotion.previousActiveProposalId !== previousActive) {
+    throw new EvolutionCatalogError(
+      `Promotion previous active for '${proposalId}' does not match replay history`,
+    );
+  }
+  if (previousActive !== null && !isPriorPromotion(replay, previousActive, targetKey)) {
+    throw new EvolutionCatalogError(
+      `Promotion previous active '${previousActive}' is not a prior promotion for the same target`,
+    );
+  }
+}
+
+function isPriorPromotion(replay: RestoreReplay, id: string, targetKey: string): boolean {
+  const previous = replay.proposalById.get(id);
+  if (!previous) return false;
+  if (candidateTargetKey(previous.candidate) !== targetKey) return false;
+  return replay.promotionByProposal.has(previous.id);
+}
+
+function applyRejection(
+  replay: RestoreReplay,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { rejection: number },
+): void {
+  if (count.rejection !== 1) {
+    throw new EvolutionCatalogError(`Duplicate rejection audit for '${proposal.id}'`);
+  }
+  const rejection = audit as Extract<AuditRecord, { kind: "rejection" }>;
+  assertRestoreTransitionAt(proposal, "evaluated", "rejected", rejection.at);
+  if (!proposal.evaluation || !deepEqual(rejection.evaluation, proposal.evaluation.result)) {
+    throw new EvolutionCatalogError(
+      `Rejection evaluation for '${proposal.id}' does not match proposal evidence`,
+    );
+  }
+}
+
+/** After the loop: every deleted trail, then every proposal's archival state. */
+function finishReplay(replay: RestoreReplay): void {
+  for (const [proposalId, trail] of replay.deletedTrails) {
     assertDeletedAuditTrail(proposalId, trail);
   }
-
-  for (const proposal of proposalById.values()) {
-    const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
-    if (
-      state.archived !== (proposal.archivedAt !== undefined) ||
-      (state.archived && proposal.archivedAt !== state.at)
-    ) {
-      throw new EvolutionCatalogError(
-        `Archival state for '${proposal.id}' does not match restore audit history`,
-      );
-    }
+  for (const proposal of replay.proposalById.values()) {
+    assertArchivalMatches(replay, proposal);
   }
+}
 
-  for (const proposal of proposalById.values()) {
-    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
-    const expected =
-      proposal.status === "rejected"
-        ? { promotion: 0, rejection: 1, rollback: 0 }
-        : proposal.status === "promoted"
-          ? { promotion: 1, rejection: 0, rollback: 0 }
-          : proposal.status === "rolled-back"
-            ? { promotion: 1, rejection: 0, rollback: 1 }
-            : { promotion: 0, rejection: 0, rollback: 0 };
-    if (!deepEqual(count, expected)) {
-      throw new EvolutionCatalogError(
-        `Terminal audit cardinality for '${proposal.id}' does not match '${proposal.status}'`,
-      );
-    }
+function assertArchivalMatches(replay: RestoreReplay, proposal: EvolutionProposal): void {
+  const state = replay.archivalStates.get(proposal.id) ?? { archived: false, at: null };
+  if (
+    state.archived === (proposal.archivedAt !== undefined) &&
+    (!state.archived || proposal.archivedAt === state.at)
+  ) {
+    return;
   }
-
-  return { promotionByProposal, activeByTarget };
+  throw new EvolutionCatalogError(
+    `Archival state for '${proposal.id}' does not match restore audit history`,
+  );
 }
 
 /**
@@ -986,43 +1080,8 @@ function replayRestoreAudit(
  * archive/unarchive markers in between.
  */
 function assertDeletedAuditTrail(proposalId: string, trail: readonly AuditRecord[]): void {
-  if (trail[0]?.kind !== "rejection") {
-    throw new EvolutionCatalogError(
-      `Audit history for deleted proposal '${proposalId}' must begin with its rejection`,
-    );
-  }
-  if (trail[trail.length - 1]?.kind !== "delete") {
-    throw new EvolutionCatalogError(`Audit record references missing proposal '${proposalId}'`);
-  }
-  let archived = false;
-  for (const [index, record] of trail.entries()) {
-    if (record.kind === "rejection" && index !== 0) {
-      throw new EvolutionCatalogError(
-        `Duplicate rejection audit for deleted proposal '${proposalId}'`,
-      );
-    }
-    if (record.kind === "delete" && index !== trail.length - 1) {
-      throw new EvolutionCatalogError(
-        `Audit history for deleted proposal '${proposalId}' continues after its deletion`,
-      );
-    }
-    if (record.kind === "archive") {
-      if (archived) {
-        throw new EvolutionCatalogError(
-          `Duplicate archive audit for deleted proposal '${proposalId}'`,
-        );
-      }
-      archived = true;
-    }
-    if (record.kind === "unarchive") {
-      if (!archived) {
-        throw new EvolutionCatalogError(
-          `Unarchive audit for deleted proposal '${proposalId}' is out of order`,
-        );
-      }
-      archived = false;
-    }
-  }
+  const violation = auditTrailViolation(trail.map((record) => record.kind));
+  if (violation) throw new EvolutionCatalogError(violation.message(proposalId));
 }
 
 function assertRestoreTransitionAt(
@@ -1045,33 +1104,48 @@ function parseRestoreActivePointer(
   raw: unknown,
   index: number,
 ): EvolutionActiveProposalPointer {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new EvolutionValidationError(`activeProposals[${index}] must be an object`);
+  const label = `activeProposals[${index}]`;
+  const record = asPointerObject(raw, label);
+  assertExactRestoreKeys(record, ["target", "proposalId"], label);
+  const proposalId = requiredString(record.proposalId, `${label}.proposalId`);
+  const target = asPointerObject(record.target, `${label}.target`);
+  return { target: parsePointerTarget(target, label), proposalId };
+}
+
+function asPointerObject(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new EvolutionValidationError(`${label} must be an object`);
   }
-  const record = raw as Record<string, unknown>;
-  assertExactRestoreKeys(record, ["target", "proposalId"], `activeProposals[${index}]`);
-  if (typeof record.proposalId !== "string" || !record.proposalId.trim()) {
-    throw new EvolutionValidationError(`activeProposals[${index}].proposalId is required`);
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new EvolutionValidationError(`${label} is required`);
   }
-  if (!record.target || typeof record.target !== "object" || Array.isArray(record.target)) {
-    throw new EvolutionValidationError(`activeProposals[${index}].target is required`);
+  return value;
+}
+
+type PointerTarget = EvolutionActiveProposalPointer["target"];
+
+/** One reader per supported target kind. */
+const POINTER_TARGETS: Record<string, (target: Record<string, unknown>, label: string) => PointerTarget> = {
+  "strategy-blueprint": (target, label) => {
+    assertExactRestoreKeys(target, ["kind", "name"], `${label}.target`);
+    return { kind: "strategy-blueprint", name: requiredString(target.name, `${label}.target.name`) };
+  },
+  "role-prompt": (target, label) => {
+    assertExactRestoreKeys(target, ["kind", "path"], `${label}.target`);
+    return { kind: "role-prompt", path: requiredString(target.path, `${label}.target.path`) };
+  },
+};
+
+function parsePointerTarget(target: Record<string, unknown>, label: string): PointerTarget {
+  const read = POINTER_TARGETS[String(target.kind)];
+  if (!read) {
+    throw new EvolutionValidationError(`${label}.target.kind is unsupported`);
   }
-  const target = record.target as Record<string, unknown>;
-  if (target.kind === "strategy-blueprint") {
-    assertExactRestoreKeys(target, ["kind", "name"], `activeProposals[${index}].target`);
-    if (typeof target.name !== "string" || !target.name.trim()) {
-      throw new EvolutionValidationError(`activeProposals[${index}].target.name is required`);
-    }
-    return { target: { kind: "strategy-blueprint", name: target.name }, proposalId: record.proposalId };
-  }
-  if (target.kind === "role-prompt") {
-    assertExactRestoreKeys(target, ["kind", "path"], `activeProposals[${index}].target`);
-    if (typeof target.path !== "string" || !target.path.trim()) {
-      throw new EvolutionValidationError(`activeProposals[${index}].target.path is required`);
-    }
-    return { target: { kind: "role-prompt", path: target.path }, proposalId: record.proposalId };
-  }
-  throw new EvolutionValidationError(`activeProposals[${index}].target.kind is unsupported`);
+  return read(target, label);
 }
 
 function assertExactRestoreKeys(
@@ -1090,6 +1164,15 @@ function assertExactRestoreKeys(
 }
 
 function snapshotTrustContext(trust: EvolutionTrustContext): EvolutionTrustContext {
+  assertTrustShape(trust);
+  return {
+    ...trust,
+    configuredRolePromptPaths: trust.configuredRolePromptPaths.map(stringOf),
+    roleAllowedProfiles: profileSnapshot(trust.roleAllowedProfiles),
+  };
+}
+
+function assertTrustShape(trust: EvolutionTrustContext): void {
   if (
     !trust ||
     !Array.isArray(trust.configuredRolePromptPaths) ||
@@ -1099,25 +1182,34 @@ function snapshotTrustContext(trust: EvolutionTrustContext): EvolutionTrustConte
   ) {
     throw new EvolutionValidationError("trust: A valid EvolutionTrustContext is required");
   }
-
-  const configuredRolePromptPaths = trust.configuredRolePromptPaths.map((path) => {
-    if (typeof path !== "string") {
-      throw new EvolutionValidationError("trust.configuredRolePromptPaths must contain strings");
-    }
-    return path;
-  });
-  const roleAllowedProfiles = Object.create(null) as Record<string, readonly string[]>;
-  for (const [role, profiles] of Object.entries(trust.roleAllowedProfiles)) {
-    if (!Array.isArray(profiles) || profiles.some((profile) => typeof profile !== "string")) {
-      throw new EvolutionValidationError(
-        `trust.roleAllowedProfiles.${role} must contain profile-name strings`,
-      );
-    }
-    roleAllowedProfiles[role] = [...profiles];
-  }
-
-  return deepFreeze({ configuredRolePromptPaths, roleAllowedProfiles });
 }
+
+function stringOf(path: unknown): string {
+  if (typeof path !== "string") {
+    throw new EvolutionValidationError("trust.configuredRolePromptPaths must contain strings");
+  }
+  return path;
+}
+
+function profileSnapshot(
+  roleAllowedProfiles: Record<string, readonly string[]>,
+): Record<string, readonly string[]> {
+  const snapshot = Object.create(null) as Record<string, readonly string[]>;
+  for (const [role, profiles] of Object.entries(roleAllowedProfiles)) {
+    snapshot[role] = profilesOf(role, profiles);
+  }
+  return snapshot;
+}
+
+function profilesOf(role: string, profiles: unknown): readonly string[] {
+  if (!Array.isArray(profiles) || profiles.some((profile) => typeof profile !== "string")) {
+    throw new EvolutionValidationError(
+      `trust.roleAllowedProfiles.${role} must contain profile-name strings`,
+    );
+  }
+  return [...profiles];
+}
+
 
 function candidateTargetKey(candidate: EvolutionCandidate): string {
   if (candidate.kind === "strategy-blueprint") {

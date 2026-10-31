@@ -1188,3 +1188,70 @@ describe("EvolutionCatalog error taxonomy", () => {
     expect(() => propose(catalog, { id: "dup" })).toThrow(EvolutionCatalogConflictError);
   });
 });
+
+describe("restore material shape", () => {
+  it("rejects malformed material and bad pointers", () => {
+    const catalog = createCatalog();
+    propose(catalog, { id: "prop-shape" });
+    const evaluated = toEvaluated(catalog, "prop-shape");
+    catalog.promote("prop-shape", boundEvidence(evaluated), humanDecision());
+    const material = catalog.exportDurableMaterial();
+
+    expect(() => restoreEvolutionCatalog(defaultTrust, null as never)).toThrow(/must be an object/);
+    expect(() =>
+      restoreEvolutionCatalog(defaultTrust, { ...material, extra: 1 } as never),
+    ).toThrow(/missing or unexpected fields/);
+    expect(() =>
+      restoreEvolutionCatalog(defaultTrust, { ...material, proposals: "x" } as never),
+    ).toThrow(/must be arrays/);
+
+    const badPointer = structuredClone(material);
+    badPointer.activeProposals[0]!.target = { kind: "unknown" } as never;
+    expect(() => restoreEvolutionCatalog(defaultTrust, badPointer)).toThrow(/unsupported/);
+
+    const missingName = structuredClone(material);
+    missingName.activeProposals[0]!.target = { kind: "strategy-blueprint" } as never;
+    expect(() => restoreEvolutionCatalog(defaultTrust, missingName)).toThrow(/unexpected fields/);
+  });
+
+  it("rejects a trust context that is not a context", () => {
+    const catalog = createCatalog();
+    propose(catalog, { id: "prop-trust" });
+    const material = catalog.exportDurableMaterial();
+    expect(() => restoreEvolutionCatalog({} as never, material)).toThrow(/EvolutionTrustContext/);
+    expect(() =>
+      restoreEvolutionCatalog({ ...defaultTrust, configuredRolePromptPaths: [1] } as never, material),
+    ).toThrow(/must contain strings/);
+    expect(() =>
+      restoreEvolutionCatalog({ ...defaultTrust, roleAllowedProfiles: { worker: [1] } } as never, material),
+    ).toThrow(/profile-name strings/);
+  });
+
+  it("requires a deleted proposal's trail to read rejection → delete", () => {
+    const catalog = createCatalog();
+    propose(catalog, { id: "prop-deleted" });
+    const evaluated = toEvaluated(catalog, "prop-deleted");
+    catalog.reject("prop-deleted", humanDecision({ reason: "no" }), boundEvidence(evaluated));
+    catalog.archive("prop-deleted", humanDecision({ reason: "tidy" }));
+    catalog.unarchive("prop-deleted", humanDecision({ reason: "back" }));
+    catalog.deleteProposal("prop-deleted", humanDecision({ reason: "gone" }));
+    const material = catalog.exportDurableMaterial();
+    expect(restoreEvolutionCatalog(defaultTrust, material).snapshot()).toEqual(catalog.snapshot());
+
+    const withoutRejection = structuredClone(material);
+    withoutRejection.auditRecords = withoutRejection.auditRecords.filter(
+      (record: { kind: string }) => record.kind !== "rejection",
+    );
+    expect(() => restoreEvolutionCatalog(defaultTrust, withoutRejection)).toThrow(
+      /without its rejection/,
+    );
+
+    const withoutTombstone = structuredClone(material);
+    withoutTombstone.auditRecords = withoutTombstone.auditRecords.filter(
+      (record: { kind: string }) => record.kind !== "delete",
+    );
+    expect(() => restoreEvolutionCatalog(defaultTrust, withoutTombstone)).toThrow(
+      /references missing proposal/,
+    );
+  });
+});
