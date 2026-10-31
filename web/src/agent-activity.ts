@@ -89,96 +89,151 @@ export function deriveAgentActivity(
   runStatus: RunStatus | undefined,
 ): AgentInvocationActivity[] {
   const invocations = new Map<string, AgentInvocationActivity>();
-  for (const event of events) {
-    if (event.type === "agent.invocation.started") {
-      const payload = recordValue(event.payload);
-      const invocationId = stringValue(payload?.invocationId);
-      if (!invocationId) continue;
-      const model = stringValue(payload?.model);
-      const artifactKey = stringValue(payload?.artifactKey);
-      invocations.set(invocationId, {
-        id: invocationId,
-        role: stringValue(payload?.role) ?? "agent",
-        profile: stringValue(payload?.profile) ?? "default",
-        adapter: stringValue(payload?.adapter) ?? "unknown",
-        ...(model ? { model } : {}),
-        ...(artifactKey ? { artifactKey } : {}),
-        status: "running",
-        startedAt: event.occurredAt,
-        updatedAt: event.occurredAt,
-        children: [],
-      });
-      continue;
-    }
+  for (const event of events) applyEvent(invocations, event);
+  interruptStale(invocations, runStatus);
+  return sortActivities(markAdvisors([...invocations.values()]));
+}
 
-    if (event.type === "agent.invocation.completed") {
-      const payload = recordValue(event.payload);
-      const invocationId = stringValue(payload?.invocationId);
-      if (!invocationId) continue;
-      const existing = invocations.get(invocationId);
-      const model = stringValue(payload?.model) ?? existing?.model;
-      const artifactKey = stringValue(payload?.artifactKey) ?? existing?.artifactKey;
-      invocations.set(invocationId, {
-        id: invocationId,
-        role: stringValue(payload?.role) ?? existing?.role ?? "agent",
-        profile: stringValue(payload?.profile) ?? existing?.profile ?? "default",
-        adapter: stringValue(payload?.adapter) ?? existing?.adapter ?? "unknown",
-        ...(model ? { model } : {}),
-        ...(artifactKey ? { artifactKey } : {}),
-        status: payload?.success === true ? "completed" : "failed",
-        startedAt: existing?.startedAt ?? event.occurredAt,
-        updatedAt: event.occurredAt,
-        children: existing?.children ?? [],
-      });
-      continue;
-    }
+function applyEvent(
+  invocations: Map<string, AgentInvocationActivity>,
+  event: RunEvent,
+): void {
+  const payload = recordValue(event.payload);
+  const invocationId = stringValue(payload?.invocationId);
+  if (!invocationId) return;
+  if (event.type === "agent.invocation.started") {
+    invocations.set(invocationId, startedActivity(invocationId, payload, event));
+    return;
+  }
+  if (event.type === "agent.invocation.completed") {
+    invocations.set(invocationId, completedActivity(invocationId, payload, event, invocations));
+    return;
+  }
+  if (event.type === "agent.children.updated") {
+    invocations.set(invocationId, childrenActivity(invocationId, payload, event, invocations));
+  }
+}
 
-    if (event.type !== "agent.children.updated") continue;
-    const payload = recordValue(event.payload);
-    const invocationId = stringValue(payload?.invocationId);
-    if (!invocationId) continue;
-    const existing = invocations.get(invocationId);
-    const children = childActivities(payload?.agents, event.occurredAt);
-    const artifactKey = stringValue(payload?.artifactKey) ?? existing?.artifactKey;
-    invocations.set(invocationId, {
-      id: invocationId,
-      role: stringValue(payload?.role) ?? existing?.role ?? "agent",
-      profile: stringValue(payload?.profile) ?? existing?.profile ?? "default",
-      adapter: stringValue(payload?.adapter) ?? existing?.adapter ?? "codex",
-      ...(existing?.model ? { model: existing.model } : {}),
-      ...(artifactKey ? { artifactKey } : {}),
-      status: existing?.status ?? "running",
-      startedAt: existing?.startedAt ?? event.occurredAt,
-      updatedAt: event.occurredAt,
-      children,
+/** Every activity shares the same envelope: identity, defaults, timestamps. */
+function activityEnvelope(
+  invocationId: string,
+  payload: Record<string, unknown> | undefined,
+  existing: AgentInvocationActivity | undefined,
+  event: RunEvent,
+  adapterFallback: string,
+): Omit<AgentInvocationActivity, "status" | "children"> {
+  const model = inherited(payload, existing, "model");
+  const artifactKey = inherited(payload, existing, "artifactKey");
+  return {
+    id: invocationId,
+    role: inherited(payload, existing, "role") ?? "agent",
+    profile: inherited(payload, existing, "profile") ?? "default",
+    adapter: inherited(payload, existing, "adapter") ?? adapterFallback,
+    ...(model ? { model } : {}),
+    ...(artifactKey ? { artifactKey } : {}),
+    ...timestampFields(existing, event),
+  };
+}
+
+function timestampFields(
+  existing: AgentInvocationActivity | undefined,
+  event: RunEvent,
+): Pick<AgentInvocationActivity, "startedAt" | "updatedAt"> {
+  return {
+    startedAt: existing?.startedAt ?? event.occurredAt,
+    updatedAt: event.occurredAt,
+  };
+}
+
+/** A payload field wins over the copy already on the activity. */
+function inherited(
+  payload: Record<string, unknown> | undefined,
+  existing: AgentInvocationActivity | undefined,
+  field: "role" | "profile" | "adapter" | "model" | "artifactKey",
+): string | undefined {
+  return stringValue(payload?.[field]) ?? existing?.[field];
+}
+
+function startedActivity(
+  invocationId: string,
+  payload: Record<string, unknown> | undefined,
+  event: RunEvent,
+): AgentInvocationActivity {
+  return {
+    ...activityEnvelope(invocationId, payload, undefined, event, "unknown"),
+    status: "running",
+    children: [],
+  };
+}
+
+function completedActivity(
+  invocationId: string,
+  payload: Record<string, unknown> | undefined,
+  event: RunEvent,
+  invocations: Map<string, AgentInvocationActivity>,
+): AgentInvocationActivity {
+  const existing = invocations.get(invocationId);
+  return {
+    ...activityEnvelope(invocationId, payload, existing, event, "unknown"),
+    status: payload?.success === true ? "completed" : "failed",
+    children: existing?.children ?? [],
+  };
+}
+
+function childrenActivity(
+  invocationId: string,
+  payload: Record<string, unknown> | undefined,
+  event: RunEvent,
+  invocations: Map<string, AgentInvocationActivity>,
+): AgentInvocationActivity {
+  const existing = invocations.get(invocationId);
+  return {
+    ...activityEnvelope(invocationId, payload, existing, event, "codex"),
+    status: existing?.status ?? "running",
+    children: childActivities(payload?.agents, event.occurredAt),
+  };
+}
+
+/** Nothing is still running once the run reached a resting status. */
+function interruptStale(
+  invocations: Map<string, AgentInvocationActivity>,
+  runStatus: RunStatus | undefined,
+): void {
+  if (!runStatus || activeRunStatuses.has(runStatus)) return;
+  for (const [id, invocation] of invocations) {
+    invocations.set(id, {
+      ...invocation,
+      status: isActive(invocation.status) ? "interrupted" : invocation.status,
+      children: invocation.children.map((child) =>
+        isActive(child.status) ? { ...child, status: "interrupted" as const } : child,
+      ),
     });
   }
+}
 
-  if (runStatus && !activeRunStatuses.has(runStatus)) {
-    for (const [id, invocation] of invocations) {
-      const children = invocation.children.map((child) =>
-        child.status === "running" || child.status === "pending"
-          ? { ...child, status: "interrupted" as const }
-          : child,
-      );
-      const status = invocation.status === "running" || invocation.status === "pending"
-        ? "interrupted"
-        : invocation.status;
-      invocations.set(id, { ...invocation, status, children });
-    }
-  }
+function isActive(status: string): boolean {
+  return status === "running" || status === "pending";
+}
 
-  return [...invocations.values()]
-    .map((invocation): AgentInvocationActivity => (
-      isAdvisorArtifactKey(invocation.artifactKey)
-        ? { ...invocation, advisor: true as const }
-        : invocation
-    ))
-    .sort((left, right) => {
-      const leftActive = Number(left.status === "running" || left.status === "pending");
-      const rightActive = Number(right.status === "running" || right.status === "pending");
-      return rightActive - leftActive || right.updatedAt.localeCompare(left.updatedAt);
-    });
+/** Advisor consultations are marked so the UI can separate them. */
+function markAdvisors(
+  invocations: AgentInvocationActivity[],
+): AgentInvocationActivity[] {
+  return invocations.map((invocation) =>
+    isAdvisorArtifactKey(invocation.artifactKey)
+      ? { ...invocation, advisor: true as const }
+      : invocation,
+  );
+}
+
+/** Running first, then most recently updated. */
+function sortActivities(
+  invocations: AgentInvocationActivity[],
+): AgentInvocationActivity[] {
+  return invocations.sort((left, right) => {
+    const byActivity = Number(isActive(right.status)) - Number(isActive(left.status));
+    return byActivity || right.updatedAt.localeCompare(left.updatedAt);
+  });
 }
 
 export type AdvisorLogStatus = "consulted" | "skipped" | "failed" | "jev";
@@ -211,61 +266,92 @@ const advisorEventStatus: Record<string, AdvisorLogStatus> = {
 
 function deriveJevEntry(event: RunEvent): AdvisorLogEntry | undefined {
   const payload = recordValue(event.payload);
-  const source = payload?.source;
-  if (source !== "jev" && source !== "deterministic") return undefined;
+  const source = jevSource(payload?.source);
+  if (!source) return undefined;
   const taskId = stringValue(payload?.taskId);
-  const decision = stringValue(payload?.decision);
   const detail = stringValue(payload?.reason);
-  const confidence = typeof payload?.confidence === "number" ? payload.confidence : undefined;
-  const latencyMs = typeof payload?.latencyMs === "number" ? payload.latencyMs : undefined;
   return {
-    sequence: event.sequence,
-    status: "jev",
-    trigger: "jev",
+    ...advisorEnvelope(event, "jev", "jev"),
     ...(taskId ? { taskId } : {}),
     ...(detail ? { detail } : {}),
-    occurredAt: event.occurredAt,
-    jev: {
-      source,
-      ...(decision ? { decision } : {}),
-      ...(confidence !== undefined ? { confidence } : {}),
-      consult: payload?.consult === true,
-      changedOutcome: payload?.changedOutcome === true,
-      ...(latencyMs !== undefined ? { latencyMs } : {}),
-    },
+    jev: jevDetail(payload, source),
   };
+}
+
+function jevSource(value: unknown): "jev" | "deterministic" | undefined {
+  return value === "jev" || value === "deterministic" ? value : undefined;
+}
+
+function jevDetail(
+  payload: Record<string, unknown> | undefined,
+  source: "jev" | "deterministic",
+): NonNullable<AdvisorLogEntry["jev"]> {
+  const decision = stringValue(payload?.decision);
+  const confidence = numberValue(payload?.confidence);
+  const latencyMs = numberValue(payload?.latencyMs);
+  return {
+    source,
+    ...(decision ? { decision } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    consult: payload?.consult === true,
+    changedOutcome: payload?.changedOutcome === true,
+    ...(latencyMs !== undefined ? { latencyMs } : {}),
+  };
+}
+
+/** The fields every advisor log line carries. */
+function advisorEnvelope(
+  event: RunEvent,
+  status: AdvisorLogStatus,
+  trigger: string,
+): Pick<AdvisorLogEntry, "sequence" | "status" | "trigger" | "occurredAt"> {
+  return { sequence: event.sequence, status, trigger, occurredAt: event.occurredAt };
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
 }
 
 /** Newest-first architect advisor consultations and Jev fork decisions derived from run events. */
 export function deriveAdvisorLog(events: RunEvent[]): AdvisorLogEntry[] {
-  const entries: AdvisorLogEntry[] = [];
-  for (const event of events) {
-    const status = advisorEventStatus[event.type];
-    if (status === "jev") {
-      const entry = deriveJevEntry(event);
-      if (entry) entries.push(entry);
-      continue;
-    }
-    if (!status) continue;
-    const payload = recordValue(event.payload);
-    const trigger = stringValue(payload?.trigger);
-    if (!trigger) continue;
-    const taskId = stringValue(payload?.taskId);
-    const recommendation = stringValue(payload?.recommendation);
-    const summary = stringValue(payload?.summary);
-    const detail = stringValue(payload?.error) ?? stringValue(payload?.reason);
-    entries.push({
-      sequence: event.sequence,
-      status,
-      trigger,
-      ...(taskId ? { taskId } : {}),
-      ...(recommendation ? { recommendation } : {}),
-      ...(summary ? { summary } : {}),
-      ...(detail ? { detail } : {}),
-      occurredAt: event.occurredAt,
-    });
-  }
-  return entries.sort((left, right) => right.sequence - left.sequence);
+  return events
+    .flatMap((event) => advisorEntry(event) ?? [])
+    .sort((left, right) => right.sequence - left.sequence);
+}
+
+function advisorEntry(event: RunEvent): AdvisorLogEntry[] | undefined {
+  const status = advisorEventStatus[event.type];
+  if (status === "jev") return deriveJevEntry(event) ? [deriveJevEntry(event)!] : undefined;
+  if (!status) return undefined;
+  const payload = recordValue(event.payload);
+  const trigger = stringValue(payload?.trigger);
+  if (!trigger) return undefined;
+  return [consultationEntry(event, payload, status, trigger)];
+}
+
+function consultationEntry(
+  event: RunEvent,
+  payload: Record<string, unknown> | undefined,
+  status: AdvisorLogStatus,
+  trigger: string,
+): AdvisorLogEntry {
+  return { ...advisorEnvelope(event, status, trigger), ...consultationDetails(payload) };
+}
+
+/** Only the fields the server actually sent are copied onto the entry. */
+function consultationDetails(
+  payload: Record<string, unknown> | undefined,
+): Partial<AdvisorLogEntry> {
+  return {
+    ...present("taskId", stringValue(payload?.taskId)),
+    ...present("recommendation", stringValue(payload?.recommendation)),
+    ...present("summary", stringValue(payload?.summary)),
+    ...present("detail", stringValue(payload?.error) ?? stringValue(payload?.reason)),
+  };
+}
+
+function present<K extends string>(key: K, value: string | undefined): Record<K, string> | object {
+  return value ? ({ [key]: value } as Record<K, string>) : {};
 }
 
 export function agentStatusLabel(status: AgentDisplayStatus): string {
@@ -284,25 +370,44 @@ export { agentRoleLabel } from "./presentation";
 
 function childActivities(value: unknown, updatedAt: string): ChildAgentActivity[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((candidate) => {
-    const child = recordValue(candidate);
-    const threadId = stringValue(child?.threadId);
-    if (!threadId) return [];
-    const path = stringValue(child?.path);
-    const label = path?.split("/").filter(Boolean).at(-1) ?? `Codex ${shortId(threadId)}`;
-    const status = agentDisplayStatus(child?.status);
-    const model = stringValue(child?.model);
-    const reasoning = stringValue(child?.reasoning);
-    return [{
+  return value
+    .flatMap((candidate) => childActivity(candidate, updatedAt) ?? [])
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function childActivity(
+  candidate: unknown,
+  updatedAt: string,
+): ChildAgentActivity[] | undefined {
+  const child = recordValue(candidate);
+  const threadId = stringValue(child?.threadId);
+  if (!threadId) return undefined;
+  return [
+    {
       id: threadId,
       threadId,
-      label,
-      status,
-      ...(model ? { model } : {}),
-      ...(reasoning ? { reasoning } : {}),
+      label: childLabel(child?.path, threadId),
+      status: agentDisplayStatus(child?.status),
+      ...childModelFields(child),
       updatedAt,
-    }];
-  }).sort((left, right) => left.label.localeCompare(right.label));
+    },
+  ];
+}
+
+function childModelFields(child: Record<string, unknown> | undefined): {
+  model?: string;
+  reasoning?: string;
+} {
+  return {
+    ...present("model", stringValue(child?.model)),
+    ...present("reasoning", stringValue(child?.reasoning)),
+  };
+}
+
+/** The last path segment names the child; otherwise fall back to its id. */
+function childLabel(path: unknown, threadId: string): string {
+  const segment = stringValue(path)?.split("/").filter(Boolean).at(-1);
+  return segment ?? `Codex ${shortId(threadId)}`;
 }
 
 function agentDisplayStatus(value: unknown): AgentDisplayStatus {
