@@ -432,10 +432,23 @@ export function buildDemoRuns(base: number): DemoRun[] {
   }));
 }
 
+type EventPusher = (offsetMs: number, type: string, payload: unknown) => void;
+
 function buildEvents(state: RunState, base: number): RunEvent[] {
   const events: RunEvent[] = [];
+  const push = makePusher(state, events);
+  const start = Date.parse(state.createdAt);
+  emitArchitect(push, state, start);
+  state.tasks.forEach((item, index) => emitTaskEvents(push, state, start, item, index));
+  emitApprovals(push, state);
+  emitTerminalStatus(push, state);
+  void base;
+  return events;
+}
+
+function makePusher(state: RunState, events: RunEvent[]): EventPusher {
   let sequence = 0;
-  const push = (offsetMs: number, type: string, payload: unknown) => {
+  return (offsetMs, type, payload) => {
     sequence += 1;
     events.push({
       sequence,
@@ -449,111 +462,271 @@ function buildEvents(state: RunState, base: number): RunEvent[] {
       spanId: sequence.toString(16).padStart(16, "0"),
     });
   };
-  const start = Date.parse(state.createdAt);
-  const profileFor = (role: string) => state.strategy.roleProfiles[role] ?? "default";
-  const invoke = (offset: number, role: string, id: string, success: boolean | undefined, note?: string) => {
-    const profile = profileFor(role);
-    const adapter = profile.startsWith("claude") ? "claude" : "codex";
-    push(start + offset, "agent.invocation.started", { role, profile, adapter, invocationId: id, model: profile });
-    if (note) push(start + offset + 4_000, "agent.stdout", { invocationId: id, text: `${note}\n` });
-    if (success !== undefined) {
-      push(start + offset + 40_000, "agent.invocation.completed", { role, profile, adapter, invocationId: id, success, model: profile });
-    }
-  };
-  invoke(5_000, "architect", `${state.id}-arch`, true, "读取仓库结构，拆分为可并行的任务图…");
-  for (const [index, item] of state.tasks.entries()) {
-    const offset = 6 * minute + index * 90_000;
-    push(start + offset - 5_000, "run.wave.started", { taskIds: [item.task.id] });
-    const finished = item.status === "merged" || item.status === "passed";
-    const stuck = item.status === "blocked";
-    if (item.status === "pending") continue;
-    invoke(offset, "worker", `${state.id}-w${index}`, finished || stuck ? true : undefined, `实现 ${item.task.title}\n$ pnpm test --run\n${finished ? "✓ 全部通过" : "运行中…"}`);
-    if (finished) {
-      invoke(offset + 50_000, "reviewer", `${state.id}-r${index}`, true, "审查改动：边界清晰，无越权修改。");
-      push(start + offset + 95_000, "run.wave.completed", { taskIds: [item.task.id], status: "passed" });
-    } else if (stuck) {
-      invoke(offset + 50_000, "reviewer", `${state.id}-r${index}`, true, "request_changes：refresh() 存在并发竞态。");
-      push(start + offset + 95_000, "run.wave.completed", { taskIds: [item.task.id], status: "blocked" });
-      push(start + offset + 100_000, "run.advisor.consulted", { trigger: "repeated-failure", recommendation: "stop", summary: "竞态需要重新设计刷新协议，继续重试收益低。" });
-    }
+}
+
+function emitArchitect(push: EventPusher, state: RunState, start: number): void {
+  emitInvocation(push, state, start + 5_000, "architect", `${state.id}-arch`, true, {
+    note: "读取仓库结构，拆分为可并行的任务图…",
+  });
+}
+
+function emitTaskEvents(
+  push: EventPusher,
+  state: RunState,
+  start: number,
+  item: RunState["tasks"][number],
+  index: number,
+): void {
+  const offset = 6 * minute + index * 90_000;
+  push(start + offset - 5_000, "run.wave.started", { taskIds: [item.task.id] });
+  if (item.status === "pending") return;
+  const finished = item.status === "merged" || item.status === "passed";
+  const stuck = item.status === "blocked";
+  emitWorker(push, state, start + offset, item, index, { finished, stuck });
+  emitTaskOutcome(push, state, start + offset, item, index, { finished, stuck });
+}
+
+function emitWorker(
+  push: EventPusher,
+  state: RunState,
+  at: number,
+  item: RunState["tasks"][number],
+  index: number,
+  outcome: { finished: boolean; stuck: boolean },
+): void {
+  const settled = outcome.finished || outcome.stuck;
+  emitInvocation(push, state, at, "worker", `${state.id}-w${index}`, settled ? true : undefined, {
+    note: [
+      `实现 ${item.task.title}`,
+      "$ pnpm test --run",
+      outcome.finished ? "✓ 全部通过" : "运行中…",
+    ].join("\n"),
+  });
+}
+
+function emitTaskOutcome(
+  push: EventPusher,
+  state: RunState,
+  at: number,
+  item: RunState["tasks"][number],
+  index: number,
+  outcome: { finished: boolean; stuck: boolean },
+): void {
+  if (outcome.finished) {
+    emitInvocation(push, state, at + 50_000, "reviewer", `${state.id}-r${index}`, true, {
+      note: "审查改动：边界清晰，无越权修改。",
+    });
+    push(at + 95_000, "run.wave.completed", { taskIds: [item.task.id], status: "passed" });
+    return;
   }
+  if (!outcome.stuck) return;
+  emitInvocation(push, state, at + 50_000, "reviewer", `${state.id}-r${index}`, true, {
+    note: "request_changes：refresh() 存在并发竞态。",
+  });
+  push(at + 95_000, "run.wave.completed", { taskIds: [item.task.id], status: "blocked" });
+  push(at + 100_000, "run.advisor.consulted", {
+    trigger: "repeated-failure",
+    recommendation: "stop",
+    summary: "竞态需要重新设计刷新协议，继续重试收益低。",
+  });
+}
+
+function emitInvocation(
+  push: EventPusher,
+  state: RunState,
+  at: number,
+  role: string,
+  invocationId: string,
+  success: boolean | undefined,
+  options: { note?: string } = {},
+): void {
+  const profile = state.strategy.roleProfiles[role] ?? "default";
+  const adapter = profile.startsWith("claude") ? "claude" : "codex";
+  push(at, "agent.invocation.started", { role, profile, adapter, invocationId, model: profile });
+  if (options.note) {
+    push(at + 4_000, "agent.stdout", { invocationId, text: `${options.note}\n` });
+  }
+  if (success === undefined) return;
+  push(at + 40_000, "agent.invocation.completed", {
+    role,
+    profile,
+    adapter,
+    invocationId,
+    success,
+    model: profile,
+  });
+}
+
+function emitApprovals(push: EventPusher, state: RunState): void {
   for (const approval of state.approvals ?? []) {
-    push(Date.parse(approval.requestedAt), "approval.requested", { gate: approval.gate, requestId: approval.id });
+    push(Date.parse(approval.requestedAt), "approval.requested", {
+      gate: approval.gate,
+      requestId: approval.id,
+    });
   }
-  if (state.status === "blocked" || state.status === "ci-failed") {
-    push(Date.parse(state.updatedAt), "run.updated", { status: state.status });
-  }
-  void base;
-  return events;
+}
+
+function emitTerminalStatus(push: EventPusher, state: RunState): void {
+  if (state.status !== "blocked" && state.status !== "ci-failed") return;
+  push(Date.parse(state.updatedAt), "run.updated", { status: state.status });
 }
 
 export function buildEvidence(run: DemoRun): RunEvidence {
   const { state } = run;
-  const finished = state.tasks.filter((item) => item.status === "merged" || item.status === "passed").length;
-  const total = state.tasks.length;
-  const approvalPending = (state.approvals ?? []).some((approval) => approval.status === "pending");
-  const failed = state.status === "blocked" || state.status === "ci-failed";
   return {
     runId: state.id,
     status: state.status,
-    readiness: failed ? "attention" : state.status === "completed" || approvalPending ? "ready" : "in-progress",
-    checks: [
-      { id: "tasks", label: "任务", status: finished === total && total > 0 ? "pass" : failed ? "fail" : "pending", detail: `${finished}/${total} 个任务已通过` },
-      { id: "quality", label: "确定性检查", status: state.finalQuality ? (state.finalQuality.passed ? "pass" : "fail") : "pending", detail: state.finalQuality ? "check / test / lint" : "尚未运行" },
-      { id: "decision", label: "总控裁决", status: state.finalDecision ? "pass" : "pending", detail: state.finalDecision?.reason ?? "等待裁决" },
-      { id: "approval", label: "人工审批", status: approvalPending ? "pending" : state.status === "completed" ? "pass" : "pending", detail: approvalPending ? "等待你确认" : "无需审批" },
-    ],
-    tasks: state.tasks.map((item) => ({
-      id: item.task.id,
-      title: item.task.title,
-      status: item.status,
-      attempts: item.attempts,
-      ...(item.commit ? { commit: item.commit } : {}),
-      ...(item.quality ? { qualityPassed: item.quality.passed } : {}),
-      ...(item.review ? { reviewVerdict: item.review.verdict } : {}),
-      ...(item.test ? { testVerdict: item.test.verdict } : {}),
-      findingCount: item.review?.findings.length ?? 0,
-    })),
-    artifacts: [
-      { path: "plan/architect-output.md", size: 3_200, kind: "agent-output", previewable: true },
-      { path: "quality/final.json", size: 1_900, kind: "quality", previewable: true },
-    ],
+    readiness: readinessOf(state),
+    checks: checksOf(state),
+    tasks: state.tasks.map(taskEvidence),
+    artifacts: EVIDENCE_ARTIFACTS,
     artifactBytes: state.usage?.artifactBytes ?? 0,
-    diff: {
-      available: run.diff.length > 0,
-      baseCommit: "9a1b2c3",
-      ...(run.diff ? { targetCommit: "e4f5a6b", content: run.diff } : {}),
-      changedFiles: run.changedFiles,
-      truncated: false,
-      ...(run.diff ? {} : { detail: "该运行尚未产生可对比的集成提交" }),
-    },
+    diff: diffOf(run),
   };
 }
 
-export function buildUsage(runs: DemoRun[]): UsageReport {
-  const totals = {
-    agentInvocations: 0, agentDurationMs: 0, processOutputBytes: 0, truncatedStreams: 0, artifactBytes: 0,
-    inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reportedCostUsd: 0, costReported: true,
+/** Anything that failed needs attention; a finished or gated run is ready. */
+function readinessOf(state: RunState): RunEvidence["readiness"] {
+  if (isFailed(state)) return "attention";
+  if (state.status === "completed" || hasPendingApproval(state)) return "ready";
+  return "in-progress";
+}
+
+function isFailed(state: RunState): boolean {
+  return state.status === "blocked" || state.status === "ci-failed";
+}
+
+function hasPendingApproval(state: RunState): boolean {
+  return (state.approvals ?? []).some((approval) => approval.status === "pending");
+}
+
+function checksOf(state: RunState): RunEvidence["checks"] {
+  return [
+    tasksCheck(state),
+    qualityCheck(state),
+    decisionCheck(state),
+    approvalCheck(state),
+  ];
+}
+
+function tasksCheck(state: RunState): RunEvidence["checks"][number] {
+  const finished = state.tasks.filter(
+    (item) => item.status === "merged" || item.status === "passed",
+  ).length;
+  const total = state.tasks.length;
+  return {
+    id: "tasks",
+    label: "任务",
+    status: finished === total && total > 0 ? "pass" : isFailed(state) ? "fail" : "pending",
+    detail: `${finished}/${total} 个任务已通过`,
   };
+}
+
+function qualityCheck(state: RunState): RunEvidence["checks"][number] {
+  const quality = state.finalQuality;
+  return {
+    id: "quality",
+    label: "确定性检查",
+    status: quality ? (quality.passed ? "pass" : "fail") : "pending",
+    detail: quality ? "check / test / lint" : "尚未运行",
+  };
+}
+
+function decisionCheck(state: RunState): RunEvidence["checks"][number] {
+  return {
+    id: "decision",
+    label: "总控裁决",
+    status: state.finalDecision ? "pass" : "pending",
+    detail: state.finalDecision?.reason ?? "等待裁决",
+  };
+}
+
+function approvalCheck(state: RunState): RunEvidence["checks"][number] {
+  const pending = hasPendingApproval(state);
+  return {
+    id: "approval",
+    label: "人工审批",
+    status: !pending && state.status === "completed" ? "pass" : "pending",
+    detail: pending ? "等待你确认" : "无需审批",
+  };
+}
+
+function taskEvidence(item: RunState["tasks"][number]): RunEvidence["tasks"][number] {
+  return {
+    id: item.task.id,
+    title: item.task.title,
+    status: item.status,
+    attempts: item.attempts,
+    ...(item.commit ? { commit: item.commit } : {}),
+    ...(item.quality ? { qualityPassed: item.quality.passed } : {}),
+    ...(item.review ? { reviewVerdict: item.review.verdict } : {}),
+    ...(item.test ? { testVerdict: item.test.verdict } : {}),
+    findingCount: item.review?.findings.length ?? 0,
+  };
+}
+
+const EVIDENCE_ARTIFACTS: RunEvidence["artifacts"] = [
+  { path: "plan/architect-output.md", size: 3_200, kind: "agent-output", previewable: true },
+  { path: "quality/final.json", size: 1_900, kind: "quality", previewable: true },
+];
+
+function diffOf(run: DemoRun): RunEvidence["diff"] {
+  const base = {
+    available: run.diff.length > 0,
+    baseCommit: "9a1b2c3",
+    changedFiles: run.changedFiles,
+    truncated: false,
+  };
+  if (!run.diff) return { ...base, detail: "该运行尚未产生可对比的集成提交" };
+  return { ...base, targetCommit: "e4f5a6b", content: run.diff };
+}
+
+const USAGE_FIELDS = [
+  "agentInvocations",
+  "agentDurationMs",
+  "processOutputBytes",
+  "truncatedStreams",
+  "artifactBytes",
+  "inputTokens",
+  "cachedInputTokens",
+  "outputTokens",
+  "reportedCostUsd",
+] as const;
+
+type UsageField = (typeof USAGE_FIELDS)[number];
+type UsageTotals = Record<UsageField, number> & { costReported: boolean };
+
+function zeroTotals(): UsageTotals {
+  const totals = { costReported: true } as UsageTotals;
+  for (const field of USAGE_FIELDS) totals[field] = 0;
+  return totals;
+}
+
+/** One run's usage, with every missing counter read as zero. */
+function usageOf(usage: RunState["usage"]): Record<UsageField, number> {
+  const detail = {} as Record<UsageField, number>;
+  for (const field of USAGE_FIELDS) detail[field] = usage?.[field] ?? 0;
+  return detail;
+}
+
+function addUsage(totals: UsageTotals, detail: Record<UsageField, number>): void {
+  for (const field of USAGE_FIELDS) totals[field] += detail[field];
+}
+
+export function buildUsage(runs: DemoRun[]): UsageReport {
+  const totals = zeroTotals();
   const entries = runs.map(({ state }) => {
-    const usage = state.usage;
-    const detail = {
-      agentInvocations: usage?.agentInvocations ?? 0,
-      agentDurationMs: usage?.agentDurationMs ?? 0,
-      processOutputBytes: usage?.processOutputBytes ?? 0,
-      truncatedStreams: usage?.truncatedStreams ?? 0,
-      artifactBytes: usage?.artifactBytes ?? 0,
-      inputTokens: usage?.inputTokens ?? 0,
-      cachedInputTokens: usage?.cachedInputTokens ?? 0,
-      outputTokens: usage?.outputTokens ?? 0,
-      reportedCostUsd: usage?.reportedCostUsd ?? 0,
-      costReported: true,
+    const detail = usageOf(state.usage);
+    addUsage(totals, detail);
+    return {
+      runId: state.id,
+      goal: state.goal,
+      status: state.status,
+      strategy: state.strategy.name,
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+      usage: { ...detail, costReported: true },
     };
-    for (const key of Object.keys(totals) as Array<keyof typeof totals>) {
-      if (key === "costReported") continue;
-      totals[key] += detail[key];
-    }
-    return { runId: state.id, goal: state.goal, status: state.status, strategy: state.strategy.name, createdAt: state.createdAt, updatedAt: state.updatedAt, usage: detail };
   });
   return { generatedAt: new Date().toISOString(), runCount: runs.length, totals, runs: entries };
 }
