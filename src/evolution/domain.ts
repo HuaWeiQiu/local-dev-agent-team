@@ -676,56 +676,87 @@ export function createEvolutionTrustContext(input: {
   >;
 }): EvolutionTrustContext {
   rejectForbiddenPayload(input, "trust");
-  if (!input.roles || typeof input.roles !== "object" || Array.isArray(input.roles)) {
-    throw new EvolutionValidationError("trust.roles: Role map is required");
-  }
-
-  const configuredRolePromptPaths: string[] = [];
+  assertRoleMap(input.roles);
+  const collector = new PromptPathCollector();
   const roleAllowedProfiles = Object.create(null) as Record<string, readonly string[]>;
-  const seenPaths = new Set<string>();
-
   for (const [roleName, role] of Object.entries(input.roles)) {
-    if (!roleName.trim()) {
-      throw new EvolutionValidationError("trust.roles: Role name must be non-empty");
-    }
-    if (!role || typeof role !== "object" || Array.isArray(role)) {
-      throw new EvolutionValidationError(`trust.roles.${roleName}: Invalid role policy`);
-    }
-    if (!Array.isArray(role.allowedProfiles) || role.allowedProfiles.length === 0) {
-      throw new EvolutionValidationError(
-        `trust.roles.${roleName}.allowedProfiles: At least one allowed profile is required`,
-      );
-    }
-    for (const profile of role.allowedProfiles) {
-      if (typeof profile !== "string" || !profile.trim()) {
-        throw new EvolutionValidationError(
-          `trust.roles.${roleName}.allowedProfiles: Profile names must be non-empty strings`,
-        );
-      }
-    }
-    roleAllowedProfiles[roleName] = [...role.allowedProfiles];
-
-    if (role.promptFile !== undefined) {
-      if (typeof role.promptFile !== "string") {
-        throw new EvolutionValidationError(
-          `trust.roles.${roleName}.promptFile: Must be a repository-relative Markdown path`,
-        );
-      }
-      const reason = describeUnsafePath(role.promptFile, { requireMarkdown: true });
-      if (reason) {
-        throw new EvolutionValidationError(`trust.roles.${roleName}.promptFile: ${reason}`);
-      }
-      if (!seenPaths.has(role.promptFile)) {
-        seenPaths.add(role.promptFile);
-        configuredRolePromptPaths.push(role.promptFile);
-      }
-    }
+    roleAllowedProfiles[roleName] = roleProfiles(roleName, role);
+    collector.add(roleName, role);
   }
-
   return deepFreeze({
-    configuredRolePromptPaths,
+    configuredRolePromptPaths: collector.paths,
     roleAllowedProfiles,
   });
+}
+
+function assertRoleMap(roles: unknown): asserts roles is Record<string, RolePolicyInput> {
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) {
+    throw new EvolutionValidationError("trust.roles: Role map is required");
+  }
+}
+
+type RolePolicyInput = { allowedProfiles: readonly string[]; promptFile?: string };
+
+/** One role's profile list, validated. */
+function roleProfiles(roleName: string, role: RolePolicyInput): readonly string[] {
+  assertRoleEntry(roleName, role);
+  const profiles = profileList(roleName, role.allowedProfiles);
+  return [...profiles];
+}
+
+function assertRoleEntry(roleName: string, role: RolePolicyInput): void {
+  if (!roleName.trim()) {
+    throw new EvolutionValidationError("trust.roles: Role name must be non-empty");
+  }
+  assertPlainObject(role, `trust.roles.${roleName}: Invalid role policy`);
+}
+
+/** Rejects null, arrays and primitives; the message says which field. */
+function assertPlainObject(value: unknown, message: string): asserts value is object {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new EvolutionValidationError(message);
+  }
+}
+
+function profileList(roleName: string, profiles: unknown): readonly string[] {
+  const nonEmpty = nonEmptyString;
+  if (!Array.isArray(profiles) || profiles.length === 0) {
+    throw new EvolutionValidationError(
+      `trust.roles.${roleName}.allowedProfiles: At least one allowed profile is required`,
+    );
+  }
+  if (!profiles.every(nonEmpty)) {
+    throw new EvolutionValidationError(
+      `trust.roles.${roleName}.allowedProfiles: Profile names must be non-empty strings`,
+    );
+  }
+  return profiles;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** Collects each role's prompt file once, in first-seen order. */
+class PromptPathCollector {
+  readonly paths: string[] = [];
+  readonly #seen = new Set<string>();
+
+  add(roleName: string, role: RolePolicyInput): void {
+    if (role.promptFile === undefined) return;
+    if (typeof role.promptFile !== "string") {
+      throw new EvolutionValidationError(
+        `trust.roles.${roleName}.promptFile: Must be a repository-relative Markdown path`,
+      );
+    }
+    const reason = describeUnsafePath(role.promptFile, { requireMarkdown: true });
+    if (reason) {
+      throw new EvolutionValidationError(`trust.roles.${roleName}.promptFile: ${reason}`);
+    }
+    if (this.#seen.has(role.promptFile)) return;
+    this.#seen.add(role.promptFile);
+    this.paths.push(role.promptFile);
+  }
 }
 
 export function parseEvolutionPolicy(
@@ -852,6 +883,13 @@ export function assertPromotionRecordMatchesProposal(
   record: PromotionRecord,
   proposal: EvolutionProposal,
 ): void {
+  assertRecordBinding(record, proposal);
+  assertRecordEvaluation(record, proposal);
+  assertRecordTransition(record, proposal);
+  assertRecordDigest(record, proposal);
+}
+
+function assertRecordBinding(record: PromotionRecord, proposal: EvolutionProposal): void {
   if (record.proposalId !== proposal.id) {
     throw new EvolutionValidationError(
       `promotion.proposalId: Record is bound to '${record.proposalId}', not '${proposal.id}'`,
@@ -862,6 +900,9 @@ export function assertPromotionRecordMatchesProposal(
       `promotion: Proposal '${proposal.id}' is '${proposal.status}', not promoted or rolled-back`,
     );
   }
+}
+
+function assertRecordEvaluation(record: PromotionRecord, proposal: EvolutionProposal): void {
   if (!proposal.evaluation) {
     throw new EvolutionValidationError(
       `promotion: Proposal '${proposal.id}' is missing evaluation evidence required for promotion`,
@@ -873,27 +914,32 @@ export function assertPromotionRecordMatchesProposal(
     );
   }
   if (!record.evaluation.passed) {
-    throw new EvolutionValidationError(
-      `promotion.evaluation: Passing evaluation is required`,
-    );
-  }
-  const promotionTransition = proposal.transitions.find(
-    (transition) => transition.from === "evaluated" && transition.to === "promoted",
-  );
-  if (!promotionTransition || record.at !== promotionTransition.at) {
-    throw new EvolutionValidationError(
-      `promotion.at: Record timestamp does not match proposal '${proposal.id}' promotion transition`,
-    );
-  }
-  if (
-    !proposal.promotionRecordDigest ||
-    computePromotionRecordDigest(record) !== proposal.promotionRecordDigest
-  ) {
-    throw new EvolutionValidationError(
-      `promotion: Record does not match proposal '${proposal.id}' immutable promotion digest`,
-    );
+    throw new EvolutionValidationError("promotion.evaluation: Passing evaluation is required");
   }
 }
+
+function assertRecordTransition(record: PromotionRecord, proposal: EvolutionProposal): void {
+  const transition = proposal.transitions.find(
+    (item) => item.from === "evaluated" && item.to === "promoted",
+  );
+  if (transition && record.at === transition.at) return;
+  throw new EvolutionValidationError(
+    `promotion.at: Record timestamp does not match proposal '${proposal.id}' promotion transition`,
+  );
+}
+
+function assertRecordDigest(record: PromotionRecord, proposal: EvolutionProposal): void {
+  if (
+    proposal.promotionRecordDigest &&
+    computePromotionRecordDigest(record) === proposal.promotionRecordDigest
+  ) {
+    return;
+  }
+  throw new EvolutionValidationError(
+    `promotion: Record does not match proposal '${proposal.id}' immutable promotion digest`,
+  );
+}
+
 
 export function parseEvolutionEvidence(input: unknown): EvolutionEvidence {
   rejectForbiddenPayload(input, "evidence");
@@ -1079,6 +1125,16 @@ export function assertPromotionAllowed(input: {
   decision: HumanDecision;
 }): EvaluationResult {
   const { proposal, decision } = input;
+  assertPromotableStatus(proposal);
+  const evidence = parseEvolutionEvidence(input.evidence);
+  assertEvidenceBoundToProposal(proposal, evidence);
+  const evaluation = recomputeEvaluation(proposal, evidence);
+  assertEvaluationPassed(proposal, evaluation);
+  assertDecisionComplete(proposal, decision);
+  return evaluation;
+}
+
+function assertPromotableStatus(proposal: EvolutionProposal): void {
   if (proposal.status !== "evaluated") {
     throw new EvolutionPromotionError(
       `Proposal '${proposal.id}' must be in 'evaluated' status before promotion (current: '${proposal.status}')`,
@@ -1089,47 +1145,54 @@ export function assertPromotionAllowed(input: {
       `Proposal '${proposal.id}' cannot be promoted: evaluation evidence is missing`,
     );
   }
+}
 
-  const evidence = parseEvolutionEvidence(input.evidence);
-  assertEvidenceBoundToProposal(proposal, evidence);
-
-  // Evidence supplied at promotion must match the evidence recorded at evaluation.
-  if (!deepEqual(evidence, proposal.evaluation.evidence)) {
+/** Evidence supplied at promotion must match the recorded evaluation snapshot. */
+function recomputeEvaluation(
+  proposal: EvolutionProposal,
+  evidence: Parameters<typeof computeEvaluationResult>[0],
+): EvaluationResult {
+  if (!deepEqual(evidence, proposal.evaluation!.evidence)) {
     throw new EvolutionPromotionError(
       `Proposal '${proposal.id}' cannot be promoted: evidence does not match the recorded evaluation snapshot`,
     );
   }
-
   const evaluation = computeEvaluationResult(evidence);
-  if (!deepEqual(evaluation, proposal.evaluation.result)) {
+  if (!deepEqual(evaluation, proposal.evaluation!.result)) {
     throw new EvolutionPromotionError(
       `Proposal '${proposal.id}' cannot be promoted: recomputed evaluation result is inconsistent`,
     );
   }
-
-  if (!evaluation.passed) {
-    throw new EvolutionPromotionError(
-      `Proposal '${proposal.id}' cannot be promoted: evaluation did not pass`,
-    );
-  }
-  if (!evaluation.deterministicPassed || evaluation.failedDeterministicIds.length > 0) {
-    throw new EvolutionPromotionError(
-      `Proposal '${proposal.id}' cannot be promoted: deterministic evidence failed`,
-    );
-  }
-  if (evaluation.advisoryVerdicts.some((verdict) => verdict !== "approve")) {
-    throw new EvolutionPromotionError(
-      `Proposal '${proposal.id}' cannot be promoted: advisory evidence did not fully approve`,
-    );
-  }
-  if (!decision.actor.trim() || !decision.reason.trim()) {
-    throw new EvolutionPromotionError(
-      `Proposal '${proposal.id}' cannot be promoted: human actor and reason are required`,
-    );
-  }
-
   return evaluation;
 }
+
+/** One rule per reason a passing evaluation can still fail. */
+function assertEvaluationPassed(proposal: EvolutionProposal, evaluation: EvaluationResult): void {
+  const failures: Array<[boolean, string]> = [
+    [!evaluation.passed, "evaluation did not pass"],
+    [
+      !evaluation.deterministicPassed || evaluation.failedDeterministicIds.length > 0,
+      "deterministic evidence failed",
+    ],
+    [
+      evaluation.advisoryVerdicts.some((verdict) => verdict !== "approve"),
+      "advisory evidence did not fully approve",
+    ],
+  ];
+  for (const [violated, detail] of failures) {
+    if (violated) {
+      throw new EvolutionPromotionError(`Proposal '${proposal.id}' cannot be promoted: ${detail}`);
+    }
+  }
+}
+
+function assertDecisionComplete(proposal: EvolutionProposal, decision: HumanDecision): void {
+  if (decision.actor.trim() && decision.reason.trim()) return;
+  throw new EvolutionPromotionError(
+    `Proposal '${proposal.id}' cannot be promoted: human actor and reason are required`,
+  );
+}
+
 
 /**
  * Atomically promote an evaluated proposal: validates evidence, appends the
@@ -1402,298 +1465,346 @@ export function describeUnsafePath(
   pathValue: string,
   options: { requireMarkdown?: boolean } = {},
 ): string | undefined {
-  if (!pathValue || pathValue.includes("\0")) {
-    return "Path must be a non-empty repository-relative string without null bytes";
-  }
-  if (pathValue !== pathValue.trim()) {
-    return "Path must not include leading or trailing whitespace";
-  }
-  if (isAbsolutePath(pathValue)) {
-    return "Absolute paths are not allowed";
-  }
-  if (pathValue.includes("\\")) {
-    return "Path must use POSIX separators only";
-  }
+  return structuralReason(pathValue) ?? contentReason(pathValue, options);
+}
 
-  const segments = pathValue.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    return "Path contains an empty, current-directory, or parent-directory segment";
+/** Shape rules: nothing here looks at what the file is. */
+function structuralReason(pathValue: string): string | undefined {
+  const rules: Array<[boolean, string]> = [
+    [!pathValue || pathValue.includes("\0"), "Path must be a non-empty repository-relative string without null bytes"],
+    [pathValue !== pathValue.trim(), "Path must not include leading or trailing whitespace"],
+    [
+      isAbsolutePath(pathValue) || WINDOWS_ABSOLUTE.test(pathValue) || UNC_PREFIX.test(pathValue),
+      "Absolute paths are not allowed",
+    ],
+    [pathValue.includes("\\"), "Path must use POSIX separators only"],
+    [
+      unsafeSegment(pathValue),
+      "Path contains an empty, current-directory, or parent-directory segment",
+    ],
+  ];
+  for (const [violated, reason] of rules) {
+    if (violated) return reason;
   }
-
-  // Reject Windows drive-like and UNC-like forms that survived earlier checks.
-  if (/^[A-Za-z]:/.test(pathValue) || pathValue.startsWith("//") || pathValue.startsWith("\\\\")) {
-    return "Absolute paths are not allowed";
-  }
-
-  const normalized = segments.join("/");
-  if (normalized !== pathValue) {
-    return "Path is not in normalized repository-relative form";
-  }
-
-  const lower = normalized.toLowerCase();
-  if (sourceCodePrefixes.some((prefix) => lower === prefix.slice(0, -1) || lower.startsWith(prefix))) {
-    return "Source-code targets are not allowlisted mutation surfaces";
-  }
-
-  const lastSegment = segments[segments.length - 1]!;
-  const dot = lastSegment.lastIndexOf(".");
-  const extension = dot === -1 ? "" : lastSegment.slice(dot).toLowerCase();
-  if (sourceCodeExtensions.has(extension)) {
-    return "Source-code targets are not allowlisted mutation surfaces";
-  }
-
-  if (options.requireMarkdown && extension !== ".md") {
-    return "Role prompt targets must be repository-relative Markdown paths";
-  }
-
   return undefined;
 }
 
+const WINDOWS_ABSOLUTE = /^[A-Za-z]:/;
+const UNC_PREFIX = /^(\/\/|\\\\|\\)/;
+
+function unsafeSegment(pathValue: string): boolean {
+  return pathValue
+    .split("/")
+    .some((segment) => !segment || segment === "." || segment === "..");
+}
+
+/** Content rules: which mutation surfaces the file kind belongs to. */
+function contentReason(
+  pathValue: string,
+  options: { requireMarkdown?: boolean },
+): string | undefined {
+  const normalized = pathValue.split("/").join("/").toLowerCase();
+  if (sourceCodePrefixes.some((prefix) => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix))) {
+    return "Source-code targets are not allowlisted mutation surfaces";
+  }
+  const extension = extensionOf(pathValue);
+  if (sourceCodeExtensions.has(extension)) {
+    return "Source-code targets are not allowlisted mutation surfaces";
+  }
+  if (options.requireMarkdown && extension !== ".md") {
+    return "Role prompt targets must be repository-relative Markdown paths";
+  }
+  return undefined;
+}
+
+function extensionOf(pathValue: string): string {
+  const last = pathValue.split("/").pop() ?? "";
+  const dot = last.lastIndexOf(".");
+  return dot === -1 ? "" : last.slice(dot).toLowerCase();
+}
+
 function refineProposalInvariants(
-  proposal: {
-    id: string;
-    createdAt: string;
-    status: EvolutionLifecycleStatus;
-    archivedAt?: string | undefined;
-    policy: EvolutionPolicy;
-    candidate: EvolutionCandidate;
-    transitions: LifecycleTransition[];
-    evaluation?: ProposalEvaluation | undefined;
-    promotionRecordDigest?: string | undefined;
-  },
+  proposal: ProposalLike,
   context: z.RefinementCtx,
 ): void {
-  // Candidate must satisfy the same path rules as parseEvolutionCandidate, relative to
-  // the proposal's policy snapshot (trust-context checks happen at parse/create time).
-  if (proposal.candidate.kind === "role-prompt") {
-    const pathReason = describeUnsafePath(proposal.candidate.path, { requireMarkdown: true });
-    if (pathReason) {
-      context.addIssue({
-        code: "custom",
-        path: ["candidate", "path"],
-        message: pathReason,
-      });
-    } else if (!proposal.policy.allowedPromptPaths.includes(proposal.candidate.path)) {
-      context.addIssue({
-        code: "custom",
-        path: ["candidate", "path"],
-        message: `Prompt path '${proposal.candidate.path}' is not allowlisted by the evolution policy`,
-      });
-    }
-  }
   const createdAtMs = Date.parse(proposal.createdAt);
+  addIssue(context, candidatePathIssue(proposal));
   if (Number.isNaN(createdAtMs)) {
-    context.addIssue({
-      code: "custom",
-      path: ["createdAt"],
-      message: "Invalid createdAt timestamp",
+    addIssue(context, { path: ["createdAt"], message: "Invalid createdAt timestamp" });
+    return;
+  }
+  refineArchival(proposal, createdAtMs, context);
+  refineTransitions(proposal, createdAtMs, context);
+  refineDigestPresence(proposal, context);
+  if (proposal.evaluation) refineEvaluation(proposal, createdAtMs, context);
+}
+
+type Issue = { path: Array<string | number>; message: string };
+
+function addIssue(context: z.RefinementCtx, issue: Issue | undefined): void {
+  if (!issue) return;
+  context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+}
+
+type ProposalLike = {
+  id: string;
+  createdAt: string;
+  status: EvolutionLifecycleStatus;
+  archivedAt?: string | undefined;
+  policy: EvolutionPolicy;
+  candidate: EvolutionCandidate;
+  transitions: LifecycleTransition[];
+  evaluation?: ProposalEvaluation | undefined;
+  promotionRecordDigest?: string | undefined;
+};
+
+/** A prompt candidate must be a safe markdown path the policy allows. */
+function candidatePathIssue(proposal: ProposalLike): Issue | undefined {
+  if (proposal.candidate.kind !== "role-prompt") return undefined;
+  const path = proposal.candidate.path;
+  const pathReason = describeUnsafePath(path, { requireMarkdown: true });
+  if (pathReason) return { path: ["candidate", "path"], message: pathReason };
+  if (proposal.policy.allowedPromptPaths.includes(path)) return undefined;
+  return {
+    path: ["candidate", "path"],
+    message: `Prompt path '${path}' is not allowlisted by the evolution policy`,
+  };
+}
+
+function refineArchival(
+  proposal: ProposalLike,
+  createdAtMs: number,
+  context: z.RefinementCtx,
+): void {
+  if (proposal.archivedAt === undefined) return;
+  if (!archivableStatuses.has(proposal.status)) {
+    addIssue(context, {
+      path: ["archivedAt"],
+      message: `Proposal status '${proposal.status}' cannot be archived`,
     });
     return;
   }
-
-  if (proposal.archivedAt !== undefined) {
-    if (!archivableStatuses.has(proposal.status)) {
-      context.addIssue({
-        code: "custom",
-        path: ["archivedAt"],
-        message: `Proposal status '${proposal.status}' cannot be archived`,
-      });
-    }
-    const archivedAtMs = Date.parse(proposal.archivedAt);
-    if (Number.isNaN(archivedAtMs) || archivedAtMs < createdAtMs) {
-      context.addIssue({
-        code: "custom",
-        path: ["archivedAt"],
-        message: "archivedAt must be a valid timestamp not preceding proposal creation",
-      });
-    }
+  const archivedAtMs = Date.parse(proposal.archivedAt);
+  if (Number.isNaN(archivedAtMs) || archivedAtMs < createdAtMs) {
+    addIssue(context, {
+      path: ["archivedAt"],
+      message: "archivedAt must be a valid timestamp not preceding proposal creation",
+    });
   }
+}
 
+/** Each proposal must carry a contiguous history from 'proposed' to its status. */
+function refineTransitions(
+  proposal: ProposalLike,
+  createdAtMs: number,
+  context: z.RefinementCtx,
+): void {
   if (proposal.status === "proposed") {
     if (proposal.transitions.length > 0) {
-      context.addIssue({
-        code: "custom",
+      addIssue(context, {
         path: ["transitions"],
         message: "A proposed proposal must not have lifecycle transitions",
       });
     }
-  } else if (proposal.transitions.length === 0) {
-    context.addIssue({
-      code: "custom",
+    return;
+  }
+  if (proposal.transitions.length === 0) {
+    addIssue(context, {
       path: ["transitions"],
       message: `Proposal status '${proposal.status}' requires a contiguous transition history starting from 'proposed'`,
     });
-  } else {
-    if (proposal.transitions[0]!.from !== "proposed") {
-      context.addIssue({
-        code: "custom",
-        path: ["transitions", 0, "from"],
-        message: "Transition history must begin from 'proposed'",
-      });
-    }
-
-    let previousAt = createdAtMs;
-    for (const [index, transition] of proposal.transitions.entries()) {
-      const atMs = Date.parse(transition.at);
-      if (Number.isNaN(atMs)) {
-        context.addIssue({
-          code: "custom",
-          path: ["transitions", index, "at"],
-          message: "Invalid transition timestamp",
-        });
-        continue;
-      }
-      if (atMs < previousAt) {
-        context.addIssue({
-          code: "custom",
-          path: ["transitions", index, "at"],
-          message: "Transition timestamps must be chronological and not precede creation",
-        });
-      }
-      previousAt = atMs;
-
-      if (index > 0) {
-        const previous = proposal.transitions[index - 1]!;
-        if (transition.from !== previous.to) {
-          context.addIssue({
-            code: "custom",
-            path: ["transitions", index, "from"],
-            message: `Transition history is discontinuous: expected from '${previous.to}', got '${transition.from}'`,
-          });
-        }
-      }
-    }
-
-    const final = proposal.transitions[proposal.transitions.length - 1]!;
-    if (final.to !== proposal.status) {
-      context.addIssue({
-        code: "custom",
-        path: ["status"],
-        message: `Proposal status '${proposal.status}' does not match final transition '${final.from}' -> '${final.to}'`,
+    return;
+  }
+  if (proposal.transitions[0]!.from !== "proposed") {
+    addIssue(context, {
+      path: ["transitions", 0, "from"],
+      message: "Transition history must begin from 'proposed'",
+    });
+  }
+  let previousAt = createdAtMs;
+  for (const [index, transition] of proposal.transitions.entries()) {
+    previousAt = refineTransitionAt(transition, index, previousAt, context);
+    if (index > 0 && transition.from !== proposal.transitions[index - 1]!.to) {
+      addIssue(context, {
+        path: ["transitions", index, "from"],
+        message: `Transition history is discontinuous: expected from '${proposal.transitions[index - 1]!.to}', got '${transition.from}'`,
       });
     }
   }
+  const final = proposal.transitions[proposal.transitions.length - 1]!;
+  if (final.to !== proposal.status) {
+    addIssue(context, {
+      path: ["status"],
+      message: `Proposal status '${proposal.status}' does not match final transition '${final.from}' -> '${final.to}'`,
+    });
+  }
+}
 
+/** Timestamps are chronological; the returned value is the newest one seen. */
+function refineTransitionAt(
+  transition: LifecycleTransition,
+  index: number,
+  previousAt: number,
+  context: z.RefinementCtx,
+): number {
+  const atMs = Date.parse(transition.at);
+  if (Number.isNaN(atMs)) {
+    addIssue(context, {
+      path: ["transitions", index, "at"],
+      message: "Invalid transition timestamp",
+    });
+    return previousAt;
+  }
+  if (atMs < previousAt) {
+    addIssue(context, {
+      path: ["transitions", index, "at"],
+      message: "Transition timestamps must be chronological and not precede creation",
+    });
+  }
+  return atMs;
+}
+
+function refineDigestPresence(proposal: ProposalLike, context: z.RefinementCtx): void {
+  refineEvaluationPresence(proposal, context);
+  refinePromotionDigest(proposal, context);
+}
+
+function refineEvaluationPresence(proposal: ProposalLike, context: z.RefinementCtx): void {
   const needsEvaluation = statusesRequiringEvaluation.has(proposal.status);
   if (needsEvaluation && !proposal.evaluation) {
-    context.addIssue({
-      code: "custom",
+    addIssue(context, {
       path: ["evaluation"],
       message: `Proposal status '${proposal.status}' requires evaluation evidence`,
     });
-  }
-  if (!needsEvaluation && proposal.evaluation) {
-    context.addIssue({
-      code: "custom",
+  } else if (!needsEvaluation && proposal.evaluation) {
+    addIssue(context, {
       path: ["evaluation"],
       message: `Proposal status '${proposal.status}' must not include evaluation evidence`,
     });
   }
+}
 
-  const needsPromotionRecord = proposal.status === "promoted" || proposal.status === "rolled-back";
+function refinePromotionDigest(proposal: ProposalLike, context: z.RefinementCtx): void {
+  const needsPromotionRecord =
+    proposal.status === "promoted" || proposal.status === "rolled-back";
   if (needsPromotionRecord && !proposal.promotionRecordDigest) {
-    context.addIssue({
-      code: "custom",
+    addIssue(context, {
       path: ["promotionRecordDigest"],
       message: `Proposal status '${proposal.status}' requires an immutable promotion record digest`,
     });
-  }
-  if (!needsPromotionRecord && proposal.promotionRecordDigest) {
-    context.addIssue({
-      code: "custom",
+  } else if (!needsPromotionRecord && proposal.promotionRecordDigest) {
+    addIssue(context, {
       path: ["promotionRecordDigest"],
       message: `Proposal status '${proposal.status}' must not include a promotion record digest`,
     });
   }
+}
 
-  if (proposal.evaluation) {
-    const digest = computeCandidateDigest(proposal.candidate);
-    if (proposal.evaluation.evidence.proposalId !== proposal.id) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "evidence", "proposalId"],
-        message: "Evaluation evidence is bound to a different proposal",
-      });
-    }
-    if (proposal.evaluation.evidence.candidateDigest !== digest) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "evidence", "candidateDigest"],
-        message: "Evaluation evidence candidate digest does not match the proposal candidate",
-      });
-    }
-    if (proposal.evaluation.result.proposalId !== proposal.id) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "result", "proposalId"],
-        message: "Evaluation result is bound to a different proposal",
-      });
-    }
-    if (proposal.evaluation.result.candidateDigest !== digest) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "result", "candidateDigest"],
-        message: "Evaluation result candidate digest does not match the proposal candidate",
-      });
-    }
+/** The evidence must describe this proposal, and its result must match. */
+function refineEvaluation(
+  proposal: ProposalLike,
+  createdAtMs: number,
+  context: z.RefinementCtx,
+): void {
+  const evaluation = proposal.evaluation!;
+  const digest = computeCandidateDigest(proposal.candidate);
+  for (const issue of evaluationBindingIssues(proposal, digest)) {
+    addIssue(context, issue);
+  }
+  const evaluationAtMs = Date.parse(evaluation.at);
+  if (!Number.isNaN(evaluationAtMs) && evaluationAtMs < createdAtMs) {
+    addIssue(context, {
+      path: ["evaluation", "at"],
+      message: "Evaluation timestamp must not precede proposal creation",
+    });
+  }
+  addIssue(context, evaluationTransitionIssue(proposal));
+}
 
-    try {
-      const recomputed = computeEvaluationResult(proposal.evaluation.evidence);
-      if (!deepEqual(recomputed, proposal.evaluation.result)) {
-        context.addIssue({
-          code: "custom",
-          path: ["evaluation", "result"],
-          message: "Evaluation result is inconsistent with the attached evidence",
-        });
-      }
-      if (
-        (proposal.status === "promoted" || proposal.status === "rolled-back") &&
-        !recomputed.passed
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["evaluation", "result", "passed"],
-          message: `Proposal status '${proposal.status}' requires a passing evaluation`,
-        });
-      }
-    } catch (error) {
-      context.addIssue({
-        code: "custom",
+function evaluationBindingIssues(proposal: ProposalLike, digest: string): Issue[] {
+  const evaluation = proposal.evaluation!;
+  const bound: Array<[boolean, Array<string | number>, string]> = [
+    [
+      evaluation.evidence.proposalId !== proposal.id,
+      ["evaluation", "evidence", "proposalId"],
+      "Evaluation evidence is bound to a different proposal",
+    ],
+    [
+      evaluation.evidence.candidateDigest !== digest,
+      ["evaluation", "evidence", "candidateDigest"],
+      "Evaluation evidence candidate digest does not match the proposal candidate",
+    ],
+    [
+      evaluation.result.proposalId !== proposal.id,
+      ["evaluation", "result", "proposalId"],
+      "Evaluation result is bound to a different proposal",
+    ],
+    [
+      evaluation.result.candidateDigest !== digest,
+      ["evaluation", "result", "candidateDigest"],
+      "Evaluation result candidate digest does not match the proposal candidate",
+    ],
+  ];
+  return [...boundIssues(bound), ...recomputeIssues(proposal, evaluation)];
+}
+
+function boundIssues(
+  checks: Array<[boolean, Array<string | number>, string]>,
+): Issue[] {
+  return checks.filter(([violated]) => violated).map(([, path, message]) => ({ path, message }));
+}
+
+/** The result must be what the evidence recomputes to, and a passing one. */
+function recomputeIssues(proposal: ProposalLike, evaluation: ProposalEvaluation): Issue[] {
+  try {
+    const recomputed = computeEvaluationResult(evaluation.evidence);
+    const issues: Issue[] = [];
+    if (!deepEqual(recomputed, evaluation.result)) {
+      issues.push({
+        path: ["evaluation", "result"],
+        message: "Evaluation result is inconsistent with the attached evidence",
+      });
+    }
+    if (needsPassingEvaluation(proposal.status) && !recomputed.passed) {
+      issues.push({
+        path: ["evaluation", "result", "passed"],
+        message: `Proposal status '${proposal.status}' requires a passing evaluation`,
+      });
+    }
+    return issues;
+  } catch (error) {
+    return [
+      {
         path: ["evaluation", "evidence"],
-        message:
-          error instanceof Error
-            ? error.message
-            : "Evaluation evidence is invalid",
-      });
-    }
-
-    const evaluationAtMs = Date.parse(proposal.evaluation.at);
-    if (!Number.isNaN(evaluationAtMs) && evaluationAtMs < createdAtMs) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "at"],
-        message: "Evaluation timestamp must not precede proposal creation",
-      });
-    }
-
-    const evaluateTransition = proposal.transitions.find(
-      (transition) => transition.from === "evaluating" && transition.to === "evaluated",
-    );
-    if (!evaluateTransition) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "at"],
-        message: "Evaluation requires an evaluating -> evaluated lifecycle transition",
-      });
-    } else if (proposal.evaluation.at !== evaluateTransition.at) {
-      context.addIssue({
-        code: "custom",
-        path: ["evaluation", "at"],
-        message: "Evaluation timestamp must match the evaluating -> evaluated transition",
-      });
-    }
+        message: error instanceof Error ? error.message : "Evaluation evidence is invalid",
+      },
+    ];
   }
 }
+
+function needsPassingEvaluation(status: EvolutionLifecycleStatus): boolean {
+  return status === "promoted" || status === "rolled-back";
+}
+
+
+/** A passing result needs the evaluating -> evaluated transition, at the same instant. */
+function evaluationTransitionIssue(proposal: ProposalLike): Issue | undefined {
+  const transition = proposal.transitions.find(
+    (item) => item.from === "evaluating" && item.to === "evaluated",
+  );
+  if (!transition) {
+    return {
+      path: ["evaluation", "at"],
+      message: "Evaluation requires an evaluating -> evaluated lifecycle transition",
+    };
+  }
+  if (proposal.evaluation!.at === transition.at) return undefined;
+  return {
+    path: ["evaluation", "at"],
+    message: "Evaluation timestamp must match the evaluating -> evaluated transition",
+  };
+}
+
 
 function assertEvidenceBoundToProposal(
   proposal: EvolutionProposal,
