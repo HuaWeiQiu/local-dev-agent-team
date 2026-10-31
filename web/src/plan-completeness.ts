@@ -36,30 +36,36 @@ export function namedDeliverablesInGoal(goal: string): string[] {
 }
 
 export function taskKind(task: Pick<Task, "id" | "title" | "description" | "ownedPaths" | "evidenceKind">): TaskKind {
-  if (task.evidenceKind === "host-evidence") {
-    return "host-evidence";
-  }
-  if (task.evidenceKind === "commands") {
-    const pathText = task.ownedPaths.join(" ");
-    if (task.ownedPaths.length > 0 && task.ownedPaths.every((item) => isDocPath(item))) {
-      return "docs";
-    }
-    if (DOCS_PATTERN.test(`${task.id} ${task.title}`) && isDocPath(pathText)) {
-      return "docs";
-    }
-    return "implement";
-  }
-  const text = `${task.id} ${task.title} ${task.description}`;
+  if (task.evidenceKind === "host-evidence") return "host-evidence";
+  if (task.evidenceKind === "commands") return commandsKind(task);
+  return inferredKind(task);
+}
+
+/** A task that promises commands is docs only when everything it owns is docs. */
+function commandsKind(task: Pick<Task, "id" | "title" | "ownedPaths" | "evidenceKind">): TaskKind {
+  const allDocs = ownsOnlyDocs(task);
+  if (allDocs && task.ownedPaths.length > 0) return "docs";
+  if (DOCS_PATTERN.test(`${task.id} ${task.title}`) && allDocs) return "docs";
+  return "implement";
+}
+
+/** Without an explicit evidence kind the wording and paths decide. */
+function inferredKind(task: Pick<Task, "id" | "title" | "description" | "ownedPaths">): TaskKind {
   if (RECON_PATTERN.test(`${task.id} ${task.title}`) || RECON_PATTERN.test(task.description)) {
     return "recon";
   }
-  if (task.ownedPaths.length > 0 && task.ownedPaths.every((item) => isDocPath(item))) {
-    return "docs";
-  }
-  if (DOCS_PATTERN.test(text) && task.ownedPaths.every((item) => isDocPath(item) || item.endsWith(".md"))) {
-    return "docs";
-  }
+  if (ownsOnlyDocs(task) && task.ownedPaths.length > 0) return "docs";
+  const text = `${task.id} ${task.title} ${task.description}`;
+  if (DOCS_PATTERN.test(text) && task.ownedPaths.every(isDocPathOrMarkdown)) return "docs";
   return "implement";
+}
+
+function ownsOnlyDocs(task: Pick<Task, "ownedPaths">): boolean {
+  return task.ownedPaths.every((item) => isDocPath(item));
+}
+
+function isDocPathOrMarkdown(item: string): boolean {
+  return isDocPath(item) || item.endsWith(".md");
 }
 
 export function taskKindLabel(kind: TaskKind): string {
@@ -73,58 +79,78 @@ export function taskKindLabel(kind: TaskKind): string {
 
 export function assessPlanCompleteness(plan: { tasks: Task[] }, goal: string): PlanCompletenessReport {
   const namedDeliverables = namedDeliverablesInGoal(goal);
-  const coveredDeliverables = namedDeliverables.filter((id) =>
-    plan.tasks.some((task) => taskCoversDeliverable(task, id)),
-  );
+  const coveredDeliverables = coveredIn(plan.tasks, namedDeliverables);
   const missing = namedDeliverables.filter((id) => !coveredDeliverables.includes(id));
   const kinds = plan.tasks.map((task) => ({ task, kind: taskKind(task) }));
   const recon = kinds.filter((item) => item.kind === "recon");
-  const issues: string[] = [];
-  const rejected: string[] = [];
-
-  if (missing.length > 0) {
-    rejected.push(`缺 ${missing.join(" / ")}`);
-  }
-  if (recon.length > 1) {
-    rejected.push(`只读侦察超过 1 条（${recon.map((item) => item.task.id).join(", ")}）`);
-  }
-  if (recon.length === plan.tasks.length && namedDeliverables.length > 0) {
-    rejected.push("唯一任务是只读侦察");
-  }
-  for (const item of recon) {
-    if (item.task.acceptanceCommands.length > 0) {
-      rejected.push(`只读任务 ${item.task.id} 禁止 acceptanceCommands`);
-    }
-  }
-  if (namedDeliverables.length > 0) {
-    for (const item of kinds) {
-      if (item.kind !== "implement") {
-        continue;
-      }
-      if (
-        item.task.acceptanceCommands.length === 0
-        && item.task.evidenceKind !== "host-evidence"
-        && item.task.ownedPaths.length === 0
-      ) {
-        rejected.push(`实现任务 ${item.task.id} 需要验收命令、owned path 或标成 host-evidence`);
-      }
-    }
-  }
-  if (recon.length === plan.tasks.length && namedDeliverables.length === 0 && plan.tasks.length === 1) {
-    issues.push("唯一任务是只读侦察");
-  } else if (recon.length === 1 && plan.tasks.length > 1) {
-    issues.push(`含只读侦察 ${recon[0]!.task.id}`);
-  }
-
-  const status: PlanCompletenessStatus =
-    rejected.length > 0 ? "rejected" : issues.length > 0 ? "incomplete" : "complete";
+  const rejected = rejections(kinds, recon, missing, namedDeliverables);
+  const issues = advisories(recon, namedDeliverables, plan.tasks.length);
   return {
-    status,
+    status: statusOf(rejected, issues),
     issues: [...rejected, ...issues],
     namedDeliverables,
     coveredDeliverables,
     reconTaskIds: recon.map((item) => item.task.id),
   };
+}
+
+function coveredIn(tasks: Task[], named: string[]): string[] {
+  return named.filter((id) => tasks.some((task) => taskCoversDeliverable(task, id)));
+}
+
+type Kinded = { task: Task; kind: TaskKind };
+
+/** Hard failures: the plan never reaches the scheduler. */
+function rejections(
+  kinds: Kinded[],
+  recon: Kinded[],
+  missing: string[],
+  named: string[],
+): string[] {
+  return [
+    ...missingDeliverables(missing),
+    ...reconRules(recon, named, kinds.length),
+    ...implementRules(kinds, named),
+  ];
+}
+
+function missingDeliverables(missing: string[]): string[] {
+  return missing.length > 0 ? [`缺 ${missing.join(" / ")}`] : [];
+}
+
+function reconRules(recon: Kinded[], named: string[], total: number): string[] {
+  const tooMany = recon.length > 1 ? [`只读侦察超过 1 条（${recon.map((item) => item.task.id).join(", ")}）`] : [];
+  const onlyRecon = recon.length === total && named.length > 0 ? ["唯一任务是只读侦察"] : [];
+  const withCommands = recon
+    .filter((item) => item.task.acceptanceCommands.length > 0)
+    .map((item) => `只读任务 ${item.task.id} 禁止 acceptanceCommands`);
+  return [...tooMany, ...onlyRecon, ...withCommands];
+}
+
+/** An implementation task must say how it will be proven. */
+function implementRules(kinds: Kinded[], named: string[]): string[] {
+  if (named.length === 0) return [];
+  return kinds
+    .filter((item) => item.kind === "implement" && !hasProof(item.task))
+    .map((item) => `实现任务 ${item.task.id} 需要验收命令、owned path 或标成 host-evidence`);
+}
+
+function hasProof(task: Task): boolean {
+  if (task.acceptanceCommands.length > 0) return true;
+  if (task.evidenceKind === "host-evidence") return true;
+  return task.ownedPaths.length > 0;
+}
+
+/** Soft findings: the plan may run, but it is not complete. */
+function advisories(recon: Kinded[], named: string[], total: number): string[] {
+  if (recon.length === total && named.length === 0 && total === 1) return ["唯一任务是只读侦察"];
+  if (recon.length === 1 && total > 1) return [`含只读侦察 ${recon[0]!.task.id}`];
+  return [];
+}
+
+function statusOf(rejected: string[], issues: string[]): PlanCompletenessStatus {
+  if (rejected.length > 0) return "rejected";
+  return issues.length > 0 ? "incomplete" : "complete";
 }
 
 export function planCompletenessForRun(run: Pick<RunState, "goal" | "plan" | "tasks" | "error">): PlanCompletenessReport | undefined {
@@ -152,18 +178,21 @@ export function completenessBarCopy(report: PlanCompletenessReport): { tone: "su
 }
 
 export function taskPhaseLabel(task: TaskRunState, runStatus: RunState["status"]): string | undefined {
-  if (task.status === "working") {
-    if (runStatus === "reviewing-testing" || task.review || task.test) return "审查 / 测试";
-    if (task.quality) return "质量门";
-    return "工作中";
-  }
-  if (task.status === "reworking") return "返工";
-  if (task.status === "blocked") return "阻塞";
-  if (task.status === "passed") return "已通过";
-  if (task.status === "merged") return "已合并";
-  if (task.quality && !task.review && !task.test) return "质量门";
-  if (task.review || task.test) return "审查 / 测试";
-  return undefined;
+  if (task.status === "working") return workingPhase(task, runStatus);
+  return SETTLED_PHASE[task.status];
+}
+
+const SETTLED_PHASE: Partial<Record<TaskRunState["status"], string>> = {
+  reworking: "返工",
+  blocked: "阻塞",
+  passed: "已通过",
+  merged: "已合并",
+};
+
+/** While a task works, the run status and the artefacts say what it is doing. */
+function workingPhase(task: TaskRunState, runStatus: RunState["status"]): string {
+  if (runStatus === "reviewing-testing" || task.review || task.test) return "审查 / 测试";
+  return task.quality ? "质量门" : "工作中";
 }
 
 export function acceptanceSummary(task: Task): string {
@@ -201,20 +230,27 @@ function normalizeDeliverableId(raw: string): string {
   return raw.toUpperCase();
 }
 
+type DeliverableParts = [prefix: string, major: string, minor: string | undefined];
+
+function splitDeliverable(id: string): DeliverableParts | undefined {
+  const match = id.match(/^([TP])(\d+)(?:\.(\d+))?$/);
+  if (!match) return undefined;
+  return [match[1]!, match[2]!, match[3]];
+}
+
 function compareDeliverableIds(left: string, right: string): number {
-  const leftParts = left.match(/^([TP])(\d+)(?:\.(\d+))?$/);
-  const rightParts = right.match(/^([TP])(\d+)(?:\.(\d+))?$/);
-  if (leftParts && rightParts) {
-    if (leftParts[1] !== rightParts[1]) {
-      return leftParts[1]!.localeCompare(rightParts[1]!);
-    }
-    const major = Number(leftParts[2]) - Number(rightParts[2]);
-    if (major !== 0) {
-      return major;
-    }
-    return Number(leftParts[3] ?? 0) - Number(rightParts[3] ?? 0);
-  }
-  return left.localeCompare(right);
+  const leftParts = splitDeliverable(left);
+  const rightParts = splitDeliverable(right);
+  if (!leftParts || !rightParts) return left.localeCompare(right);
+  return compareParts(leftParts, rightParts);
+}
+
+function compareParts(left: DeliverableParts, right: DeliverableParts): number {
+  const byPrefix = left[0].localeCompare(right[0]);
+  if (byPrefix !== 0) return byPrefix;
+  const byMajor = Number(left[1]) - Number(right[1]);
+  if (byMajor !== 0) return byMajor;
+  return Number(left[2] ?? 0) - Number(right[2] ?? 0);
 }
 
 function isDocPath(pattern: string): boolean {
