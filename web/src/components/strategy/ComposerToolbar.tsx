@@ -7,6 +7,7 @@ import { cn } from "../../ui/cn";
 import { Select } from "../../ui/form";
 import { Tooltip } from "../../ui/tooltip";
 import type { ComposerFeedback } from "./draft";
+import { PILL_TONE, pillState, pillText, type PillState } from "./composer/status-pill";
 
 const toggleActive = "bg-accent-soft text-accent-ink hover:bg-accent-soft";
 const collapsible = "@max-4xl:w-8 @max-4xl:px-0";
@@ -121,18 +122,29 @@ function StatusPill({
   dirty: boolean;
   submitting: boolean;
 }) {
-  const failed = feedback?.kind === "error";
-  const tone = failed ? "danger" : feedback ? "success" : dirty ? "warning" : "neutral";
-  const text = failed ? "操作失败" : feedback?.message ?? (dirty ? "草稿待预检" : "已加载策略");
-  const Icon = submitting ? LoaderCircle : failed ? CircleAlert : feedback ? Check : dirty ? CircleDot : Check;
+  const state = pillState({ feedback, dirty, submitting });
+  const visible = state === "submitting" ? "submitting" : state;
   return (
     <Badge
-      tone={tone}
+      tone={PILL_TONE[state]}
       role="status"
       className="h-7 min-w-0 max-w-full gap-1.5 px-3 text-xs [&_svg]:size-3.5 [&_svg]:shrink-0"
     >
-      <Icon aria-hidden className={cn(submitting && "motion-safe:animate-spin")} />
-      <span className="truncate">{text}</span>
+      <PillIcon state={visible} />
+      <span className="truncate">{pillText(state, feedback)}</span>
     </Badge>
   );
+}
+
+const PILL_ICONS = {
+  submitting: LoaderCircle,
+  failed: CircleAlert,
+  reported: Check,
+  dirty: CircleDot,
+  clean: Check,
+} as const;
+
+function PillIcon({ state }: { state: PillState }) {
+  const Icon = PILL_ICONS[state];
+  return <Icon aria-hidden className={cn(state === "submitting" && "motion-safe:animate-spin")} />;
 }
