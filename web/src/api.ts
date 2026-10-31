@@ -1,3 +1,4 @@
+import type { TicketAttention } from "./attention.js";
 import type {
   AutomaticEvolutionSnapshot,
   ExperienceEntry,
@@ -132,6 +133,11 @@ export async function saveOnboardingQuality(
     method: "PUT",
     body: JSON.stringify({ commands }),
   });
+}
+
+/** Who is waiting on a person, and how much is moving without one. */
+export async function getTicketAttention(scope: ProjectScope): Promise<TicketAttention> {
+  return await request<TicketAttention>(`${apiRoot(scope)}/tickets`);
 }
 
 export async function getRuns(scope: ProjectScope): Promise<RunSummary[]> {
