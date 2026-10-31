@@ -1,4 +1,13 @@
-import type { LiveAgent, RunEvent, RunState, RunStatus, RunSummary, Task, TaskStatus } from "../types";
+import type {
+  LiveAgent,
+  RunEvent,
+  RunState,
+  RunStatus,
+  RunSummary,
+  StrategyDefinition,
+  Task,
+  TaskStatus,
+} from "../types";
 import {
   buildDemoRuns,
   buildEvidence,
@@ -44,12 +53,84 @@ function summarize(state: RunState): RunSummary {
   };
 }
 
-class DemoServer {
-  private readonly base = Date.now();
-  private readonly runs = new Map<string, DemoRun[]>([
-    ["storefront", buildDemoRuns(this.base)],
+const DEFAULT_STRATEGY = "balanced";
+
+function withDefault<T>(value: T | undefined, fallback: T): T {
+  return value ?? fallback;
+}
+
+const RUN_LIMITS = {
+  executionTimeoutSeconds: 900,
+  maxAgentInvocations: 64,
+  maxProcessOutputBytes: 4_000_000,
+  maxArtifactBytes: 8_000_000,
+  approvalTimeoutSeconds: 3600,
+} as const;
+
+function strategyDefinition(name: string): StrategyDefinition {
+  const definitions = demoConfig.strategies.definitions;
+  return definitions[name] ?? definitions[DEFAULT_STRATEGY]!;
+}
+
+function newRunState(id: string, goal: string, strategy: string | undefined): RunState {
+  const name = strategy ?? DEFAULT_STRATEGY;
+  const def = strategyDefinition(name);
+  const now = new Date().toISOString();
+  return {
+    id,
+    goal,
+    status: "created",
+    strategy: {
+      name,
+      maxParallel: withDefault(def.maxParallel, 3),
+      maxReworkAttempts: withDefault(def.maxReworkAttempts, 2),
+      ...RUN_LIMITS,
+      roleProfiles: def.roleProfiles,
+      approvalGates: withDefault(def.approvalGates, ["final"]),
+      topology: def.compiledTopology,
+    },
+    profileOverrides: {},
+    createdAt: now,
+    updatedAt: now,
+    tasks: [],
+    history: [{ at: now, status: "created", message: "运行已创建" }],
+  };
+}
+
+function initialRuns(base: number): Map<string, DemoRun[]> {
+  return new Map([
+    ["storefront", buildDemoRuns(base)],
     ["docs-site", []],
   ]);
+}
+
+function delivers(
+  entry: { project: string; runId: string | undefined },
+  project: string,
+  run: DemoRun,
+): boolean {
+  if (entry.project !== project) return false;
+  return entry.runId === undefined || entry.runId === run.state.id;
+}
+
+function nextEvent(run: DemoRun, type: string, payload: unknown): RunEvent {
+  const sequence = (run.events.at(-1)?.sequence ?? 0) + 1;
+  return {
+    sequence,
+    id: `${run.state.id}-${sequence}`,
+    schemaVersion: 1,
+    runId: run.state.id,
+    type,
+    occurredAt: new Date().toISOString(),
+    payload,
+    traceId: "a".repeat(32),
+    spanId: sequence.toString(16).padStart(16, "0"),
+  };
+}
+
+export class DemoServer {
+  readonly base = Date.now();
+  private readonly runs = initialRuns(this.base);
   private readonly listeners = new Set<{ project: string; runId: string | undefined; fn: Listener }>();
   private tick = 0;
 
@@ -57,7 +138,7 @@ class DemoServer {
     window.setInterval(() => this.stream(), TICK_MS);
   }
 
-  private list(project: string): DemoRun[] {
+  list(project: string): DemoRun[] {
     let runs = this.runs.get(project);
     if (!runs) {
       runs = [];
@@ -66,7 +147,7 @@ class DemoServer {
     return runs;
   }
 
-  private find(project: string, runId: string): DemoRun | undefined {
+  find(project: string, runId: string): DemoRun | undefined {
     return this.list(project).find((entry) => entry.state.id === runId);
   }
 
@@ -80,26 +161,15 @@ class DemoServer {
     return this.find(project, runId)?.events ?? [];
   }
 
-  private emit(project: string, run: DemoRun, type: string, payload: unknown): void {
-    const last = run.events.at(-1);
-    const event: RunEvent = {
-      sequence: (last?.sequence ?? 0) + 1,
-      id: `${run.state.id}-${(last?.sequence ?? 0) + 1}`,
-      schemaVersion: 1,
-      runId: run.state.id,
-      type,
-      occurredAt: new Date().toISOString(),
-      payload,
-      traceId: "a".repeat(32),
-      spanId: ((last?.sequence ?? 0) + 1).toString(16).padStart(16, "0"),
-    };
+  emit(project: string, run: DemoRun, type: string, payload: unknown): void {
+    const event = nextEvent(run, type, payload);
     run.events.push(event);
     for (const entry of this.listeners) {
-      if (entry.project === project && (entry.runId === undefined || entry.runId === run.state.id)) entry.fn(event);
+      if (delivers(entry, project, run)) entry.fn(event);
     }
   }
 
-  private touch(project: string, run: DemoRun, status?: RunStatus, message?: string): void {
+  touch(project: string, run: DemoRun, status?: RunStatus, message?: string): void {
     const now = new Date().toISOString();
     run.state.updatedAt = now;
     if (status && status !== run.state.status) {
@@ -137,31 +207,7 @@ class DemoServer {
 
   createRun(project: string, goal: string, strategy: string | undefined): string {
     const id = `demo-new-${Math.random().toString(36).slice(2, 8)}`;
-    const def = demoConfig.strategies.definitions[strategy ?? "balanced"] ?? demoConfig.strategies.definitions.balanced!;
-    const now = new Date().toISOString();
-    const state: RunState = {
-      id,
-      goal,
-      status: "created",
-      strategy: {
-        name: strategy ?? "balanced",
-        maxParallel: def.maxParallel ?? 3,
-        maxReworkAttempts: def.maxReworkAttempts ?? 2,
-        executionTimeoutSeconds: 900,
-        maxAgentInvocations: 64,
-        maxProcessOutputBytes: 4_000_000,
-        maxArtifactBytes: 8_000_000,
-        roleProfiles: def.roleProfiles,
-        approvalGates: def.approvalGates ?? ["final"],
-        approvalTimeoutSeconds: 3600,
-        topology: def.compiledTopology,
-      },
-      profileOverrides: {},
-      createdAt: now,
-      updatedAt: now,
-      tasks: [],
-      history: [{ at: now, status: "created", message: "运行已创建" }],
-    };
+    const state = newRunState(id, goal, strategy);
     const run: DemoRun = { state, events: [], diff: "", changedFiles: [] };
     this.list(project).unshift(run);
     this.emit(project, run, "run.updated", { status: "created" });
@@ -214,7 +260,7 @@ class DemoServer {
     for (const [delay, step] of steps) window.setTimeout(step, delay);
   }
 
-  private demoAgents(run: DemoRun): LiveAgent[] {
+  demoAgents(run: DemoRun): LiveAgent[] {
     const now = new Date().toISOString();
     return run.state.tasks.flatMap((item, index) =>
       item.status === "working"
@@ -241,113 +287,293 @@ class DemoServer {
   act(project: string, runId: string, action: string, body: Record<string, unknown>): unknown {
     const run = this.find(project, runId);
     if (!run) return undefined;
-    switch (action) {
-      case "respond-approval": {
-        const approval = run.state.approvals?.find((item) => item.id === body.requestId);
-        if (approval) {
-          const decision = body.decision === "approved" ? "approved" : "rejected";
-          approval.status = decision;
-          approval.response = { decision, actor: String(body.actor ?? "demo"), reason: String(body.reason ?? ""), respondedAt: new Date().toISOString() };
-          this.emit(project, run, "approval.responded", { gate: approval.gate, decision, reason: body.reason });
-        }
-        this.touch(project, run, body.decision === "approved" ? "ready-to-merge" : "blocked", body.decision === "approved" ? "审批通过" : "审批驳回");
-        return {};
-      }
-      case "pause":
-        this.touch(project, run, "interrupted", "已暂停");
-        return {};
-      case "cancel":
-        this.touch(project, run, "cancelled", "已取消");
-        return {};
-      case "resume":
-        this.touch(project, run, "implementing", "从检查点继续");
-        return {};
-      case "publish":
-        run.state.pullRequestUrl = "https://example.com/storefront/pull/200";
-        run.state.pullRequestNumber = 200;
-        this.touch(project, run, "completed", "已发布");
-        return { runId, status: "completed", pullRequestUrl: run.state.pullRequestUrl };
-      case "retry":
-        return { runId: this.createRun(project, run.state.goal, run.state.strategy.name) };
-      case "delete": {
-        const runs = this.list(project);
-        runs.splice(runs.indexOf(run), 1);
-        return { deletedRunIds: [runId], reclaimedBytes: 0 };
-      }
-      default:
-        return undefined;
-    }
+    const handler = ACTIONS[action];
+    return handler ? handler(this, project, runId, run, body) : undefined;
   }
 
   handle(method: string, rawPath: string, body: Record<string, unknown>): { status: number; body: unknown } {
-    const scoped = /^\/api\/projects\/([^/]+)(\/.*)?$/.exec(rawPath);
-    const project = scoped ? decodeURIComponent(scoped[1]!) : "storefront";
-    const path = (scoped ? scoped[2] ?? "" : rawPath.replace(/^\/api/, "")).split("?")[0]!;
-    const ok = (payload: unknown) => ({ status: 200, body: payload });
-    const runs = this.list(project);
-
-    if (path === "/workspace") return ok(demoWorkspace);
-    if (path === "/config") return ok(demoConfig);
-    if (path === "/desktop/settings") return ok(demoDesktopSettings);
-    if (path.startsWith("/desktop/cli-inventory")) return ok({ inventory: demoDesktopSettings.inventory, fromCache: true });
-    if (path === "/evolution") return ok(demoEvolution);
-    if (path === "/experience") return ok(buildExperience(this.base));
-    if (path === "/experience/retrieve") return ok({ note: "演示数据", items: [] });
-    if (path === "/usage") return ok(buildUsage(runs));
-    if (path === "/jev/probe") return ok({ ok: false, latencyMs: 0, error: "演示模式不连接本地模型" });
-    if (path === "/onboarding" || path === "/onboarding/quality") {
-      return ok(demoOnboarding(project));
-    }
-    if (path === "/role-settings") {
-      return ok({ projectId: project, projectName: project, roles: {}, global: demoDesktopSettings.settings.defaults.roles, effective: demoDesktopSettings.settings.defaults.roles, sources: {} });
-    }
-    if (path === "/runs" && method === "GET") return ok({ runs: runs.map((entry) => summarize(entry.state)) });
-    if (path === "/runs" && method === "POST") {
-      return ok({ runId: this.createRun(project, String(body.goal ?? "演示运行"), typeof body.strategy === "string" ? body.strategy : undefined) });
-    }
-    if (path === "/runs/cleanup/preview") {
-      const candidates = runs
-        .filter((entry) => ["completed", "cancelled", "blocked", "interrupted"].includes(entry.state.status))
-        .map((entry) => ({ id: entry.state.id, goal: entry.state.goal, status: entry.state.status as "completed", updatedAt: entry.state.updatedAt, bytes: 120_000 }));
-      return ok({ token: "demo-token", expiresAt: iso(10 * minute, Date.now()), olderThanDays: Number(body.olderThanDays ?? 7), cutoff: new Date().toISOString(), candidates, totalBytes: candidates.length * 120_000 });
-    }
-    if (path === "/runs/cleanup") return ok({ deletedRunIds: [], reclaimedBytes: 0 });
-
-    const match = /^\/runs\/([^/]+)(?:\/(.*))?$/.exec(path);
-    if (match) {
-      const runId = decodeURIComponent(match[1]!);
-      const rest = match[2];
-      const run = this.find(project, runId);
-      if (!run) return { status: 404, body: { error: "运行不存在" } };
-      if (!rest) return ok({ run: run.state });
-      if (rest === "evidence") return ok({ evidence: buildEvidence(run) });
-      if (rest === "evidence/file") return ok({ file: { path: "plan/architect-output.md", size: 120, content: "# 演示产物\n\n这是演示数据，不对应真实文件。\n", truncated: false } });
-      if (rest === "export") return ok({});
-      if (rest === "agents") return ok({ agents: this.demoAgents(run) });
-      if (rest === "explain") return ok({ explanation: demoExplanation(run) });
-      if (rest === "usage") return ok({ usage: demoUsageBreakdown(run) });
-      if (rest === "replay") return ok({ steps: demoReplay(run) });
-      if (rest === "transcripts") return ok({ transcripts: demoTranscripts(run) });
-      if (rest === "transcript") return ok({ transcript: demoTranscript(new URLSearchParams(rawPath.split("?")[1] ?? "").get("id") ?? "") });
-      const taskDiff = /^tasks\/([^/]+)\/diff$/.exec(rest ?? "");
-      if (taskDiff) return ok({ diff: demoTaskDiff(run, decodeURIComponent(taskDiff[1]!)) });
-      const agentAction = /^agents\/([^/]+)\/(steer|interrupt|answer)$/.exec(rest ?? "");
-      if (agentAction && method === "POST") {
-        const agentId = decodeURIComponent(agentAction[1]!);
-        const actor = String(body.actor ?? "demo");
-        if (agentAction[2] === "steer") this.emit(project, run, "agent.steered", { agentId, actor, text: body.text });
-        else if (agentAction[2] === "interrupt") this.emit(project, run, "agent.interrupted", { agentId, actor, note: body.note, redirected: body.note !== undefined });
-        else this.emit(project, run, "agent.answered", { agentId, actor, questionId: body.questionId, answer: body.answer });
-        return ok({ ok: true });
-      }
-      const action = /^actions\/(.+)$/.exec(rest);
-      if (action && method === "POST") {
-        const result = this.act(project, runId, action[1]!, body);
-        return result === undefined ? { status: 404, body: { error: "演示模式不支持该操作" } } : ok(result);
-      }
-    }
-    return { status: 404, body: { error: "演示模式不支持该操作" } };
+    const { project, path } = parsePath(rawPath);
+    return (
+      platformResponse(path, project) ??
+      projectResponse(this, method, path, project, body) ??
+      runResponse(this, method, path, project, rawPath, body) ??
+      NOT_SUPPORTED
+    );
   }
+}
+
+interface DemoResponse {
+  status: number;
+  body: unknown;
+}
+
+const NOT_SUPPORTED: DemoResponse = { status: 404, body: { error: "演示模式不支持该操作" } };
+
+function ok(payload: unknown): DemoResponse {
+  return { status: 200, body: payload };
+}
+
+/** `/api/projects/<project>/<path>` with the default project as fallback. */
+function parsePath(rawPath: string): { project: string; path: string } {
+  const scoped = /^\/api\/projects\/([^/]+)(\/.*)?$/.exec(rawPath);
+  if (!scoped) return { project: "storefront", path: rawPath.replace(/^\/api/, "").split("?")[0]! };
+  return {
+    project: decodeURIComponent(scoped[1]!),
+    path: (scoped[2] ?? "").split("?")[0]!,
+  };
+}
+
+/** Endpoints that do not depend on the selected project's runs. */
+function platformResponse(path: string, project: string): DemoResponse | undefined {
+  if (path === "/workspace") return ok(demoWorkspace);
+  if (path === "/config") return ok(demoConfig);
+  if (path === "/desktop/settings") return ok(demoDesktopSettings);
+  if (path.startsWith("/desktop/cli-inventory")) {
+    return ok({ inventory: demoDesktopSettings.inventory, fromCache: true });
+  }
+  if (path === "/evolution") return ok(demoEvolution);
+  if (path === "/jev/probe") return ok({ ok: false, latencyMs: 0, error: "演示模式不连接本地模型" });
+  if (path === "/onboarding" || path === "/onboarding/quality") return ok(demoOnboarding(project));
+  if (path === "/role-settings") return ok(roleSettings(project));
+  return undefined;
+}
+
+function roleSettings(project: string): unknown {
+  const roles = demoDesktopSettings.settings.defaults.roles;
+  return {
+    projectId: project,
+    projectName: project,
+    roles: {},
+    global: roles,
+    effective: roles,
+    sources: {},
+  };
+}
+
+/** Endpoints scoped to the project's run collection. */
+function projectResponse(
+  server: DemoServer,
+  method: string,
+  path: string,
+  project: string,
+  body: Record<string, unknown>,
+): DemoResponse | undefined {
+  const runs = server.list(project);
+  if (path === "/experience") return ok(buildExperience(server.base));
+  if (path === "/experience/retrieve") return ok({ note: "演示数据", items: [] });
+  if (path === "/usage") return ok(buildUsage(runs));
+  if (path === "/runs") return runsResponse(server, method, project, runs, body);
+  if (path === "/runs/cleanup/preview") return ok(cleanupPreview(runs, body));
+  if (path === "/runs/cleanup") return ok({ deletedRunIds: [], reclaimedBytes: 0 });
+  return undefined;
+}
+
+function runsResponse(
+  server: DemoServer,
+  method: string,
+  project: string,
+  runs: DemoRun[],
+  body: Record<string, unknown>,
+): DemoResponse {
+  if (method === "GET") return ok({ runs: runs.map((entry) => summarize(entry.state)) });
+  return ok({
+    runId: server.createRun(
+      project,
+      String(body.goal ?? "演示运行"),
+      typeof body.strategy === "string" ? body.strategy : undefined,
+    ),
+  });
+}
+
+function cleanupPreview(runs: DemoRun[], body: Record<string, unknown>): unknown {
+  const candidates = runs
+    .filter((entry) => ["completed", "cancelled", "blocked", "interrupted"].includes(entry.state.status))
+    .map((entry) => ({
+      id: entry.state.id,
+      goal: entry.state.goal,
+      status: entry.state.status as "completed",
+      updatedAt: entry.state.updatedAt,
+      bytes: CLEANUP_BYTES,
+    }));
+  return {
+    token: "demo-token",
+    expiresAt: iso(10 * minute, Date.now()),
+    olderThanDays: Number(body.olderThanDays ?? 7),
+    cutoff: new Date().toISOString(),
+    candidates,
+    totalBytes: candidates.length * CLEANUP_BYTES,
+  };
+}
+
+const CLEANUP_BYTES = 120_000;
+
+/** `/runs/<id>/<rest>` — one run's detail endpoints. */
+function runResponse(
+  server: DemoServer,
+  method: string,
+  path: string,
+  project: string,
+  rawPath: string,
+  body: Record<string, unknown>,
+): DemoResponse | undefined {
+  const match = /^\/runs\/([^/]+)(?:\/(.*))?$/.exec(path);
+  if (!match) return undefined;
+  const runId = decodeURIComponent(match[1]!);
+  const run = server.find(project, runId);
+  if (!run) return { status: 404, body: { error: "运行不存在" } };
+  const rest = match[2];
+  if (!rest) return ok({ run: run.state });
+  return entityResponse({ server, method, project, runId, run, rest, rawPath, body });
+}
+
+interface EntityContext {
+  server: DemoServer;
+  method: string;
+  project: string;
+  runId: string;
+  run: DemoRun;
+  rest: string;
+  rawPath: string;
+  body: Record<string, unknown>;
+}
+
+const RUN_ENTITIES: Record<string, (ctx: EntityContext) => DemoResponse> = {
+  evidence: ({ run }) => ok({ evidence: buildEvidence(run) }),
+  "evidence/file": () => ok({ file: EVIDENCE_FILE }),
+  export: () => ok({}),
+  agents: (ctx) => ok({ agents: ctx.server.demoAgents(ctx.run) }),
+  explain: ({ run }) => ok({ explanation: demoExplanation(run) }),
+  usage: ({ run }) => ok({ usage: demoUsageBreakdown(run) }),
+  replay: ({ run }) => ok({ steps: demoReplay(run) }),
+  transcripts: ({ run }) => ok({ transcripts: demoTranscripts(run) }),
+};
+
+const EVIDENCE_FILE = {
+  path: "plan/architect-output.md",
+  size: 120,
+  content: "# 演示产物\n\n这是演示数据，不对应真实文件。\n",
+  truncated: false,
+};
+
+function entityResponse(ctx: EntityContext): DemoResponse {
+  const handler = RUN_ENTITIES[ctx.rest];
+  if (handler) return handler(ctx);
+  if (ctx.rest === "transcript") return ok({ transcript: demoTranscript(transcriptId(ctx.rawPath)) });
+  const taskDiff = /^tasks\/([^/]+)\/diff$/.exec(ctx.rest);
+  if (taskDiff) return ok({ diff: demoTaskDiff(ctx.run, decodeURIComponent(taskDiff[1]!)) });
+  const agentAction = /^agents\/([^/]+)\/(steer|interrupt|answer)$/.exec(ctx.rest);
+  if (agentAction && ctx.method === "POST") return ok(agentEvent(ctx, agentAction));
+  const action = /^actions\/(.+)$/.exec(ctx.rest);
+  if (!action || ctx.method !== "POST") return NOT_SUPPORTED;
+  const result = ctx.server.act(ctx.project, ctx.runId, action[1]!, ctx.body);
+  return result === undefined ? NOT_SUPPORTED : ok(result);
+}
+
+function transcriptId(rawPath: string): string {
+  return new URLSearchParams(rawPath.split("?")[1] ?? "").get("id") ?? "";
+}
+
+function agentEvent(ctx: EntityContext, match: RegExpExecArray): unknown {
+  const agentId = decodeURIComponent(match[1]!);
+  const actor = String(ctx.body.actor ?? "demo");
+  const server = ctx.server;
+  if (match[2] === "steer") {
+    server.emit(ctx.project, ctx.run, "agent.steered", { agentId, actor, text: ctx.body.text });
+  } else if (match[2] === "interrupt") {
+    server.emit(ctx.project, ctx.run, "agent.interrupted", {
+      agentId,
+      actor,
+      note: ctx.body.note,
+      redirected: ctx.body.note !== undefined,
+    });
+  } else {
+    server.emit(ctx.project, ctx.run, "agent.answered", {
+      agentId,
+      actor,
+      questionId: ctx.body.questionId,
+      answer: ctx.body.answer,
+    });
+  }
+  return { ok: true };
+}
+
+type ActionHandler = (
+  server: DemoServer,
+  project: string,
+  runId: string,
+  run: DemoRun,
+  body: Record<string, unknown>,
+) => unknown;
+
+const ACTIONS: Record<string, ActionHandler> = {
+  "respond-approval": (server, project, _runId, run, body) => respondApproval(server, project, run, body),
+  pause: (server, project, _runId, run) => {
+    server.touch(project, run, "interrupted", "已暂停");
+    return {};
+  },
+  cancel: (server, project, _runId, run) => {
+    server.touch(project, run, "cancelled", "已取消");
+    return {};
+  },
+  resume: (server, project, _runId, run) => {
+    server.touch(project, run, "implementing", "从检查点继续");
+    return {};
+  },
+  publish: (server, project, _runId, run) => publish(server, project, run),
+  retry: (server, project, _runId, run) => ({
+    runId: server.createRun(project, run.state.goal, run.state.strategy.name),
+  }),
+  delete: (server, project, runId, run) => deleteRun(server, project, runId, run),
+};
+
+function respondApproval(
+  server: DemoServer,
+  project: string,
+  run: DemoRun,
+  body: Record<string, unknown>,
+): unknown {
+  const approval = run.state.approvals?.find((item) => item.id === body.requestId);
+  const approved = body.decision === "approved";
+  if (approval) {
+    const decision = approved ? "approved" : "rejected";
+    approval.status = decision;
+    approval.response = {
+      decision,
+      actor: String(body.actor ?? "demo"),
+      reason: String(body.reason ?? ""),
+      respondedAt: new Date().toISOString(),
+    };
+    server.emit(project, run, "approval.responded", {
+      gate: approval.gate,
+      decision,
+      reason: body.reason,
+    });
+  }
+  server.touch(project, run, approved ? "ready-to-merge" : "blocked", approved ? "审批通过" : "审批驳回");
+  return {};
+}
+
+function publish(server: DemoServer, project: string, run: DemoRun): unknown {
+  run.state.pullRequestUrl = "https://example.com/storefront/pull/200";
+  run.state.pullRequestNumber = 200;
+  server.touch(project, run, "completed", "已发布");
+  return { runId: run.state.id, status: "completed", pullRequestUrl: run.state.pullRequestUrl };
+}
+
+function deleteRun(server: DemoServer, project: string, runId: string, run: DemoRun): unknown {
+  const runs = server.list(project);
+  runs.splice(runs.indexOf(run), 1);
+  return { deletedRunIds: [runId], reclaimedBytes: 0 };
+}
+
+/** `/api/projects/<project>/…?runId=…`, defaulting to the demo project. */
+function parseStreamUrl(url: string): { project: string; runId: string | undefined } {
+  const parsed = new URL(url, window.location.origin);
+  const scoped = /^\/api\/projects\/([^/]+)/.exec(parsed.pathname);
+  return {
+    project: scoped ? decodeURIComponent(scoped[1]!) : "storefront",
+    runId: parsed.searchParams.get("runId") ?? undefined,
+  };
 }
 
 class DemoEventSource {
@@ -364,10 +590,7 @@ class DemoEventSource {
   private off: (() => void) | undefined;
 
   constructor(readonly url: string, server: DemoServer) {
-    const parsed = new URL(url, window.location.origin);
-    const scoped = /^\/api\/projects\/([^/]+)/.exec(parsed.pathname);
-    const project = scoped ? decodeURIComponent(scoped[1]!) : "storefront";
-    const runId = parsed.searchParams.get("runId") ?? undefined;
+    const { project, runId } = parseStreamUrl(url);
     window.setTimeout(() => {
       if (this.readyState === 2) return;
       this.readyState = 1;
@@ -394,28 +617,49 @@ class DemoEventSource {
 export function installDemoMode(): void {
   const server = new DemoServer();
   const nativeFetch = window.fetch.bind(window);
-  window.fetch = async (input, init) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname + input.search : input.url;
-    const path = url.startsWith("http") ? new URL(url).pathname + new URL(url).search : url;
-    if (!path.startsWith("/api")) return await nativeFetch(input, init);
-    let body: Record<string, unknown> = {};
-    if (typeof init?.body === "string" && init.body) {
-      try {
-        body = JSON.parse(init.body) as Record<string, unknown>;
-      } catch {
-        body = {};
-      }
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 60));
-    const result = server.handle((init?.method ?? "GET").toUpperCase(), path, body);
-    return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
-  };
+  window.fetch = (input, init) => demoFetch(server, nativeFetch, input, init);
   class BoundEventSource extends DemoEventSource {
     constructor(url: string) {
       super(url, server);
     }
   }
   (window as unknown as { EventSource: unknown }).EventSource = BoundEventSource;
+}
+
+async function demoFetch(
+  server: DemoServer,
+  nativeFetch: typeof window.fetch,
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): Promise<Response> {
+  const path = requestPath(input);
+  if (!path.startsWith("/api")) return nativeFetch(input, init);
+  await new Promise((resolve) => window.setTimeout(resolve, 60));
+  const result = server.handle((init?.method ?? "GET").toUpperCase(), path, requestBody(init));
+  return new Response(JSON.stringify(result.body), {
+    status: result.status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function requestPath(input: RequestInfo | URL): string {
+  if (typeof input === "string") return absolutePath(input);
+  return input instanceof URL ? input.pathname + input.search : input.url;
+}
+
+function absolutePath(url: string): string {
+  if (!url.startsWith("http")) return url;
+  const parsed = new URL(url);
+  return parsed.pathname + parsed.search;
+}
+
+function requestBody(init: RequestInit | undefined): Record<string, unknown> {
+  if (typeof init?.body !== "string" || !init.body) return {};
+  try {
+    return JSON.parse(init.body) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 function demoOnboarding(project: string) {
