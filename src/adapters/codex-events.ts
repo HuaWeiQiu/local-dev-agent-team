@@ -61,16 +61,8 @@ export class CodexActivityParser implements AgentActivityParser {
   private consume(lines: string[]): AgentActivitySnapshot[] {
     const snapshots: AgentActivitySnapshot[] = [];
     for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let event: Record<string, unknown>;
-      try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (!isRecord(parsed)) continue;
-        event = parsed;
-      } catch {
-        continue;
-      }
+      const event = decodeEventLine(line);
+      if (!event) continue;
       const item = eventItem(event);
       if (!item || !this.updateFromItem(item, eventPhase(event))) continue;
       const snapshot = this.snapshot();
@@ -101,47 +93,45 @@ export class CodexActivityParser implements AgentActivityParser {
 
     for (const threadId of ids) {
       const state = isRecord(states?.[threadId]) ? states[threadId] : undefined;
-      const existing = this.agents.get(threadId);
-      const metadata = receivers.get(threadId);
-      const status = statusFromCollabState(state?.status)
-        ?? statusFromTool(tool, callStatus, phase)
-        ?? existing?.status
-        ?? "unknown";
-      const agentPath = metadata?.path ?? existing?.path;
-      const model = metadata?.model
-        ?? boundedString(stringField(item, "model"), 128)
-        ?? existing?.model;
-      const reasoning = metadata?.reasoning
-        ?? boundedString(stringField(item, "reasoning_effort", "reasoningEffort"), 32)
-        ?? existing?.reasoning;
-      changed = this.upsert({
+      const entry = this.mergeCollabThread({
         threadId,
-        status,
-        ...(agentPath ? { path: agentPath } : {}),
-        ...(model ? { model } : {}),
-        ...(reasoning ? { reasoning } : {}),
-      }) || changed;
+        state,
+        metadata: receivers.get(threadId),
+        item,
+        tool,
+        callStatus,
+        phase,
+      });
+      changed = this.upsert(entry) || changed;
     }
     return changed;
+  }
+
+  /** One collab thread: the most specific status and metadata wins. */
+  private mergeCollabThread(input: {
+    threadId: string;
+    state: Record<string, unknown> | undefined;
+    metadata: ReceiverMetadata | undefined;
+    item: Record<string, unknown>;
+    tool: string;
+    callStatus: string;
+    phase: EventPhase;
+  }): ChildAgentState {
+    const existing = this.agents.get(input.threadId);
+    const resolved = resolveCollabMetadata(input, existing);
+    return {
+      threadId: input.threadId,
+      status: resolveCollabStatus(input, existing),
+      ...(resolved.path ? { path: resolved.path } : {}),
+      ...(resolved.model ? { model: resolved.model } : {}),
+      ...(resolved.reasoning ? { reasoning: resolved.reasoning } : {}),
+    };
   }
 
   private updateFromSubagentActivity(item: Record<string, unknown>): boolean {
     const threadId = stringField(item, "agent_thread_id", "agentThreadId");
     if (!threadId) return false;
-    const existing = this.agents.get(threadId);
-    const kind = normalizedToken(stringField(item, "kind"));
-    const status: ChildAgentStatus = kind === "interrupted"
-      ? "interrupted"
-      : existing?.status ?? "running";
-    const agentPath = boundedString(stringField(item, "agent_path", "agentPath"), 256);
-    const resolvedPath = agentPath ?? existing?.path;
-    return this.upsert({
-      threadId,
-      status,
-      ...(resolvedPath ? { path: resolvedPath } : {}),
-      ...(existing?.model ? { model: existing.model } : {}),
-      ...(existing?.reasoning ? { reasoning: existing.reasoning } : {}),
-    });
+    return this.upsert(subagentEntry(threadId, item, this.agents.get(threadId)));
   }
 
   private upsert(agent: ChildAgentState): boolean {
@@ -185,14 +175,108 @@ function statusFromTool(
   phase: EventPhase,
 ): ChildAgentStatus | undefined {
   if (callStatus === "failed") return "failed";
-  if (tool === "closeagent" && (phase === "completed" || callStatus === "completed")) {
-    return "shutdown";
+  return TOOL_STATUS_RULES[tool]?.(phase, callStatus);
+}
+
+type ToolStatusRule = (
+  phase: EventPhase,
+  callStatus: string,
+) => ChildAgentStatus | undefined;
+
+/** Which child-agent status each collaboration tool implies. */
+const TOOL_STATUS_RULES: Record<string, ToolStatusRule> = {
+  closeagent: (phase, callStatus) =>
+    phase === "completed" || callStatus === "completed" ? "shutdown" : undefined,
+  spawnagent: (phase, callStatus) =>
+    phase === "started" || callStatus === "inprogress" ? "pending" : "running",
+  sendinput: () => "running",
+  resumeagent: () => "running",
+};
+
+interface CollabThreadInput {
+  threadId: string;
+  state: Record<string, unknown> | undefined;
+  metadata: ReceiverMetadata | undefined;
+  item: Record<string, unknown>;
+  tool: string;
+  callStatus: string;
+  phase: EventPhase;
+}
+
+/** The collab state wins, then the tool call, then what we already knew. */
+function resolveCollabStatus(
+  input: CollabThreadInput,
+  existing: ChildAgentState | undefined,
+): ChildAgentStatus {
+  return (
+    statusFromCollabState(input.state?.status)
+    ?? statusFromTool(input.tool, input.callStatus, input.phase)
+    ?? existing?.status
+    ?? "unknown"
+  );
+}
+
+/** Declared receiver metadata wins, then the item itself, then the last known. */
+function resolveCollabMetadata(
+  input: CollabThreadInput,
+  existing: ChildAgentState | undefined,
+): { path?: string; model?: string; reasoning?: string } {
+  return {
+    ...pick("path", input.metadata?.path, existing?.path),
+    ...pick("model", input.metadata?.model, boundedString(stringField(input.item, "model"), 128), existing?.model),
+    ...pick(
+      "reasoning",
+      input.metadata?.reasoning,
+      boundedString(stringField(input.item, "reasoning_effort", "reasoningEffort"), 32),
+      existing?.reasoning,
+    ),
+  };
+}
+
+function pick<K extends string>(
+  key: K,
+  ...candidates: Array<string | undefined>
+): { [P in K]?: string } {
+  const value = candidates.find((candidate) => Boolean(candidate));
+  return value ? ({ [key]: value } as { [P in K]?: string }) : {};
+}
+
+/** One JSONL line, or undefined when it is blank or not an object. */
+function decodeEventLine(line: string): Record<string, unknown> | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
-  if (tool === "spawnagent") {
-    return phase === "started" || callStatus === "inprogress" ? "pending" : "running";
-  }
-  if (tool === "sendinput" || tool === "resumeagent") return "running";
-  return undefined;
+}
+
+/** One subagent activity line folded onto what we already knew about the thread. */
+function subagentEntry(
+  threadId: string,
+  item: Record<string, unknown>,
+  existing: ChildAgentState | undefined,
+): ChildAgentState {
+  const path =
+    boundedString(stringField(item, "agent_path", "agentPath"), 256) ?? existing?.path;
+  return {
+    threadId,
+    status: subagentStatus(normalizedToken(stringField(item, "kind")), existing?.status),
+    ...(path ? { path } : {}),
+    ...(existing?.model ? { model: existing.model } : {}),
+    ...(existing?.reasoning ? { reasoning: existing.reasoning } : {}),
+  };
+}
+
+/** An interrupted subagent keeps that status; otherwise the last known one wins. */
+function subagentStatus(
+  kind: string,
+  previous: ChildAgentStatus | undefined,
+): ChildAgentStatus {
+  if (kind === "interrupted") return "interrupted";
+  return previous ?? "running";
 }
 
 function statusFromCollabState(value: unknown): ChildAgentStatus | undefined {
@@ -222,19 +306,36 @@ function receiverAgentMetadata(item: Record<string, unknown>): Map<string, Recei
   const raw = item.receiver_agents ?? item.receiverAgents;
   if (!Array.isArray(raw)) return result;
   for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const threadId = stringField(entry, "thread_id", "threadId", "agent_thread_id", "agentThreadId");
-    if (!threadId) continue;
-    const path = boundedString(stringField(entry, "agent_path", "agentPath", "path", "task_name", "taskName"), 256);
-    const model = boundedString(stringField(entry, "model"), 128);
-    const reasoning = boundedString(stringField(entry, "reasoning_effort", "reasoningEffort", "reasoning"), 32);
-    result.set(threadId, {
+    const parsed = receiverEntry(entry);
+    if (parsed) result.set(parsed.threadId, parsed.metadata);
+  }
+  return result;
+}
+
+/** One declared receiver, or undefined when it has no usable thread id. */
+function receiverEntry(
+  entry: unknown,
+): { threadId: string; metadata: ReceiverMetadata } | undefined {
+  if (!isRecord(entry)) return undefined;
+  const threadId = stringField(entry, "thread_id", "threadId", "agent_thread_id", "agentThreadId");
+  if (!threadId) return undefined;
+  const path = boundedString(
+    stringField(entry, "agent_path", "agentPath", "path", "task_name", "taskName"),
+    256,
+  );
+  const model = boundedString(stringField(entry, "model"), 128);
+  const reasoning = boundedString(
+    stringField(entry, "reasoning_effort", "reasoningEffort", "reasoning"),
+    32,
+  );
+  return {
+    threadId,
+    metadata: {
       ...(path ? { path } : {}),
       ...(model ? { model } : {}),
       ...(reasoning ? { reasoning } : {}),
-    });
-  }
-  return result;
+    },
+  };
 }
 
 function recordField(
