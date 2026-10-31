@@ -43,6 +43,8 @@ export interface TicketEnd {
 
 export interface Ticket {
   id: string;
+  /** The last failed delivery of Inputs, until a delivery succeeds or a new Assignment starts. */
+  delivery?: { error: string; at: string };
   /** The Thread this Ticket was opened on. */
   threadKey: string;
   mandate: Mandate;
