@@ -51,54 +51,79 @@ export function listTranscripts(
   artifacts: readonly EvidenceArtifact[],
   events: readonly RunEvent[],
 ): TranscriptSummary[] {
+  const dirs = transcriptDirs(artifacts);
+  const completed = completedInvocations(events);
+  return [...dirs.entries()]
+    .map(([dir, info]) => summaryFor(dir, info, completed))
+    .sort((left, right) => left.artifactKey.localeCompare(right.artifactKey));
+}
+
+/** Directories that hold a session or stdout log, with their total size. */
+function transcriptDirs(artifacts: readonly EvidenceArtifact[]): Map<string, { bytes: number; live: boolean }> {
   const dirs = new Map<string, { bytes: number; live: boolean }>();
   for (const artifact of artifacts) {
-    const segments = artifact.path.split("/");
-    const name = segments.pop();
-    if (name !== "stdout.log" && name !== "session.jsonl") continue;
-    if (segments.length < 2) continue;
-    const dir = segments.join("/");
-    const entry = dirs.get(dir) ?? { bytes: 0, live: false };
+    const located = locateLog(artifact);
+    if (!located) continue;
+    const entry = dirs.get(located.dir) ?? { bytes: 0, live: false };
     entry.bytes += artifact.size;
-    if (name === "session.jsonl") entry.live = true;
-    dirs.set(dir, entry);
+    if (located.live) entry.live = true;
+    dirs.set(located.dir, entry);
   }
+  return dirs;
+}
 
-  const completed = new Map<string, { role?: string; success?: boolean; durationMs?: number; profile?: string }>();
+function locateLog(artifact: EvidenceArtifact): { dir: string; live: boolean } | undefined {
+  const segments = artifact.path.split("/");
+  const name = segments.pop();
+  if (name !== "stdout.log" && name !== "session.jsonl") return undefined;
+  if (segments.length < 2) return undefined;
+  return { dir: segments.join("/"), live: name === "session.jsonl" };
+}
+
+type Completion = { role?: string; success?: boolean; durationMs?: number; profile?: string };
+
+/** The last completion per artifact key + profile, used to enrich a summary. */
+function completedInvocations(events: readonly RunEvent[]): Map<string, Completion> {
+  const completed = new Map<string, Completion>();
   for (const event of events) {
     if (event.type !== "agent.invocation.completed") continue;
-    const payload = event.payload as {
-      artifactKey?: string;
-      profile?: string;
-      role?: string;
-      success?: boolean;
-      durationMs?: number;
-    };
+    const payload = event.payload as Completion & { artifactKey?: string };
     if (payload.artifactKey && payload.profile) {
       completed.set(`${payload.artifactKey}/${payload.profile}`, payload);
     }
   }
+  return completed;
+}
 
-  return [...dirs]
-    .map(([dir, info]): TranscriptSummary => {
-      const segments = dir.split("/");
-      const profile = segments.at(-1)!;
-      const artifactKey = segments.slice(0, -1).join("/");
-      const seen = completed.get(dir);
-      const taskId = taskIdFromArtifactKey(`${artifactKey}/`);
-      return {
-        id: dir,
-        artifactKey,
-        profile,
-        live: info.live,
-        bytes: info.bytes,
-        ...(seen?.role ? { role: seen.role } : {}),
-        ...(taskId ? { taskId } : {}),
-        ...(seen?.success !== undefined ? { success: seen.success } : {}),
-        ...(seen?.durationMs !== undefined ? { durationMs: seen.durationMs } : {}),
-      };
-    })
-    .sort((left, right) => left.artifactKey.localeCompare(right.artifactKey));
+function summaryFor(
+  dir: string,
+  info: { bytes: number; live: boolean },
+  completed: Map<string, Completion>,
+): TranscriptSummary {
+  const segments = dir.split("/");
+  const artifactKey = segments.slice(0, -1).join("/");
+  return {
+    id: dir,
+    artifactKey,
+    profile: segments.at(-1)!,
+    live: info.live,
+    bytes: info.bytes,
+    ...completionFields(completed.get(dir), artifactKey),
+  };
+}
+
+/** Only the fields a completed invocation actually reported are copied. */
+function completionFields(
+  seen: Completion | undefined,
+  artifactKey: string,
+): Partial<TranscriptSummary> {
+  const taskId = taskIdFromArtifactKey(`${artifactKey}/`);
+  return {
+    ...(seen?.role ? { role: seen.role } : {}),
+    ...(taskId ? { taskId } : {}),
+    ...(seen?.success !== undefined ? { success: seen.success } : {}),
+    ...(seen?.durationMs !== undefined ? { durationMs: seen.durationMs } : {}),
+  };
 }
 
 function clip(text: string): string {
@@ -116,64 +141,111 @@ export function parseSessionLog(raw: string): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   const toolIndex = new Map<string, number>();
   for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    let event: SessionLine;
-    try {
-      event = JSON.parse(line) as SessionLine;
-    } catch {
-      continue;
-    }
-    const at = typeof event.at === "string" ? event.at : undefined;
-    const base = at ? { at } : {};
-    switch (event.type) {
-      case "message":
-        if (event.final === true && typeof event.text === "string") {
-          entries.push({ ...base, kind: "message", text: clip(event.text) });
-        }
-        break;
-      case "tool": {
-        const toolId = String(event.toolId ?? "");
-        const status = String(event.status ?? "started");
-        const text = typeof event.summary === "string" ? event.summary : String(event.name ?? "tool");
-        const existing = toolIndex.get(toolId);
-        if (existing !== undefined && entries[existing]) {
-          entries[existing] = {
-            ...entries[existing],
-            status,
-            text: typeof event.summary === "string" ? clip(event.summary) : entries[existing].text,
-          };
-        } else {
-          toolIndex.set(toolId, entries.length);
-          entries.push({ ...base, kind: "tool", label: String(event.name ?? "tool"), status, text: clip(text) });
-        }
-        break;
-      }
-      case "question":
-        entries.push({
-          ...base,
-          kind: "question",
-          text: clip(String(event.prompt ?? "")),
-          ...(event.secret === true ? { label: "secret" } : {}),
-        });
-        break;
-      case "notice":
-        entries.push({
-          ...base,
-          kind: "notice",
-          label: String(event.level ?? "info"),
-          text: clip(String(event.message ?? "")),
-        });
-        break;
-      case "turn-started":
-        entries.push({ ...base, kind: "turn", text: "turn started" });
-        break;
-      case "turn-completed":
-        entries.push({ ...base, kind: "turn", status: String(event.status ?? ""), text: `turn ${String(event.status ?? "completed")}` });
-        break;
-      default:
-    }
+    const event = parseLine(line);
+    if (!event) continue;
+    const entry = lineEntry(event, entries, toolIndex);
+    if (entry === "replace") continue;
+    if (entry) entries.push(entry);
   }
   return entries;
+}
+
+function parseLine(line: string): SessionLine | undefined {
+  if (!line.trim()) return undefined;
+  try {
+    return JSON.parse(line) as SessionLine;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One log line → an entry to append, "replace" when it updated an existing tool, or nothing. */
+function lineEntry(
+  event: SessionLine,
+  entries: TranscriptEntry[],
+  toolIndex: Map<string, number>,
+): TranscriptEntry | "replace" | undefined {
+  const base = event.at === undefined ? {} : { at: String(event.at) };
+  switch (event.type) {
+    case "message":
+      return finalMessage(event, base);
+    case "tool":
+      return toolEntry(event, base, entries, toolIndex);
+    case "question":
+      return questionEntry(event, base);
+    case "notice":
+      return noticeEntry(event, base);
+    case "turn-started":
+      return { ...base, kind: "turn", text: "turn started" };
+    case "turn-completed":
+      return completedTurn(event, base);
+    default:
+      return undefined;
+  }
+}
+
+type Base = { at?: string };
+
+function finalMessage(event: SessionLine, base: Base): TranscriptEntry | undefined {
+  if (event.final !== true || typeof event.text !== "string") return undefined;
+  return { ...base, kind: "message", text: clip(event.text) };
+}
+
+/** A repeated tool id updates the entry in place instead of appending. */
+function toolEntry(
+  event: SessionLine,
+  base: Base,
+  entries: TranscriptEntry[],
+  toolIndex: Map<string, number>,
+): TranscriptEntry | "replace" | undefined {
+  const toolId = String(event.toolId ?? "");
+  const existing = toolIndex.get(toolId);
+  if (existing !== undefined && entries[existing]) {
+    entries[existing] = { ...entries[existing], ...toolUpdate(event) };
+    return "replace";
+  }
+  toolIndex.set(toolId, entries.length);
+  return {
+    ...base,
+    kind: "tool",
+    label: String(event.name ?? "tool"),
+    status: String(event.status ?? "started"),
+    text: clip(toolText(event)),
+  };
+}
+
+function toolUpdate(event: SessionLine): Partial<TranscriptEntry> {
+  return {
+    status: String(event.status ?? "started"),
+    ...(typeof event.summary === "string" ? { text: clip(event.summary) } : {}),
+  };
+}
+
+function toolText(event: SessionLine): string {
+  return typeof event.summary === "string" ? event.summary : String(event.name ?? "tool");
+}
+
+function questionEntry(event: SessionLine, base: Base): TranscriptEntry {
+  return {
+    ...base,
+    kind: "question",
+    text: clip(String(event.prompt ?? "")),
+    ...(event.secret === true ? { label: "secret" } : {}),
+  };
+}
+
+function noticeEntry(event: SessionLine, base: Base): TranscriptEntry {
+  return {
+    ...base,
+    kind: "notice",
+    label: String(event.level ?? "info"),
+    text: clip(String(event.message ?? "")),
+  };
+}
+
+function completedTurn(event: SessionLine, base: Base): TranscriptEntry {
+  const status = String(event.status ?? "");
+  return { ...base, kind: "turn", status, text: `turn ${String(event.status ?? "completed")}` };
 }
 
 const OPERATOR_EVENTS: Record<string, string> = {
@@ -185,40 +257,60 @@ const OPERATOR_EVENTS: Record<string, string> = {
 
 /** Operator and watchdog actions on the agents that wrote this transcript. */
 export function operatorEntries(events: readonly RunEvent[], artifactKey: string): TranscriptEntry[] {
-  const agentIds = new Set(
-    events
-      .filter((event) => event.type === "agent.session.opened")
-      .map((event) => event.payload as { agentId?: string; artifactKey?: string })
-      .filter((payload) => payload.artifactKey === artifactKey && payload.agentId)
-      .map((payload) => payload.agentId!),
-  );
+  const agentIds = agentsFor(events, artifactKey);
   if (agentIds.size === 0) return [];
-  const entries: TranscriptEntry[] = [];
+  return events.flatMap((event) => operatorEntry(event, agentIds) ?? []);
+}
+
+/** The agents that opened a session for this transcript's artifact key. */
+function agentsFor(events: readonly RunEvent[], artifactKey: string): Set<string> {
+  const ids = new Set<string>();
   for (const event of events) {
-    const label = OPERATOR_EVENTS[event.type];
-    if (!label) continue;
-    const payload = event.payload as {
-      agentId?: string;
-      actor?: string;
-      text?: string;
-      note?: string;
-      answer?: string;
-      redacted?: boolean;
-      idleSeconds?: number;
-    };
-    if (!payload.agentId || !agentIds.has(payload.agentId)) continue;
-    const detail =
-      label === "stall"
-        ? `no output for ${payload.idleSeconds ?? "?"}s, nudged to continue`
-        : (payload.text ?? payload.note ?? (payload.redacted ? "[redacted]" : payload.answer) ?? "");
-    entries.push({
-      kind: "operator",
-      at: event.occurredAt,
-      label,
-      text: `${payload.actor ? `${payload.actor}: ` : ""}${clip(detail)}`.trim(),
-    });
+    if (event.type !== "agent.session.opened") continue;
+    const payload = event.payload as { agentId?: string; artifactKey?: string };
+    if (payload.artifactKey === artifactKey && payload.agentId) ids.add(payload.agentId);
   }
-  return entries;
+  return ids;
+}
+
+interface OperatorPayload {
+  agentId?: string;
+  actor?: string;
+  text?: string;
+  note?: string;
+  answer?: string;
+  redacted?: boolean;
+  idleSeconds?: number;
+}
+
+function operatorEntry(event: RunEvent, agentIds: Set<string>): TranscriptEntry[] | undefined {
+  const label = OPERATOR_EVENTS[event.type];
+  if (!label) return undefined;
+  const payload = event.payload as OperatorPayload;
+  if (!payload.agentId || !agentIds.has(payload.agentId)) return undefined;
+  return [
+    {
+      kind: "notice",
+      label,
+      text: operatorText(label, payload),
+      ...(event.occurredAt ? { at: event.occurredAt } : {}),
+    },
+  ];
+}
+
+const OPERATOR_TEXT: Record<string, (payload: OperatorPayload) => string> = {
+  stall: (payload) => `no output for ${payload.idleSeconds ?? "?"}s, nudged to continue`,
+  interrupt: (payload) => payload.note ?? "interrupted",
+  answer: (payload) => visible(payload.answer, payload.redacted),
+  steer: (payload) => visible(payload.text, payload.redacted),
+};
+
+function operatorText(label: string, payload: OperatorPayload): string {
+  return OPERATOR_TEXT[label]?.(payload) ?? "";
+}
+
+function visible(value: string | undefined, redacted: boolean | undefined): string {
+  return redacted === true ? "<redacted>" : value ?? "";
 }
 
 function normalizeDirectory(directory: string): string[] {
