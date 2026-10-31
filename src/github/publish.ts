@@ -18,7 +18,7 @@ export class GithubPublisher {
     private readonly client = new GithubClient(),
     /** The one write to the remote; injected so publication can be tested without a repo. */
     private readonly push: (state: RunState) => Promise<void> = async (state) =>
-      await this.gitFor(state).push(
+      await this.gitFor().push(
         state.integrationWorktree,
         this.loaded.config.github.remote,
         state.integrationBranch,
@@ -72,7 +72,7 @@ export class GithubPublisher {
     }
   }
 
-  private gitFor(state: RunState): GitManager {
+  private gitFor(): GitManager {
     const worktreesRoot = path.resolve(
       this.loaded.root,
       this.loaded.config.project.stateDirectory,
