@@ -2,6 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { selectExperiences, type RepoTrace } from "../src/domain/repo-tree.js";
 import { ExperienceCatalog } from "../src/experience/catalog.js";
 import { extractCandidatesFromRun } from "../src/experience/extract.js";
 import { sharedExperienceCatalogPath } from "../src/experience/paths.js";
@@ -180,6 +181,321 @@ describe("experience extract + shared service", () => {
     expect(rework?.note).toMatch(/返工/);
   });
 
+  it("extracts a success candidate from a run that stopped at ready-to-merge", async () => {
+    const state = fixtureRun({
+      status: "ready-to-merge",
+      tasks: [
+        {
+          task: {
+            id: "T1",
+            title: "Add locale option",
+            description: "Render a zh greeting behind options.locale",
+            dependsOn: [],
+            ownedPaths: ["src/greet.js"],
+            acceptanceCommands: [],
+            profile: null,
+          },
+          status: "merged",
+          attempts: 1,
+        },
+      ],
+    });
+    const candidates = extractCandidatesFromRun(state, "demo");
+    const success = candidates.find((entry) => entry.tags?.includes("成功"));
+    expect(success).toBeDefined();
+    expect(success?.summary).toContain("完成 1 个任务");
+    expect(success?.conditions).toContain("状态：已就绪待合并");
+    expect(success?.conditions).toContain("涉及路径：src/greet.js");
+    expect(success?.sourceRunId).toBe(state.id);
+  });
+
+  it("extracts an evaluation success pattern", () => {
+    const state = fixtureRun({
+      status: "completed",
+      purpose: "evolution-evaluation",
+      tasks: [taskRun("T1", "src/app.ts", "merged"), taskRun("T2", "src/util.ts", "passed")],
+    });
+    const candidates = extractCandidatesFromRun(state, "demo");
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.summary).toContain("评测通过");
+    expect(candidates[0]?.conditions).toEqual(
+      expect.arrayContaining(["场景：评测", "涉及路径：src/app.ts、src/util.ts"]),
+    );
+  });
+
+  it("extracts rework advice with the touched paths", () => {
+    const state = fixtureRun({
+      status: "blocked",
+      error: "spawn codex ENOENT",
+      tasks: [taskRun("T1", "src/a.ts", "merged", 2), taskRun("T2", "src/b.ts", "merged", 3)],
+    });
+    const rework = extractCandidatesFromRun(state, "demo").find((entry) =>
+      entry.tags?.includes("返工"),
+    );
+    expect(rework?.summary).toContain("2 个任务返工");
+    expect(rework?.conditions).toContain("涉及路径：src/a.ts、src/b.ts");
+  });
+
+  it("extracts the pre-planning blocked candidate", () => {
+    const candidates = extractCandidatesFromRun(
+      fixtureRun({ status: "blocked", tasks: [] }),
+      "demo",
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.summary).toContain("任务规划前即阻塞");
+    expect(candidates[0]?.tags).toEqual(["规划", "失败"]);
+  });
+
+  it("maps every portable failure rule and keeps unknown errors project-bound", () => {
+    const portable: Array<[string, RegExp]> = [
+      ["spawn codex ENOENT", /Codex/],
+      ["spawn grok ENOENT", /Grok/],
+      ["MODEL_QUOTA_EXHAUSTED", /额度/],
+      ["429 rate limited", /限流/],
+      ["401 unauthorized", /认证/],
+      ["circuit open", /熔断/],
+      ["Control service is shutting down", /控制服务/],
+      ["All profiles failed for role 'worker'", /执行/],
+      ["response was not valid JSON", /格式无效/],
+    ];
+    for (const [error, pattern] of portable) {
+      const candidates = extractCandidatesFromRun(
+        fixtureRun({ status: "blocked", error, tasks: [] }),
+        "demo",
+      );
+      expect(candidates[0]?.summary).toMatch(pattern);
+      expect(candidates[0]?.portability).toBe("cross-project");
+    }
+
+    const unknown = extractCandidatesFromRun(
+      fixtureRun({ status: "blocked", error: "something odd happened", tasks: [] }),
+      "demo",
+    );
+    expect(unknown[0]?.summary).toContain("运行已阻塞");
+    expect(unknown[0]?.portability).toBe("project-bound");
+    expect(unknown[0]?.sensitivity).toBe("medium");
+
+    const chinese = extractCandidatesFromRun(
+      fixtureRun({ status: "cancelled", error: "用户手动取消了这个运行", tasks: [] }),
+      "demo",
+    );
+    expect(chinese[0]?.summary).toContain("用户手动取消");
+  });
+
+  it("ignores runs that are not terminal", () => {
+    expect(
+      extractCandidatesFromRun(fixtureRun({ status: "running", tasks: [] }), "demo"),
+    ).toEqual([]);
+  });
+
+  it("labels the strategy topology and falls back when none was recorded", () => {
+    const sequential = fixtureRun({
+      status: "blocked",
+      error: "spawn grok ENOENT",
+      tasks: [],
+      strategy: {
+        name: "ordered",
+        topology: { mode: "sequential" },
+      } as unknown as RunState["strategy"],
+    });
+    expect(extractCandidatesFromRun(sequential, "demo")[0]?.summary).toBeTruthy();
+    expect(extractCandidatesFromRun(sequential, "demo")[0]?.conditions).toContain(
+      "拓扑：顺序执行",
+    );
+
+    const bare = fixtureRun({ status: "blocked", error: "spawn grok ENOENT", tasks: [] });
+    bare.strategy = undefined as unknown as RunState["strategy"];
+    expect(extractCandidatesFromRun(bare, "demo")[0]?.conditions).toContain("策略：默认");
+    expect(extractCandidatesFromRun(bare, "demo")[0]?.conditions).toContain("拓扑：依赖并行");
+  });
+
+  it("cites a path-carrying entry against the repo trace so it can be injected", () => {
+    const source = {
+      id: "entry-1",
+      summary: "策略「demo」（依赖并行）完成 1 个任务，通过 1 个",
+      conditions: ["状态：已就绪待合并", "涉及路径：src/greet.js"],
+      tags: ["成功", "策略:demo"],
+      updatedAt: "2026-10-30T00:00:00.000Z",
+    };
+    const trace: RepoTrace = {
+      matched: true,
+      nodes: [
+        { id: "n1", parentId: null, path: "src", name: "src", kind: "directory" },
+        { id: "n2", parentId: "n1", path: "src/greet.js", name: "greet.js", kind: "file" },
+      ],
+    };
+    expect(selectExperiences([source], trace, 5)).toHaveLength(1);
+
+    // Without the path the same entry is unreachable — the reason the extractor
+    // now writes `涉及路径`.
+    const pathless = { ...source, conditions: ["状态：已就绪待合并"] };
+    expect(selectExperiences([pathless], trace, 5)).toHaveLength(0);
+  });
+
+  it("auto-promotes a low-sensitivity success candidate when a suite digest is bound", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-auto-"));
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));
+    const config = createDefaultConfig("demo");
+    config.evolution.automatic.evaluationGoal = "Keep the greeting behaviour intact";
+    const loaded: LoadedConfig = {
+      root: projectRoot,
+      path: path.join(projectRoot, "agent-team.yaml"),
+      config,
+    };
+    const service = ExperienceService.forLoaded(loaded, {
+      ...process.env,
+      AGENT_TEAM_HOME: home,
+    });
+
+    const result = await service.extractFromRun(
+      fixtureRun({
+        status: "completed",
+        tasks: [taskRun("T1", "src/greet.js", "merged")],
+      }),
+    );
+    expect(result.created).toHaveLength(1);
+    expect(result.created[0]?.suiteDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.autoPromoted).toHaveLength(1);
+    expect(result.autoPromoted[0]?.verifiedBy).toBe("system:auto-promote-suite");
+
+    const snapshot = await service.snapshot();
+    expect(snapshot.counts.verified).toBe(1);
+  });
+
+  it("does not auto-promote a run that stopped at ready-to-merge", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-parked-"));
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));
+    const config = createDefaultConfig("demo");
+    config.evolution.automatic.evaluationGoal = "Keep the greeting behaviour intact";
+    const loaded: LoadedConfig = {
+      root: projectRoot,
+      path: path.join(projectRoot, "agent-team.yaml"),
+      config,
+    };
+    const service = ExperienceService.forLoaded(loaded, {
+      ...process.env,
+      AGENT_TEAM_HOME: home,
+    });
+
+    const result = await service.extractFromRun(
+      fixtureRun({
+        status: "ready-to-merge",
+        tasks: [taskRun("T1", "src/greet.js", "merged")],
+      }),
+    );
+    expect(result.created).toHaveLength(1);
+    expect(result.created[0]?.suiteDigest).toBeUndefined();
+    expect(result.autoPromoted).toEqual([]);
+  });
+
+  it("counts a trace-driven retrieval and ignores unknown or unverified ids", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-experience-hit-"));
+    const catalog = new ExperienceCatalog(ExperienceCatalog.defaultPath(root));
+    const verified = await catalog.extract({
+      project: "demo",
+      summary: "Prefer a ratchet gate over a whole-repo threshold",
+      sourceRunId: "run-hit",
+    });
+    await catalog.promote(verified.id, "operator", "reviewed");
+    const candidate = await catalog.extract({
+      project: "demo",
+      summary: "Still unverified",
+      sourceRunId: "run-hit-2",
+    });
+
+    await catalog.recordRetrieval([], "orchestrator", "no ids is a no-op");
+    await catalog.recordRetrieval(
+      [verified.id, candidate.id, "00000000-0000-4000-8000-000000000000"],
+      "orchestrator",
+      "cited by repo trace",
+    );
+
+    const stored = (await catalog.list()).find((entry) => entry.id === verified.id);
+    expect(stored?.hitCount).toBe(1);
+    const candidateStored = (await catalog.list()).find((entry) => entry.id === candidate.id);
+    expect(candidateStored?.hitCount).toBe(0);
+
+    const doc = await catalog.load();
+    expect(doc.audit.filter((record) => record.reason === "cited by repo trace")).toHaveLength(1);
+  });
+
+  it("refuses to share anything unknown, unverified, sensitive or project-bound", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-share-"));
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));
+    const loaded = fixtureLoaded(projectRoot);
+    const service = ExperienceService.forLoaded(loaded, {
+      ...process.env,
+      AGENT_TEAM_HOME: home,
+    });
+    const catalog = new ExperienceCatalog(
+      ExperienceCatalog.defaultPath(path.join(projectRoot, ".agent-team")),
+    );
+
+    await expect(
+      service.share("00000000-0000-4000-8000-000000000000", "op", "nope"),
+    ).rejects.toThrow(/Unknown project experience id/);
+
+    const candidate = await catalog.extract({
+      project: "demo",
+      summary: "A candidate that was never promoted",
+      sourceRunId: "run-share-1",
+      portability: "cross-project",
+    });
+    await expect(service.share(candidate.id, "op", "too early")).rejects.toThrow(
+      /Only verified experiences/,
+    );
+
+    const sensitive = await catalog.extract({
+      project: "demo",
+      summary: "Promoted but medium sensitivity",
+      sourceRunId: "run-share-2",
+      sensitivity: "medium",
+      portability: "cross-project",
+    });
+    await catalog.promote(sensitive.id, "op", "reviewed");
+    await expect(service.share(sensitive.id, "op", "sensitive")).rejects.toThrow(
+      /low-sensitivity/,
+    );
+
+    const bound = await catalog.extract({
+      project: "demo",
+      summary: "Promoted, low, but project-bound",
+      sourceRunId: "run-share-3",
+      portability: "project-bound",
+    });
+    await catalog.promote(bound.id, "op", "reviewed");
+    await expect(service.share(bound.id, "op", "bound")).rejects.toThrow(/project-bound/);
+
+    const portable = await catalog.extract({
+      project: "demo",
+      summary: "Promoted, low and cross-project",
+      sourceRunId: "run-share-4",
+      portability: "cross-project",
+    });
+    await catalog.promote(portable.id, "op", "reviewed");
+    const shared = await service.share(portable.id, "op", "worth sharing");
+    expect(shared.scope).toBe("shared");
+    expect(shared.status).toBe("verified");
+  });
+
+  it("returns strategy hints even when no verified entry is cited", async () => {
+    const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-hints-"));
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));
+    const service = ExperienceService.forLoaded(fixtureLoaded(projectRoot), {
+      ...process.env,
+      AGENT_TEAM_HOME: home,
+    });
+
+    const created = await service.extractFromRun(
+      fixtureRun({ status: "ready-to-merge", tasks: [taskRun("T1", "src/greet.js", "merged")] }),
+    );
+    await service.promote(created.created[0]!.id, "op", "reviewed");
+
+    const bundle = await service.retrieveForPlanning("something unrelated");
+    expect(bundle?.items).toEqual([]);
+    expect(bundle?.strategyHints?.[0]?.topology).toBe("parallel-dag");
+  });
+
   it("gates promote when requireSuiteForPromote is enabled", async () => {
     const projectRoot = await mkdtemp(path.join(tmpdir(), "agent-team-exp-suite-"));
     const home = await mkdtemp(path.join(tmpdir(), "agent-team-home-"));
@@ -318,6 +634,27 @@ function fixtureLoaded(root: string): LoadedConfig {
     root,
     path: path.join(root, "agent-team.yaml"),
     config: createDefaultConfig("demo"),
+  };
+}
+
+function taskRun(
+  id: string,
+  ownedPath: string,
+  status: "merged" | "passed" | "blocked",
+  attempts = 1,
+): RunState["tasks"][number] {
+  return {
+    task: {
+      id,
+      title: id,
+      description: `Do ${id}`,
+      dependsOn: [],
+      ownedPaths: [ownedPath],
+      acceptanceCommands: [],
+      profile: null,
+    },
+    status,
+    attempts,
   };
 }
 

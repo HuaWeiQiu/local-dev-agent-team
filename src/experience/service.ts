@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import { selectExperiences, type RepoTrace } from "../domain/repo-tree.js";
@@ -8,12 +9,14 @@ import {
   ExperienceCatalog,
   type ExperienceEntry,
   type ExperienceStatus,
+  type ExtractExperienceInput,
 } from "./catalog.js";
 import { extractCandidatesFromRun } from "./extract.js";
 import {
   projectExperienceCatalogPath,
   sharedExperienceCatalogPath,
 } from "./paths.js";
+import { parseReasoningBank, toExperienceEntries } from "./reasoning-bank.js";
 import { StrategyHintStore, type StrategyHint } from "./strategy-hints.js";
 
 export interface ExperiencePlanningBundle {
@@ -138,13 +141,20 @@ export class ExperienceService {
     if (!this.options.enabled || !this.options.extractOnTerminal) {
       return { created: [], autoPromoted: [] };
     }
+    const suiteDigest = await this.activeSuiteDigest();
+    const inputs = withSuiteDigest(extractCandidatesFromRun(state, this.projectName), state, suiteDigest);
+    const created = await this.persistCandidates(inputs);
+    const autoPromoted = await this.autoPromoteWithSuite(state, created, suiteDigest);
+    return { created, autoPromoted };
+  }
+
+  private async activeSuiteDigest(): Promise<string | undefined> {
     const suite = await resolveEvaluationSuite(this.loaded.config, this.loaded.root);
-    const suiteDigest = suite ? computeSuiteDigest(suite) : undefined;
-    const inputs = extractCandidatesFromRun(state, this.projectName).map((input) =>
-      suiteDigest && (state.status === "completed" || state.purpose === "evolution-evaluation")
-        ? { ...input, suiteDigest }
-        : input,
-    );
+    return suite ? computeSuiteDigest(suite) : undefined;
+  }
+
+  /** Store candidates, skipping anything this run already produced. */
+  private async persistCandidates(inputs: ExtractExperienceInput[]): Promise<ExperienceEntry[]> {
     const existing = await this.project.list();
     const created: ExperienceEntry[] = [];
     for (const input of inputs) {
@@ -162,37 +172,98 @@ export class ExperienceService {
       existing.push(entry);
       created.push(entry);
     }
+    return created;
+  }
 
-    const autoPromoted: ExperienceEntry[] = [];
-    if (
-      this.options.autoPromoteWithSuite &&
-      suiteDigest &&
-      state.status === "completed" &&
-      created.length > 0
-    ) {
-      for (const entry of created) {
-        if (entry.sensitivity !== "low") continue;
-        if (!entry.tags.some((tag) => tag === "成功" || tag === "评测")) continue;
-        try {
-          const promoted = await this.project.promote(
-            entry.id,
-            "system:auto-promote-suite",
-            "评测套件 digest 已绑定，自动晋升低敏成功经验",
-            { suiteDigest },
-          );
-          autoPromoted.push(promoted);
-          if (this.options.writeStrategyHints) {
-            await new StrategyHintStore(StrategyHintStore.pathFor(this.stateRoot)).maybeRecordFromExperience(
-              promoted,
-            );
-          }
-        } catch {
-          // leave as candidate
-        }
-      }
+  /**
+   * Promote low-sensitivity success candidates when a suite digest is bound.
+   * Only `completed` runs qualify: a run parked at `ready-to-merge` has not been
+   * published, so its pattern is evidence but not suite-verified.
+   */
+  private async autoPromoteWithSuite(
+    state: RunState,
+    created: ExperienceEntry[],
+    suiteDigest: string | undefined,
+  ): Promise<ExperienceEntry[]> {
+    if (!this.options.autoPromoteWithSuite || !suiteDigest) return [];
+    if (state.status !== "completed" || created.length === 0) return [];
+
+    const promoted: ExperienceEntry[] = [];
+    for (const entry of created) {
+      const result = await this.promoteSuccess(entry, suiteDigest);
+      if (result) promoted.push(result);
     }
+    return promoted;
+  }
 
-    return { created, autoPromoted };
+  /** Promote one candidate; a rejection or a failed write leaves it as a candidate. */
+  private async promoteSuccess(
+    entry: ExperienceEntry,
+    suiteDigest: string,
+  ): Promise<ExperienceEntry | undefined> {
+    if (!isPromotableSuccess(entry)) return undefined;
+    try {
+      const result = await this.project.promote(
+        entry.id,
+        "system:auto-promote-suite",
+        "评测套件 digest 已绑定，自动晋升低敏成功经验",
+        { suiteDigest },
+      );
+      if (this.options.writeStrategyHints) {
+        await new StrategyHintStore(
+          StrategyHintStore.pathFor(this.stateRoot),
+        ).maybeRecordFromExperience(result);
+      }
+      return result;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Import curated `agent-memory/reasoning-bank.md` entries as candidates.
+   *
+   * This is where the second memory path finally lands in the same store the
+   * orchestrator retrieves from. Candidates are never injected: an operator (or
+   * the evaluation-digest path) still has to promote them.
+   */
+  async importReasoningBank(
+    options: {
+      filePath?: string;
+      actor?: string;
+      reason?: string;
+      dryRun?: boolean;
+    } = {},
+  ): Promise<{
+    filePath: string;
+    parsed: number;
+    imported: number;
+    added: ExperienceEntry[];
+    unchanged: ExperienceEntry[];
+  }> {
+    const filePath = path.resolve(
+      options.filePath ?? path.join(this.loaded.root, "agent-memory", "reasoning-bank.md"),
+    );
+    const markdown = await readFile(filePath, "utf8");
+    const sourcePath = path.relative(this.loaded.root, filePath) || filePath;
+    const now = new Date().toISOString();
+    const parsed = parseReasoningBank(markdown);
+    const items = toExperienceEntries(parsed, {
+      project: this.projectName,
+      sourcePath,
+      now,
+    });
+    const { added, unchanged } = await this.project.importCandidates(
+      items,
+      importMeta(options, items.length, sourcePath),
+    );
+    return {
+      filePath,
+      parsed: parsed.length,
+      imported: items.length,
+      added,
+      unchanged,
+    };
   }
 
   async recordAttempt(input: {
@@ -293,15 +364,14 @@ export class ExperienceService {
       options.preview === true,
       options.trace,
     );
-    const hints = this.options.writeStrategyHints
-      ? await new StrategyHintStore(StrategyHintStore.pathFor(this.stateRoot)).list()
-      : [];
-    if (!bundle && hints.length === 0) return undefined;
-    return {
-      note: bundle?.note ?? "策略提示来自已验证经验。",
-      items: bundle?.items ?? [],
-      ...(hints.length > 0 ? { strategyHints: hints.slice(0, 8) } : {}),
-    };
+    const hints = await this.strategyHints();
+    return planningBundle(bundle, hints);
+  }
+
+  private async strategyHints(): Promise<StrategyHint[]> {
+    if (!this.options.writeStrategyHints) return [];
+    const store = new StrategyHintStore(StrategyHintStore.pathFor(this.stateRoot));
+    return (await store.list()).slice(0, 8);
   }
 
   async recordSuccess(experienceIds: string[]): Promise<number> {
@@ -319,25 +389,29 @@ export class ExperienceService {
     trace?: RepoTrace;
   }): Promise<ExperiencePlanningBundle | undefined> {
     if (!this.options.enabled || !this.options.injectIntoRework) return undefined;
-    const query = [input.feedback, input.taskTitle, input.taskId, "失败", "返工"]
-      .filter(Boolean)
-      .join(" ")
-      .slice(0, 400);
     const limit = Math.min(input.limit ?? 5, this.options.maxInjected || 5);
-    const bundle = await this.retrieveVerifiedBundle(query, "rework", limit, false, input.trace);
-    const recentAttempts = this.options.recordAttemptCards
-      ? await new AttemptLog(AttemptLog.pathFor(this.stateRoot)).recentMatching({
-          feedback: input.feedback,
-          ...(input.taskId ? { taskId: input.taskId } : {}),
-          limit: 5,
-        })
-      : [];
-    if (!bundle && recentAttempts.length === 0) return undefined;
-    return {
-      note: "返工参考：已验证经验 + 近期同类 attempt。优先修同类问题。",
-      items: bundle?.items ?? [],
-      ...(recentAttempts.length > 0 ? { recentAttempts } : {}),
-    };
+    const bundle = await this.retrieveVerifiedBundle(
+      reworkQuery(input),
+      "rework",
+      limit,
+      false,
+      input.trace,
+    );
+    const recentAttempts = await this.recentAttempts(input);
+    return reworkBundle(bundle, recentAttempts);
+  }
+
+  private async recentAttempts(input: {
+    feedback: string;
+    taskId?: string;
+  }): Promise<AttemptCard[]> {
+    if (!this.options.recordAttemptCards) return [];
+    const log = new AttemptLog(AttemptLog.pathFor(this.stateRoot));
+    return log.recentMatching({
+      feedback: input.feedback,
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      limit: 5,
+    });
   }
 
   private async retrieveVerifiedBundle(
@@ -438,5 +512,69 @@ function toPlanningItem(
     scope,
     hitCount: entry.hitCount,
     ...(citations && citations.length > 0 ? { citations } : {}),
+  };
+}
+
+/** Bind the evaluation-suite digest to candidates only where it is evidence. */
+function withSuiteDigest(
+  inputs: ExtractExperienceInput[],
+  state: RunState,
+  suiteDigest: string | undefined,
+): ExtractExperienceInput[] {
+  if (!suiteDigest) return inputs;
+  const bound = state.status === "completed" || state.purpose === "evolution-evaluation";
+  return bound ? inputs.map((input) => ({ ...input, suiteDigest })) : inputs;
+}
+
+function isPromotableSuccess(entry: ExperienceEntry): boolean {
+  if (entry.sensitivity !== "low") return false;
+  return entry.tags.some((tag) => tag === "成功" || tag === "评测");
+}
+
+/** Rework retrieval query: the failure signal first, capped for the catalog search. */
+function reworkQuery(input: { feedback: string; taskTitle?: string; taskId?: string }): string {
+  return [input.feedback, input.taskTitle, input.taskId, "失败", "返工"]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 400);
+}
+
+/** Planning bundle assembled from verified experience and strategy hints. */
+function planningBundle(
+  bundle: ExperiencePlanningBundle | undefined,
+  hints: StrategyHint[],
+): ExperiencePlanningBundle | undefined {
+  if (!bundle && hints.length === 0) return undefined;
+  return {
+    note: bundle?.note ?? "策略提示来自已验证经验。",
+    items: bundle?.items ?? [],
+    ...(hints.length > 0 ? { strategyHints: hints } : {}),
+  };
+}
+
+/** Rework bundle assembled from verified experience and recent attempt cards. */
+function reworkBundle(
+  bundle: ExperiencePlanningBundle | undefined,
+  recentAttempts: AttemptCard[],
+): ExperiencePlanningBundle | undefined {
+  if (!bundle && recentAttempts.length === 0) return undefined;
+  return {
+    note: "返工参考：已验证经验 + 近期同类 attempt。优先修同类问题。",
+    items: bundle?.items ?? [],
+    ...(recentAttempts.length > 0 ? { recentAttempts } : {}),
+  };
+}
+
+/** Audit metadata for a reasoning-bank import. */
+function importMeta(
+  options: { actor?: string; reason?: string; dryRun?: boolean },
+  count: number,
+  sourcePath: string,
+): { actor: string; reason: string; dryRun?: boolean } {
+  const noun = count === 1 ? "entry" : "entries";
+  return {
+    actor: options.actor ?? "operator",
+    reason: options.reason ?? `Imported ${count} curated ${noun} from ${sourcePath}`,
+    ...(options.dryRun ? { dryRun: true } : {}),
   };
 }

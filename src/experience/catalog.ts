@@ -311,6 +311,50 @@ export class ExperienceCatalog {
   }
 
   /**
+   * Import externally authored candidates (e.g. curated reasoning-bank entries)
+   * into this catalog.
+   *
+   * Idempotent: an entry whose deterministic id already exists is left exactly
+   * as it is, so a promoted entry is never reset to candidate by a re-import.
+   * Imported entries are always candidates — promotion stays a human decision.
+   */
+  async importCandidates(
+    items: { entry: ExperienceEntry }[],
+    meta: { actor: string; reason: string; dryRun?: boolean },
+  ): Promise<{ added: ExperienceEntry[]; unchanged: ExperienceEntry[] }> {
+    const doc = await this.load();
+    const known = new Set(doc.entries.map((entry) => entry.id));
+    const timestamp = new Date(this.now()).toISOString();
+    const added: ExperienceEntry[] = [];
+    const unchanged: ExperienceEntry[] = [];
+
+    for (const item of items) {
+      const existing = doc.entries.find((entry) => entry.id === item.entry.id);
+      if (known.has(item.entry.id)) {
+        if (existing) unchanged.push({ ...existing });
+        continue;
+      }
+      const entry = experienceEntrySchema.parse(item.entry);
+      known.add(entry.id);
+      doc.entries.push(entry);
+      doc.audit.push({
+        id: randomUUID(),
+        at: timestamp,
+        actor: meta.actor,
+        action: "import",
+        experienceId: entry.id,
+        reason: meta.reason,
+      });
+      added.push({ ...entry });
+    }
+
+    if (added.length > 0 && !meta.dryRun) {
+      await this.save(doc);
+    }
+    return { added, unchanged };
+  }
+
+  /**
    * Retrieve only verified experiences. Candidate entries are never returned.
    * Records a retrieve audit entry for transparency unless `recordHit` is false
    * (read-only previews, e.g. UI retrieval preview, must not inflate hitCount).

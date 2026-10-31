@@ -33,12 +33,14 @@ import { resolveProfile } from "../profiles/resolve.js";
 import { RunStateStore, summarizeRun } from "../state/store.js";
 import type {
   ApprovalRequest,
+  RunCheckpoint,
   RunState,
   RunSummary,
 } from "../state/types.js";
 import { resolveStrategy } from "../strategies/resolve.js";
 import { createRunId } from "../workflow/id.js";
 import { LocalWorkflowRunner, type WorkflowResumeOptions } from "../workflow/runner.js";
+import { RunExperienceRecorder } from "../workflow/experience-recorder.js";
 import type {
   ApprovalResponseRequest,
   EditPlanRequest,
@@ -223,93 +225,97 @@ export class RunSupervisor {
     purpose?: "evolution-evaluation",
   ): StartRunResult {
     resolveStrategy(this.loaded.config, request.strategy);
-
-    let runConfig = this.loaded.config;
-    let profileOverrides = { ...request.profileOverrides };
-    const startBindings =
-      request.roleBindings && Object.keys(request.roleBindings).length > 0
-        ? request.roleBindings
-        : roleBindingsFromRunState({ profileOverrides });
-    if (Object.keys(startBindings).length > 0) {
-      const material = materializeRoleBindings(this.loaded.config, startBindings);
-      runConfig = material.config;
-      // roleBindings win over legacy profileOverrides for the same role
-      profileOverrides = {
-        ...request.profileOverrides,
-        ...material.profileOverrides,
-      };
-    }
-
-    for (const [role, profile] of Object.entries(profileOverrides)) {
-      resolveProfile(runConfig, role, profile);
-    }
-
+    const prepared = prepareStartConfig(this.loaded.config, request);
     const runId = createRunId(request.goal);
     const hash = idempotencyKey ? requestHash(request) : undefined;
+
     if (idempotencyKey) {
-      const claim = this.events.claimCommand(
-        idempotencyKey,
-        hash!,
-        { runId },
-      );
-      if (!claim.claimed) {
-        const response = claim.response as { runId?: unknown };
-        if (typeof response.runId !== "string") {
-          throw new Error(`Invalid stored response for idempotency key '${idempotencyKey}'`);
-        }
-        return { runId: response.runId, deduplicated: true };
-      }
+      const duplicate = this.claimStart(idempotencyKey, hash!, runId);
+      if (duplicate) return duplicate;
     }
 
-    let workflow: Promise<RunState>;
+    this.launch({ request, runId, prepared, purpose, automationOwner, idempotencyKey, hash });
+    return { runId, deduplicated: false };
+  }
+
+  /** Start the workflow, releasing the idempotency claim if the start fails. */
+  private launch(input: {
+    request: StartRunRequest;
+    runId: string;
+    prepared: PreparedStart;
+    purpose: "evolution-evaluation" | undefined;
+    automationOwner: symbol | undefined;
+    idempotencyKey: string | undefined;
+    hash: string | undefined;
+  }): void {
+    const { request, runId, prepared, purpose, automationOwner, idempotencyKey, hash } = input;
+    const controller = new AbortController();
     try {
       this.assertRunStartAllowed(automationOwner);
-      const controller = new AbortController();
-      this.events.emit(runId, "run.queued", {
-        goal: request.goal,
-        strategy: request.strategy ?? this.loaded.config.strategies?.default ?? "legacy",
-        ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
-        ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
-      });
-      const loadedForRun = runConfig === this.loaded.config
-        ? this.loaded
-        : { ...this.loaded, config: runConfig };
-      workflow = this.dependencies.runWorkflow
-        ? this.dependencies.runWorkflow(
-            { ...request, profileOverrides },
-            {
-              runId,
-              signal: controller.signal,
-              supervisorId: this.id,
-              ...(purpose ? { purpose } : {}),
-            },
-          )
-        : new LocalWorkflowRunner(loadedForRun, { eventSink: this.events, live: this.live }).run({
-            goal: request.goal,
-            profileOverrides,
-            ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
-            ...(request.strategy ? { strategyName: request.strategy } : {}),
-            ...(request.template && request.template !== "auto" ? { template: request.template } : {}),
-            runId,
-            signal: controller.signal,
-            supervisorId: this.id,
-            ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
-            ...(purpose ? { purpose } : {}),
-          });
-      void this.track(
+      this.emitQueued(runId, request);
+      const workflow = this.startWorkflow({
+        request,
         runId,
-        controller,
-        workflow,
-        request.parentRunId,
-        idempotencyKey && hash ? { key: idempotencyKey, hash } : undefined,
-      );
+        prepared,
+        signal: controller.signal,
+        ...(purpose ? { purpose } : {}),
+      });
+      const replay = idempotencyKey && hash ? { key: idempotencyKey, hash } : undefined;
+      void this.track(runId, controller, workflow, request.parentRunId, replay);
     } catch (error) {
       if (idempotencyKey && hash) {
         this.events.releaseCommand(idempotencyKey, hash);
       }
       throw error;
     }
-    return { runId, deduplicated: false };
+  }
+
+  /** Replay a previous start for the same key, or claim the key for this run. */
+  private claimStart(
+    idempotencyKey: string,
+    hash: string,
+    runId: string,
+  ): StartRunResult | undefined {
+    const claim = this.events.claimCommand(idempotencyKey, hash, { runId });
+    if (claim.claimed) return undefined;
+    const response = claim.response as { runId?: unknown };
+    if (typeof response.runId !== "string") {
+      throw new Error(`Invalid stored response for idempotency key '${idempotencyKey}'`);
+    }
+    return { runId: response.runId, deduplicated: true };
+  }
+
+  private emitQueued(runId: string, request: StartRunRequest): void {
+    this.events.emit(runId, "run.queued", {
+      goal: request.goal,
+      strategy: request.strategy ?? this.loaded.config.strategies?.default ?? "legacy",
+      ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+      ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
+    });
+  }
+
+  private startWorkflow(input: {
+    request: StartRunRequest;
+    runId: string;
+    prepared: PreparedStart;
+    signal: AbortSignal;
+    purpose?: "evolution-evaluation";
+  }): Promise<RunState> {
+    const { request, runId, prepared, signal, purpose } = input;
+    if (this.dependencies.runWorkflow) {
+      return this.dependencies.runWorkflow(
+        { ...request, profileOverrides: prepared.profileOverrides },
+        { runId, signal, supervisorId: this.id, ...(purpose ? { purpose } : {}) },
+      );
+    }
+    const loadedForRun =
+      prepared.runConfig === this.loaded.config
+        ? this.loaded
+        : { ...this.loaded, config: prepared.runConfig };
+    return new LocalWorkflowRunner(loadedForRun, {
+      eventSink: this.events,
+      live: this.live,
+    }).run(buildRunnerRequest({ request, runId, prepared, signal, supervisorId: this.id, ...(purpose ? { purpose } : {}) }));
   }
 
   /**
@@ -432,43 +438,24 @@ export class RunSupervisor {
     options?: { fallbackRoleBindings?: StartRunRequest["roleBindings"] },
   ): Promise<StartRunResult> {
     return await this.serializeAction(runId, async () => {
-      const source = await this.get(runId);
-      if (!source) {
-        throw new Error(`Run '${runId}' was not found`);
-      }
-      if (source.purpose === "evolution-proposer") {
-        throw new Error(`Automatic evolution proposer run '${runId}' cannot be retried directly`);
-      }
-      if (!["blocked", "cancelled", "interrupted"].includes(source.status)) {
-        throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
-      }
-      const copiedBindings = source.roleBindings
-        ? Object.fromEntries(
-            Object.entries(source.roleBindings).map(([role, binding]) => [
-              role,
-              {
-                cli: binding.cli,
-                ...(binding.model ? { model: binding.model } : {}),
-                ...(binding.reasoning ? { reasoning: binding.reasoning } : {}),
-              },
-            ]),
-          )
-        : undefined;
-      const roleBindings =
-        copiedBindings && Object.keys(copiedBindings).length > 0
-          ? copiedBindings
-          : options?.fallbackRoleBindings;
-      return this.start(
-        {
-          goal: source.goal,
-          profileOverrides: source.profileOverrides,
-          ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
-          ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
-          parentRunId: source.id,
-        },
-        idempotencyKey,
-      );
+      const source = await this.requireRetriable(runId);
+      return this.start(retryRequest(source, options?.fallbackRoleBindings), idempotencyKey);
     });
+  }
+
+  /** A retryable source run: it exists, is not an evolution proposer and has stopped. */
+  private async requireRetriable(runId: string): Promise<RunState> {
+    const source = await this.get(runId);
+    if (!source) {
+      throw new Error(`Run '${runId}' was not found`);
+    }
+    if (source.purpose === "evolution-proposer") {
+      throw new Error(`Automatic evolution proposer run '${runId}' cannot be retried directly`);
+    }
+    if (!RETRIABLE_STATUSES.includes(source.status)) {
+      throw new Error(`Run '${runId}' cannot be retried from status '${source.status}'`);
+    }
+    return source;
   }
 
   async respondApproval(
@@ -477,83 +464,110 @@ export class RunSupervisor {
   ): Promise<RunActionResult> {
     return await this.serializeAction(runId, async () => {
       const state = await this.requireRun(runId);
-      const approval = state.approvals?.find((item) => item.id === response.requestId);
-      if (!approval) {
-        throw new Error(`Approval request '${response.requestId}' was not found`);
-      }
-      if (state.approvals?.at(-1)?.id !== approval.id) {
-        throw new Error(`Approval request '${approval.id}' is not the latest request`);
-      }
-      if (approval.status !== "pending") {
-        if (
-          approval.response?.decision === response.decision &&
-          approval.response.actor === response.actor &&
-          approval.response.reason === response.reason
-        ) {
-          return {
-            runId,
-            status: approval.status === "approved" ? "unchanged" : "blocked",
-          };
-        }
-        throw new Error(`Approval request '${approval.id}' already has a response`);
-      }
+      const approval = pendingApproval(state, response.requestId);
+      const replay = approvalReplay(approval, response);
+      if (replay) return { runId, status: replay };
       if (this.active.has(runId)) {
         throw new Error(`Run '${runId}' is active and cannot accept an approval response`);
       }
-      if (Date.now() > Date.parse(approval.expiresAt)) {
-        await this.recordApprovalResponse(state, approval, {
-          decision: "rejected",
-          actor: "system:approval-expiry",
-          reason: `Approval request expired at ${approval.expiresAt}`,
-        });
-        await this.stateStore.transition(state, "blocked", approval.response!.reason);
-        throw new Error(`Approval request '${approval.id}' expired at ${approval.expiresAt}`);
-      }
-
-      if (response.plan !== undefined) {
-        if (approval.gate !== "plan" || response.decision !== "approved") {
-          throw new Error("Only an approved plan gate can carry an edited plan");
-        }
-        await this.applyPlanEdit(state, response.plan, response.actor, response.reason);
-      }
+      await this.expireLateApproval(state, approval);
+      await this.applyPlanFromApproval(state, approval, response);
       await this.recordApprovalResponse(state, approval, response);
-      if (response.decision === "rejected") {
-        state.error = `Approval rejected by ${response.actor}: ${response.reason}`;
-        await this.stateStore.transition(state, "blocked", state.error);
-        return { runId, status: "blocked" };
-      }
-      if (approval.gate === "final") {
-        delete state.error;
-        await this.stateStore.transition(
-          state,
-          "ready-to-merge",
-          `Final approval granted by ${response.actor}`,
-        );
-        return { runId, status: "ready-to-merge" };
-      }
+      return await this.settleApproval(state, approval, response);
+    });
+  }
 
+  /** Reject an approval that arrives after its expiry and surface the original error. */
+  private async expireLateApproval(state: RunState, approval: ApprovalRequest): Promise<void> {
+    if (Date.now() <= Date.parse(approval.expiresAt)) return;
+    await this.recordApprovalResponse(state, approval, {
+      decision: "rejected",
+      actor: "system:approval-expiry",
+      reason: `Approval request expired at ${approval.expiresAt}`,
+    });
+    await this.stateStore.transition(state, "blocked", approval.response!.reason);
+    throw new Error(`Approval request '${approval.id}' expired at ${approval.expiresAt}`);
+  }
+
+  private async applyPlanFromApproval(
+    state: RunState,
+    approval: ApprovalRequest,
+    response: ApprovalResponseRequest,
+  ): Promise<void> {
+    if (response.plan === undefined) return;
+    if (approval.gate !== "plan" || response.decision !== "approved") {
+      throw new Error("Only an approved plan gate can carry an edited plan");
+    }
+    await this.applyPlanEdit(state, response.plan, response.actor, response.reason);
+  }
+
+  /** Block, finish as ready-to-merge, or continue the plan, depending on the decision. */
+  private async settleApproval(
+    state: RunState,
+    approval: ApprovalRequest,
+    response: ApprovalResponseRequest,
+  ): Promise<RunActionResult> {
+    if (response.decision === "rejected") {
+      return await this.blockOnRejection(state, response);
+    }
+    if (approval.gate === "final") {
+      return await this.finishAfterFinalApproval(state, response);
+    }
+    return await this.continueApprovedPlan(state, response);
+  }
+
+  private async blockOnRejection(
+    state: RunState,
+    response: ApprovalResponseRequest,
+  ): Promise<RunActionResult> {
+    state.error = `Approval rejected by ${response.actor}: ${response.reason}`;
+    await this.stateStore.transition(state, "blocked", state.error);
+    return { runId: state.id, status: "blocked" };
+  }
+
+  private async finishAfterFinalApproval(
+    state: RunState,
+    response: ApprovalResponseRequest,
+  ): Promise<RunActionResult> {
+    delete state.error;
+    await this.stateStore.transition(
+      state,
+      "ready-to-merge",
+      `Final approval granted by ${response.actor}`,
+    );
+    // An approval that arrives after the runnable process exited lands here (the
+    // runner process stops at `awaiting-human`). Without this call the successful
+    // run would never reach the experience library, so only failed runs would
+    // ever be learned from.
+    await new RunExperienceRecorder(this.loaded).extractFromRun(state, this.stateStore);
+    return { runId: state.id, status: "ready-to-merge" };
+  }
+
+  private async continueApprovedPlan(
+    state: RunState,
+    response: ApprovalResponseRequest,
+  ): Promise<RunActionResult> {
+    await this.stateStore.transition(
+      state,
+      "planned",
+      `Plan approved by ${response.actor}; continuation queued`,
+    );
+    try {
+      this.startContinuation(state, {
+        mode: "approval",
+        actor: response.actor,
+        reason: response.reason,
+      });
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
       await this.stateStore.transition(
         state,
-        "planned",
-        `Plan approved by ${response.actor}; continuation queued`,
+        "interrupted",
+        `Approved plan continuation could not start: ${state.error}`,
       );
-      try {
-        this.startContinuation(state, {
-          mode: "approval",
-          actor: response.actor,
-          reason: response.reason,
-        });
-      } catch (error) {
-        state.error = error instanceof Error ? error.message : String(error);
-        await this.stateStore.transition(
-          state,
-          "interrupted",
-          `Approved plan continuation could not start: ${state.error}`,
-        );
-        throw error;
-      }
-      return { runId, status: "resuming" };
-    });
+      throw error;
+    }
+    return { runId: state.id, status: "resuming" };
   }
 
   /** Saves an edited plan while the run waits at the plan gate; the gate stays pending. */
@@ -612,31 +626,7 @@ export class RunSupervisor {
 
   async resume(runId: string, request: ResumeRunRequest): Promise<RunActionResult> {
     return await this.serializeAction(runId, async () => {
-      if (this.active.has(runId)) {
-        throw new Error(`Run '${runId}' is already active`);
-      }
-      const state = await this.requireRun(runId);
-      if (state.status !== "interrupted") {
-        throw new Error(`Run '${runId}' cannot resume from status '${state.status}'`);
-      }
-      const checkpoint = state.checkpoints?.at(-1);
-      if (!checkpoint) {
-        throw new Error(`Run '${runId}' has no recoverable task-boundary checkpoint`);
-      }
-      if (
-        checkpoint.stage === "plan-ready" &&
-        (state.strategy.approvalGates ?? ["final"]).includes("plan")
-      ) {
-        const planApproval = state.approvals
-          ?.filter((approval) => approval.gate === "plan")
-          .at(-1);
-        if (
-          planApproval?.status !== "approved" ||
-          planApproval.checkpointId !== checkpoint.id
-        ) {
-          throw new Error("Plan checkpoint requires approval before worker recovery");
-        }
-      }
+      const { state, checkpoint } = await this.recoverable(runId);
       this.events.emit(runId, "run.resume-requested", {
         actor: request.actor,
         reason: request.reason,
@@ -649,6 +639,25 @@ export class RunSupervisor {
       });
       return { runId, status: "resuming" };
     });
+  }
+
+  /** Load an interrupted run whose latest checkpoint may be recovered. */
+  private async recoverable(
+    runId: string,
+  ): Promise<{ state: RunState; checkpoint: RunCheckpoint }> {
+    if (this.active.has(runId)) {
+      throw new Error(`Run '${runId}' is already active`);
+    }
+    const state = await this.requireRun(runId);
+    if (state.status !== "interrupted") {
+      throw new Error(`Run '${runId}' cannot resume from status '${state.status}'`);
+    }
+    const checkpoint = state.checkpoints?.at(-1);
+    if (!checkpoint) {
+      throw new Error(`Run '${runId}' has no recoverable task-boundary checkpoint`);
+    }
+    assertPlanCheckpointApproved(state, checkpoint);
+    return { state, checkpoint };
   }
 
   async wait(runId: string): Promise<RunState | undefined> {
@@ -973,4 +982,136 @@ function requestHash(request: StartRunRequest): string {
       : null,
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+/** Run configuration and per-role profiles resolved before a run is created. */
+interface PreparedStart {
+  runConfig: LoadedConfig["config"];
+  profileOverrides: Record<string, string>;
+}
+
+/**
+ * Resolve the effective config for a start request.
+ * `roleBindings` win over legacy `profileOverrides` for the same role, and every
+ * requested profile is validated against the config that will actually run.
+ */
+function prepareStartConfig(
+  config: LoadedConfig["config"],
+  request: StartRunRequest,
+): PreparedStart {
+  const startBindings =
+    request.roleBindings && Object.keys(request.roleBindings).length > 0
+      ? request.roleBindings
+      : roleBindingsFromRunState({ profileOverrides: request.profileOverrides });
+  if (Object.keys(startBindings).length === 0) {
+    return { runConfig: config, profileOverrides: { ...request.profileOverrides } };
+  }
+
+  const material = materializeRoleBindings(config, startBindings);
+  const profileOverrides = { ...request.profileOverrides, ...material.profileOverrides };
+  for (const [role, profile] of Object.entries(profileOverrides)) {
+    resolveProfile(material.config, role, profile);
+  }
+  return { runConfig: material.config, profileOverrides };
+}
+
+type RunnerRequest = Parameters<LocalWorkflowRunner["run"]>[0];
+
+/** Map a start request onto the local workflow runner's options. */
+export function buildRunnerRequest(
+  input: {
+    request: StartRunRequest;
+    runId: string;
+    prepared: PreparedStart;
+    signal: AbortSignal;
+    supervisorId: string;
+    purpose?: "evolution-evaluation";
+  },
+): RunnerRequest {
+  const { request, runId, prepared, signal, supervisorId, purpose } = input;
+  const template =
+    request.template && request.template !== "auto" ? request.template : undefined;
+  return {
+    goal: request.goal,
+    profileOverrides: prepared.profileOverrides,
+    ...(request.roleBindings ? { roleBindings: request.roleBindings } : {}),
+    ...(request.strategy ? { strategyName: request.strategy } : {}),
+    ...(template ? { template } : {}),
+    runId,
+    signal,
+    supervisorId,
+    ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
+    ...(purpose ? { purpose } : {}),
+  };
+}
+
+/** The addressed approval, which must be the newest and still unanswered. */
+export function pendingApproval(state: RunState, requestId: string): ApprovalRequest {
+  const approval = state.approvals?.find((item) => item.id === requestId);
+  if (!approval) {
+    throw new Error(`Approval request '${requestId}' was not found`);
+  }
+  if (state.approvals?.at(-1)?.id !== approval.id) {
+    throw new Error(`Approval request '${approval.id}' is not the latest request`);
+  }
+  return approval;
+}
+
+/** Identical replay of an already answered approval, else refuse the answer. */
+export function approvalReplay(
+  approval: ApprovalRequest,
+  response: ApprovalResponseRequest,
+): RunActionResult["status"] | undefined {
+  if (approval.status === "pending") return undefined;
+  const same =
+    approval.response?.decision === response.decision &&
+    approval.response.actor === response.actor &&
+    approval.response.reason === response.reason;
+  if (!same) throw new Error(`Approval request '${approval.id}' already has a response`);
+  return approval.status === "approved" ? "unchanged" : "blocked";
+}
+
+const RETRIABLE_STATUSES: RunState["status"][] = ["blocked", "cancelled", "interrupted"];
+
+/** Start request that replays a stopped run under a new parent id. */
+export function retryRequest(
+  source: RunState,
+  fallbackRoleBindings: StartRunRequest["roleBindings"],
+): StartRunRequest {
+  const copied = copyRoleBindings(source.roleBindings);
+  const roleBindings =
+    copied && Object.keys(copied).length > 0 ? copied : fallbackRoleBindings;
+  return {
+    goal: source.goal,
+    profileOverrides: source.profileOverrides,
+    ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
+    ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
+    parentRunId: source.id,
+  };
+}
+
+export function copyRoleBindings(
+  bindings: RunState["roleBindings"],
+): StartRunRequest["roleBindings"] {
+  if (!bindings) return undefined;
+  return Object.fromEntries(
+    Object.entries(bindings).map(([role, binding]) => [
+      role,
+      {
+        cli: binding.cli,
+        ...(binding.model ? { model: binding.model } : {}),
+        ...(binding.reasoning ? { reasoning: binding.reasoning } : {}),
+      },
+    ]),
+  );
+}
+
+/** A plan-gated checkpoint may only be recovered once its plan gate was approved. */
+export function assertPlanCheckpointApproved(state: RunState, checkpoint: RunCheckpoint): void {
+  const gatePlan = (state.strategy.approvalGates ?? ["final"]).includes("plan");
+  if (checkpoint.stage !== "plan-ready" || !gatePlan) return;
+  const planApproval = state.approvals?.filter((approval) => approval.gate === "plan").at(-1);
+  if (planApproval?.status !== "approved" || planApproval.checkpointId !== checkpoint.id) {
+    throw new Error("Plan checkpoint requires approval before worker recovery");
+  }
 }

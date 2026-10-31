@@ -24,6 +24,8 @@ import { loadWorkspace } from "./workspace/load.js";
 import { startWorkspaceControlService } from "./workspace/service.js";
 import { assertDiagnosticProfilePermission } from "./security/permissions.js";
 import { buildInteropManifest } from "./interop/manifest.js";
+import { ExperienceService } from "./experience/service.js";
+import type { ExperienceStatus } from "./experience/catalog.js";
 
 const program = new Command();
 program
@@ -439,6 +441,127 @@ program
       } finally {
         await runtime.close();
       }
+    },
+  );
+
+const experienceCommand = program
+  .command("experience")
+  .description(
+    "Inspect the experience library and import curated reasoning-bank entries as candidates",
+  );
+
+experienceCommand
+  .command("list")
+  .description("List experience entries")
+  .option("-c, --config <path>", "configuration path")
+  .option("--status <status>", "filter by candidate, verified, rejected or retired")
+  .option("--json", "emit JSON", false)
+  .action(async (options: { config?: string; status?: string; json: boolean }) => {
+    const loaded = await loadValidatedConfig(options.config);
+    const service = ExperienceService.forLoaded(loaded);
+    const snapshot = await service.snapshot(options.status as ExperienceStatus | undefined);
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return;
+    }
+    process.stdout.write(
+      `project=${snapshot.project} candidate=${snapshot.counts.candidate} verified=${snapshot.counts.verified}\n`,
+    );
+    for (const entry of snapshot.entries) {
+      process.stdout.write(
+        `  ${entry.status.padEnd(10)} ${entry.hitCount}/${entry.successCount}  ${entry.summary}\n`,
+      );
+    }
+  });
+
+experienceCommand
+  .command("import")
+  .description(
+    "Import agent-memory/reasoning-bank.md entries into the catalog as candidates (idempotent)",
+  )
+  .option("-c, --config <path>", "configuration path")
+  .option("--from <path>", "markdown file (default: agent-memory/reasoning-bank.md)")
+  .option("--actor <name>", "operator recorded in the audit log", "operator")
+  .option("--reason <text>", "audit reason")
+  .option("--dry-run", "report what would be imported without writing", false)
+  .option("--json", "emit JSON", false)
+  .action(
+    async (options: {
+      config?: string;
+      from?: string;
+      actor: string;
+      reason?: string;
+      dryRun: boolean;
+      json: boolean;
+    }) => {
+      const loaded = await loadValidatedConfig(options.config);
+      const service = ExperienceService.forLoaded(loaded);
+      const result = await service.importReasoningBank({
+        ...(options.from ? { filePath: options.from } : {}),
+        actor: options.actor,
+        ...(options.reason ? { reason: options.reason } : {}),
+        dryRun: options.dryRun,
+      });
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(
+        `${path.relative(process.cwd(), result.filePath)} parsed=${result.parsed} imported=${result.imported} added=${result.added.length} unchanged=${result.unchanged.length}${options.dryRun ? " (dry run)" : ""}\n`,
+      );
+      for (const entry of result.added) {
+        process.stdout.write(`  + ${entry.id}  ${entry.summary}\n`);
+      }
+      for (const entry of result.unchanged) {
+        process.stdout.write(`  = ${entry.id}  ${entry.status}  ${entry.summary}\n`);
+      }
+    },
+  );
+
+experienceCommand
+  .command("promote")
+  .description("Promote a candidate to verified (the human gate for injection)")
+  .argument("<experience-id>", "experience identifier")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "why this candidate is trustworthy")
+  .option("-c, --config <path>", "configuration path")
+  .option("--json", "emit JSON", false)
+  .action(
+    async (
+      experienceId: string,
+      options: { actor: string; reason: string; config?: string; json: boolean },
+    ) => {
+      const loaded = await loadValidatedConfig(options.config);
+      const service = ExperienceService.forLoaded(loaded);
+      const promoted = await service.promote(
+        experienceId,
+        options.actor,
+        options.reason,
+      );
+      if (options.json) {
+        process.stdout.write(`${JSON.stringify(promoted, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`${promoted.id}\t${promoted.status}\t${promoted.summary}\n`);
+    },
+  );
+
+experienceCommand
+  .command("reject")
+  .description("Reject a candidate so it is never injected")
+  .argument("<experience-id>", "experience identifier")
+  .requiredOption("--actor <name>", "human actor recorded in the audit trail")
+  .requiredOption("--reason <text>", "why it must not be used")
+  .option("-c, --config <path>", "configuration path")
+  .action(
+    async (
+      experienceId: string,
+      options: { actor: string; reason: string; config?: string },
+    ) => {
+      const loaded = await loadValidatedConfig(options.config);
+      const service = ExperienceService.forLoaded(loaded);
+      const rejected = await service.reject(experienceId, options.actor, options.reason);
+      process.stdout.write(`${rejected.id}\t${rejected.status}\n`);
     },
   );
 

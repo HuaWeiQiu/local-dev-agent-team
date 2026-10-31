@@ -761,7 +761,8 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 经验用于提高后续运行成功率，**不是**聊天记录全文入库。
 
 ```text
-运行终态 → 规则抽取候选（默认不进 prompt）
+运行终态（completed / blocked / cancelled / interrupted / ready-to-merge）
+  → 规则抽取候选（默认不进 prompt）
   → 人工晋升 / 评测 digest 晋升 → 已验证
   → 可选共享到 ~/.agent-team/experience/shared
   → 新项目规划、任务返工时注入已验证经验
@@ -775,6 +776,14 @@ proposal 中的 SHA-256 完全一致。`adopt` 不接受该选项。
 - 可选 `requireSuiteForPromote`：晋升须带 EvaluationSuite 的 suiteDigest
 - 可选 `autoPromoteWithSuite`：完成运行且能解析评测套件时，自动晋升低敏成功/评测候选
 - 工作台侧栏「经验」：筛选、晋升、拒绝、共享
+- `agent-team experience import [--from <file>] [--dry-run]`：把 curator 维护的
+  `agent-memory/reasoning-bank.md` 增量导入为**候选**。id 由「项目 + 标题」确定性派生，
+  重复导入不会产生重复条目，也不会把已晋升条目打回候选；导入本身**不会**产生 verified，
+  人工晋升门禁保持不变。
+- `agent-team experience list [--status candidate|verified|rejected|retired]`：查看条目、
+  命中次数与成功计数。
+- 终态抽取包含 `ready-to-merge`：普通运行人工批准后停在该状态，若不抽取，经验库就只能
+  学到失败（旧行为）。审批发生在 runner 进程退出之后时，批准动作本身也会补做抽取。
 
 配置示例见 `agent-team.example.yaml` 的 `experience` 段；边界与 OCR 外挂说明见
 [可选外部集成](docs/integrations-optional.zh-CN.md)。
@@ -825,6 +834,7 @@ Agent CLI 需要通过适配器接口接入。
 - [安全模型](docs/security.md)（含受限自演进信任、持久化、应用、控制面与前端边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
 - [可选外部集成](docs/integrations-optional.zh-CN.md)（经验闭环、外挂 OCR、不内嵌边界）
+- [ub-mode 质量门接入](docs/ub-quality-gates.zh-CN.md)（CRAP/重复度/变异测试作为确定性质量门，含本仓基线）
 - [受限自演进 Phase 1-6](docs/evolution-phase-1.zh-CN.md)（人工候选、受控应用/回滚、可视化工作台与自动策略循环）
 - [ADR 0013：演进 domain 与 catalog 边界](docs/adr/0013-bounded-evolution-domain-catalog-boundary.md)
 - [ADR 0014：演进 catalog 持久化边界](docs/adr/0014-durable-evolution-catalog.md)
