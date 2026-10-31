@@ -5,15 +5,41 @@ import type { OnboardingStatus, ProjectScope } from "../types";
 
 const DISMISS_PREFIX = "agent-team:onboarding-dismissed:";
 
-function dismissKey(scope: ProjectScope): string {
+export function dismissKey(scope: ProjectScope): string {
   return `${DISMISS_PREFIX}${scope.mode}:${scope.projectId}`;
 }
 
-function readDismissed(scope: ProjectScope): boolean {
+/** A browser that refuses storage simply never remembers the dismissal. */
+export function readDismissed(scope: ProjectScope): boolean {
   try {
     return window.localStorage.getItem(dismissKey(scope)) === "1";
   } catch {
     return false;
+  }
+}
+
+export function markDismissed(scope: ProjectScope): void {
+  try {
+    window.localStorage.setItem(dismissKey(scope), "1");
+  } catch {
+    // 无法持久化时，本次会话内关闭即可。
+  }
+}
+
+/** Whether the wizard should open for a freshly loaded status. */
+export function shouldOpenWizard(scope: ProjectScope | undefined, status: OnboardingStatus): boolean {
+  return Boolean(scope) && status.needsSetup && !readDismissed(scope!);
+}
+
+/** Saving either yields the new status or the copy to show. */
+export async function saveQuality(
+  scope: ProjectScope,
+  commands: Array<{ command: string; args: string[] }>,
+): Promise<{ status: OnboardingStatus } | { error: string }> {
+  try {
+    return { status: await saveOnboardingQuality(scope, commands) };
+  } catch (requestError) {
+    return { error: runActionErrorMessage(requestError) };
   }
 }
 
@@ -38,7 +64,7 @@ export function useOnboarding(scope: ProjectScope | undefined) {
       .then((next) => {
         if (cancelled) return;
         setStatus(next);
-        setOpen(next.needsSetup && !readDismissed(scope));
+        setOpen(shouldOpenWizard(scope, next));
       })
       .catch(() => {
         // 向导是增强功能；服务端不支持或暂不可用时静默跳过。
@@ -51,13 +77,7 @@ export function useOnboarding(scope: ProjectScope | undefined) {
   }, [scopeKey]);
 
   const skip = useCallback(() => {
-    if (scope) {
-      try {
-        window.localStorage.setItem(dismissKey(scope), "1");
-      } catch {
-        // 无法持久化时，本次会话内关闭即可。
-      }
-    }
+    if (scope) markDismissed(scope);
     setOpen(false);
     setError(undefined);
   }, [scope]);
@@ -67,16 +87,16 @@ export function useOnboarding(scope: ProjectScope | undefined) {
       if (!scope) return false;
       setBusy(true);
       setError(undefined);
-      try {
-        setStatus(await saveOnboardingQuality(scope, commands));
-        setOpen(false);
-        return true;
-      } catch (requestError) {
-        setError(runActionErrorMessage(requestError));
-        return false;
-      } finally {
+      const saved = await saveQuality(scope, commands);
+      if ("error" in saved) {
+        setError(saved.error);
         setBusy(false);
+        return false;
       }
+      setStatus(saved.status);
+      setOpen(false);
+      setBusy(false);
+      return true;
     },
     [scope],
   );
