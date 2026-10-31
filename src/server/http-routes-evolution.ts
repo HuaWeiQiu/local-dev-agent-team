@@ -416,46 +416,64 @@ function decodeCanonicalBase64(value: string): Buffer {
 function evolutionHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   const message = error instanceof Error ? error.message : "Evolution request failed";
-  if (error instanceof ProjectMutationConflictError) {
-    return new HttpError(409, message, error.code);
-  }
-  if (error instanceof EvolutionApplicationError) {
-    if (error.code === "PROPOSAL_NOT_FOUND") return new HttpError(404, message, error.code);
-    if (error.code === "POLICY_DENIED") return new HttpError(403, message, error.code);
-    if (error.code === "MATERIAL_MISSING" || error.code === "RECOVERY_REQUIRED") {
-      return new HttpError(503, message, error.code);
-    }
-    return new HttpError(409, message, error.code);
-  }
-  if (error instanceof EvolutionServiceError) {
-    if (error.code === "PROPOSAL_NOT_FOUND") {
-      return new HttpError(404, message, error.code);
-    }
-    if (error.code === "PROMPT_ROLE_NOT_FOUND") {
-      return new HttpError(400, message, error.code);
-    }
-    if (error.code === "SERVICE_CLOSED") {
-      return new HttpError(503, message, error.code);
-    }
-    return new HttpError(409, message, error.code);
-  }
-  if (error instanceof AutomaticEvolutionError) {
-    if (error.code === "AUTOMATION_DISABLED") {
-      return new HttpError(403, message, error.code);
-    }
-    return new HttpError(409, message, error.code);
-  }
-  if (error instanceof EvolutionLifecycleError || error instanceof EvolutionPromotionError) {
-    return new HttpError(409, message, "INVALID_LIFECYCLE");
-  }
-  if (error instanceof EvolutionValidationError) {
-    return new HttpError(400, message, "INVALID_REQUEST");
-  }
-  if (error instanceof EvolutionPersistenceError) {
-    return new HttpError(503, "Evolution persistence is unavailable", "EVOLUTION_UNAVAILABLE");
-  }
-  if (error instanceof EvolutionDomainError) {
-    return new HttpError(400, message, "INVALID_REQUEST");
-  }
+  return mappedEvolutionError(error, message);
+}
+
+/** Each domain error carries the status and code the client should see. */
+function mappedEvolutionError(error: unknown, message: string): HttpError {
+  const kind = errorConstructor(error);
+  const mapping = kind ? EVOLUTION_ERROR_STATUS.get(kind) : undefined;
+  if (!mapping) return fallbackEvolutionError(error, message);
+  return mapping(error, message);
+}
+
+interface ErrorMapping {
+  (error: unknown, message: string): HttpError;
+}
+
+type ErrorClass = abstract new (...args: never[]) => Error;
+
+/** The table is keyed by the classes themselves, not by their names. */
+const EVOLUTION_ERROR_STATUS = new Map<ErrorClass, ErrorMapping>([
+  [ProjectMutationConflictError, (error, message) => new HttpError(409, message, codeOf(error))],
+  [
+    EvolutionApplicationError,
+    statusByCode(
+      { PROPOSAL_NOT_FOUND: 404, POLICY_DENIED: 403, MATERIAL_MISSING: 503, RECOVERY_REQUIRED: 503 },
+      409,
+    ),
+  ],
+  [
+    EvolutionServiceError,
+    statusByCode({ PROPOSAL_NOT_FOUND: 404, PROMPT_ROLE_NOT_FOUND: 400, SERVICE_CLOSED: 503 }, 409),
+  ],
+  [AutomaticEvolutionError, statusByCode({ AUTOMATION_DISABLED: 403 }, 409)],
+  [EvolutionLifecycleError, (error, message) => new HttpError(409, message, "INVALID_LIFECYCLE")],
+  [EvolutionPromotionError, (error, message) => new HttpError(409, message, "INVALID_LIFECYCLE")],
+  [EvolutionValidationError, (error, message) => new HttpError(400, message, "INVALID_REQUEST")],
+  [
+    EvolutionPersistenceError,
+    () => new HttpError(503, "Evolution persistence is unavailable", "EVOLUTION_UNAVAILABLE"),
+  ],
+  [EvolutionDomainError, (error, message) => new HttpError(400, message, "INVALID_REQUEST")],
+]);
+
+function codeOf(error: unknown): string | undefined {
+  return (error as { code?: string }).code;
+}
+
+function statusByCode(statuses: Record<string, number>, fallback: number): ErrorMapping {
+  return (error, message) =>
+    new HttpError(statuses[codeOf(error) ?? ""] ?? fallback, message, codeOf(error));
+}
+
+function errorConstructor(error: unknown): ErrorClass | undefined {
+  if (!(error instanceof Error)) return undefined;
+  return error.constructor as ErrorClass;
+}
+
+function fallbackEvolutionError(error: unknown, message: string): HttpError {
+  void error;
+  void message;
   return new HttpError(500, "Evolution request failed", "INTERNAL_ERROR");
 }

@@ -8,6 +8,7 @@ import {
   parseArgs,
   readBaseline,
   baselineStep,
+  isScoredSource,
   layerTargets,
   layers,
   readScores,
@@ -268,5 +269,17 @@ describe("layer targets", () => {
     const all = parseArgs(["--all"], {});
     expect(layerTargets(all, "rust", [])).toEqual(["src-tauri"]);
     expect(layerTargets(all, "typescript", [])).toEqual(["src", "web", "scripts"]);
+  });
+});
+
+describe("scored sources", () => {
+  it("keeps test and e2e files out of the changed list", () => {
+    expect(isScoredSource("src/server/http.ts")).toBe(true);
+    expect(isScoredSource("web/src/App.tsx")).toBe(true);
+    expect(isScoredSource("src-tauri/src/lib.rs")).toBe(true);
+    expect(isScoredSource("test/evolution-server.test.ts")).toBe(false);
+    expect(isScoredSource("web/src/App.test.tsx")).toBe(false);
+    expect(isScoredSource("web/e2e/workbench.e2e.ts")).toBe(false);
+    expect(isScoredSource("docs/readme.md")).toBe(false);
   });
 });
