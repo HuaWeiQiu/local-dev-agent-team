@@ -34,21 +34,66 @@ function structuralIssues(
   allowLoops: boolean,
 ): string[] {
   const issues: string[] = [];
-  const ids = new Set<string>();
-  for (const node of graph.nodes) {
-    if (ids.has(node.id)) issues.push(`${label}: duplicate node '${node.id}'`);
-    ids.add(node.id);
-    if (!kinds.includes(node.kind)) issues.push(`${label}: unknown node kind '${node.kind}'`);
-    if (node.id !== node.kind) issues.push(`${label}: node id '${node.id}' must equal its kind`);
-    for (const clause of node.when?.all ?? []) {
-      if (!(FLOW_FACTS as readonly string[]).includes(clause.fact)) {
-        issues.push(`${label}: node '${node.id}' reads unknown fact '${clause.fact}'`);
-      }
-    }
-  }
+  const ids = new Set(graph.nodes.map((node) => node.id));
+  issues.push(...nodeIssues(label, graph, kinds, ids));
   if (!ids.has(graph.start)) issues.push(`${label}: start '${graph.start}' is not a node`);
-
   const forward = new Map<string, string[]>();
+  issues.push(...edgeIssues(label, graph, ids, allowLoops, forward));
+  issues.push(...reachabilityIssues(label, graph, ids, forward));
+  return issues;
+}
+
+/** Node identity, kind and the facts a condition may read. */
+function nodeIssues(
+  label: string,
+  graph: FlowGraph,
+  kinds: readonly string[],
+  ids: Set<string>,
+): string[] {
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  for (const node of graph.nodes) {
+    issues.push(...singleNodeIssues(label, node, seen, kinds));
+    ids.add(node.id);
+  }
+  return issues;
+}
+
+/** One node's own problems: identity, kind, and the facts its condition reads. */
+function singleNodeIssues(
+  label: string,
+  node: FlowGraph["nodes"][number],
+  seen: Set<string>,
+  kinds: readonly string[],
+): string[] {
+  const issues: string[] = [];
+  if (seen.has(node.id)) issues.push(`${label}: duplicate node '${node.id}'`);
+  seen.add(node.id);
+  if (!kinds.includes(node.kind)) issues.push(`${label}: unknown node kind '${node.kind}'`);
+  if (node.id !== node.kind) issues.push(`${label}: node id '${node.id}' must equal its kind`);
+  issues.push(...unknownFactIssues(label, node.id, node.when?.all ?? []));
+  return issues;
+}
+
+function unknownFactIssues(
+  label: string,
+  nodeId: string,
+  clauses: ReadonlyArray<{ fact: string }>,
+): string[] {
+  return clauses
+    .filter((clause) => !(FLOW_FACTS as readonly string[]).includes(clause.fact))
+    .map((clause) => `${label}: node '${nodeId}' reads unknown fact '${clause.fact}'`);
+}
+
+/** Edges must join known nodes, and only task graphs may loop. */
+function edgeIssues(
+  label: string,
+  graph: FlowGraph,
+  ids: Set<string>,
+  allowLoops: boolean,
+  forward: Map<string, string[]>,
+): string[] {
+  const issues: string[] = [];
   for (const edge of graph.edges) {
     if (!ids.has(edge.from) || !ids.has(edge.to)) {
       issues.push(`${label}: edge ${edge.from} -> ${edge.to} references a missing node`);
@@ -64,6 +109,17 @@ function structuralIssues(
     if (targets.length > 1) issues.push(`${label}: node '${from}' branches; templates are linear`);
   }
 
+  return issues;
+}
+
+/** Every node is reachable from the start, and no forward edge closes a cycle. */
+function reachabilityIssues(
+  label: string,
+  graph: FlowGraph,
+  ids: Set<string>,
+  forward: Map<string, string[]>,
+): string[] {
+  const issues: string[] = [];
   const seen = new Set<string>();
   const visiting = new Set<string>();
   const walk = (id: string): void => {
@@ -95,26 +151,49 @@ function orderOf(graph: FlowGraph): string[] {
   return order;
 }
 
+/** The run must plan, execute, check, decide and get a final approval, in that order. */
+const RUN_CHAIN = ["plan", "execute", "final-checks", "decide", "approve-final"] as const;
+
 function runInvariantIssues(template: FlowTemplate): string[] {
   const order = orderOf(template.run);
+  return [
+    ...missingNodes("run", order, RUN_CHAIN),
+    ...chainIssues(order, RUN_CHAIN, "run"),
+    ...unconditionalIssues("run", template.run, RUN_CHAIN),
+  ];
+}
+
+function missingNodes(label: string, order: readonly string[], required: readonly string[]): string[] {
+  return required
+    .filter((node) => !order.includes(node))
+    .map((node) => `${label}: required node '${node}' is missing`);
+}
+
+/** Each step must come after the one before it, and the last one must be last. */
+function chainIssues(order: readonly string[], chain: readonly string[], label: string): string[] {
   const issues: string[] = [];
-  for (const required of ["plan", "execute", "final-checks", "decide", "approve-final"]) {
-    if (!order.includes(required)) issues.push(`run: required node '${required}' is missing`);
-  }
-  const before = (a: string, b: string): boolean =>
-    order.includes(a) && order.includes(b) && order.indexOf(a) < order.indexOf(b);
-  if (!before("plan", "execute")) issues.push("run: plan must precede execute");
-  if (!before("execute", "final-checks")) issues.push("run: execute must precede final-checks");
-  if (!before("final-checks", "decide")) issues.push("run: final-checks must precede decide");
-  if (!before("decide", "approve-final")) issues.push("run: decide must precede approve-final");
-  if (order.at(-1) !== "approve-final") issues.push("run: approve-final must be the last node");
-  if (before("approve-plan", "plan")) issues.push("run: approve-plan cannot precede plan");
-  for (const mandatory of ["plan", "execute", "final-checks", "decide", "approve-final"]) {
-    if (template.run.nodes.find((node) => node.id === mandatory)?.when) {
-      issues.push(`run: '${mandatory}' cannot be conditional`);
+  for (let index = 0; index < chain.length - 1; index += 1) {
+    const before = chain[index]!;
+    const after = chain[index + 1]!;
+    if (!precedes(order, before, after)) {
+      issues.push(`${label}: ${before} must precede ${after}`);
     }
   }
+  if (order.at(-1) !== chain.at(-1)) {
+    issues.push(`${label}: ${chain.at(-1)} must be the last node`);
+  }
   return issues;
+}
+
+function precedes(order: readonly string[], before: string, after: string): boolean {
+  return order.includes(before) && order.includes(after) && order.indexOf(before) < order.indexOf(after);
+}
+
+/** A step the run cannot skip may not be conditional either. */
+function unconditionalIssues(label: string, graph: FlowGraph, ids: readonly string[]): string[] {
+  return graph.nodes
+    .filter((node) => ids.includes(node.id) && node.when)
+    .map((node) => `${label}: '${node.id}' cannot be conditional`);
 }
 
 function taskInvariantIssues(template: FlowTemplate): string[] {
