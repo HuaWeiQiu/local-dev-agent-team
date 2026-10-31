@@ -1,4 +1,4 @@
-import { auditTrailViolation } from "./audit-trail.js";
+import { auditTrailViolation, isRetainedTrailKind } from "./audit-trail.js";
 import {
   archiveProposal,
   assertPromotionRecordMatchesProposal,
@@ -892,11 +892,8 @@ function applyAudit(replay: RestoreReplay, audit: AuditRecord): void {
   applyDecision(replay, audit, proposal);
 }
 
-/** Only a rejection, archival markers and the tombstone may outlive a proposal. */
-const DELETED_TRAIL_KINDS = new Set(["rejection", "archive", "unarchive", "delete"]);
-
 function recordDeletedTrail(replay: RestoreReplay, audit: AuditRecord): void {
-  if (!DELETED_TRAIL_KINDS.has(audit.kind)) {
+  if (!isRetainedTrailKind(audit.kind)) {
     throw new EvolutionCatalogError(
       `Audit record references missing proposal '${audit.proposalId}'`,
     );
