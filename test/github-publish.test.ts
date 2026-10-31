@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GithubPublisher } from "../src/github/publish.js";
 import { RunStateStore } from "../src/state/store.js";
+import { OutboxStore } from "../src/authority/outbox-store.js";
+import { markSent, messageId, receiptFor } from "../src/authority/outbox.js";
 import type { LoadedConfig } from "../src/config/load.js";
 import type { RunState } from "../src/state/types.js";
 
@@ -208,5 +210,76 @@ describe("markCompletedIfMerged", () => {
     const s = await store();
     const publisher = new GithubPublisher(loaded(), s, client(), noPush);
     await expect(publisher.markCompletedIfMerged(state())).rejects.toThrow(/not been published/);
+  });
+});
+
+describe("publication receipts", () => {
+  async function withOutbox() {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-outbox-"));
+    roots.push(root);
+    const s = new RunStateStore(path.join(root, "runs"));
+    const outbox = new OutboxStore(path.join(root, "outbox.json"));
+    return { store: s, outbox, root };
+  }
+
+  const receiptInput = {
+    purpose: "result" as const,
+    subjectId: "run-1",
+    channel: { sourceKind: "github", sourceInstanceId: "origin", threadId: "agent-team/integration" },
+    body: "",
+    at: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("records a receipt once the pull request exists", async () => {
+    const { store: s, outbox } = await withOutbox();
+    const publisher = new GithubPublisher(loaded(), s, client(), noPush, outbox);
+    await publisher.publish(state());
+    const receipt = await outbox.get(messageId(receiptInput));
+    expect(receipt).toMatchObject({
+      state: "sent",
+      body: "https://github.com/acme/demo/pull/1",
+      attempts: 1,
+    });
+  });
+
+  it("answers from a receipt that already says sent, without asking GitHub", async () => {
+    const { store: s, outbox } = await withOutbox();
+    const fake = client();
+    await outbox.save(
+      markSent({ ...receiptFor(receiptInput), body: "https://github.com/acme/demo/pull/9" }, "t"),
+    );
+    const run = state();
+    await new GithubPublisher(loaded(), s, fake, noPush, outbox).publish(run);
+    expect(run.pullRequestUrl).toBe("https://github.com/acme/demo/pull/9");
+    const spies = fake as unknown as { createPullRequest: ReturnType<typeof vi.fn>; findPullRequest: ReturnType<typeof vi.fn> };
+    expect(spies.createPullRequest).not.toHaveBeenCalled();
+    expect(spies.findPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("records why a publication failed, and lets a retry try again", async () => {
+    const { store: s, outbox } = await withOutbox();
+    const failing = client({
+      authStatus: vi.fn(async () => {
+        throw new Error("gh is not logged in");
+      }),
+    });
+    await expect(new GithubPublisher(loaded(), s, failing, noPush, outbox).publish(state())).rejects.toBeTruthy();
+    const failed = await outbox.get(messageId(receiptInput));
+    expect(failed).toMatchObject({ state: "failed", attempts: 1 });
+    // The failure is classified before it is recorded; the receipt keeps the copy
+    // the operator will see, which is the classified one.
+    expect(failed!.lastError).toBeTruthy();
+
+    const working = client();
+    await new GithubPublisher(loaded(), s, working, noPush, outbox).publish(state());
+    const sent = await outbox.get(messageId(receiptInput));
+    expect(sent).toMatchObject({ state: "sent", attempts: 2 });
+  });
+
+  it("keeps today's behaviour without an outbox", async () => {
+    const { store: s } = await withOutbox();
+    await expect(new GithubPublisher(loaded(), s, client(), noPush).publish(state())).resolves.toMatchObject({
+      status: "waiting-ci",
+    });
   });
 });
