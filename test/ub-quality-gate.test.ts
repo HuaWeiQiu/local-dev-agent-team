@@ -104,7 +104,9 @@ describe("ub quality gate wrapper", () => {
     const log = path.join(await mkdtemp(path.join(tmpdir(), "agent-team-ub-log-")), "args.txt");
     const ub = await stubTool(`printf '%s\\n' "$@" > ${log}\nexit 0`);
 
-    const result = run(["--ub", ub, "--all"]);
+    // A missing baseline keeps this test about the arguments, not about debt.
+    const baseline = path.join(await mkdtemp(path.join(tmpdir(), "agent-team-nobase-")), "base.json");
+    const result = run(["--ub", ub, "--all", "--baseline", baseline]);
     expect(result.status).toBe(0);
     const forwarded = (await readFile(log, "utf8")).trim().split("\n");
     expect(forwarded[0]).toBe("crapper");
