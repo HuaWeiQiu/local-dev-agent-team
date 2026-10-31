@@ -1225,7 +1225,7 @@ const BINDING_FIELDS: Array<{
     completed: ApplicationPayload["completed"][number],
   ): boolean;
 }> = [
-  { matches: (command, completed) => command.result.proposal.id === command.proposalId },
+  { matches: (command) => command.result.proposal.id === command.proposalId },
   {
     matches: (command) =>
       computeCandidateDigest(command.result.proposal.candidate) === command.candidateDigest,
