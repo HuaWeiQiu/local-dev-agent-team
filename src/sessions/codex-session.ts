@@ -20,6 +20,16 @@ import {
 
 type Json = Record<string, unknown>;
 
+/** Thread parameters: the sandbox and model the profile asked for. */
+function threadParameters(cwd: string, profile: AgentProfile): Json {
+  return {
+    cwd,
+    approvalPolicy: "never",
+    sandbox: profile.permission,
+    ...(profile.model !== "inherit" ? { model: profile.model } : {}),
+  };
+}
+
 /** The app-server command line: isolation flags first, then profile overrides. */
 export function appServerArguments(profile: AgentProfile, cwd: string): string[] {
   const args = ["app-server"];
@@ -49,6 +59,21 @@ async function removeIsolatedHome(home: string | undefined): Promise<void> {
   await rm(home, { recursive: true, force: true }).catch(() => undefined);
 }
 
+/** The settled shape of one completed turn. */
+function outcomeOf(active: ActiveTurn, turn: CompletedTurn | undefined): TurnOutcome {
+  const status = turnStatus(turn?.status);
+  return { status, turnId: turnIdOf(active, turn), error: failureOf(status, turn?.error) };
+}
+
+function turnIdOf(active: ActiveTurn, turn: CompletedTurn | undefined): string {
+  return turn?.id ?? active.turnId ?? "";
+}
+
+/** Only a failed turn carries an error payload. */
+function failureOf(status: TurnStatus, error: { message?: string } | null | undefined): string | undefined {
+  return status === "failed" ? JSON.stringify(error ?? { message: "turn failed" }) : undefined;
+}
+
 /** One JSON-RPC line, or undefined when it is not JSON at all. */
 function decodeLine(line: string): Json | undefined {
   try {
@@ -69,6 +94,12 @@ function exitReason(
   const code = exitCode ?? "none";
   const signalText = signal ? `, ${signal}` : "";
   return `codex app-server exited (code ${code}${signalText}): ${stderrTail.slice(-400)}`;
+}
+
+interface TurnOutcome {
+  status: TurnStatus;
+  turnId: string;
+  error: string | undefined;
 }
 
 interface CompletedTurn {
@@ -219,33 +250,10 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   async runTurn(input: TurnInput): Promise<TurnResult> {
-    if (this.closed) throw new SessionError("session is closed", "closed");
-    if (this.dead) throw this.dead;
-    if (this.active) throw new SessionError("a turn is already running", "protocol");
-    input.signal?.throwIfAborted();
+    this.assertCanRunTurn(input);
     await this.ensureStarted();
-
-    const active: ActiveTurn = {
-      turnId: undefined,
-      done: new Deferred<TurnResult>(),
-      startedAt: Date.now(),
-      finalText: undefined,
-      lastText: "",
-      usageBaseline: { ...this.totals },
-      structured: input.outputSchema !== undefined,
-    };
-    this.active = active;
-
-    const onAbort = (): void => {
-      void this.interruptWithGrace(active, "interrupted");
-    };
-    input.signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = input.timeoutMs
-      ? setTimeout(() => {
-          void this.interruptWithGrace(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
-        }, input.timeoutMs)
-      : undefined;
-
+    const active = this.beginTurn(input);
+    const cleanup = this.armTurnTimers(active, input);
     try {
       const response = (await this.request("turn/start", {
         threadId: this.threadId,
@@ -259,10 +267,48 @@ export class CodexAppServerSession implements AgentSession {
       active.done.reject(error);
       throw error;
     } finally {
-      if (timer) clearTimeout(timer);
-      input.signal?.removeEventListener("abort", onAbort);
+      cleanup();
       if (this.active === active) this.active = undefined;
     }
+  }
+
+  /** A turn needs an open session, no dead process and no turn in flight. */
+  assertCanRunTurn(input: TurnInput): void {
+    if (this.closed) throw new SessionError("session is closed", "closed");
+    if (this.dead) throw this.dead;
+    if (this.active) throw new SessionError("a turn is already running", "protocol");
+    input.signal?.throwIfAborted();
+  }
+
+  beginTurn(input: TurnInput): ActiveTurn {
+    const active: ActiveTurn = {
+      turnId: undefined,
+      done: new Deferred<TurnResult>(),
+      startedAt: Date.now(),
+      finalText: undefined,
+      lastText: "",
+      usageBaseline: { ...this.totals },
+      structured: input.outputSchema !== undefined,
+    };
+    this.active = active;
+    return active;
+  }
+
+  /** Abort and timeout both interrupt the turn; the returned cleanup disarms them. */
+  armTurnTimers(active: ActiveTurn, input: TurnInput): () => void {
+    const onAbort = (): void => {
+      void this.interruptWithGrace(active, "interrupted");
+    };
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = input.timeoutMs
+      ? setTimeout(() => {
+          void this.interruptWithGrace(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
+        }, input.timeoutMs)
+      : undefined;
+    return () => {
+      if (timer) clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+    };
   }
 
   async steer(text: string): Promise<void> {
@@ -365,25 +411,29 @@ export class CodexAppServerSession implements AgentSession {
     this.proc = proc;
     void proc.exited.then((exit) => this.handleExit(exit.exitCode, exit.signal, exit.error));
 
+    await this.handshake(cwd, profile);
+  }
+
+  /** Initialize the connection, then open or resume the thread. */
+  async handshake(cwd: string, profile: AgentProfile): Promise<void> {
     await this.request("initialize", {
       clientInfo: { name: "agent-team", title: "Agent Team", version: "2" },
     });
     this.notify("initialized");
+    this.threadId = await this.openThread(cwd, profile);
+  }
 
-    const threadParams = {
-      cwd,
-      approvalPolicy: "never",
-      sandbox: profile.permission,
-      ...(profile.model !== "inherit" ? { model: profile.model } : {}),
-    };
+  async openThread(cwd: string, profile: AgentProfile): Promise<string> {
+    const params = threadParameters(cwd, profile);
     const resumeId = this.options.resumeSessionId;
     const response = (await (resumeId
-      ? this.request("thread/resume", { threadId: resumeId, ...threadParams })
-      : this.request("thread/start", { ...threadParams, ephemeral: !this.capabilities.resume }))) as {
+      ? this.request("thread/resume", { threadId: resumeId, ...params })
+      : this.request("thread/start", { ...params, ephemeral: !this.capabilities.resume }))) as {
       thread?: { id?: string };
     };
-    this.threadId = response.thread?.id ?? resumeId;
-    if (!this.threadId) throw new SessionError("codex did not return a thread id", "protocol");
+    const threadId = response.thread?.id ?? resumeId;
+    if (!threadId) throw new SessionError("codex did not return a thread id", "protocol");
+    return threadId;
   }
 
   private request(method: string, params: Json): Promise<unknown> {
@@ -406,6 +456,20 @@ export class CodexAppServerSession implements AgentSession {
     this.proc?.write(JSON.stringify({ method }));
   }
 
+  /** A line without a method answers a request we sent earlier. */
+  settleReply(id: number | string | undefined, message: Json): void {
+    if (id === undefined) return;
+    const waiter = typeof id === "number" ? this.pending.get(id) : undefined;
+    if (!waiter) return;
+    this.pending.delete(id as number);
+    const error = message.error as { message?: string } | undefined;
+    if (error) {
+      waiter.reject(new SessionError(error.message ?? "app-server error", "protocol"));
+      return;
+    }
+    waiter.resolve(message.result);
+  }
+
   respond(id: number | string, result: unknown): void {
     this.proc?.write(JSON.stringify({ id, result }));
   }
@@ -426,25 +490,13 @@ export class CodexAppServerSession implements AgentSession {
     }
     const id = message.id as number | string | undefined;
     const method = message.method as string | undefined;
-    if (method === undefined && id !== undefined) {
-      const waiter = typeof id === "number" ? this.pending.get(id) : undefined;
-      if (!waiter) return;
-      this.pending.delete(id as number);
-      if (message.error) {
-        const error = message.error as { message?: string };
-        waiter.reject(new SessionError(error.message ?? "app-server error", "protocol"));
-      } else {
-        waiter.resolve(message.result);
-      }
+    if (method === undefined) {
+      this.settleReply(id, message);
       return;
     }
-    if (method === undefined) return;
     const params = (message.params ?? {}) as Json;
-    if (id !== undefined) {
-      this.handleServerRequest(id, method, params);
-    } else {
-      this.handleNotification(method, params);
-    }
+    if (id !== undefined) this.handleServerRequest(id, method, params);
+    else this.handleNotification(method, params);
   }
 
   private handleServerRequest(id: number | string, method: string, params: Json): void {
@@ -494,10 +546,9 @@ export class CodexAppServerSession implements AgentSession {
 
   emitDelta(params: Json): void {
     const active = this.active;
-    if (!active) return;
     this.hub.emit({
       type: "text-delta",
-      turnId: String(params.turnId ?? active.turnId ?? ""),
+      turnId: String(params.turnId ?? active?.turnId ?? ""),
       text: String(params.delta ?? ""),
     });
   }
@@ -561,16 +612,19 @@ export class CodexAppServerSession implements AgentSession {
     if (!active) return;
     const turn = params.turn as CompletedTurn | undefined;
     if (belongsToAnotherTurn(active, turn)) return;
-    const status = turnStatus(turn?.status);
+    this.completeTurn(active, turn);
+  }
+
+  /** Adopt the final item, settle the promise and announce the completion. */
+  completeTurn(active: ActiveTurn, turn: CompletedTurn | undefined): void {
     adoptFinalItem(active, turn?.items);
-    const error = status === "failed" ? JSON.stringify(turn?.error ?? { message: "turn failed" }) : undefined;
-    this.settleTurn(active, status, turn?.id ?? active.turnId ?? "", error);
+    this.settleTurn(active, outcomeOf(active, turn));
   }
 
   /** Announce the completed turn and resolve the waiting caller. */
-  settleTurn(active: ActiveTurn, status: TurnStatus, turnId: string, error: string | undefined): void {
-    this.hub.emit({ type: "turn-completed", turnId, status });
-    active.done.resolve(this.buildResult(active, status, error));
+  settleTurn(active: ActiveTurn, outcome: TurnOutcome): void {
+    this.hub.emit({ type: "turn-completed", turnId: outcome.turnId, status: outcome.status });
+    active.done.resolve(this.buildResult(active, outcome.status, outcome.error));
   }
 
   private buildResult(active: ActiveTurn, status: TurnStatus, error?: string): TurnResult {

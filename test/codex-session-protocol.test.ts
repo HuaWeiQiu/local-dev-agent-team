@@ -167,6 +167,38 @@ describe("codex app-server requests", () => {
   });
 });
 
+describe("codex turn completion", () => {
+  it("completes through the notification path in one call", () => {
+    const { session: target } = session();
+    const settled: unknown[] = [];
+    Object.assign((target as unknown as { active: Record<string, unknown> }).active, {
+      done: { resolve: (value: unknown) => settled.push(value), reject: () => undefined },
+    });
+    target.completeTurn(
+      (target as unknown as { active: never }).active,
+      { id: "turn-1", status: "completed", items: [{ type: "agentMessage", text: "ok" }] },
+    );
+    expect(settled).toHaveLength(1);
+  });
+});
+
+describe("codex turn outcomes", () => {
+  it("carries the turn id, status and a failure payload", () => {
+    const { session: target } = session();
+    const settled: unknown[] = [];
+    Object.assign((target as unknown as { active: Record<string, unknown> }).active, {
+      done: { resolve: (value: unknown) => settled.push(value), reject: () => undefined },
+    });
+    target.completeTurn((target as unknown as { active: never }).active, {
+      id: "turn-1",
+      status: "failed",
+      error: { message: "boom" },
+    });
+    expect(settled).toHaveLength(1);
+    expect(JSON.stringify(settled[0])).toContain("boom");
+  });
+});
+
 describe("codex helpers", () => {
   it("summarizes each tool kind", () => {
     expect(toolSummary("commandExecution", { command: "pnpm test" })).toBe("pnpm test");
@@ -254,6 +286,56 @@ describe("codex protocol failures", () => {
     expect(events).toEqual([]);
     target.handleTurnCompleted({ turn: { id: "turn-1", status: "failed", error: { message: "boom" } } });
     expect(events[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("settles a completed turn through the notification path", () => {
+    const { session: target, events } = session();
+    const settled: unknown[] = [];
+    Object.assign((target as unknown as { active: Record<string, unknown> }).active, {
+      done: { resolve: (value: unknown) => settled.push(value), reject: () => undefined },
+    });
+    notify(target, "turn/completed", {
+      turn: { id: "turn-1", status: "interrupted", items: [{ type: "agentMessage", text: "stopped" }] },
+    });
+    expect(events[0]).toMatchObject({ type: "turn-completed", status: "interrupted" });
+    expect(settled).toHaveLength(1);
+  });
+
+  it("answers a reply for an unknown or string id without throwing", () => {
+    const { session: target } = session();
+    Object.assign(target, { pending: new Map() });
+    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+      JSON.stringify({ id: 42, result: { ok: true } }),
+    );
+    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+      JSON.stringify({ id: "abc", result: { ok: true } }),
+    );
+    (target as unknown as { handleLine: (line: string) => void }).handleLine(JSON.stringify({}));
+    expect(true).toBe(true);
+  });
+
+  it("reports a spawn failure and a signal in the exit reason", () => {
+    const { session: target } = session();
+    const rejections: unknown[] = [];
+    Object.assign(target, {
+      pending: new Map([[1, { resolve: () => undefined, reject: (e: unknown) => rejections.push(e) }]]),
+      proc: { stderrTail: () => "" },
+    });
+    (target as unknown as { handleExit: (c: number | null, s: string | null, e?: Error) => void }).handleExit(
+      null,
+      "SIGKILL",
+    );
+    expect(String(rejections[0])).toContain("SIGKILL");
+
+    const second = session();
+    Object.assign(second.session, {
+      pending: new Map([[2, { resolve: () => undefined, reject: (e: unknown) => rejections.push(e) }]]),
+      proc: { stderrTail: () => "" },
+    });
+    (second.session as unknown as {
+      handleExit: (c: number | null, s: string | null, e?: Error) => void;
+    }).handleExit(null, null, new Error("ENOENT"));
+    expect(String(rejections[1])).toContain("could not start codex");
   });
 
   it("fails every waiter when the process exits", () => {
