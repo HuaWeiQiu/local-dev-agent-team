@@ -181,6 +181,8 @@ export interface RunState {
   flow?: FlowSelection;
   supervisorId?: string;
   parentRunId?: string;
+  /** The Ticket this run executes as one Assignment of (ADR 0019). */
+  ticketId?: string;
   purpose?: "evolution-evaluation" | "evolution-proposer";
   intake?: GoalIntake;
   /** Read-only research written before planning. Absent when explore was skipped or failed open. */

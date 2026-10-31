@@ -10,6 +10,10 @@ import {
   summarizePlanEdit,
 } from "../interventions/plan-edit.js";
 import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
+import { TicketService } from "../authority/ticket-service.js";
+import type { PolicySnapshot } from "../authority/types.js";
+import { TicketStore } from "../authority/ticket-store.js";
+import { assignmentOutcome } from "../authority/assignment-outcome.js";
 import { policyFactsFrom, policySnapshot } from "../authority/policy.js";
 import { attachTreeNodes } from "../domain/architecture-design.js";
 import { SessionFactory } from "../sessions/factory.js";
@@ -143,6 +147,8 @@ export class RunSupervisor {
   private evolutionMutationFinished: Promise<void> = Promise.resolve();
   private finishEvolutionMutation: (() => void) | undefined;
   private automationOwner: symbol | undefined;
+  /** Built on first use: a run without a Ticket never touches the file. */
+  #tickets: TicketService | undefined;
   readonly live: LiveSupport;
   readonly insights: RunInsights;
 
@@ -255,13 +261,15 @@ export class RunSupervisor {
     try {
       this.assertRunStartAllowed(automationOwner);
       this.emitQueued(runId, request);
-      const workflow = this.startWorkflow({
-        request,
-        runId,
-        prepared,
-        signal: controller.signal,
-        ...(purpose ? { purpose } : {}),
-      });
+      const workflow = this.withTicketAssignment(request.ticketId, runId, () =>
+        this.startWorkflow({
+          request,
+          runId,
+          prepared,
+          signal: controller.signal,
+          ...(purpose ? { purpose } : {}),
+        }),
+      );
       const replay = idempotencyKey && hash ? { key: idempotencyKey, hash } : undefined;
       void this.track(runId, controller, workflow, request.parentRunId, replay);
     } catch (error) {
@@ -850,6 +858,66 @@ export class RunSupervisor {
     return promise;
   }
 
+  /**
+   * A run may execute as one Assignment of a Ticket. Binding happens before the
+   * workflow starts, so a Ticket that already has a running Assignment refuses
+   * this run instead of running it twice; the Assignment is settled whatever the
+   * workflow does, including a crash.
+   */
+  private withTicketAssignment(
+    ticketId: string | undefined,
+    runId: string,
+    start: () => Promise<RunState>,
+  ): Promise<RunState> {
+    if (!ticketId) return start();
+    return this.ticketService()
+      .attachRun({ ticketId, runId })
+      .then(async () => await start())
+      .finally(async () => await this.settleTicketAssignment(ticketId, runId));
+  }
+
+  /**
+   * The Assignment ends with the run; the Ticket keeps its own life. The run
+   * record keeps the Ticket it belongs to, so a retry is another Assignment of
+   * the same work rather than new work.
+   */
+  private async settleTicketAssignment(ticketId: string, runId: string): Promise<void> {
+    const state = await this.stateStore.load(runId).catch(() => undefined);
+    await this.ticketService()
+      .settleRun({ ticketId, runId, outcome: assignmentOutcome(state?.status) })
+      .catch(() => undefined);
+    await this.rememberTicket(state, ticketId);
+  }
+
+  /** A retry reads this to stay an Assignment of the same Ticket. */
+  private async rememberTicket(state: RunState | undefined, ticketId: string): Promise<void> {
+    if (!state || state.ticketId === ticketId) return;
+    await this.stateStore.save({ ...state, ticketId }).catch(() => undefined);
+  }
+
+  /** The Ticket service for this project; built once, file-backed. */
+  private ticketService(): TicketService {
+    this.#tickets ??= new TicketService({
+      store: new TicketStore(this.ticketStorePath()),
+      policy: () => this.currentPolicy(),
+    });
+    return this.#tickets;
+  }
+
+  /** Tickets live beside the runs, under the configured state directory. */
+  private ticketStorePath(): string {
+    return TicketStore.pathFor(
+      path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory),
+    );
+  }
+
+  /** The policy as it stands now, which is what a Mandate is revalidated against. */
+  currentPolicy(): PolicySnapshot {
+    return policySnapshot(
+      policyFactsFrom(this.loaded.config, this.loaded.config.strategies?.default ?? "balanced"),
+    );
+  }
+
   private startContinuation(
     state: RunState,
     options: Omit<WorkflowResumeOptions, "signal" | "supervisorId">,
@@ -1129,6 +1197,8 @@ export function retryRequest(
     ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
     ...(source.strategy.name !== "legacy" ? { strategy: source.strategy.name } : {}),
     parentRunId: source.id,
+    // A retry is another Assignment of the same authorized work, not new work.
+    ...(source.ticketId ? { ticketId: source.ticketId } : {}),
   };
 }
 

@@ -17,6 +17,12 @@ export const startRunRequestSchema = z.object({
   /** Global CLI picker: per-role CLI / model / reasoning for this run. */
   roleBindings: z.record(z.string().min(1), roleBindingSchema).optional(),
   parentRunId: z.string().min(1).optional(),
+  /**
+   * The authorized work this run executes as (ADR 0019). Omit it and the run
+   * behaves exactly as before; supply it and the run becomes one Assignment of
+   * that Ticket.
+   */
+  ticketId: z.string().min(1).optional(),
 });
 
 export type StartRunRequest = z.infer<typeof startRunRequestSchema>;
