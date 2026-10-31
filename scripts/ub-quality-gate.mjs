@@ -200,9 +200,9 @@ export function regressions(scores, baseline, threshold = 10) {
 export function main(argv = process.argv.slice(2)) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
-  if (prepared.options.changed && layersInput(prepared.options).length === 0) {
-    return baselineStep(prepared.options);
-  }
+  // crapper in changed mode has nothing to score when nothing changed; the
+  // other tools do not look at git at all.
+  if (isIdleCrapperRun(prepared.options)) return baselineStep(prepared.options);
   const failed = runLayers(prepared.ub, prepared.options);
   // Seeding a baseline records reality even when the layers are still red.
   if (prepared.options.updateBaseline) return baselineStep(prepared.options);
@@ -215,6 +215,10 @@ function runLayers(ub, options) {
     const args = toolArgs(options, layer, files);
     return args ? Math.max(worst, runLayer(ub, args, layer)) : worst;
   }, 0);
+}
+
+function isIdleCrapperRun(options) {
+  return options.tool === "crapper" && options.changed && layersInput(options).length === 0;
 }
 
 /** The changed files, or an empty list when nothing changed. */

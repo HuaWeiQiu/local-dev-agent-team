@@ -88,14 +88,16 @@ describe("ub quality gate wrapper", () => {
     const log = path.join(await mkdtemp(path.join(tmpdir(), "agent-team-ub-log-")), "args.txt");
     const ub = await stubTool(`printf '%s\\n' "$@" > ${log}\nexit 2`);
 
-    const result = run(["--ub", ub, "--threshold", "12"]);
+    // `--all` keeps the assertion independent of the checkout's git state.
+    const result = run(["--ub", ub, "--threshold", "12", "--all"]);
     expect(result.status).toBe(2);
 
     // The stub logs its last call: the TypeScript layer (Rust runs first).
     // Only the TypeScript layer has a changed file in this repository state.
     const forwarded = (await readFile(log, "utf8")).trim().split("\n");
     expect(forwarded[0]).toBe("crapper");
-    expect(forwarded.at(-2)).toBe("--threshold");
+    expect(forwarded.slice(0, 4)).toEqual(["crapper", "src", "web", "scripts"]);
+    expect(forwarded).toContain("12");
   });
 
   it("scans the whole project when --all is given", async () => {
