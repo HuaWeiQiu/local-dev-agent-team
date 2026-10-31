@@ -15,27 +15,30 @@ export const refreshRequiredEvolutionCodes = new Set([
   "RECOVERY_REQUIRED",
 ]);
 
+const API_MESSAGES: Record<string, string> = {
+  ORIGIN_DENIED: "当前页面来源与控制服务不一致，请从控制服务地址打开应用。",
+  ACTIVE_RUN_CONFLICT: "项目中仍有 Agent 操作正在进行，结束后可使用同一确认重新提交。",
+  RECOVERY_REQUIRED: "本地演进状态需要恢复，当前操作已安全停止。",
+  AUTOMATION_DISABLED: "当前项目未启用自动演进，请先更新 agent-team.yaml。",
+  AUTOMATION_RUNNING: "自动演进已经在运行，请等待完成或先停止。",
+  AUTOMATION_NOT_RUNNING: "自动演进已经停止，当前没有可停止的循环。",
+  AUTOMATION_CYCLE_LIMIT: "循环次数超出当前项目配置的安全上限。",
+  AUTOMATION_TARGET_CONFLICT: "自动演进目标已被其他策略占用，未修改现有目标。",
+  AUTOMATION_BUDGET_EXPANSION: "候选提高了资源或时间上限，已安全拒绝本轮自动应用。",
+  AUTOMATION_COMMAND_CONFLICT: "这个启动请求已被其他自动演进会话使用，请刷新状态后再决定。",
+  PROPOSAL_ARCHIVED: "候选已归档，请先取消归档再执行变更操作。",
+  PROPOSAL_ALREADY_ARCHIVED: "候选已经归档，无需重复操作。",
+  PROPOSAL_NOT_ARCHIVED: "候选不在已归档状态，无法取消归档。",
+  PROPOSAL_STATE_CONFLICT: "候选当前状态不允许该操作，请刷新后核对。",
+  PROPOSAL_NOT_DELETABLE: "只有已拒绝的候选可以删除。",
+  REASON_REQUIRED: "该操作必须填写原因。",
+};
+
+/** API failures get a sentence per code; anything else falls back to its message. */
 export function evolutionErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 401) return "本地控制会话尚未建立，请从服务启动时输出的地址重新打开应用。";
-    if (error.code === "ORIGIN_DENIED") return "当前页面来源与控制服务不一致，请从控制服务地址打开应用。";
-    if (error.code === "ACTIVE_RUN_CONFLICT") return "项目中仍有 Agent 操作正在进行，结束后可使用同一确认重新提交。";
-    if (error.code === "RECOVERY_REQUIRED") return "本地演进状态需要恢复，当前操作已安全停止。";
-    if (error.code === "AUTOMATION_DISABLED") return "当前项目未启用自动演进，请先更新 agent-team.yaml。";
-    if (error.code === "AUTOMATION_RUNNING") return "自动演进已经在运行，请等待完成或先停止。";
-    if (error.code === "AUTOMATION_NOT_RUNNING") return "自动演进已经停止，当前没有可停止的循环。";
-    if (error.code === "AUTOMATION_CYCLE_LIMIT") return "循环次数超出当前项目配置的安全上限。";
-    if (error.code === "AUTOMATION_TARGET_CONFLICT") return "自动演进目标已被其他策略占用，未修改现有目标。";
-    if (error.code === "AUTOMATION_BUDGET_EXPANSION") return "候选提高了资源或时间上限，已安全拒绝本轮自动应用。";
-    if (error.code === "AUTOMATION_COMMAND_CONFLICT") return "这个启动请求已被其他自动演进会话使用，请刷新状态后再决定。";
-    if (error.code === "PROPOSAL_ARCHIVED") return "候选已归档，请先取消归档再执行变更操作。";
-    if (error.code === "PROPOSAL_ALREADY_ARCHIVED") return "候选已经归档，无需重复操作。";
-    if (error.code === "PROPOSAL_NOT_ARCHIVED") return "候选不在已归档状态，无法取消归档。";
-    if (error.code === "PROPOSAL_STATE_CONFLICT") return "候选当前状态不允许该操作，请刷新后核对。";
-    if (error.code === "PROPOSAL_NOT_DELETABLE") return "只有已拒绝的候选可以删除。";
-    if (error.code === "REASON_REQUIRED") return "该操作必须填写原因。";
-  }
-  return errorMessage(error);
+  if (!(error instanceof ApiError)) return errorMessage(error);
+  if (error.status === 401) return "本地控制会话尚未建立，请从服务启动时输出的地址重新打开应用。";
+  return API_MESSAGES[error.code ?? ""] ?? errorMessage(error);
 }
 
 export const formatDate = (value: string) =>
