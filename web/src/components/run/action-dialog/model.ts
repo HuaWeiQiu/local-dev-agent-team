@@ -97,9 +97,9 @@ export type DialogView = {
 /** Everything the dialog derives from its inputs and local state. */
 export function dialogView(input: {
   mode: DialogMode;
-  approval?: ApprovalRequest;
-  run?: RunState;
-  draft?: EditablePlan;
+  approval: ApprovalRequest | undefined;
+  run: RunState | undefined;
+  draft: EditablePlan | undefined;
   editing: boolean;
   acknowledged: boolean;
   actor: string;
