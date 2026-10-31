@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { codexProviderArguments } from "../adapters/codex.js";
 import type { AgentUsage } from "../adapters/types.js";
+import type { AgentProfile } from "../config/schema.js";
 import { sanitizedChildEnv } from "../process/env.js";
 import { spawnStreamProcess, type StreamProcess } from "../process/stream.js";
 import { Deferred, SessionEventHub } from "./hub.js";
@@ -18,6 +19,82 @@ import {
 } from "./types.js";
 
 type Json = Record<string, unknown>;
+
+/** The app-server command line: isolation flags first, then profile overrides. */
+export function appServerArguments(profile: AgentProfile, cwd: string): string[] {
+  const args = ["app-server"];
+  if (profile.externalTools === "deny") {
+    args.push(
+      "-c",
+      "project_root_markers=[]",
+      "-c",
+      `projects.${JSON.stringify(cwd)}.trust_level="untrusted"`,
+    );
+  }
+  if (profile.codexProvider) args.push(...codexProviderArguments(profile.codexProvider));
+  if (profile.nativeProfile) args.push("-c", `profile=${JSON.stringify(profile.nativeProfile)}`);
+  return args;
+}
+
+/** Close the pipe first, then the process; wait for it to be gone. */
+async function stopProcess(proc: StreamProcess | undefined): Promise<void> {
+  if (!proc) return;
+  proc.closeStdin();
+  proc.terminate();
+  await proc.exited;
+}
+
+async function removeIsolatedHome(home: string | undefined): Promise<void> {
+  if (!home) return;
+  await rm(home, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/** One JSON-RPC line, or undefined when it is not JSON at all. */
+function decodeLine(line: string): Json | undefined {
+  try {
+    return JSON.parse(line) as Json;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The reason text for an exited app server. */
+function exitReason(
+  spawnError: Error | undefined,
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  stderrTail: string,
+): string {
+  if (spawnError) return `could not start codex: ${spawnError.message}`;
+  const code = exitCode ?? "none";
+  const signalText = signal ? `, ${signal}` : "";
+  return `codex app-server exited (code ${code}${signalText}): ${stderrTail.slice(-400)}`;
+}
+
+interface CompletedTurn {
+  id?: string;
+  status?: string;
+  error?: { message?: string } | null;
+  items?: Json[];
+}
+
+/** A completion for a different turn leaves the current one alone. */
+function belongsToAnotherTurn(active: ActiveTurn, turn: CompletedTurn | undefined): boolean {
+  return Boolean(active.turnId && turn?.id && turn.id !== active.turnId);
+}
+
+function turnStatus(raw: string | undefined): TurnStatus {
+  if (raw === "completed") return "completed";
+  return raw === "interrupted" ? "interrupted" : "failed";
+}
+
+/** The last agent message becomes the turn's answer when none was streamed. */
+function adoptFinalItem(active: ActiveTurn, items: Json[] | undefined): void {
+  if (active.finalText !== undefined) return;
+  const finals = (items ?? []).filter((item) => item.type === "agentMessage");
+  const last = finals[finals.length - 1];
+  if (last) active.finalText = String(last.text ?? "");
+}
 
 interface ActiveTurn {
   turnId: string | undefined;
@@ -38,6 +115,72 @@ interface PendingQuestion {
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INTERRUPT_GRACE_MS = 5_000;
+
+/** Item kinds that carry no tool information worth showing. */
+const IGNORED_ITEM_TYPES = new Set([
+  "userMessage",
+  "reasoning",
+  "hookPrompt",
+  "contextCompaction",
+]);
+
+/** A completed item is only failed when the server says so. */
+function toolStatus(completed: boolean, item: Json): "started" | "failed" | "completed" {
+  if (!completed) return "started";
+  return item.status === "failed" || item.status === "declined" ? "failed" : "completed";
+}
+
+type NotificationHandler = (session: CodexAppServerSession, params: Json) => void;
+
+/** App-server notifications, one handler per method. */
+const NOTIFICATIONS: Record<string, NotificationHandler> = {
+  "turn/started": (session, params) => session.startTurn(params),
+  "item/agentMessage/delta": (session, params) => session.emitDelta(params),
+  "item/started": (session, params) => session.handleItem(false, params),
+  "item/completed": (session, params) => session.handleItem(true, params),
+  "thread/tokenUsage/updated": (session, params) => session.handleUsage(params),
+  "turn/completed": (session, params) => session.handleTurnCompleted(params),
+  error: (session, params) =>
+    session.emitNotice("error", errorText(params) ?? "app-server error"),
+  warning: (session, params) => session.emitNotice("warning", String(params.message ?? "")),
+};
+
+function errorText(params: Json): string | undefined {
+  const error = params.error as { message?: string } | undefined;
+  return error?.message;
+}
+
+type ServerReply = (session: CodexAppServerSession, id: number | string, params: Json) => void;
+
+/** Every request the app server may send us, and the one answer we give. */
+const SERVER_REPLIES: Record<string, ServerReply> = {
+  "item/tool/requestUserInput": (session, id, params) => session.requestUserInput(id, params),
+  "item/commandExecution/requestApproval": (session, id, _params) =>
+    session.declineApproval(id, "item/commandExecution/requestApproval"),
+  "item/fileChange/requestApproval": (session, id, _params) =>
+    session.declineApproval(id, "item/fileChange/requestApproval"),
+  applyPatchApproval: (session, id) => session.respond(id, { decision: "denied" }),
+  execCommandApproval: (session, id) => session.respond(id, { decision: "denied" }),
+  "item/permissions/requestApproval": (session, id) => session.respond(id, { permissions: {} }),
+  "mcpServer/elicitation/request": (session, id) => session.respond(id, { action: "decline" }),
+};
+
+/** One session event per question the app server asked. */
+function questionEvent(
+  turnId: string,
+  questionId: string,
+  question: Json,
+): Parameters<SessionEventHub["emit"]>[0] {
+  const options = (question.options as Json[] | null | undefined)?.map((o) => String(o.label));
+  return {
+    type: "question",
+    turnId,
+    questionId,
+    prompt: String(question.question ?? question.header ?? ""),
+    ...(options && options.length > 0 ? { options } : {}),
+    ...(question.isSecret === true ? { secret: true } : {}),
+  };
+}
 
 export class CodexAppServerSession implements AgentSession {
   readonly kind = "codex-app-server" as const;
@@ -155,21 +298,17 @@ export class CodexAppServerSession implements AgentSession {
     if (this.closed) return;
     this.closed = true;
     const proc = this.proc;
-    if (this.active) {
-      this.active.done.reject(new SessionError("session closed", "closed"));
-    }
-    for (const waiter of this.pending.values()) {
-      waiter.reject(new SessionError("session closed", "closed"));
-    }
+    this.rejectOutstanding();
+    await stopProcess(proc);
+    await removeIsolatedHome(this.codexHome);
+  }
+
+  /** Nobody is left to answer: fail the active turn and every waiter. */
+  rejectOutstanding(): void {
+    const error = new SessionError("session closed", "closed");
+    this.active?.done.reject(error);
+    for (const waiter of this.pending.values()) waiter.reject(error);
     this.pending.clear();
-    if (proc) {
-      proc.closeStdin();
-      proc.terminate();
-      await proc.exited;
-    }
-    if (this.codexHome) {
-      await rm(this.codexHome, { recursive: true, force: true }).catch(() => undefined);
-    }
   }
 
   private requireActiveTurn(): ActiveTurn {
@@ -213,12 +352,7 @@ export class CodexAppServerSession implements AgentSession {
       env.CODEX_HOME = this.codexHome;
     }
 
-    const args = ["app-server"];
-    if (profile.externalTools === "deny") {
-      args.push("-c", "project_root_markers=[]", "-c", `projects.${JSON.stringify(cwd)}.trust_level="untrusted"`);
-    }
-    if (profile.codexProvider) args.push(...codexProviderArguments(profile.codexProvider));
-    if (profile.nativeProfile) args.push("-c", `profile=${JSON.stringify(profile.nativeProfile)}`);
+    const args = appServerArguments(profile, cwd);
 
     const proc = spawnStreamProcess({
       command: this.command,
@@ -272,7 +406,7 @@ export class CodexAppServerSession implements AgentSession {
     this.proc?.write(JSON.stringify({ method }));
   }
 
-  private respond(id: number | string, result: unknown): void {
+  respond(id: number | string, result: unknown): void {
     this.proc?.write(JSON.stringify({ id, result }));
   }
 
@@ -281,11 +415,13 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private handleLine(line: string): void {
-    let message: Json;
-    try {
-      message = JSON.parse(line) as Json;
-    } catch {
-      this.hub.emit({ type: "notice", level: "warning", message: `unparseable app-server line: ${line.slice(0, 120)}` });
+    const message = decodeLine(line);
+    if (!message) {
+      this.hub.emit({
+        type: "notice",
+        level: "warning",
+        message: `unparseable app-server line: ${line.slice(0, 120)}`,
+      });
       return;
     }
     const id = message.id as number | string | undefined;
@@ -312,151 +448,128 @@ export class CodexAppServerSession implements AgentSession {
   }
 
   private handleServerRequest(id: number | string, method: string, params: Json): void {
-    switch (method) {
-      case "item/tool/requestUserInput": {
-        const turnId = String(params.turnId ?? this.active?.turnId ?? "");
-        const questions = (params.questions as Json[] | undefined) ?? [];
-        const questionIds = questions.map((q) => `${id}:${String(q.id)}`);
-        const pending: PendingQuestion = { requestId: id, turnId, questionIds, answers: new Map() };
-        for (const [index, question] of questions.entries()) {
-          const questionId = questionIds[index]!;
-          this.questions.set(questionId, pending);
-          const options = (question.options as Json[] | null | undefined)?.map((o) => String(o.label));
-          this.hub.emit({
-            type: "question",
-            turnId,
-            questionId,
-            prompt: String(question.question ?? question.header ?? ""),
-            ...(options && options.length > 0 ? { options } : {}),
-            ...(question.isSecret === true ? { secret: true } : {}),
-          });
-        }
-        return;
-      }
-      case "item/commandExecution/requestApproval":
-      case "item/fileChange/requestApproval":
-        this.respond(id, { decision: "decline" });
-        this.hub.emit({ type: "notice", level: "warning", message: `declined ${method}: approvals are never granted automatically` });
-        return;
-      case "applyPatchApproval":
-      case "execCommandApproval":
-        this.respond(id, { decision: "denied" });
-        return;
-      case "item/permissions/requestApproval":
-        this.respond(id, { permissions: {} });
-        return;
-      case "mcpServer/elicitation/request":
-        this.respond(id, { action: "decline" });
-        return;
-      default:
-        this.respondError(id, `unsupported server request '${method}'`);
+    const reply = SERVER_REPLIES[method];
+    if (!reply) {
+      this.respondError(id, `unsupported server request '${method}'`);
+      return;
     }
+    reply(this, id, params);
+  }
+
+  /** Ask the operator and remember the pending questions until answered. */
+  requestUserInput(id: number | string, params: Json): void {
+    const turnId = String(params.turnId ?? this.active?.turnId ?? "");
+    const questions = (params.questions as Json[] | undefined) ?? [];
+    const questionIds = questions.map((q) => `${id}:${String(q.id)}`);
+    const pending: PendingQuestion = { requestId: id, turnId, questionIds, answers: new Map() };
+    for (const [index, question] of questions.entries()) {
+      const questionId = questionIds[index]!;
+      this.questions.set(questionId, pending);
+      this.hub.emit(questionEvent(turnId, questionId, question));
+    }
+  }
+
+  /** Approvals are never granted automatically: refuse and say so. */
+  declineApproval(id: number | string, method: string): void {
+    this.respond(id, { decision: "decline" });
+    this.hub.emit({
+      type: "notice",
+      level: "warning",
+      message: `declined ${method}: approvals are never granted automatically`,
+    });
   }
 
   private handleNotification(method: string, params: Json): void {
-    const active = this.active;
-    switch (method) {
-      case "turn/started": {
-        const turn = params.turn as { id?: string } | undefined;
-        if (active && turn?.id) {
-          active.turnId ??= turn.id;
-          this.hub.emit({ type: "turn-started", turnId: turn.id });
-        }
-        return;
-      }
-      case "item/agentMessage/delta":
-        if (active) {
-          this.hub.emit({
-            type: "text-delta",
-            turnId: String(params.turnId ?? active.turnId ?? ""),
-            text: String(params.delta ?? ""),
-          });
-        }
-        return;
-      case "item/started":
-      case "item/completed":
-        this.handleItem(method === "item/completed", params);
-        return;
-      case "thread/tokenUsage/updated":
-        this.handleUsage(params);
-        return;
-      case "turn/completed":
-        this.handleTurnCompleted(params);
-        return;
-      case "error": {
-        const error = params.error as { message?: string } | undefined;
-        this.hub.emit({ type: "notice", level: "error", message: error?.message ?? "app-server error" });
-        return;
-      }
-      case "warning":
-        this.hub.emit({ type: "notice", level: "warning", message: String(params.message ?? "") });
-        return;
-      default:
-        return;
-    }
+    const handler = NOTIFICATIONS[method];
+    if (handler) handler(this, params);
   }
 
-  private handleItem(completed: boolean, params: Json): void {
+  startTurn(params: Json): void {
+    const active = this.active;
+    const turn = params.turn as { id?: string } | undefined;
+    if (!active || !turn?.id) return;
+    active.turnId ??= turn.id;
+    this.hub.emit({ type: "turn-started", turnId: turn.id });
+  }
+
+  emitDelta(params: Json): void {
+    const active = this.active;
+    if (!active) return;
+    this.hub.emit({
+      type: "text-delta",
+      turnId: String(params.turnId ?? active.turnId ?? ""),
+      text: String(params.delta ?? ""),
+    });
+  }
+
+  emitNotice(level: "info" | "warning" | "error", message: string): void {
+    this.hub.emit({ type: "notice", level, message });
+  }
+
+  handleItem(completed: boolean, params: Json): void {
     const active = this.active;
     const item = params.item as Json | undefined;
     if (!active || !item) return;
     const turnId = String(params.turnId ?? active.turnId ?? "");
     const type = String(item.type);
     if (type === "agentMessage") {
-      if (completed) {
-        const text = String(item.text ?? "");
-        active.lastText = text;
-        if (item.phase === "final_answer") active.finalText = text;
-        this.hub.emit({ type: "message", turnId, text, final: item.phase === "final_answer" });
-      }
+      this.agentMessageItem(completed, item, turnId);
       return;
     }
-    if (type === "userMessage" || type === "reasoning" || type === "hookPrompt" || type === "contextCompaction") {
-      return;
-    }
-    const failed = completed && (item.status === "failed" || item.status === "declined");
+    if (IGNORED_ITEM_TYPES.has(type)) return;
+    this.toolItem(completed, item, turnId);
+  }
+
+  /** A completed agent message is the turn's answer; only a final phase is final. */
+  agentMessageItem(completed: boolean, item: Json, turnId: string): void {
+    if (!completed) return;
+    const text = String(item.text ?? "");
+    const active = this.active!;
+    active.lastText = text;
+    if (item.phase === "final_answer") active.finalText = text;
+    this.hub.emit({ type: "message", turnId, text, final: item.phase === "final_answer" });
+  }
+
+  toolItem(completed: boolean, item: Json, turnId: string): void {
+    const type = String(item.type);
+    const summary = toolSummary(type, item);
     this.hub.emit({
       type: "tool",
       turnId,
       toolId: String(item.id),
       name: toolName(type, item),
-      status: !completed ? "started" : failed ? "failed" : "completed",
-      ...(toolSummary(type, item) ? { summary: toolSummary(type, item)! } : {}),
+      status: toolStatus(completed, item),
+      ...(summary ? { summary } : {}),
     });
   }
 
-  private handleUsage(params: Json): void {
+  handleUsage(params: Json): void {
     const total = (params.tokenUsage as { total?: Json } | undefined)?.total;
     if (!total) return;
-    this.totals = {
-      inputTokens: Number(total.inputTokens ?? 0),
-      cachedInputTokens: Number(total.cachedInputTokens ?? 0),
-      outputTokens: Number(total.outputTokens ?? 0),
-    };
-    const active = this.active;
-    if (active) {
-      this.hub.emit({
-        type: "usage",
-        turnId: String(params.turnId ?? active.turnId ?? ""),
-        usage: usageDelta(this.totals, active.usageBaseline),
-      });
-    }
-  }
-
-  private handleTurnCompleted(params: Json): void {
+    this.totals = totalsFrom(total);
     const active = this.active;
     if (!active) return;
-    const turn = params.turn as { id?: string; status?: string; error?: { message?: string } | null; items?: Json[] };
-    if (active.turnId && turn.id && turn.id !== active.turnId) return;
-    const status: TurnStatus =
-      turn.status === "completed" ? "completed" : turn.status === "interrupted" ? "interrupted" : "failed";
-    if (active.finalText === undefined) {
-      const finals = (turn.items ?? []).filter((item) => item.type === "agentMessage");
-      const last = finals[finals.length - 1];
-      if (last) active.finalText = String(last.text ?? "");
-    }
-    const error = status === "failed" ? JSON.stringify(turn.error ?? { message: "turn failed" }) : undefined;
-    this.hub.emit({ type: "turn-completed", turnId: turn.id ?? active.turnId ?? "", status });
+    this.hub.emit({
+      type: "usage",
+      turnId: String(params.turnId ?? active.turnId ?? ""),
+      usage: usageDelta(this.totals, active.usageBaseline),
+    });
+  }
+
+  handleTurnCompleted(params: Json): void {
+    const active = this.active;
+    if (!active) return;
+    const turn = params.turn as CompletedTurn | undefined;
+    if (belongsToAnotherTurn(active, turn)) return;
+    const status = turnStatus(turn?.status);
+    adoptFinalItem(active, turn?.items);
+    const error = status === "failed" ? JSON.stringify(turn?.error ?? { message: "turn failed" }) : undefined;
+    this.settleTurn(active, status, turn?.id ?? active.turnId ?? "", error);
+  }
+
+  /** Announce the completed turn and resolve the waiting caller. */
+  settleTurn(active: ActiveTurn, status: TurnStatus, turnId: string, error: string | undefined): void {
+    this.hub.emit({ type: "turn-completed", turnId, status });
     active.done.resolve(this.buildResult(active, status, error));
   }
 
@@ -484,9 +597,12 @@ export class CodexAppServerSession implements AgentSession {
 
   private handleExit(exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error): void {
     if (this.closed) return;
-    const reason = spawnError
-      ? `could not start codex: ${spawnError.message}`
-      : `codex app-server exited (code ${exitCode ?? "none"}${signal ? `, ${signal}` : ""}): ${this.proc?.stderrTail().slice(-400) ?? ""}`;
+    const reason = exitReason(
+      spawnError,
+      exitCode,
+      signal,
+      this.proc?.stderrTail() ?? "",
+    );
     const error = new SessionError(reason, "process-exit");
     for (const waiter of this.pending.values()) waiter.reject(error);
     this.pending.clear();
@@ -512,14 +628,37 @@ function toolName(type: string, item: Json): string {
   return type;
 }
 
-function toolSummary(type: string, item: Json): string | undefined {
-  if (type === "commandExecution") return String(item.command ?? "").slice(0, 300) || undefined;
-  if (type === "webSearch") return String(item.query ?? "").slice(0, 300) || undefined;
-  if (type === "fileChange") {
-    const changes = item.changes as Json[] | undefined;
-    return changes?.map((change) => String(change.path ?? "")).filter(Boolean).slice(0, 8).join(", ") || undefined;
-  }
-  return undefined;
+/** Token totals as the app server reports them; missing counters read as zero. */
+export function totalsFrom(total: Json): AgentUsage {
+  return {
+    inputTokens: Number(total.inputTokens ?? 0),
+    cachedInputTokens: Number(total.cachedInputTokens ?? 0),
+    outputTokens: Number(total.outputTokens ?? 0),
+  };
+}
+
+const TOOL_SUMMARIES: Record<string, (item: Json) => string | undefined> = {
+  commandExecution: (item) => clipped(item.command),
+  webSearch: (item) => clipped(item.query),
+  fileChange: (item) => changedPaths(item.changes),
+};
+
+/** A tool's one-line summary: the command, the query, or the changed paths. */
+export function toolSummary(type: string, item: Json): string | undefined {
+  return TOOL_SUMMARIES[type]?.(item);
+}
+
+function clipped(value: unknown): string | undefined {
+  return String(value ?? "").slice(0, 300) || undefined;
+}
+
+function changedPaths(changes: unknown): string | undefined {
+  if (!Array.isArray(changes)) return undefined;
+  const paths = changes
+    .map((change) => String((change as Json).path ?? ""))
+    .filter(Boolean)
+    .slice(0, 8);
+  return paths.length > 0 ? paths.join(", ") : undefined;
 }
 
 async function createIsolatedCodexHome(env: NodeJS.ProcessEnv): Promise<string> {
