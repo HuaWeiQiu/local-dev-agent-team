@@ -106,6 +106,9 @@ function commentDraft(
     threads: [threadRef(context.instanceId, pull ? "pull" : "issue", number)],
     actor,
     at: timestamp(comment.created_at),
+    // The words travel with the Trigger: the gate reads who was addressed, and
+    // the assessment reads what was asked.
+    ...(typeof comment.body === "string" ? { payload: { body: comment.body } } : {}),
   };
 }
 
