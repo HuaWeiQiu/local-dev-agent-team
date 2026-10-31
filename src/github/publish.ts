@@ -10,6 +10,15 @@ import {
   GithubActionError,
 } from "./errors.js";
 import { GithubClient, summarizeChecks, type GithubCheck } from "./client.js";
+import {
+  markFailed,
+  markSent,
+  messageId,
+  receiptFor,
+  type EnqueueInput,
+  type OutboxMessage,
+} from "../authority/outbox.js";
+import type { OutboxStore } from "../authority/outbox-store.js";
 
 export class GithubPublisher {
   constructor(
@@ -23,6 +32,8 @@ export class GithubPublisher {
         this.loaded.config.github.remote,
         state.integrationBranch,
       ),
+    /** Where the receipt of what was already said goes; omit it to keep today's behaviour. */
+    private readonly outbox?: OutboxStore,
   ) {}
 
   async publish(state: RunState): Promise<RunState> {
@@ -32,10 +43,16 @@ export class GithubPublisher {
       await this.client.authStatus(state.integrationWorktree);
       const repository = await this.client.repository(state.integrationWorktree);
       await this.push(state);
+      const receipt = await this.publicationReceipt(state);
+      if (receipt?.state === "sent" && receipt.body) {
+        // The pull request was created, even if we died before saying where.
+        return await this.reusePublication(state, repository.nameWithOwner, receipt.body);
+      }
       const pullRequest = await this.ensurePullRequest(state, repository.nameWithOwner);
       state.repository = repository.nameWithOwner;
       state.pullRequestUrl = pullRequest.url;
       state.pullRequestNumber = pullRequest.number;
+      await this.recordPublication(state, pullRequest.url, receipt);
       await this.store.transition(state, "waiting-ci", `Pull request created: ${pullRequest.url}`);
       return state;
     } catch (error) {
@@ -43,10 +60,66 @@ export class GithubPublisher {
       // re-publishable state, mirroring the repair loop's ci-failed fallback.
       const classified: GithubActionError =
         error instanceof GithubActionError ? error : classifyGithubFailure(error);
+      await this.recordPublicationFailure(state, classified.message);
       state.error = classified.message;
       await this.store.transition(state, "ready-to-merge", `Publication failed: ${state.error}`);
       throw classified;
     }
+  }
+
+  /**
+   * What this run's publication looks like as one message to the source.
+   *
+   * The channel uses the configured remote, never `state.repository`: publish sets
+   * that field itself, so keying on it would mean the receipt written after the
+   * pull request exists lands under a different id than the one read before it.
+   */
+  private publicationMessage(state: RunState): EnqueueInput {
+    return {
+      purpose: "result",
+      subjectId: state.id,
+      channel: {
+        sourceKind: "github",
+        sourceInstanceId: this.loaded.config.github.remote,
+        threadId: state.integrationBranch,
+      },
+      body: "",
+      at: new Date().toISOString(),
+    };
+  }
+
+  private async publicationReceipt(state: RunState): Promise<OutboxMessage | undefined> {
+    if (!this.outbox) return undefined;
+    return await this.outbox.get(messageId(this.publicationMessage(state)));
+  }
+
+  /**
+   * A receipt that already says "sent" is honoured — it is the evidence that the
+   * pull request exists. Answering from it is what stops a retry opening a second
+   * one after a crash between creating and recording.
+   */
+  private async reusePublication(state: RunState, repository: string, url: string): Promise<RunState> {
+    state.repository = repository;
+    state.pullRequestUrl = url;
+    await this.store.transition(state, "waiting-ci", `Pull request already created: ${url}`);
+    return state;
+  }
+
+  private async recordPublication(
+    state: RunState,
+    url: string,
+    existing: OutboxMessage | undefined,
+  ): Promise<void> {
+    if (!this.outbox) return;
+    const receipt = receiptFor(this.publicationMessage(state), existing);
+    await this.outbox.save(markSent({ ...receipt, body: url }, new Date().toISOString()));
+  }
+
+  private async recordPublicationFailure(state: RunState, message: string): Promise<void> {
+    if (!this.outbox) return;
+    const existing = await this.publicationReceipt(state);
+    const receipt = receiptFor(this.publicationMessage(state), existing);
+    await this.outbox.save(markFailed(receipt, new Date().toISOString(), message));
   }
 
   /** Publication needs integration enabled, a final approval and a publishable status. */
