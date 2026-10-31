@@ -25,31 +25,86 @@ function line(invocations: number, failures = 0): UsageLine {
 
 export function demoExplanation(run: DemoRun): RunExplanation {
   const { state } = run;
-  const merged = state.tasks.filter((task) => task.status === "merged" || task.status === "passed").length;
-  const blocked = state.tasks.find((task) => task.status === "blocked");
-  const headline: ExplainLine = blocked
-    ? { tone: "bad", text: `已阻塞：任务 ${blocked.task.id} ${blocked.error ?? "未通过门禁"}` }
-    : state.status === "completed"
-      ? { tone: "good", text: `已完成：${merged}/${state.tasks.length} 个任务已合并` }
-      : { tone: "neutral", text: `进行中：${state.status}（${merged}/${state.tasks.length} 个任务已合并）` };
   return {
-    headline,
+    headline: headlineFor(state),
     flow: { template: "standard", source: "router", reasons: ["多个交付物，需要独立评审"] },
-    run: state.finalQuality
-      ? [{ tone: state.finalQuality.passed ? "good" : "bad", text: state.finalQuality.passed ? "最终集成质量门禁通过" : "最终集成质量门禁失败" }]
-      : [],
-    tasks: state.tasks.map((task) => ({
-      taskId: task.task.id,
-      title: task.task.title,
-      status: task.status,
-      tone: task.status === "merged" || task.status === "passed" ? "good" : task.status === "blocked" ? "bad" : "neutral",
-      summary: task.status === "blocked" ? (task.error ?? "任务被阻塞") : task.attempts > 1 ? `经过 ${task.attempts} 次尝试后通过全部门禁` : "一次通过全部门禁",
-      lines: [
-        ...(task.quality ? [{ tone: task.quality.passed ? ("good" as const) : ("bad" as const), text: task.quality.passed ? `质量门禁通过（${task.quality.commands.length} 条命令）` : "质量命令失败" }] : []),
-        ...(task.review ? [{ tone: task.review.verdict === "approve" ? ("good" as const) : ("warn" as const), text: `评审 ${task.review.verdict}：${task.review.summary}` }] : []),
-      ],
-    })),
+    run: runLines(state),
+    tasks: state.tasks.map(taskExplanation),
   };
+}
+
+function mergedCount(state: DemoRun["state"]): number {
+  return state.tasks.filter((task) => task.status === "merged" || task.status === "passed").length;
+}
+
+function headlineFor(state: DemoRun["state"]): ExplainLine {
+  const blocked = state.tasks.find((task) => task.status === "blocked");
+  if (blocked) {
+    return { tone: "bad", text: `已阻塞：任务 ${blocked.task.id} ${blocked.error ?? "未通过门禁"}` };
+  }
+  const merged = mergedCount(state);
+  if (state.status === "completed") {
+    return { tone: "good", text: `已完成：${merged}/${state.tasks.length} 个任务已合并` };
+  }
+  return { tone: "neutral", text: `进行中：${state.status}（${merged}/${state.tasks.length} 个任务已合并）` };
+}
+
+function runLines(state: DemoRun["state"]): ExplainLine[] {
+  if (!state.finalQuality) return [];
+  return [qualityLine(state.finalQuality.passed)];
+}
+
+function qualityLine(passed: boolean): ExplainLine {
+  return {
+    tone: passed ? "good" : "bad",
+    text: passed ? "最终集成质量门禁通过" : "最终集成质量门禁失败",
+  };
+}
+
+function taskExplanation(task: DemoRun["state"]["tasks"][number]) {
+  return {
+    taskId: task.task.id,
+    title: task.task.title,
+    status: task.status,
+    tone: taskTone(task.status),
+    summary: taskSummary(task),
+    lines: taskLines(task),
+  };
+}
+
+function taskTone(status: string): ExplainLine["tone"] {
+  if (status === "merged" || status === "passed") return "good";
+  return status === "blocked" ? "bad" : "neutral";
+}
+
+function taskSummary(task: DemoRun["state"]["tasks"][number]): string {
+  if (task.status === "blocked") return task.error ?? "任务被阻塞";
+  return task.attempts > 1 ? `经过 ${task.attempts} 次尝试后通过全部门禁` : "一次通过全部门禁";
+}
+
+function taskLines(task: DemoRun["state"]["tasks"][number]): ExplainLine[] {
+  return [...qualityLines(task), ...reviewLines(task)];
+}
+
+function qualityLines(task: DemoRun["state"]["tasks"][number]): ExplainLine[] {
+  if (!task.quality) return [];
+  const passed = task.quality.passed;
+  return [
+    {
+      tone: passed ? "good" : "bad",
+      text: passed ? `质量门禁通过（${task.quality.commands.length} 条命令）` : "质量命令失败",
+    },
+  ];
+}
+
+function reviewLines(task: DemoRun["state"]["tasks"][number]): ExplainLine[] {
+  if (!task.review) return [];
+  return [
+    {
+      tone: task.review.verdict === "approve" ? "good" : "warn",
+      text: `评审 ${task.review.verdict}：${task.review.summary}`,
+    },
+  ];
 }
 
 export function demoUsageBreakdown(run: DemoRun): RunUsageBreakdown {
