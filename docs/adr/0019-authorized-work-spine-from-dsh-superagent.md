@@ -1,6 +1,6 @@
 # ADR 0019: 引入「授权工作脊柱」——借鉴 dsh-superagent 的准入与工单模型
 
-- Status: Proposed
+- Status: Accepted（P0–P6 已实现，见文末实施记录）
 - Date: 2026-10-31
 - 参考: `deepseek-ai/dsh-superagent-prototype`（源码与 `docs/000`–`008`）
 
@@ -145,3 +145,41 @@ exit 0、走正式 PR。**任何阶段都不允许让现存的 run 流水线停�
 我们不是要变成 dsh-superagent。我们要的是它的**两条脊柱**：事件驱动的入口，和
 不可变、可重新校验的授权。执行引擎已经比它强，保留；把授权和入口补上之后，
 「这条工作凭什么可以做、做到哪一步、谁在等」才第一次有答案。
+
+## 实施记录（2026-10-31）
+
+13 个 PR，测试 1320 → 1586。每一阶段独立合并，每次都跑过 `pnpm test` / `check` / `lint` 与门禁。
+
+| 阶段 | 落地 | PR | 接到真实路径了吗 |
+| --- | --- | --- | --- |
+| P0 词表 | `intake/types.ts`、`authority/types.ts` | #70 | — |
+| P1 Mandate | `authority/policy.ts`、`authority/mandate.ts` | #71 | 是：审批产出、`resume` 前重校验 |
+| P2 Source | `intake/github-source.ts` | #72 | 是：见 P4 入口 |
+| P3 gate | `authority/gate.ts` | #73 | 是：`TicketService.admit` |
+| P4 Ticket | `authority/ticket.ts`、`ticket-store.ts`、`ticket-service.ts` | #74–#76 | 是 |
+| P4 run 接线 | `RunState.ticketId`、`withTicketAssignment` | #77 | 是 |
+| P4 入口 | `intake/admission.ts`、`Supervisor.admitEvent`、`POST /api/intake/github` | #78、#80、#81 | 是，默认关闭 |
+| P5 attention | `authority/attention.ts`、`GET /api/tickets`、`web/src/components/AttentionPanel.tsx` | #82、#83 | 数据源是；**面板未挂页面** |
+| P6 Outbox | `authority/outbox.ts`、`outbox-store.ts`、接 `github/publish.ts` | #84、#86、#87 | 是：发布前写回执 |
+
+### 没有做的，以及为什么
+
+**1. 手起的 run 还不是 Ticket。**
+现在只有带 `ticketId` 的请求、或从 webhook 进来的工作会成为 Ticket。要让每条 run 都自动开一张 Ticket，`start()` 必须等 gate 与 Ticket 落盘才能返回——那意味着 `start()` 变成异步，波及所有调用点。试过一版：异步化后 `active.size` 立刻可见性变了，多个既有的并发/幂等测试直接红。**这是真正的双生命周期问题，ADR 里标的第一风险兑现了。** 它需要单独一轮设计，不该混在收口里。
+
+**2. attention 面板没有挂到页面上。**
+组件、数据源、测试都在（`test/web-attention-panel.test.tsx`），但放在首屏、侧栏还是某个标签页下是一个**产品决定**，不是技术债。没有替使用者做这个决定。
+
+**3. Outbox 只服务发布。**
+`publish` 会把「要说什么」写成回执再动手；其余对外动作（评论、通知）还没有走 outbox。它们的通道语义（尤其「会话已消失」）需要各自定义。
+
+### 值得记住的三个坑
+
+- **`/停止\b/` 永远不匹配**：word boundary 不能跟在 CJK 字符后面。中文停止词要单独分支。
+- **回执键不能依赖流程自己会改的字段**：第一版用 `state.repository`，而 publish 自己会设置它，于是写回执和读回执用了不同的 id——幂等**静默失效**，不报错，只是每次新建 PR。
+- **文件级门禁会放大改动代价**：碰 `http.ts` 就要清三个冻结函数（#79），碰 `publish.ts` 就要先让它可测（#86）。这不是阻力，是提醒：**改动范围要在动手前算进预算**。
+
+### 一条被证明有效的纪律
+
+凡是「债来自覆盖率而不是来自分支」的函数，拆解是负收益：`useDesktopProject` 和 `useOnboarding` 的 CC 只有 9，CRAP 90 完全来自 0% 覆盖，**没拆一行代码，只让行为可达就掉到 10 以下**。反之 `automatic-controller` 只拆不测，拆一次涨一次，只能整支回滚。
+
