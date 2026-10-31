@@ -350,55 +350,105 @@ fn open_registered_workspace_sync(
     runtime: &DesktopRuntime,
     focus: Option<PathBuf>,
 ) -> Result<DesktopStatus, String> {
-    let mut settings = load_settings(app)?.unwrap_or_default();
-    if let Some(focus) = focus.as_ref() {
-        settings = remember_project_in_memory(settings, focus);
-        save_settings_document(app, &settings)?;
-    }
+    let settings = remember_focus(app, focus.as_ref())?;
     if settings.project_roots.is_empty() {
-        let mut state = lock_runtime(runtime);
-        stop_service_locked(&mut state);
-        return Ok(with_projects(needs_project_status(), &settings));
+        return Ok(no_projects_status(runtime, &settings));
     }
+    let focus_root = focus_root_of(focus, &settings)?;
+    open_workspace_at(app, runtime, &settings, focus_root)
+}
 
-    let workspace_bundle = write_desktop_workspace_manifest(app, &settings.project_roots)?;
-    let focus_root = focus
-        .or_else(|| settings.active_project_root.clone())
-        .or_else(|| settings.project_roots.first().cloned())
-        .ok_or_else(|| "没有可打开的项目".to_string())?;
-    let focus_name = project_name(&focus_root);
+/// Persist a newly focused project before the manifest is written.
+fn remember_focus(app: &AppHandle, focus: Option<&PathBuf>) -> Result<DesktopSettings, String> {
+    let settings = load_settings(app)?.unwrap_or_default();
+    let Some(focus) = focus else {
+        return Ok(settings);
+    };
+    let updated = remember_project_in_memory(settings, focus);
+    save_settings_document(app, &updated)?;
+    Ok(updated)
+}
 
+/// Nothing remembered: stop the service and ask for a project.
+fn no_projects_status(runtime: &DesktopRuntime, settings: &DesktopSettings) -> DesktopStatus {
     let mut state = lock_runtime(runtime);
     stop_service_locked(&mut state);
-    state.pending_project = Some(focus_root.clone());
+    with_projects(needs_project_status(), settings)
+}
+
+/// Newest focus first, then the remembered active project, then the first one.
+fn focus_root_of(focus: Option<PathBuf>, settings: &DesktopSettings) -> Result<PathBuf, String> {
+    focus
+        .or_else(|| settings.active_project_root.clone())
+        .or_else(|| settings.project_roots.first().cloned())
+        .ok_or_else(|| "没有可打开的项目".to_string())
+}
+
+fn open_workspace_at(
+    app: &AppHandle,
+    runtime: &DesktopRuntime,
+    settings: &DesktopSettings,
+    focus_root: PathBuf,
+) -> Result<DesktopStatus, String> {
+    let launch = prepare_launch(app, settings, focus_root)?;
+    let mut guard = lock_runtime(runtime);
+    stop_service_locked(&mut guard);
+    guard.pending_project = Some(launch.focus_root.clone());
+    start_and_apply(app, runtime, settings, launch, guard)
+}
+
+/// Everything the service needs before it is spawned.
+struct WorkspaceLaunch {
+    focus_root: PathBuf,
+    focus_name: String,
+    paths: RuntimePaths,
+    service_root: PathBuf,
+    config: SelectedConfig,
+    registry_path: PathBuf,
+    token_path: PathBuf,
+}
+
+fn prepare_launch(
+    app: &AppHandle,
+    settings: &DesktopSettings,
+    focus_root: PathBuf,
+) -> Result<WorkspaceLaunch, String> {
+    let focus_name = project_name(&focus_root);
+    let bundle = write_desktop_workspace_manifest(app, &settings.project_roots)?;
     let paths = resolve_runtime_paths(app)
         .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
-    let config = SelectedConfig {
-        path: workspace_bundle.workspace_path,
-        kind: ConfigKind::Workspace,
-    };
-    // Workspace serve cwd is the app config dir so relative paths in the manifest stay stable.
-    let service_root = settings_path(app)?
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "无法定位桌面配置目录".to_string())?;
     let token_path = session_token_path(app)
         .map_err(|detail| format!("桌面运行环境尚未准备好：{detail}"))?;
-    match start_service(
-        &paths,
-        &service_root,
-        &config,
-        Some(&workspace_bundle.registry_path),
-        &token_path,
-    ) {
+    Ok(WorkspaceLaunch {
+        focus_root,
+        focus_name,
+        paths,
+        service_root: service_root_dir(app)?,
+        config: SelectedConfig {
+            path: bundle.workspace_path,
+            kind: ConfigKind::Workspace,
+        },
+        registry_path: bundle.registry_path,
+        token_path,
+    })
+}
+
+fn start_and_apply(
+    app: &AppHandle,
+    runtime: &DesktopRuntime,
+    settings: &DesktopSettings,
+    launch: WorkspaceLaunch,
+    mut state: std::sync::MutexGuard<'_, RuntimeState>,
+) -> Result<DesktopStatus, String> {
+    match spawn_workspace_service(&launch) {
         Ok(mut service) => {
-            service.project_root = focus_root.clone();
-            service.project_name = if settings.project_roots.len() > 1 {
-                format!("{} · {} 个项目", focus_name, settings.project_roots.len())
-            } else {
-                focus_name.clone()
-            };
-            let status = with_projects(ready_status(&service), &settings);
+            apply_project_name(
+                &mut service,
+                launch.focus_root,
+                &launch.focus_name,
+                settings.project_roots.len(),
+            );
+            let status = with_projects(ready_status(&service), settings);
             let bootstrap_url = service.bootstrap_url.clone();
             state.service = Some(service);
             state.pending_project = None;
@@ -410,11 +460,39 @@ fn open_registered_workspace_sync(
         Err(detail) => {
             drop(state);
             Ok(with_projects(
-                service_start_error_status(focus_name, detail),
-                &settings,
+                service_start_error_status(launch.focus_name, detail),
+                settings,
             ))
         }
     }
+}
+
+/// Multi-project dock: the window title carries the project count.
+fn apply_project_name(service: &mut ManagedService, root: PathBuf, name: &str, total: usize) {
+    service.project_root = root;
+    service.project_name = if total > 1 {
+        format!("{name} · {total} 个项目")
+    } else {
+        name.to_string()
+    };
+}
+
+/// Workspace serve cwd is the app config dir so relative manifest paths stay stable.
+fn service_root_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    settings_path(app)?
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法定位桌面配置目录".to_string())
+}
+
+fn spawn_workspace_service(launch: &WorkspaceLaunch) -> Result<ManagedService, String> {
+    start_service(
+        &launch.paths,
+        &launch.service_root,
+        &launch.config,
+        Some(&launch.registry_path),
+        &launch.token_path,
+    )
 }
 
 fn initialize_project_sync(app: &AppHandle, runtime: &DesktopRuntime) -> DesktopStatus {
