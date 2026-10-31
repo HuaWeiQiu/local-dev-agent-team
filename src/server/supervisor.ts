@@ -11,6 +11,9 @@ import {
 } from "../interventions/plan-edit.js";
 import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
 import { TicketService } from "../authority/ticket-service.js";
+import { readAdmission } from "../intake/admission.js";
+import type { DroppedEvent } from "../intake/github-source.js";
+import type { Trigger } from "../intake/types.js";
 import type { PolicySnapshot } from "../authority/types.js";
 import { TicketStore } from "../authority/ticket-store.js";
 import { assignmentOutcome } from "../authority/assignment-outcome.js";
@@ -440,6 +443,61 @@ export class RunSupervisor {
       await this.stateStore.transition(current, "cancelled", current.error);
       return true;
     });
+  }
+
+  /**
+   * A webhook arrives: read it, admit what it carries, start a run for what the
+   * gate accepted. A refused Trigger starts nothing at all.
+   *
+   * This is the only path by which the outside world causes work, so it names
+   * what it did — which Trigger became which Ticket and which run, and which
+   * Trigger was refused and why.
+   */
+  async admitEvent(input: {
+    event: string;
+    payload: unknown;
+    agentLogins: readonly string[];
+    instanceId?: string;
+  }): Promise<{
+    admitted: Array<{ triggerId: string; ticketId: string; runId: string }>;
+    refused: Array<{ triggerId: string; code: string }>;
+    dropped: DroppedEvent[];
+  }> {
+    const reading = readAdmission({
+      request: {
+        event: input.event,
+        payload: input.payload,
+        agentLogins: input.agentLogins,
+        ...(input.instanceId ? { instanceId: input.instanceId } : {}),
+      },
+    });
+    const admitted: Array<{ triggerId: string; ticketId: string; runId: string }> = [];
+    const refused: Array<{ triggerId: string; code: string }> = [];
+    for (const candidate of reading.candidates) {
+      const admission = await this.ticketService().admit({
+        trigger: candidate.trigger,
+        addressed: candidate.addressed,
+        scope: [],
+      });
+      if (admission.decision.outcome !== "accept" || !admission.ticket) {
+        refused.push({
+          triggerId: candidate.trigger.id,
+          code: admission.decision.reasons[0]?.code ?? "refused",
+        });
+        continue;
+      }
+      const started = this.start({
+        goal: goalFromTrigger(candidate.trigger),
+        profileOverrides: {},
+        ticketId: admission.ticket.id,
+      });
+      admitted.push({
+        triggerId: candidate.trigger.id,
+        ticketId: admission.ticket.id,
+        runId: started.runId,
+      });
+    }
+    return { admitted, refused, dropped: reading.dropped };
   }
 
   async retry(
@@ -1153,6 +1211,14 @@ export function buildRunnerRequest(
     ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
     ...(purpose ? { purpose } : {}),
   };
+}
+
+/** What a person's message asks for, as a goal the planner can read. */
+export function goalFromTrigger(trigger: Trigger): string {
+  const body = trigger.payload?.body;
+  const words = typeof body === "string" && body.trim() ? body.trim() : `a ${trigger.kind} event`;
+  const thread = trigger.threads[0]?.threadId ?? "the thread";
+  return `${words.slice(0, 500)}\n\n(Raised on ${trigger.sourceKind} ${thread})`;
 }
 
 /** The addressed approval, which must be the newest and still unanswered. */

@@ -13,7 +13,6 @@
 
 import { githubIntake, type DroppedEvent } from "./github-source.js";
 import { makeTrigger, primaryThread, threadKey, type Trigger } from "./types.js";
-import type { GateDecision } from "../authority/gate.js";
 
 export interface AdmissionRequest {
   event: string;
@@ -30,41 +29,36 @@ export interface AdmissionRequest {
   instanceId?: string;
 }
 
-export interface AdmissionVerdict {
+/** One Trigger the Source accepted, and whether it addresses the agent. */
+export interface Candidate {
   trigger: Trigger;
-  decision: GateDecision;
-  /** How the request was read: a person naming the agent, or a bare event. */
   addressed: boolean;
 }
 
 export interface AdmissionResult {
-  verdicts: AdmissionVerdict[];
+  candidates: Candidate[];
   dropped: DroppedEvent[];
 }
 
 /**
  * Read one webhook into the Triggers it carries and whether each addresses the
- * agent. `decide` is injected so the gate's policy stays the caller's business
- * and a recorded decision can be replayed without a policy.
+ * agent. Deciding is the caller's job: this only says what arrived and how to
+ * read it, so the same reading can be replayed against a different policy.
  */
-export function readAdmission(input: {
-  request: AdmissionRequest;
-  decide: (trigger: Trigger, addressed: boolean) => GateDecision;
-}): AdmissionResult {
+export function readAdmission(input: { request: AdmissionRequest }): AdmissionResult {
   const context = {
     instanceId: input.request.instanceId ?? repositoryOf(input.request.payload) ?? "unknown",
     selfLogins: input.request.agentLogins,
     ...(input.request.listened ? { listened: input.request.listened } : {}),
   };
   const intake = githubIntake(input.request.event, input.request.payload, context);
-  const verdicts: AdmissionVerdict[] = [];
+  const candidates: Candidate[] = [];
   for (const draft of intake.drafts) {
     const trigger = makeTrigger(draft);
     if (!trigger) continue;
-    const addressed = addressesAgent(trigger, input.request.agentLogins);
-    verdicts.push({ trigger, addressed, decision: input.decide(trigger, addressed) });
+    candidates.push({ trigger, addressed: addressesAgent(trigger, input.request.agentLogins) });
   }
-  return { verdicts, dropped: intake.dropped };
+  return { candidates, dropped: intake.dropped };
 }
 
 /** A comment that names one of the agent's logins is a request, not context. */

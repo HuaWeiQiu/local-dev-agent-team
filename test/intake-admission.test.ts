@@ -25,38 +25,34 @@ function comment(body: string, login = "alice"): Record<string, unknown> {
 describe("readAdmission", () => {
   it("admits a comment that names the agent", () => {
     const result = readAdmission({
-      request: { event: "issue_comment", payload: comment("@agent-bot please fix"), agentLogins: ["agent-bot"] },
-      decide,
+      request: { event: "issue_comment", payload: comment("@agent-bot please fix"), agentLogins: ["agent-bot"] }
     });
-    expect(result.verdicts).toHaveLength(1);
-    expect(result.verdicts[0]).toMatchObject({ addressed: true });
-    expect(result.verdicts[0]!.decision.outcome).toBe("accept");
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({ addressed: true });
+    
   });
 
   it("refuses a comment that merely mentions the thread", () => {
     const result = readAdmission({
-      request: { event: "issue_comment", payload: comment("looks good to me"), agentLogins: ["agent-bot"] },
-      decide,
+      request: { event: "issue_comment", payload: comment("looks good to me"), agentLogins: ["agent-bot"] }
     });
-    expect(result.verdicts[0]).toMatchObject({ addressed: false });
-    expect(result.verdicts[0]!.decision.reasons[0]!.code).toBe("proactive_disallowed");
+    expect(result.candidates[0]).toMatchObject({ addressed: false });
+    
   });
 
   it("refuses everything when the agent has no login configured", () => {
     const result = readAdmission({
-      request: { event: "issue_comment", payload: comment("@agent-bot please fix"), agentLogins: [] },
-      decide,
+      request: { event: "issue_comment", payload: comment("@agent-bot please fix"), agentLogins: [] }
     });
-    expect(result.verdicts[0]!.addressed).toBe(false);
-    expect(result.verdicts[0]!.decision.outcome).toBe("ignore");
+    expect(result.candidates[0]!.addressed).toBe(false);
+    
   });
 
   it("reports an event it does not listen to and starts nothing", () => {
     const result = readAdmission({
-      request: { event: "push", payload: comment("@agent-bot go"), agentLogins: ["agent-bot"] },
-      decide,
+      request: { event: "push", payload: comment("@agent-bot go"), agentLogins: ["agent-bot"] }
     });
-    expect(result.verdicts).toEqual([]);
+    expect(result.candidates).toEqual([]);
     expect(result.dropped[0]!.code).toBe("not-listened");
   });
 
@@ -67,10 +63,9 @@ describe("readAdmission", () => {
         payload: { ...comment("@agent-bot go"), repository: { full_name: "other/repo" } },
         agentLogins: ["agent-bot"],
         instanceId: "acme/demo",
-      },
-      decide,
+      }
     });
-    expect(result.verdicts).toEqual([]);
+    expect(result.candidates).toEqual([]);
     expect(result.dropped[0]!.code).toBe("other-repository");
   });
 });
@@ -105,19 +100,17 @@ describe("addressing", () => {
 describe("repository resolution", () => {
   it("falls back to the payload's repository when the Source names none", () => {
     const result = readAdmission({
-      request: { event: "issue_comment", payload: comment("@agent-bot go"), agentLogins: ["agent-bot"] },
-      decide,
+      request: { event: "issue_comment", payload: comment("@agent-bot go"), agentLogins: ["agent-bot"] }
     });
-    expect(result.verdicts).toHaveLength(1);
-    expect(admissionThread(result.verdicts[0]!.trigger)).toContain("pull/7");
+    expect(result.candidates).toHaveLength(1);
+    expect(admissionThread(result.candidates[0]!.trigger)).toContain("pull/7");
   });
 
   it("starts nothing from a payload it cannot read", () => {
     const result = readAdmission({
-      request: { event: "issue_comment", payload: "not an object", agentLogins: ["agent-bot"] },
-      decide,
+      request: { event: "issue_comment", payload: "not an object", agentLogins: ["agent-bot"] }
     });
-    expect(result.verdicts).toEqual([]);
+    expect(result.candidates).toEqual([]);
     expect(result.dropped[0]!.code).toBe("incomplete");
   });
 });
