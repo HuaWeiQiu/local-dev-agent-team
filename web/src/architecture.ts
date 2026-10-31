@@ -74,49 +74,121 @@ function lastStdout(events: RunEvent[], roles: string[]): string | undefined {
   const live = new Set<string>();
   let latest: string | undefined;
   for (const event of events) {
-    const payload = record(event.payload);
-    const id = text(payload?.invocationId);
-    const role = invocationRole(event);
-    if (event.type === "agent.invocation.started" && id && role && wanted.has(role)) live.add(id);
-    if (event.type === "agent.invocation.completed" && id) live.delete(id);
-    if ((event.type === "agent.stdout" || event.type === "agent.stderr") && id && live.has(id)) {
-      const chunk = text(payload?.text);
-      if (chunk) latest = chunk.trim();
-    }
+    const update = liveUpdate(event, wanted, live);
+    if (update === undefined) continue;
+    if (update.kind === "output") latest = update.text;
   }
   return latest;
 }
 
+type LiveUpdate =
+  | { kind: "start" }
+  | { kind: "end" }
+  | { kind: "output"; text: string };
+
+/** Track which invocations are live and surface the newest output line. */
+function liveUpdate(event: RunEvent, wanted: Set<string>, live: Set<string>): LiveUpdate | undefined {
+  const payload = record(event.payload);
+  const id = text(payload?.invocationId);
+  if (!id) return undefined;
+  if (event.type === "agent.invocation.started") {
+    return startInvocation(id, invocationRole(event), wanted, live);
+  }
+  if (event.type === "agent.invocation.completed") {
+    live.delete(id);
+    return { kind: "end" };
+  }
+  return outputUpdate(event, id, live, payload);
+}
+
+function outputUpdate(
+  event: RunEvent,
+  id: string,
+  live: Set<string>,
+  payload: Record<string, unknown> | undefined,
+): LiveUpdate | undefined {
+  if (!isOutputEvent(event)) return undefined;
+  if (!live.has(id)) return undefined;
+  const chunk = text(payload?.text);
+  return chunk ? { kind: "output", text: chunk.trim() } : undefined;
+}
+
+function isOutputEvent(event: RunEvent): boolean {
+  return event.type === "agent.stdout" || event.type === "agent.stderr";
+}
+
+function startInvocation(
+  id: string,
+  role: string | undefined,
+  wanted: Set<string>,
+  live: Set<string>,
+): LiveUpdate | undefined {
+  if (!role || !wanted.has(role)) return undefined;
+  live.add(id);
+  return { kind: "start" };
+}
+
+type StageReader = (run: RunState) => StageArtifact | undefined;
+
+/** Stage artifacts: what this step produced, one reader per stage. */
+const STAGE_ARTIFACTS: Partial<Record<StageId, StageReader>> = {
+  intake: intakeArtifact,
+  explore: exploreArtifact,
+  plan: planArtifact,
+  gates: gatesArtifact,
+  approval: decisionArtifact,
+  ship: decisionArtifact,
+};
+
 function stageArtifact(run: RunState, stageId: StageId): StageArtifact | undefined {
-  if (stageId === "intake" && run.intake) {
-    return { title: "目标理解", body: run.intake.goalSummary };
-  }
-  if (stageId === "explore" && run.explore) {
-    const lines = [
-      run.explore.summary,
-      run.explore.modules.length > 0 ? `模块：${run.explore.modules.join("、")}` : "",
-      run.explore.riskPaths.length > 0 ? `风险路径：${run.explore.riskPaths.join("、")}` : "",
-    ].filter(Boolean);
-    return { title: "探索摘要", body: lines.join("\n") };
-  }
-  if (stageId === "plan" && run.plan) {
-    const design = run.plan.design;
-    if (design) {
-      const title = design.source === "architect" ? "架构设计" : design.source === "controller" ? "控制面设计" : "推断出的结构";
-      return {
-        title,
-        body: [design.summary, ...design.elements.map((element) => `${element.name}：${element.responsibility}`)].join("\n"),
-      };
-    }
-    return { title: "任务计划", body: run.plan.summary };
-  }
-  if (stageId === "gates" && run.finalQuality) {
-    return { title: "质量报告", body: run.finalQuality.passed ? "确定性检查通过。" : "确定性检查未通过。" };
-  }
-  if ((stageId === "approval" || stageId === "ship") && run.finalDecision) {
-    return { title: "最终决定", body: run.finalDecision.reason };
-  }
-  return undefined;
+  const read = STAGE_ARTIFACTS[stageId];
+  return read ? read(run) : undefined;
+}
+
+function intakeArtifact(run: RunState): StageArtifact | undefined {
+  if (!run.intake) return undefined;
+  return { title: "目标理解", body: run.intake.goalSummary };
+}
+
+function exploreArtifact(run: RunState): StageArtifact | undefined {
+  if (!run.explore) return undefined;
+  return { title: "探索摘要", body: exploreLines(run.explore).join("\n") };
+}
+
+function exploreLines(explore: NonNullable<RunState["explore"]>): string[] {
+  return [
+    explore.summary,
+    explore.modules.length > 0 ? `模块：${explore.modules.join("、")}` : "",
+    explore.riskPaths.length > 0 ? `风险路径：${explore.riskPaths.join("、")}` : "",
+  ].filter(Boolean);
+}
+
+function planArtifact(run: RunState): StageArtifact | undefined {
+  if (!run.plan) return undefined;
+  const design = run.plan.design;
+  if (!design) return { title: "任务计划", body: run.plan.summary };
+  return { title: designTitle(design.source), body: designBody(design) };
+}
+
+function designTitle(source: ArchitectureSource): string {
+  if (source === "architect") return "架构设计";
+  return source === "controller" ? "控制面设计" : "推断出的结构";
+}
+
+function designBody(design: NonNullable<NonNullable<RunState["plan"]>["design"]>): string {
+  return [design.summary, ...design.elements.map((element) => `${element.name}：${element.responsibility}`)]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function gatesArtifact(run: RunState): StageArtifact | undefined {
+  if (!run.finalQuality) return undefined;
+  return { title: "质量报告", body: run.finalQuality.passed ? "确定性检查通过。" : "确定性检查未通过。" };
+}
+
+function decisionArtifact(run: RunState): StageArtifact | undefined {
+  if (!run.finalDecision) return undefined;
+  return { title: "最终决定", body: run.finalDecision.reason };
 }
 
 const STAGE_EVENT_TYPES: Partial<Record<StageId, string[]>> = {
@@ -127,23 +199,45 @@ const STAGE_EVENT_TYPES: Partial<Record<StageId, string[]>> = {
   ship: ["run.updated"],
 };
 
+type StageInputReader = (run: RunState) => string | undefined;
+
+/** What each stage received, one reader per stage. */
+const STAGE_INPUTS: Partial<Record<StageId, StageInputReader>> = {
+  intake: (run) => run.goal,
+  explore: (run) => run.intake?.instructionsForArchitect ?? run.goal,
+  plan: (run) => run.explore?.summary ?? run.intake?.goalSummary ?? run.goal,
+  build: taskTitles,
+  review: taskTitles,
+  integrate: taskTitles,
+  gates: qualityCommands,
+  approval: pendingApprovalSummary,
+  ship: (run) => run.pullRequestUrl ?? run.finalDecision?.reason,
+};
+
 function stageInput(run: RunState, stageId: StageId): string | undefined {
-  if (stageId === "intake") return run.goal;
-  if (stageId === "explore") return run.intake?.instructionsForArchitect ?? run.goal;
-  if (stageId === "plan") return run.explore?.summary ?? run.intake?.goalSummary ?? run.goal;
-  if (stageId === "build" || stageId === "review" || stageId === "integrate") {
-    const titles = run.tasks.filter((task) => task.status !== "pending").map((task) => task.task.title);
-    return titles.length > 0 ? titles.join("\n") : undefined;
-  }
-  if (stageId === "gates") {
-    const commands = run.finalQuality?.commands?.map((command) => [command.spec.command, ...command.spec.args].join(" "));
-    return commands && commands.length > 0 ? commands.join("\n") : undefined;
-  }
-  if (stageId === "approval") {
-    return run.approvals?.find((approval) => approval.status === "pending")?.summary ?? run.finalDecision?.reason;
-  }
-  if (stageId === "ship") return run.pullRequestUrl ?? run.finalDecision?.reason;
-  return undefined;
+  const read = STAGE_INPUTS[stageId];
+  return read ? read(run) : undefined;
+}
+
+function taskTitles(run: RunState): string | undefined {
+  const titles = run.tasks
+    .filter((task) => task.status !== "pending")
+    .map((task) => task.task.title);
+  return titles.length > 0 ? titles.join("\n") : undefined;
+}
+
+function qualityCommands(run: RunState): string | undefined {
+  const commands = run.finalQuality?.commands?.map((command) =>
+    [command.spec.command, ...command.spec.args].join(" "),
+  );
+  return commands && commands.length > 0 ? commands.join("\n") : undefined;
+}
+
+function pendingApprovalSummary(run: RunState): string | undefined {
+  return (
+    run.approvals?.find((approval) => approval.status === "pending")?.summary ??
+    run.finalDecision?.reason
+  );
 }
 
 function stageRetries(run: RunState, stageId: StageId, events: RunEvent[]): number {
@@ -153,41 +247,71 @@ function stageRetries(run: RunState, stageId: StageId, events: RunEvent[]): numb
   return attempts + signals;
 }
 
-function ledgerDetail(event: RunEvent): { label: string; detail?: string } {
+interface LedgerContext {
+  payload: Record<string, unknown> | undefined;
+  roleLabel: string;
+}
+
+type LedgerBuilder = (ctx: LedgerContext) => { label: string; detail?: string };
+
+function ledgerContext(event: RunEvent): LedgerContext {
   const payload = record(event.payload);
   const role = text(payload?.role);
-  const roleLabel = role ? agentRoleLabel(role) : "智能体";
-  if (event.type === "agent.invocation.started") {
-    const profile = text(payload?.profile);
-    return { label: `${roleLabel} 开始`, ...(profile ? { detail: profile } : {}) };
-  }
-  if (event.type === "agent.invocation.completed") {
-    const profile = text(payload?.profile);
-    return {
-      label: `${roleLabel} ${payload?.success === false ? "失败" : "完成"}`,
-      ...(profile ? { detail: profile } : {}),
-    };
-  }
-  if (event.type === "agent.stdout" || event.type === "agent.stderr") {
-    const chunk = text(payload?.text)?.replace(/\s+/g, " ").slice(0, 160);
-    return { label: event.type === "agent.stderr" ? "错误输出" : "输出", ...(chunk ? { detail: chunk } : {}) };
-  }
-  if (event.type === "run.wave.started" || event.type === "run.wave.completed") {
-    const ids = Array.isArray(payload?.taskIds) ? payload.taskIds.filter((id): id is string => typeof id === "string") : [];
-    const status = text(payload?.status);
-    const detail = [ids.join("、"), status].filter(Boolean).join(" · ");
-    return { label: event.type === "run.wave.started" ? "开始一批任务" : "这一批结束", ...(detail ? { detail } : {}) };
-  }
-  if (event.type === "run.advisor.consulted" || event.type === "flow.triage") {
-    const summary = text(payload?.summary) ?? text(payload?.recommendation);
-    return { label: "重试或请教", ...(summary ? { detail: summary } : {}) };
-  }
-  if (event.type === "quality.flaky") return { label: "不稳定命令重跑" };
-  if (event.type === "approval.requested" || event.type === "approval.resolved") {
-    const gate = text(payload?.gate);
-    return { label: event.type === "approval.requested" ? "请求审批" : "审批结果", ...(gate ? { detail: gate } : {}) };
-  }
-  return { label: event.type };
+  return { payload, roleLabel: role ? agentRoleLabel(role) : "智能体" };
+}
+
+/** One line per event type; anything unlisted falls back to the raw type. */
+function ledgerDetail(event: RunEvent): { label: string; detail?: string } {
+  const builder = LEDGER_BUILDERS[event.type];
+  return builder ? builder(ledgerContext(event)) : { label: event.type };
+}
+
+const LEDGER_BUILDERS: Record<string, LedgerBuilder> = {
+  "agent.invocation.started": ({ payload, roleLabel }) => ({
+    label: `${roleLabel} 开始`,
+    ...profileDetail(payload),
+  }),
+  "agent.invocation.completed": ({ payload, roleLabel }) => ({
+    label: `${roleLabel} ${payload?.success === false ? "失败" : "完成"}`,
+    ...profileDetail(payload),
+  }),
+  "agent.stdout": ({ payload }) => outputLine(payload, "输出"),
+  "agent.stderr": ({ payload }) => outputLine(payload, "错误输出"),
+  "run.wave.started": ({ payload }) => waveLine(payload, "开始一批任务"),
+  "run.wave.completed": ({ payload }) => waveLine(payload, "这一批结束"),
+  "run.advisor.consulted": ({ payload }) => retryAdvice(payload),
+  "flow.triage": ({ payload }) => retryAdvice(payload),
+  "quality.flaky": () => ({ label: "不稳定命令重跑" }),
+  "approval.requested": ({ payload }) => ({ label: "请求审批", ...gateDetail(payload) }),
+  "approval.resolved": ({ payload }) => ({ label: "审批结果", ...gateDetail(payload) }),
+};
+
+function profileDetail(payload: Record<string, unknown> | undefined): { detail?: string } {
+  const profile = text(payload?.profile);
+  return profile ? { detail: profile } : {};
+}
+
+function outputLine(payload: Record<string, unknown> | undefined, label: string) {
+  const chunk = text(payload?.text)?.replace(/\s+/g, " ").slice(0, 160);
+  return { label, ...(chunk ? { detail: chunk } : {}) };
+}
+
+function waveLine(payload: Record<string, unknown> | undefined, label: string) {
+  const ids = Array.isArray(payload?.taskIds)
+    ? payload.taskIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const detail = [ids.join("、"), text(payload?.status)].filter(Boolean).join(" · ");
+  return { label, ...(detail ? { detail } : {}) };
+}
+
+function retryAdvice(payload: Record<string, unknown> | undefined) {
+  const summary = text(payload?.summary) ?? text(payload?.recommendation);
+  return { label: "重试或请教", ...(summary ? { detail: summary } : {}) };
+}
+
+function gateDetail(payload: Record<string, unknown> | undefined): { detail?: string } {
+  const gate = text(payload?.gate);
+  return gate ? { detail: gate } : {};
 }
 
 function stageLedger(events: RunEvent[], stageId: StageId, roles: string[]): StageLedgerEntry[] {
@@ -206,71 +330,123 @@ function stageLedger(events: RunEvent[], stageId: StageId, roles: string[]): Sta
 }
 
 export function describeStage(run: RunState, stageId: StageId, events: RunEvent[] = []): StageBrief {
-  const stage = deriveStages(run).find((item) => item.id === stageId) ?? {
-    id: stageId,
-    label: stageDefinitions.find((item) => item.id === stageId)?.label ?? stageId,
-    state: "pending" as StageState,
-  };
-  const statuses = new Set(statusesOf(stageId));
-  const history = run.history
-    .filter((entry) => statuses.has(entry.status))
-    .map((entry) => ({ at: entry.at, message: entry.message }))
-    .slice(-6);
+  const stage = stageViewOf(run, stageId);
+  const history = stageHistory(run, stageId);
   const roles = STAGE_ROLES[stageId];
-  const agents: StageBrief["agents"] = [];
-  const seen = new Map<string, StageBrief["agents"][number]>();
-  for (const event of events) {
-    const role = invocationRole(event);
-    if (!role || !roles.includes(role)) continue;
-    const payload = record(event.payload);
-    const id = text(payload?.invocationId) ?? role;
-    if (event.type === "agent.invocation.started") {
-      seen.set(id, { role, label: agentRoleLabel(role), status: "running" });
-    } else if (event.type === "agent.invocation.completed") {
-      const profile = text(payload?.profile);
-      seen.set(id, {
-        role,
-        label: agentRoleLabel(role),
-        status: payload?.success === false ? "failed" : "done",
-        ...(profile ? { note: profile } : {}),
-      });
-    }
-  }
-  agents.push(...seen.values());
-  const tasks = run.tasks.filter((task) => {
-    if (stageId === "build") return ["working", "reworking", "pending", "passed", "merged", "blocked"].includes(task.status);
-    if (stageId === "review") return Boolean(task.review || task.test) || task.status === "working";
-    if (stageId === "plan") return true;
-    return ["working", "reworking", "blocked"].includes(task.status);
-  });
+  const tasks = stageTasks(run, stageId);
   const liveText = lastStdout(events, roles);
   const artifact = stageArtifact(run, stageId);
   const input = stageInput(run, stageId);
   const retries = stageRetries(run, stageId, events);
-  const ledger = stageLedger(events, stageId, roles);
-  const latest = history.at(-1)?.message;
-  const headline =
-    stage.state === "current"
-      ? latest ?? `正在${stage.label}`
-      : stage.state === "failed"
-        ? latest ?? `${stage.label}在此停止`
-        : stage.state === "done"
-          ? latest ?? `${stage.label}已完成`
-          : stage.state === "skipped"
-            ? `${stage.label}已跳过`
-            : `尚未开始${stage.label}`;
   return {
     stage,
-    headline,
+    headline: headlineFor(stage, history),
     hint: STAGE_HINT[stageId],
     history,
-    agents,
+    agents: stageAgents(events, roles),
     ...(liveText ? { liveText } : {}),
     ...(artifact ? { artifact } : {}),
     ...(input ? { input } : {}),
     ...(retries > 0 ? { retries } : {}),
-    ledger,
-    tasks: stageId === "plan" || stageId === "build" || stageId === "review" ? tasks : tasks.filter((task) => task.status !== "pending"),
+    ledger: stageLedger(events, stageId, roles),
+    tasks: visibleTasks(stageId, tasks),
+  };
+}
+
+function stageViewOf(run: RunState, stageId: StageId): StageBrief["stage"] {
+  const derived = deriveStages(run).find((item) => item.id === stageId);
+  if (derived) return derived;
+  return {
+    id: stageId,
+    label: stageDefinitions.find((item) => item.id === stageId)?.label ?? stageId,
+    state: "pending" as StageState,
+  };
+}
+
+function stageHistory(run: RunState, stageId: StageId): StageBrief["history"] {
+  const statuses = new Set(statusesOf(stageId));
+  return run.history
+    .filter((entry) => statuses.has(entry.status))
+    .map((entry) => ({ at: entry.at, message: entry.message }))
+    .slice(-6);
+}
+
+function headlineFor(stage: StageBrief["stage"], history: StageBrief["history"]): string {
+  const latest = history.at(-1)?.message;
+  if (latest) return latest;
+  if (stage.state === "current") return `正在${stage.label}`;
+  if (stage.state === "failed") return `${stage.label}在此停止`;
+  if (stage.state === "done") return `${stage.label}已完成`;
+  if (stage.state === "skipped") return `${stage.label}已跳过`;
+  return `尚未开始${stage.label}`;
+}
+
+/** Which tasks belong on this stage's card. */
+function stageTasks(run: RunState, stageId: StageId): RunState["tasks"] {
+  return run.tasks.filter((task) => taskBelongsToStage(task, stageId));
+}
+
+function taskBelongsToStage(task: RunState["tasks"][number], stageId: StageId): boolean {
+  if (stageId === "plan") return true;
+  if (stageId === "build") return BUILD_STAGE_STATUSES.has(task.status);
+  if (stageId === "review") return Boolean(task.review || task.test) || task.status === "working";
+  return ACTIVE_STAGE_STATUSES.has(task.status);
+}
+
+const BUILD_STAGE_STATUSES = new Set(["working", "reworking", "pending", "passed", "merged", "blocked"]);
+const ACTIVE_STAGE_STATUSES = new Set(["working", "reworking", "blocked"]);
+
+function visibleTasks(stageId: StageId, tasks: RunState["tasks"]): RunState["tasks"] {
+  if (stageId === "plan" || stageId === "build" || stageId === "review") return tasks;
+  return tasks.filter((task) => task.status !== "pending");
+}
+
+/** Running/done/failed agents for this stage, in first-seen order. */
+function stageAgents(events: RunEvent[], roles: string[]): StageBrief["agents"] {
+  const seen = new Map<string, StageBrief["agents"][number]>();
+  for (const event of events) {
+    const update = agentUpdate(event, roles);
+    if (update) seen.set(update.id, update.agent);
+  }
+  return [...seen.values()];
+}
+
+function agentUpdate(
+  event: RunEvent,
+  roles: string[],
+): { id: string; agent: StageBrief["agents"][number] } | undefined {
+  const role = invocationRole(event);
+  if (!role || !roles.includes(role)) return undefined;
+  if (event.type === "agent.invocation.started") return startedAgent(event, role);
+  if (event.type === "agent.invocation.completed") return finishedAgent(event, role);
+  return undefined;
+}
+
+function startedAgent(
+  event: RunEvent,
+  role: string,
+): { id: string; agent: StageBrief["agents"][number] } {
+  const payload = record(event.payload);
+  return {
+    id: text(payload?.invocationId) ?? role,
+    agent: { role, label: agentRoleLabel(role), status: "running" },
+  };
+}
+
+function finishedAgent(
+  event: RunEvent,
+  role: string,
+): { id: string; agent: StageBrief["agents"][number] } {
+  const payload = record(event.payload);
+  const profile = text(payload?.profile);
+  return {
+    id: text(payload?.invocationId) ?? role,
+    agent: {
+      role,
+      label: agentRoleLabel(role),
+      status: payload?.success === false ? "failed" : "done",
+      ...(profile ? { note: profile } : {}),
+    },
   };
 }
 
@@ -353,9 +529,20 @@ function pathCovered(owned: string, elementPaths: string[]): boolean {
 }
 
 function layoutDiagram(modules: Map<string, ArchitectureModule>, edges: ArchitectureEdge[]): ArchitectureDiagram {
-  const incoming = new Map<string, number>();
-  for (const id of modules.keys()) incoming.set(id, 0);
-  for (const edge of edges) incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
+  const layers = layersOf(modules, edges);
+  const boxes = placeBoxes(modules, layers);
+  const width = diagramWidth(layers);
+  return {
+    boxes,
+    edges,
+    width,
+    height: diagramHeight(layers),
+  };
+}
+
+/** Longest-path layering: ready nodes first, cycles broken one node at a time. */
+function layersOf(modules: Map<string, ArchitectureModule>, edges: ArchitectureEdge[]): string[][] {
+  const incoming = incomingCounts(modules, edges);
   const remaining = new Set(modules.keys());
   const layers: string[][] = [];
   while (remaining.size > 0) {
@@ -364,21 +551,39 @@ function layoutDiagram(modules: Map<string, ArchitectureModule>, edges: Architec
     layers.push(layer);
     for (const id of layer) {
       remaining.delete(id);
-      for (const edge of edges) {
-        if (edge.from === id) incoming.set(edge.to, (incoming.get(edge.to) ?? 1) - 1);
-      }
+      releaseEdges(id, edges, incoming);
     }
   }
+  return layers;
+}
 
-  const width = Math.max(...layers.map((layer) => layer.length), 1) * (BOX_WIDTH + GAP_X) - GAP_X + PAD * 2;
+function incomingCounts(
+  modules: Map<string, ArchitectureModule>,
+  edges: ArchitectureEdge[],
+): Map<string, number> {
+  const incoming = new Map<string, number>();
+  for (const id of modules.keys()) incoming.set(id, 0);
+  for (const edge of edges) incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
+  return incoming;
+}
+
+function releaseEdges(id: string, edges: ArchitectureEdge[], incoming: Map<string, number>): void {
+  for (const edge of edges) {
+    if (edge.from === id) incoming.set(edge.to, (incoming.get(edge.to) ?? 1) - 1);
+  }
+}
+
+function placeBoxes(
+  modules: Map<string, ArchitectureModule>,
+  layers: string[][],
+): ArchitectureBox[] {
+  const width = diagramWidth(layers);
   const boxes: ArchitectureBox[] = [];
   layers.forEach((layer, row) => {
-    const rowWidth = layer.length * BOX_WIDTH + (layer.length - 1) * GAP_X;
-    const offset = Math.max(PAD, (width - rowWidth) / 2);
+    const offset = Math.max(PAD, (width - rowWidth(layer)) / 2);
     layer.forEach((id, column) => {
-      const module = modules.get(id)!;
       boxes.push({
-        ...module,
+        ...modules.get(id)!,
         x: offset + column * (BOX_WIDTH + GAP_X),
         y: PAD + row * (BOX_HEIGHT + GAP_Y),
         width: BOX_WIDTH,
@@ -386,52 +591,101 @@ function layoutDiagram(modules: Map<string, ArchitectureModule>, edges: Architec
       });
     });
   });
-  const height = layers.length * (BOX_HEIGHT + GAP_Y) - GAP_Y + PAD * 2;
-  return { boxes, edges, width, height: Math.max(height, BOX_HEIGHT + PAD * 2) };
+  return boxes;
 }
 
-/**
- * Path-prefix fallback for runs that never stored a design. The UI must label
- * this as inferred: it is not something the architect produced.
- */
+function rowWidth(layer: string[]): number {
+  return layer.length * BOX_WIDTH + (layer.length - 1) * GAP_X;
+}
+
+function diagramWidth(layers: string[][]): number {
+  return Math.max(...layers.map((layer) => layer.length), 1) * (BOX_WIDTH + GAP_X) - GAP_X + PAD * 2;
+}
+
+function diagramHeight(layers: string[][]): number {
+  const height = layers.length * (BOX_HEIGHT + GAP_Y) - GAP_Y + PAD * 2;
+  return Math.max(height, BOX_HEIGHT + PAD * 2);
+}
+
 export function buildArchitectureDiagram(tasks: TaskRunState[]): ArchitectureDiagram {
+  const { modules, taskModule } = modulesFromPaths(tasks);
+  for (const module of modules.values()) module.status = rollupStatus(module.tasks);
+  return layoutDiagram(modules, edgesFromDependencies(tasks, taskModule));
+}
+
+/** Group tasks by the module directory of their first owned path. */
+function modulesFromPaths(tasks: TaskRunState[]): {
+  modules: Map<string, ArchitectureModule>;
+  taskModule: Map<string, string>;
+} {
   const modules = new Map<string, ArchitectureModule>();
   const taskModule = new Map<string, string>();
   for (const task of tasks) {
     const key = moduleKey(task.task.ownedPaths[0] ?? "未指定");
     taskModule.set(task.task.id, key);
-    const current = modules.get(key) ?? { id: key, label: key, paths: [], tasks: [], status: "pending" as ModuleStatus };
-    for (const owned of task.task.ownedPaths) {
-      if (!current.paths.includes(owned)) current.paths.push(owned);
-    }
-    current.tasks.push(task);
-    modules.set(key, current);
+    modules.set(key, addToModule(modules.get(key), key, task));
   }
-  for (const module of modules.values()) module.status = rollupStatus(module.tasks);
+  return { modules, taskModule };
+}
 
-  const edgeSet = new Set<string>();
+function addToModule(
+  current: ArchitectureModule | undefined,
+  key: string,
+  task: TaskRunState,
+): ArchitectureModule {
+  const module =
+    current ?? { id: key, label: key, paths: [], tasks: [], status: "pending" as ModuleStatus };
+  for (const owned of task.task.ownedPaths) {
+    if (!module.paths.includes(owned)) module.paths.push(owned);
+  }
+  module.tasks.push(task);
+  return module;
+}
+
+/** A dependency edge between two different modules, deduplicated. */
+function edgesFromDependencies(
+  tasks: TaskRunState[],
+  taskModule: Map<string, string>,
+): ArchitectureEdge[] {
+  const seen = new Set<string>();
   const edges: ArchitectureEdge[] = [];
   for (const task of tasks) {
     const to = taskModule.get(task.task.id);
     if (!to) continue;
     for (const dependency of task.task.dependsOn) {
-      const from = taskModule.get(dependency);
-      if (!from || from === to) continue;
-      const key = `${from}->${to}`;
-      if (edgeSet.has(key)) continue;
-      edgeSet.add(key);
-      edges.push({ from, to });
+      addDependencyEdge(edges, seen, taskModule.get(dependency), to);
     }
   }
-  return layoutDiagram(modules, edges);
+  return edges;
+}
+
+function addDependencyEdge(
+  edges: ArchitectureEdge[],
+  seen: Set<string>,
+  from: string | undefined,
+  to: string,
+): void {
+  if (!from || from === to) return;
+  const key = `${from}->${to}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  edges.push({ from, to });
 }
 
 function diagramFromDesign(tasks: TaskRunState[], design: ArchitectureDesign): ArchitectureDiagram {
-  const claimed = new Set<string>();
+  const modules = moduleMapFromDesign(tasks, design);
+  claimUnassignedTasks(tasks, design, modules);
+  for (const module of modules.values()) module.status = rollupStatus(module.tasks);
+  return layoutDiagram(modules, designEdges(design, modules));
+}
+
+/** Modules come from the design; tasks are attached by element id first. */
+function moduleMapFromDesign(
+  tasks: TaskRunState[],
+  design: ArchitectureDesign,
+): Map<string, ArchitectureModule> {
   const modules = new Map<string, ArchitectureModule>();
   for (const element of design.elements) {
-    const mine = tasks.filter((task) => task.task.elementId === element.id);
-    for (const task of mine) claimed.add(task.task.id);
     modules.set(element.id, {
       id: element.id,
       label: element.name,
@@ -439,9 +693,22 @@ function diagramFromDesign(tasks: TaskRunState[], design: ArchitectureDesign): A
       responsibility: element.responsibility,
       paths: [...element.paths],
       ...(element.nodeId ? { nodeId: element.nodeId } : {}),
-      tasks: mine,
+      tasks: tasks.filter((task) => task.task.elementId === element.id),
       status: "pending",
     });
+  }
+  return modules;
+}
+
+/** Elements with no explicit task still own the tasks whose paths they cover. */
+function claimUnassignedTasks(
+  tasks: TaskRunState[],
+  design: ArchitectureDesign,
+  modules: Map<string, ArchitectureModule>,
+): void {
+  const claimed = new Set<string>();
+  for (const module of modules.values()) {
+    for (const task of module.tasks) claimed.add(task.task.id);
   }
   for (const element of design.elements) {
     const module = modules.get(element.id)!;
@@ -451,8 +718,13 @@ function diagramFromDesign(tasks: TaskRunState[], design: ArchitectureDesign): A
     );
     for (const task of module.tasks) claimed.add(task.task.id);
   }
-  for (const module of modules.values()) module.status = rollupStatus(module.tasks);
-  const edges: ArchitectureEdge[] = design.relations
+}
+
+function designEdges(
+  design: ArchitectureDesign,
+  modules: Map<string, ArchitectureModule>,
+): ArchitectureEdge[] {
+  return design.relations
     .filter((relation) => modules.has(relation.from) && modules.has(relation.to))
     .map((relation) => ({
       from: relation.from,
@@ -460,7 +732,6 @@ function diagramFromDesign(tasks: TaskRunState[], design: ArchitectureDesign): A
       kind: relation.kind,
       ...(relation.label ? { label: relation.label } : {}),
     }));
-  return layoutDiagram(modules, edges);
 }
 
 export interface ArchitecturePresentation {
@@ -496,6 +767,10 @@ export function presentArchitecture(tasks: TaskRunState[], design?: Architecture
 export function stageForTask(task: TaskRunState): StageId {
   if (task.status === "blocked") return task.review || task.test ? "review" : "build";
   if (task.status === "working" || task.status === "reworking") return "build";
+  return settledStage(task);
+}
+
+function settledStage(task: TaskRunState): StageId {
   if (task.review || task.test) return "review";
   if (task.status === "merged" || task.status === "passed") return "integrate";
   return "plan";
