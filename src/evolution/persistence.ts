@@ -1,3 +1,4 @@
+import { auditTrailViolation, recordTrail } from "./audit-trail.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
@@ -126,6 +127,97 @@ const catalogFileMutationQueues = new Map<string, Promise<void>>();
  * The payload SHA-256 digest detects corruption; it is not authentication
  * against an attacker with filesystem write access.
  */
+function assertLoadedConfig(loaded: LoadedConfig): void {
+  if (!loaded || typeof loaded !== "object") {
+    throw new EvolutionPersistenceValidationError("LoadedConfig is required");
+  }
+  if (typeof loaded.root !== "string" || !loaded.root.trim()) {
+    throw new EvolutionPersistenceValidationError("LoadedConfig.root is required");
+  }
+  if (!loaded.config || typeof loaded.config !== "object") {
+    throw new EvolutionPersistenceValidationError("LoadedConfig.config is required");
+  }
+}
+
+/** The realpath of the repository root, which must be a directory. */
+async function resolveRepositoryRoot(
+  io: DurableEvolutionFileIo,
+  configuredRoot: string,
+): Promise<string> {
+  try {
+    const root = await io.realpath(path.resolve(configuredRoot));
+    const rootInfo = await io.lstat(root);
+    if (!rootInfo.isDirectory()) {
+      throw new EvolutionPersistenceValidationError(
+        `LoadedConfig.root must resolve to a directory: ${root}`,
+      );
+    }
+    return root;
+  } catch (error) {
+    if (error instanceof EvolutionPersistenceError) throw error;
+    throw new EvolutionPersistenceValidationError(
+      `Unable to resolve repository root '${configuredRoot}': ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+function stateDirectoryOf(loaded: LoadedConfig): string {
+  const stateDirectoryRelative = loaded.config.project?.stateDirectory;
+  if (typeof stateDirectoryRelative !== "string" || !stateDirectoryRelative.trim()) {
+    throw new EvolutionPersistenceValidationError(
+      "project.stateDirectory must be a non-empty repository-relative path",
+    );
+  }
+  return stateDirectoryRelative;
+}
+
+function trustFrom(loaded: LoadedConfig): EvolutionTrustContext {
+  try {
+    return createEvolutionTrustContext({ roles: trustRolesFromLoadedConfig(loaded.config.roles) });
+  } catch (error) {
+    if (error instanceof EvolutionDomainError) {
+      throw new EvolutionPersistenceValidationError(error.message);
+    }
+    throw error;
+  }
+}
+
+async function prepareStorage(
+  io: DurableEvolutionFileIo,
+  root: string,
+  stateDirectory: string,
+  evolutionDirectory: string,
+  filePath: string,
+): Promise<void> {
+  await createRepositoryOwnedDirectory(io, root, stateDirectory);
+  await createRepositoryOwnedDirectory(io, root, evolutionDirectory);
+  await assertRepositoryOwnedStorage(io, root, stateDirectory, evolutionDirectory, filePath);
+  await cleanOrphanTemporaryFiles(io, evolutionDirectory, filePath);
+}
+
+/** An absent document is a fresh catalog; any other failure is reported. */
+async function loadOrCreate(
+  io: DurableEvolutionFileIo,
+  root: string,
+  filePath: string,
+  trust: EvolutionTrustContext,
+): Promise<{ catalog: EvolutionCatalog; revision: number }> {
+  try {
+    await assertPrimaryFileSafe(io, root, filePath);
+    const contents = await io.readFile(filePath, "utf8");
+    return restoreFromDocumentText(contents, trust, filePath);
+  } catch (error) {
+    if (isNotFound(error)) return { catalog: createEvolutionCatalog(trust), revision: 0 };
+    if (error instanceof EvolutionPersistenceError) throw error;
+    if (error instanceof EvolutionDomainError) {
+      throw new EvolutionPersistenceValidationError(error.message);
+    }
+    throw error;
+  }
+}
+
 export class DurableEvolutionCatalog {
   readonly root: string;
   readonly stateDirectory: string;
@@ -168,41 +260,10 @@ export class DurableEvolutionCatalog {
     loaded: LoadedConfig,
     options: { io?: Partial<DurableEvolutionFileIo> } = {},
   ): Promise<DurableEvolutionCatalog> {
-    if (!loaded || typeof loaded !== "object") {
-      throw new EvolutionPersistenceValidationError("LoadedConfig is required");
-    }
-    if (typeof loaded.root !== "string" || !loaded.root.trim()) {
-      throw new EvolutionPersistenceValidationError("LoadedConfig.root is required");
-    }
-    if (!loaded.config || typeof loaded.config !== "object") {
-      throw new EvolutionPersistenceValidationError("LoadedConfig.config is required");
-    }
-
+    assertLoadedConfig(loaded);
     const io: DurableEvolutionFileIo = { ...defaultFileIo, ...options.io };
-    let root: string;
-    try {
-      root = await io.realpath(path.resolve(loaded.root));
-      const rootInfo = await io.lstat(root);
-      if (!rootInfo.isDirectory()) {
-        throw new EvolutionPersistenceValidationError(
-          `LoadedConfig.root must resolve to a directory: ${root}`,
-        );
-      }
-    } catch (error) {
-      if (error instanceof EvolutionPersistenceError) throw error;
-      throw new EvolutionPersistenceValidationError(
-        `Unable to resolve repository root '${loaded.root}': ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-    const stateDirectoryRelative = loaded.config.project?.stateDirectory;
-    if (typeof stateDirectoryRelative !== "string" || !stateDirectoryRelative.trim()) {
-      throw new EvolutionPersistenceValidationError(
-        "project.stateDirectory must be a non-empty repository-relative path",
-      );
-    }
-
+    const root = await resolveRepositoryRoot(io, loaded.root);
+    const stateDirectoryRelative = stateDirectoryOf(loaded);
     const stateDirectory = resolveRepositoryOwnedDirectory(
       root,
       stateDirectoryRelative,
@@ -210,45 +271,9 @@ export class DurableEvolutionCatalog {
     );
     const evolutionDirectory = path.join(stateDirectory, "evolution");
     const filePath = path.join(evolutionDirectory, EVOLUTION_CATALOG_FILENAME);
-
-    let trust: EvolutionTrustContext;
-    try {
-      trust = createEvolutionTrustContext({
-        roles: trustRolesFromLoadedConfig(loaded.config.roles),
-      });
-    } catch (error) {
-      if (error instanceof EvolutionDomainError) {
-        throw new EvolutionPersistenceValidationError(error.message);
-      }
-      throw error;
-    }
-
-    await createRepositoryOwnedDirectory(io, root, stateDirectory);
-    await createRepositoryOwnedDirectory(io, root, evolutionDirectory);
-    await assertRepositoryOwnedStorage(io, root, stateDirectory, evolutionDirectory, filePath);
-    await cleanOrphanTemporaryFiles(io, evolutionDirectory, filePath);
-
-    let catalog: EvolutionCatalog;
-    let revision: number;
-    try {
-      await assertPrimaryFileSafe(io, root, filePath);
-      const contents = await io.readFile(filePath, "utf8");
-      const restored = restoreFromDocumentText(contents, trust, filePath);
-      catalog = restored.catalog;
-      revision = restored.revision;
-    } catch (error) {
-      if (isNotFound(error)) {
-        catalog = createEvolutionCatalog(trust);
-        revision = 0;
-      } else if (error instanceof EvolutionPersistenceError) {
-        throw error;
-      } else if (error instanceof EvolutionDomainError) {
-        throw new EvolutionPersistenceValidationError(error.message);
-      } else {
-        throw error;
-      }
-    }
-
+    const trust = trustFrom(loaded);
+    await prepareStorage(io, root, stateDirectory, evolutionDirectory, filePath);
+    const { catalog, revision } = await loadOrCreate(io, root, filePath, trust);
     return new DurableEvolutionCatalog({
       root,
       stateDirectory,
@@ -745,236 +770,231 @@ function restoreFromDocument(
   trust: EvolutionTrustContext,
   filePath: string,
 ): { catalog: EvolutionCatalog; revision: number } {
-  if (!document || typeof document !== "object" || Array.isArray(document)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: expected object document`,
-    );
-  }
+  const record = asDocument(document, filePath);
+  assertDocumentHeader(record, filePath);
+  const payloadRecord = asPayload(record, filePath);
+  const proposalById = proposalsFromPayload(payloadRecord, trust, filePath);
+  const storedPromotionById = promotionsFromPayload(payloadRecord, proposalById, filePath);
+  const auditRecords = auditsFromPayload(payloadRecord, filePath);
+  assertRevision(record, proposalById, auditRecords, filePath);
+  const replayed = replayAuditHistory(auditRecords, proposalById, filePath);
+  assertProvenance(replayed, storedPromotionById, filePath);
+  const activeProposals = activePointersFrom(payloadRecord, proposalById, replayed, filePath);
+  return openRestoredCatalog(trust, filePath, Number(record.revision), {
+    proposals: [...proposalById.values()],
+    auditRecords,
+    activeProposals,
+    promotionRecords: [...storedPromotionById.values()],
+  });
+}
 
-  const record = document as Record<string, unknown>;
-  assertExactKeys(
-    record,
-    ["version", "revision", "payloadDigest", "payload"],
-    `durable evolution catalog at ${filePath}`,
+function invalid(filePath: string, detail: string): EvolutionPersistenceValidationError {
+  return new EvolutionPersistenceValidationError(
+    `Invalid durable evolution catalog at ${filePath}: ${detail}`,
   );
+}
+
+function asDocument(document: unknown, filePath: string): Record<string, unknown> {
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    throw invalid(filePath, "expected object document");
+  }
+  return document as Record<string, unknown>;
+}
+
+/** Version, revision and digest are checked before any payload is read. */
+function assertDocumentHeader(record: Record<string, unknown>, filePath: string): void {
+  assertExactKeys(record, ["version", "revision", "payloadDigest", "payload"], `durable evolution catalog at ${filePath}`);
   if (record.version !== EVOLUTION_DURABLE_DOCUMENT_VERSION) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: unsupported version '${String(record.version)}'`,
-    );
+    throw invalid(filePath, `unsupported version '${String(record.version)}'`);
   }
   if (!isNonNegativeSafeInteger(record.revision) || record.revision === 0) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: persisted revision must be a positive safe integer`,
-    );
+    throw invalid(filePath, "persisted revision must be a positive safe integer");
   }
   if (typeof record.payloadDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.payloadDigest)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payloadDigest must be a lowercase SHA-256 hex string`,
-    );
+    throw invalid(filePath, "payloadDigest must be a lowercase SHA-256 hex string");
   }
-  if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload must be an object`,
-    );
-  }
+}
 
+function asPayload(record: Record<string, unknown>, filePath: string): Record<string, unknown> {
+  if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) {
+    throw invalid(filePath, "payload must be an object");
+  }
   const payloadRecord = record.payload as Record<string, unknown>;
   assertExactKeys(
     payloadRecord,
     ["proposals", "auditRecords", "activeProposals", "promotionRecords"],
     `durable evolution catalog payload at ${filePath}`,
   );
-
-  const expectedDigest = computePayloadDigest(payloadRecord);
-  if (expectedDigest !== record.payloadDigest) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload digest mismatch`,
-    );
+  if (computePayloadDigest(payloadRecord) !== record.payloadDigest) {
+    throw invalid(filePath, "payload digest mismatch");
   }
-
-  if (!Array.isArray(payloadRecord.proposals)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.proposals must be an array`,
-    );
-  }
-  if (!Array.isArray(payloadRecord.auditRecords)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.auditRecords must be an array`,
-    );
-  }
-  if (!Array.isArray(payloadRecord.activeProposals)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.activeProposals must be an array`,
-    );
-  }
-  if (!Array.isArray(payloadRecord.promotionRecords)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.promotionRecords must be an array`,
-    );
-  }
-
-  const proposals: EvolutionProposal[] = [];
-  const proposalById = new Map<string, EvolutionProposal>();
-  for (const [index, raw] of payloadRecord.proposals.entries()) {
-    let proposal: EvolutionProposal;
-    try {
-      proposal = parseEvolutionProposal(raw, trust);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.proposals[${index}]: ${message}`,
-      );
+  for (const key of ["proposals", "auditRecords", "activeProposals", "promotionRecords"]) {
+    if (!Array.isArray(payloadRecord[key])) {
+      throw invalid(filePath, `payload.${key} must be an array`);
     }
+  }
+  return payloadRecord;
+}
+
+function proposalsFromPayload(
+  payloadRecord: Record<string, unknown>,
+  trust: EvolutionTrustContext,
+  filePath: string,
+): Map<string, EvolutionProposal> {
+  const proposalById = new Map<string, EvolutionProposal>();
+  for (const [index, raw] of (payloadRecord.proposals as unknown[]).entries()) {
+    const proposal = parseOrThrow(() => parseEvolutionProposal(raw, trust), filePath, `payload.proposals[${index}]`);
     if (proposalById.has(proposal.id)) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: duplicate proposal id '${proposal.id}'`,
-      );
+      throw invalid(filePath, `duplicate proposal id '${proposal.id}'`);
     }
     proposalById.set(proposal.id, proposal);
-    proposals.push(proposal);
   }
+  return proposalById;
+}
 
-  const promotionRecords: PromotionRecord[] = [];
-  const storedPromotionById = new Map<string, PromotionRecord>();
-  for (const [index, raw] of payloadRecord.promotionRecords.entries()) {
-    let promotion: PromotionRecord;
-    try {
-      promotion = parsePromotionRecord(raw);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.promotionRecords[${index}]: ${message}`,
-      );
-    }
-    if (storedPromotionById.has(promotion.proposalId)) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: duplicate promotion record for '${promotion.proposalId}'`,
-      );
+function promotionsFromPayload(
+  payloadRecord: Record<string, unknown>,
+  proposalById: Map<string, EvolutionProposal>,
+  filePath: string,
+): Map<string, PromotionRecord> {
+  const stored = new Map<string, PromotionRecord>();
+  for (const [index, raw] of (payloadRecord.promotionRecords as unknown[]).entries()) {
+    const promotion = parseOrThrow(() => parsePromotionRecord(raw), filePath, `payload.promotionRecords[${index}]`);
+    if (stored.has(promotion.proposalId)) {
+      throw invalid(filePath, `duplicate promotion record for '${promotion.proposalId}'`);
     }
     const proposal = proposalById.get(promotion.proposalId);
     if (!proposal) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: promotion record references missing proposal '${promotion.proposalId}'`,
-      );
+      throw invalid(filePath, `promotion record references missing proposal '${promotion.proposalId}'`);
     }
-    try {
-      assertPromotionRecordMatchesProposal(promotion, proposal);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.promotionRecords[${index}]: ${message}`,
-      );
-    }
-    storedPromotionById.set(promotion.proposalId, promotion);
-    promotionRecords.push(promotion);
+    parseOrThrow(
+      () => assertPromotionRecordMatchesProposal(promotion, proposal),
+      filePath,
+      `payload.promotionRecords[${index}]`,
+    );
+    stored.set(promotion.proposalId, promotion);
   }
+  return stored;
+}
 
-  const auditRecords: AuditRecord[] = [];
-  for (const [index, raw] of payloadRecord.auditRecords.entries()) {
+function auditsFromPayload(payloadRecord: Record<string, unknown>, filePath: string): AuditRecord[] {
+  return (payloadRecord.auditRecords as unknown[]).map((raw, index) => {
     const parsed = auditRecordSchema.safeParse(raw);
-    if (!parsed.success) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.auditRecords[${index}] is malformed`,
-      );
-    }
-    auditRecords.push(parsed.data);
-  }
+    if (!parsed.success) throw invalid(filePath, `payload.auditRecords[${index}] is malformed`);
+    return parsed.data;
+  });
+}
 
-  // Every mutation bumps the revision once. Live proposals contribute their
-  // creation plus lifecycle transitions; archive/unarchive markers contribute
-  // one each; each deletion tombstone accounts for the deleted proposal's own
-  // mutations (creation + the fixed 3 transitions on the only path to
-  // 'rejected') plus the deletion itself.
+function parseOrThrow<T>(parse: () => T, filePath: string, label: string): T {
+  try {
+    return parse();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw invalid(filePath, `${label}: ${message}`);
+  }
+}
+
+/**
+ * Every mutation bumps the revision once: creation plus transitions per live
+ * proposal, one per archival marker, and the tombstone weight per deletion.
+ */
+function assertRevision(
+  record: Record<string, unknown>,
+  proposalById: Map<string, EvolutionProposal>,
+  auditRecords: AuditRecord[],
+  filePath: string,
+): void {
   const archivalMutations = auditRecords.filter(
     (audit) => audit.kind === "archive" || audit.kind === "unarchive",
   ).length;
   const deletions = auditRecords.filter((audit) => audit.kind === "delete").length;
-  const reconstructedRevision =
-    proposals.reduce((total, proposal) => total + 1 + proposal.transitions.length, 0) +
+  const reconstructed =
+    [...proposalById.values()].reduce(
+      (total, proposal) => total + 1 + proposal.transitions.length,
+      0,
+    ) +
     archivalMutations +
     deletions * DELETED_PROPOSAL_REVISION_WEIGHT;
-  if (record.revision !== reconstructedRevision) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: revision ${record.revision} does not match ${reconstructedRevision} recorded mutation(s)`,
-    );
+  if (record.revision !== reconstructed) {
+    throw invalid(filePath, `revision ${String(record.revision)} does not match ${reconstructed} recorded mutation(s)`);
   }
+}
 
-  const replayed = replayAuditHistory(auditRecords, proposalById, filePath);
-  if (storedPromotionById.size !== replayed.promotionByProposal.size) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: promotion provenance does not match audit history`,
-    );
+function assertProvenance(
+  replayed: AuditReplayResult,
+  stored: Map<string, PromotionRecord>,
+  filePath: string,
+): void {
+  if (stored.size !== replayed.promotionByProposal.size) {
+    throw invalid(filePath, "promotion provenance does not match audit history");
   }
   for (const [proposalId, promotion] of replayed.promotionByProposal) {
-    if (!deepEqual(storedPromotionById.get(proposalId), promotion)) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: promotion provenance for '${proposalId}' does not match audit history`,
-      );
+    if (!deepEqual(stored.get(proposalId), promotion)) {
+      throw invalid(filePath, `promotion provenance for '${proposalId}' does not match audit history`);
     }
   }
+}
 
-  const activeProposals: EvolutionActiveProposalPointer[] = [];
+/** Pointers must agree with the replay in both directions. */
+function activePointersFrom(
+  payloadRecord: Record<string, unknown>,
+  proposalById: Map<string, EvolutionProposal>,
+  replayed: AuditReplayResult,
+  filePath: string,
+): EvolutionActiveProposalPointer[] {
+  const activeProposals = (payloadRecord.activeProposals as unknown[]).map((raw, index) =>
+    parseActivePointer(raw, filePath, index),
+  );
   const activeKeys = new Set<string>();
-  for (const [index, raw] of payloadRecord.activeProposals.entries()) {
-    const pointer = parseActivePointer(raw, filePath, index);
+  for (const pointer of activeProposals) {
     const key = candidateTargetKeyFromTarget(pointer.target);
-    if (activeKeys.has(key)) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: duplicate active pointer for '${key}'`,
-      );
-    }
-    const proposal = proposalById.get(pointer.proposalId);
-    if (!proposal) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: active pointer references missing proposal '${pointer.proposalId}'`,
-      );
-    }
-    if (proposal.status !== "promoted") {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: active pointer '${pointer.proposalId}' requires promoted status`,
-      );
-    }
-    if (candidateTargetKey(proposal.candidate) !== key) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: active pointer target does not match proposal '${pointer.proposalId}'`,
-      );
-    }
+    if (activeKeys.has(key)) throw invalid(filePath, `duplicate active pointer for '${key}'`);
+    assertPointerMatches(pointer, key, proposalById, filePath);
     activeKeys.add(key);
-    activeProposals.push(pointer);
   }
-
   if (activeKeys.size !== replayed.activeByTarget.size) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: active pointers do not match replayed audit history`,
-    );
+    throw invalid(filePath, "active pointers do not match replayed audit history");
   }
   for (const [targetKey, proposalId] of replayed.activeByTarget) {
     const pointer = activeProposals.find(
       (candidate) => candidateTargetKeyFromTarget(candidate.target) === targetKey,
     );
     if (pointer?.proposalId !== proposalId) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: active pointer for '${targetKey}' does not match replayed proposal '${proposalId}'`,
-      );
+      throw invalid(filePath, `active pointer for '${targetKey}' does not match replayed proposal '${proposalId}'`);
     }
   }
+  return activeProposals;
+}
 
-  const material: EvolutionCatalogRestoreMaterial = {
-    proposals,
-    auditRecords,
-    activeProposals,
-    promotionRecords,
-  };
-
-  try {
-    const catalog = restoreEvolutionCatalog(trust, material);
-    return { catalog, revision: record.revision };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: ${message}`,
-    );
+function assertPointerMatches(
+  pointer: EvolutionActiveProposalPointer,
+  key: string,
+  proposalById: Map<string, EvolutionProposal>,
+  filePath: string,
+): void {
+  const proposal = proposalById.get(pointer.proposalId);
+  if (!proposal) {
+    throw invalid(filePath, `active pointer references missing proposal '${pointer.proposalId}'`);
   }
+  if (proposal.status !== "promoted") {
+    throw invalid(filePath, `active pointer '${pointer.proposalId}' requires promoted status`);
+  }
+  if (candidateTargetKey(proposal.candidate) !== key) {
+    throw invalid(filePath, `active pointer target does not match proposal '${pointer.proposalId}'`);
+  }
+}
+
+function openRestoredCatalog(
+  trust: EvolutionTrustContext,
+  filePath: string,
+  revision: number,
+  material: EvolutionCatalogRestoreMaterial,
+): { catalog: EvolutionCatalog; revision: number } {
+  return parseOrThrow(
+    () => ({ catalog: restoreEvolutionCatalog(trust, material), revision }),
+    filePath,
+    "restore",
+  );
 }
 
 type AuditReplayResult = {
@@ -995,246 +1015,300 @@ function replayAuditHistory(
   proposalById: ReadonlyMap<string, EvolutionProposal>,
   filePath: string,
 ): AuditReplayResult {
-  const promotionByProposal = new Map<string, PromotionRecord>();
-  const activeByTarget = new Map<string, string>();
-  const counts = new Map<
-    string,
-    { promotion: number; rejection: number; rollback: number }
-  >();
-  const applicationCommandIds = new Set<string>();
-  const archivalStates = new Map<string, { archived: boolean; at: string | null }>();
-  const deletedTrails = new Map<string, Array<{ index: number; audit: AuditRecord }>>();
-
-  for (const [index, audit] of auditRecords.entries()) {
-    const proposal = proposalById.get(audit.proposalId);
-    if (!proposal) {
-      // Only the retained trail of a deleted proposal (its rejection, any
-      // archival markers, and the deletion tombstone) may reference a proposal
-      // that is no longer present.
-      if (
-        audit.kind !== "rejection" &&
-        audit.kind !== "archive" &&
-        audit.kind !== "unarchive" &&
-        audit.kind !== "delete"
-      ) {
-        throw invalidHistory(filePath, index, `references missing proposal '${audit.proposalId}'`);
-      }
-      const trail = deletedTrails.get(audit.proposalId) ?? [];
-      trail.push({ index, audit });
-      deletedTrails.set(audit.proposalId, trail);
-      continue;
-    }
-    if (audit.kind === "delete") {
-      throw invalidHistory(filePath, index, `deletes live proposal '${proposal.id}'`);
-    }
-    const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
-    if (commandId !== undefined) {
-      if (applicationCommandIds.has(commandId)) {
-        throw invalidHistory(filePath, index, `duplicates application command '${commandId}'`);
-      }
-      applicationCommandIds.add(commandId);
-    }
-
-    if (audit.kind === "archive" || audit.kind === "unarchive") {
-      const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
-      if (audit.kind === "archive") {
-        if (state.archived) {
-          throw invalidHistory(filePath, index, `duplicates archive for '${proposal.id}'`);
-        }
-        archivalStates.set(proposal.id, { archived: true, at: audit.at });
-      } else {
-        if (!state.archived) {
-          throw invalidHistory(filePath, index, `unarchives non-archived proposal '${proposal.id}'`);
-        }
-        archivalStates.set(proposal.id, { archived: false, at: null });
-      }
-      continue;
-    }
-
-    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
-    count[audit.kind] += 1;
-    counts.set(proposal.id, count);
-    const targetKey = candidateTargetKey(proposal.candidate);
-
-    if (audit.kind === "promotion") {
-      if (count.promotion !== 1) {
-        throw invalidHistory(filePath, index, `duplicates promotion for '${proposal.id}'`);
-      }
-      try {
-        assertPromotionRecordMatchesProposal(audit, proposal);
-      } catch (error) {
-        throw invalidHistory(
-          filePath,
-          index,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-      assertAuditTransitionAt(proposal, "evaluated", "promoted", audit.at, filePath, index);
-      const currentActive = activeByTarget.get(targetKey) ?? null;
-      if (audit.previousActiveProposalId !== currentActive) {
-        throw invalidHistory(
-          filePath,
-          index,
-          `promotion previousActiveProposalId must be '${currentActive ?? "null"}'`,
-        );
-      }
-      if (audit.previousActiveProposalId !== null) {
-        const previous = proposalById.get(audit.previousActiveProposalId);
-        if (
-          !previous ||
-          candidateTargetKey(previous.candidate) !== targetKey ||
-          !promotionByProposal.has(previous.id)
-        ) {
-          throw invalidHistory(
-            filePath,
-            index,
-            `promotion previous active '${audit.previousActiveProposalId}' is not a prior promotion for the same target`,
-          );
-        }
-      }
-      promotionByProposal.set(proposal.id, audit);
-      activeByTarget.set(targetKey, proposal.id);
-      continue;
-    }
-
-    if (audit.kind === "rollback") {
-      if (count.rollback !== 1) {
-        throw invalidHistory(filePath, index, `duplicates rollback for '${proposal.id}'`);
-      }
-      const promotion = promotionByProposal.get(proposal.id);
-      if (!promotion) {
-        throw invalidHistory(filePath, index, `rolls back '${proposal.id}' before its promotion`);
-      }
-      if (activeByTarget.get(targetKey) !== proposal.id) {
-        throw invalidHistory(filePath, index, `rolls back inactive proposal '${proposal.id}'`);
-      }
-      assertAuditTransitionAt(proposal, "promoted", "rolled-back", audit.at, filePath, index);
-      if (audit.restoredActiveProposalId !== promotion.previousActiveProposalId) {
-        throw invalidHistory(
-          filePath,
-          index,
-          `rollback restoration does not match promotion provenance for '${proposal.id}'`,
-        );
-      }
-      if (audit.restoredActiveProposalId === null) {
-        activeByTarget.delete(targetKey);
-      } else {
-        const restored = proposalById.get(audit.restoredActiveProposalId);
-        if (
-          !restored ||
-          candidateTargetKey(restored.candidate) !== targetKey ||
-          !promotionByProposal.has(restored.id)
-        ) {
-          throw invalidHistory(
-            filePath,
-            index,
-            `rollback target '${audit.restoredActiveProposalId}' is not a prior promotion for the same target`,
-          );
-        }
-        activeByTarget.set(targetKey, restored.id);
-      }
-      continue;
-    }
-
-    if (count.rejection !== 1) {
-      throw invalidHistory(filePath, index, `duplicates rejection for '${proposal.id}'`);
-    }
-    assertAuditTransitionAt(proposal, "evaluated", "rejected", audit.at, filePath, index);
-    if (!proposal.evaluation || !deepEqual(audit.evaluation, proposal.evaluation.result)) {
-      throw invalidHistory(
-        filePath,
-        index,
-        `rejection evaluation does not match proposal '${proposal.id}'`,
-      );
-    }
-  }
-
-  for (const [proposalId, trail] of deletedTrails) {
-    assertDeletedAuditTrail(filePath, proposalId, trail);
-  }
-
-  for (const proposal of proposalById.values()) {
-    const state = archivalStates.get(proposal.id) ?? { archived: false, at: null };
-    if (
-      state.archived !== (proposal.archivedAt !== undefined) ||
-      (state.archived && proposal.archivedAt !== state.at)
-    ) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: archival state for proposal '${proposal.id}' does not match audit history`,
-      );
-    }
-  }
-
-  for (const proposal of proposalById.values()) {
-    const count = counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
-    const expected =
-      proposal.status === "rejected"
-        ? { promotion: 0, rejection: 1, rollback: 0 }
-        : proposal.status === "promoted"
-          ? { promotion: 1, rejection: 0, rollback: 0 }
-          : proposal.status === "rolled-back"
-            ? { promotion: 1, rejection: 0, rollback: 1 }
-            : { promotion: 0, rejection: 0, rollback: 0 };
-    if (!deepEqual(count, expected)) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: terminal audit cardinality for proposal '${proposal.id}' does not match status '${proposal.status}'`,
-      );
-    }
-  }
-
-  return { promotionByProposal, activeByTarget };
+  const replay: AuditReplay = {
+    filePath,
+    proposalById,
+    promotionByProposal: new Map(),
+    activeByTarget: new Map(),
+    counts: new Map(),
+    applicationCommandIds: new Set(),
+    archivalStates: new Map(),
+    deletedTrails: new Map(),
+  };
+  for (const [index, audit] of auditRecords.entries()) applyAuditAt(replay, index, audit);
+  finishReplay(replay);
+  return { promotionByProposal: replay.promotionByProposal, activeByTarget: replay.activeByTarget };
 }
+
+interface AuditReplay {
+  filePath: string;
+  proposalById: ReadonlyMap<string, EvolutionProposal>;
+  promotionByProposal: Map<string, PromotionRecord>;
+  activeByTarget: Map<string, string>;
+  counts: Map<string, { promotion: number; rejection: number; rollback: number }>;
+  applicationCommandIds: Set<string>;
+  archivalStates: Map<string, { archived: boolean; at: string | null }>;
+  deletedTrails: Map<string, Array<{ index: number; audit: AuditRecord }>>;
+}
+
+/** A deleted proposal's trail, an archival marker, or a terminal decision. */
+function applyAuditAt(replay: AuditReplay, index: number, audit: AuditRecord): void {
+  const proposal = replay.proposalById.get(audit.proposalId);
+  if (!proposal) return recordTrailAt(replay, index, audit);
+  if (audit.kind === "delete") {
+    throw invalidHistory(replay.filePath, index, `deletes live proposal '${proposal.id}'`);
+  }
+  claimCommandAt(replay, index, audit);
+  if (audit.kind === "archive" || audit.kind === "unarchive") {
+    return applyArchivalAt(replay, index, audit, proposal);
+  }
+  applyDecisionAt(replay, index, audit, proposal);
+}
+
+function recordTrailAt(replay: AuditReplay, index: number, audit: AuditRecord): void {
+  const trail = replay.deletedTrails.get(audit.proposalId) ?? [];
+  replay.deletedTrails.set(
+    audit.proposalId,
+    recordTrail(trail, index, audit, (at, message) => {
+      throw invalidHistory(replay.filePath, at, message);
+    }),
+  );
+}
+
+function claimCommandAt(replay: AuditReplay, index: number, audit: AuditRecord): void {
+  const commandId = "applicationCommandId" in audit ? audit.applicationCommandId : undefined;
+  if (commandId === undefined) return;
+  if (replay.applicationCommandIds.has(commandId)) {
+    throw invalidHistory(replay.filePath, index, `duplicates application command '${commandId}'`);
+  }
+  replay.applicationCommandIds.add(commandId);
+}
+
+function applyArchivalAt(
+  replay: AuditReplay,
+  index: number,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+): void {
+  const state = replay.archivalStates.get(proposal.id) ?? { archived: false, at: null };
+  const archiving = audit.kind === "archive";
+  if (archiving === state.archived) {
+    throw invalidHistory(
+      replay.filePath,
+      index,
+      archiving ? `duplicates archive for '${proposal.id}'` : `unarchives non-archived proposal '${proposal.id}'`,
+    );
+  }
+  replay.archivalStates.set(proposal.id, {
+    archived: archiving,
+    at: archiving ? (audit as { at: string }).at : null,
+  });
+}
+
+type DecisionKind = "promotion" | "rejection" | "rollback";
+
+function applyDecisionAt(
+  replay: AuditReplay,
+  index: number,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+): void {
+  const kind = audit.kind as DecisionKind;
+  const count = replay.counts.get(proposal.id) ?? { promotion: 0, rejection: 0, rollback: 0 };
+  count[kind] += 1;
+  replay.counts.set(proposal.id, count);
+  if (kind === "promotion") return applyPromotionAt(replay, index, audit, proposal, count);
+  if (kind === "rollback") return applyRollbackAt(replay, index, audit, proposal, count);
+  applyRejectionAt(replay, index, audit, proposal, count);
+}
+
+function applyPromotionAt(
+  replay: AuditReplay,
+  index: number,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { promotion: number },
+): void {
+  if (count.promotion !== 1) {
+    throw invalidHistory(replay.filePath, index, `duplicates promotion for '${proposal.id}'`);
+  }
+  const promotion = audit as Extract<AuditRecord, { kind: "promotion" }>;
+  assertPromotionMatches(replay, index, promotion, proposal);
+  assertAuditTransitionAt(proposal, "evaluated", "promoted", promotion.at, replay.filePath, index);
+  const targetKey = candidateTargetKey(proposal.candidate);
+  assertPromotionChainAt(replay, index, promotion, targetKey);
+  replay.promotionByProposal.set(proposal.id, promotion);
+  replay.activeByTarget.set(targetKey, proposal.id);
+}
+
+function assertPromotionMatches(
+  replay: AuditReplay,
+  index: number,
+  promotion: Extract<AuditRecord, { kind: "promotion" }>,
+  proposal: EvolutionProposal,
+): void {
+  try {
+    assertPromotionRecordMatchesProposal(promotion, proposal);
+  } catch (error) {
+    throw invalidHistory(replay.filePath, index, error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** The declared predecessor must be the proposal the replay already promoted. */
+function assertPromotionChainAt(
+  replay: AuditReplay,
+  index: number,
+  promotion: Extract<AuditRecord, { kind: "promotion" }>,
+  targetKey: string,
+): void {
+  const currentActive = replay.activeByTarget.get(targetKey) ?? null;
+  if (promotion.previousActiveProposalId !== currentActive) {
+    throw invalidHistory(
+      replay.filePath,
+      index,
+      `promotion previousActiveProposalId must be '${currentActive ?? "null"}'`,
+    );
+  }
+  if (currentActive === null) return;
+  if (!isPriorPromotion(replay, currentActive, targetKey)) {
+    throw invalidHistory(
+      replay.filePath,
+      index,
+      `promotion previous active '${currentActive}' is not a prior promotion for the same target`,
+    );
+  }
+}
+
+function applyRollbackAt(
+  replay: AuditReplay,
+  index: number,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { rollback: number },
+): void {
+  if (count.rollback !== 1) {
+    throw invalidHistory(replay.filePath, index, `duplicates rollback for '${proposal.id}'`);
+  }
+  const rollback = audit as Extract<AuditRecord, { kind: "rollback" }>;
+  const targetKey = candidateTargetKey(proposal.candidate);
+  const promotion = replay.promotionByProposal.get(proposal.id);
+  if (!promotion) {
+    throw invalidHistory(replay.filePath, index, `rolls back '${proposal.id}' before its promotion`);
+  }
+  if (replay.activeByTarget.get(targetKey) !== proposal.id) {
+    throw invalidHistory(replay.filePath, index, `rolls back inactive proposal '${proposal.id}'`);
+  }
+  assertAuditTransitionAt(proposal, "promoted", "rolled-back", rollback.at, replay.filePath, index);
+  assertRollbackProvenance(replay, index, rollback, promotion, proposal.id);
+  restoreActiveAt(replay, index, rollback.restoredActiveProposalId, targetKey);
+}
+
+function assertRollbackProvenance(
+  replay: AuditReplay,
+  index: number,
+  rollback: Extract<AuditRecord, { kind: "rollback" }>,
+  promotion: PromotionRecord,
+  proposalId: string,
+): void {
+  if (rollback.restoredActiveProposalId === promotion.previousActiveProposalId) return;
+  throw invalidHistory(
+    replay.filePath,
+    index,
+    `rollback restoration does not match promotion provenance for '${proposalId}'`,
+  );
+}
+
+function restoreActiveAt(
+  replay: AuditReplay,
+  index: number,
+  restoredId: string | null,
+  targetKey: string,
+): void {
+  if (restoredId === null) {
+    replay.activeByTarget.delete(targetKey);
+    return;
+  }
+  if (!isPriorPromotion(replay, restoredId, targetKey)) {
+    throw invalidHistory(
+      replay.filePath,
+      index,
+      `rollback target '${restoredId}' is not a prior promotion for the same target`,
+    );
+  }
+  replay.activeByTarget.set(targetKey, restoredId);
+}
+
+function isPriorPromotion(replay: AuditReplay, id: string, targetKey: string): boolean {
+  const previous = replay.proposalById.get(id);
+  if (!previous) return false;
+  if (candidateTargetKey(previous.candidate) !== targetKey) return false;
+  return replay.promotionByProposal.has(previous.id);
+}
+
+function applyRejectionAt(
+  replay: AuditReplay,
+  index: number,
+  audit: AuditRecord,
+  proposal: EvolutionProposal,
+  count: { rejection: number },
+): void {
+  if (count.rejection !== 1) {
+    throw invalidHistory(replay.filePath, index, `duplicates rejection for '${proposal.id}'`);
+  }
+  const rejection = audit as Extract<AuditRecord, { kind: "rejection" }>;
+  assertAuditTransitionAt(proposal, "evaluated", "rejected", rejection.at, replay.filePath, index);
+  if (!proposal.evaluation || !deepEqual(rejection.evaluation, proposal.evaluation.result)) {
+    throw invalidHistory(
+      replay.filePath,
+      index,
+      `rejection evaluation does not match proposal '${proposal.id}'`,
+    );
+  }
+}
+
+/** After the loop: deleted trails, archival state, then terminal cardinality. */
+function finishReplay(replay: AuditReplay): void {
+  for (const [proposalId, trail] of replay.deletedTrails) {
+    assertDeletedAuditTrail(replay.filePath, proposalId, trail);
+  }
+  for (const proposal of replay.proposalById.values()) assertArchival(replay, proposal);
+  for (const proposal of replay.proposalById.values()) assertCardinality(replay, proposal);
+}
+
+function assertArchival(replay: AuditReplay, proposal: EvolutionProposal): void {
+  const state = replay.archivalStates.get(proposal.id) ?? { archived: false, at: null };
+  if (
+    state.archived === (proposal.archivedAt !== undefined) &&
+    (!state.archived || proposal.archivedAt === state.at)
+  ) {
+    return;
+  }
+  throw new EvolutionPersistenceValidationError(
+    `Invalid durable evolution catalog at ${replay.filePath}: archival state for proposal '${proposal.id}' does not match audit history`,
+  );
+}
+
+const EXPECTED_COUNTS: Record<string, { promotion: number; rejection: number; rollback: number }> = {
+  rejected: { promotion: 0, rejection: 1, rollback: 0 },
+  promoted: { promotion: 1, rejection: 0, rollback: 0 },
+  "rolled-back": { promotion: 1, rejection: 0, rollback: 1 },
+};
+
+const NO_DECISIONS = { promotion: 0, rejection: 0, rollback: 0 };
+
+function assertCardinality(replay: AuditReplay, proposal: EvolutionProposal): void {
+  const count = replay.counts.get(proposal.id) ?? NO_DECISIONS;
+  if (deepEqual(count, EXPECTED_COUNTS[proposal.status] ?? NO_DECISIONS)) return;
+  throw new EvolutionPersistenceValidationError(
+    `Invalid durable evolution catalog at ${replay.filePath}: terminal audit cardinality for proposal '${proposal.id}' does not match status '${proposal.status}'`,
+  );
+}
+
 
 /**
  * Validate the retained audit trail of a deleted proposal: exactly one
  * rejection first, exactly one deletion tombstone last, and alternating
  * archive/unarchive markers in between.
  */
-function assertDeletedAuditTrail(
+export function assertDeletedAuditTrail(
   filePath: string,
   proposalId: string,
   trail: ReadonlyArray<{ index: number; audit: AuditRecord }>,
 ): void {
-  if (trail[0]?.audit.kind !== "rejection") {
-    throw invalidHistory(
-      filePath,
-      trail[0]?.index ?? 0,
-      `begins the retained history of deleted proposal '${proposalId}' without its rejection`,
-    );
-  }
-  const last = trail[trail.length - 1]!;
-  if (last.audit.kind !== "delete") {
-    throw invalidHistory(filePath, last.index, `references missing proposal '${proposalId}'`);
-  }
-  let archived = false;
-  for (const [position, { index, audit }] of trail.entries()) {
-    if (audit.kind === "rejection" && position !== 0) {
-      throw invalidHistory(filePath, index, `duplicates rejection for deleted proposal '${proposalId}'`);
-    }
-    if (audit.kind === "delete" && position !== trail.length - 1) {
-      throw invalidHistory(
-        filePath,
-        index,
-        `continues the history of deleted proposal '${proposalId}' after its deletion`,
-      );
-    }
-    if (audit.kind === "archive") {
-      if (archived) {
-        throw invalidHistory(filePath, index, `duplicates archive for deleted proposal '${proposalId}'`);
-      }
-      archived = true;
-    }
-    if (audit.kind === "unarchive") {
-      if (!archived) {
-        throw invalidHistory(
-          filePath,
-          index,
-          `unarchives non-archived deleted proposal '${proposalId}'`,
-        );
-      }
-      archived = false;
-    }
-  }
+  const violation = auditTrailViolation(trail.map((entry) => entry.audit.kind));
+  if (!violation) return;
+  const index = trail[violation.index]?.index ?? violation.index;
+  throw invalidHistory(filePath, index, violation.message(proposalId));
 }
 
 function assertAuditTransitionAt(
@@ -1272,64 +1346,57 @@ function parseActivePointer(
   filePath: string,
   index: number,
 ): EvolutionActiveProposalPointer {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}] must be an object`,
-    );
-  }
-  const value = raw as Record<string, unknown>;
-  assertExactKeys(
-    value,
-    ["target", "proposalId"],
-    `payload.activeProposals[${index}] at ${filePath}`,
-  );
-  if (typeof value.proposalId !== "string" || !value.proposalId.trim()) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}].proposalId is required`,
-    );
-  }
-  if (!value.target || typeof value.target !== "object" || Array.isArray(value.target)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}].target is required`,
-    );
-  }
-  const targetRecord = value.target as Record<string, unknown>;
-  if (targetRecord.kind === "strategy-blueprint") {
-    assertExactKeys(
-      targetRecord,
-      ["kind", "name"],
-      `payload.activeProposals[${index}].target at ${filePath}`,
-    );
-    if (typeof targetRecord.name !== "string" || !targetRecord.name.trim()) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}].target.name is required`,
-      );
-    }
-    return {
-      target: { kind: "strategy-blueprint", name: targetRecord.name },
-      proposalId: value.proposalId,
-    };
-  }
-  if (targetRecord.kind === "role-prompt") {
-    assertExactKeys(
-      targetRecord,
-      ["kind", "path"],
-      `payload.activeProposals[${index}].target at ${filePath}`,
-    );
-    if (typeof targetRecord.path !== "string" || !targetRecord.path.trim()) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}].target.path is required`,
-      );
-    }
-    return {
-      target: { kind: "role-prompt", path: targetRecord.path },
-      proposalId: value.proposalId,
-    };
-  }
-  throw new EvolutionPersistenceValidationError(
-    `Invalid durable evolution catalog at ${filePath}: payload.activeProposals[${index}].target.kind is unsupported`,
-  );
+  const label = `payload.activeProposals[${index}]`;
+  const value = pointerObject(raw, filePath, `${label} must be an object`);
+  assertExactKeys(value, ["target", "proposalId"], `${label} at ${filePath}`);
+  const proposalId = pointerString(value.proposalId, filePath, `${label}.proposalId is required`);
+  const target = pointerObject(value.target, filePath, `${label}.target is required`);
+  return { target: pointerTarget(target, filePath, label), proposalId };
 }
+
+function pointerObject(raw: unknown, filePath: string, detail: string): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw invalid(filePath, detail);
+  return raw as Record<string, unknown>;
+}
+
+function pointerString(value: unknown, filePath: string, detail: string): string {
+  if (typeof value !== "string" || !value.trim()) throw invalid(filePath, detail);
+  return value;
+}
+
+type PointerTarget = EvolutionActiveProposalPointer["target"];
+
+/** One reader per supported target kind, mirroring the catalog. */
+const POINTER_TARGETS: Record<
+  string,
+  (target: Record<string, unknown>, filePath: string, label: string) => PointerTarget
+> = {
+  "strategy-blueprint": (target, filePath, label) => {
+    assertExactKeys(target, ["kind", "name"], `${label}.target at ${filePath}`);
+    return {
+      kind: "strategy-blueprint",
+      name: pointerString(target.name, filePath, `${label}.target.name is required`),
+    };
+  },
+  "role-prompt": (target, filePath, label) => {
+    assertExactKeys(target, ["kind", "path"], `${label}.target at ${filePath}`);
+    return {
+      kind: "role-prompt",
+      path: pointerString(target.path, filePath, `${label}.target.path is required`),
+    };
+  },
+};
+
+function pointerTarget(
+  target: Record<string, unknown>,
+  filePath: string,
+  label: string,
+): PointerTarget {
+  const read = POINTER_TARGETS[String(target.kind)];
+  if (!read) throw invalid(filePath, `${label}.target.kind is unsupported`);
+  return read(target, filePath, label);
+}
+
 
 function candidateTargetKey(candidate: EvolutionProposal["candidate"]): string {
   if (candidate.kind === "strategy-blueprint") {
@@ -1375,42 +1442,84 @@ function resolveRepositoryOwnedDirectory(
   relativeDirectory: string,
   label: string,
 ): string {
-  if (!relativeDirectory || relativeDirectory.includes("\0")) {
-    throw new EvolutionPersistenceValidationError(
-      `${label} must be a non-empty repository-relative path`,
-    );
-  }
-  if (relativeDirectory !== relativeDirectory.trim()) {
-    throw new EvolutionPersistenceValidationError(
-      `${label} must not include leading or trailing whitespace`,
-    );
-  }
-  if (path.isAbsolute(relativeDirectory) || /^[A-Za-z]:[\\/]/.test(relativeDirectory)) {
-    throw new EvolutionPersistenceValidationError(
-      `${label} must be repository-relative (absolute paths are not allowed)`,
-    );
-  }
-  if (relativeDirectory.includes("\\")) {
-    throw new EvolutionPersistenceValidationError(`${label} must use POSIX separators only`);
-  }
+  assertRelativeDirectory(relativeDirectory, label);
   const segments = relativeDirectory.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new EvolutionPersistenceValidationError(
-      `${label} must not contain empty, '.', or '..' segments`,
-    );
-  }
-
+  assertSafeSegments(segments, label);
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, ...segments);
-  const rootPrefix = resolvedRoot.endsWith(path.sep)
-    ? resolvedRoot
-    : `${resolvedRoot}${path.sep}`;
-  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix(resolvedRoot))) {
     throw new EvolutionPersistenceValidationError(
       `${label} must resolve inside the repository root`,
     );
   }
   return resolved;
+}
+
+/** One guard per rule; the first violation names the field. */
+function assertRelativeDirectory(relativeDirectory: string, label: string): void {
+  const violations: Array<[boolean, string]> = [
+    [
+      !relativeDirectory || relativeDirectory.includes("\0"),
+      "must be a non-empty repository-relative path",
+    ],
+    [
+      relativeDirectory !== relativeDirectory.trim(),
+      "must not include leading or trailing whitespace",
+    ],
+    [
+      path.isAbsolute(relativeDirectory) || /^[A-Za-z]:[\\/]/.test(relativeDirectory),
+      "must be repository-relative (absolute paths are not allowed)",
+    ],
+    [relativeDirectory.includes("\\"), "must use POSIX separators only"],
+  ];
+  for (const [violated, detail] of violations) {
+    if (violated) throw new EvolutionPersistenceValidationError(`${label} ${detail}`);
+  }
+}
+
+function assertSafeSegments(segments: string[], label: string): void {
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new EvolutionPersistenceValidationError(
+      `${label} must not contain empty, '.', or '..' segments`,
+    );
+  }
+}
+
+function rootPrefix(resolvedRoot: string): string {
+  return resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+}
+
+async function assertExistingDirectoryChain(
+  io: DurableEvolutionFileIo,
+  root: string,
+  target: string,
+): Promise<void> {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new EvolutionPersistenceValidationError(
+      `Evolution storage directory must remain below repository root: ${target}`,
+    );
+  }
+  let current = root;
+  for (const segment of relative.split(path.sep)) {
+    current = path.join(current, segment);
+    const info = await io.lstat(current);
+    assertDirectoryEntrySafe(info, current);
+  }
+  const canonical = await io.realpath(target);
+  assertCanonicalPathInsideRoot(root, canonical, "Evolution storage directory");
+}
+
+async function assertRepositoryOwnedStorage(
+  io: DurableEvolutionFileIo,
+  root: string,
+  stateDirectory: string,
+  evolutionDirectory: string,
+  filePath: string,
+): Promise<void> {
+  await assertExistingDirectoryChain(io, root, stateDirectory);
+  await assertExistingDirectoryChain(io, root, evolutionDirectory);
+  await assertPrimaryFileSafe(io, root, filePath);
 }
 
 async function createRepositoryOwnedDirectory(
@@ -1445,39 +1554,7 @@ async function createRepositoryOwnedDirectory(
   await assertExistingDirectoryChain(io, root, target);
 }
 
-async function assertRepositoryOwnedStorage(
-  io: DurableEvolutionFileIo,
-  root: string,
-  stateDirectory: string,
-  evolutionDirectory: string,
-  filePath: string,
-): Promise<void> {
-  await assertExistingDirectoryChain(io, root, stateDirectory);
-  await assertExistingDirectoryChain(io, root, evolutionDirectory);
-  await assertPrimaryFileSafe(io, root, filePath);
-}
-
-async function assertExistingDirectoryChain(
-  io: DurableEvolutionFileIo,
-  root: string,
-  target: string,
-): Promise<void> {
-  const relative = path.relative(root, target);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new EvolutionPersistenceValidationError(
-      `Evolution storage directory must remain below repository root: ${target}`,
-    );
-  }
-  let current = root;
-  for (const segment of relative.split(path.sep)) {
-    current = path.join(current, segment);
-    const info = await io.lstat(current);
-    assertDirectoryEntrySafe(info, current);
-  }
-  const canonical = await io.realpath(target);
-  assertCanonicalPathInsideRoot(root, canonical, "Evolution storage directory");
-}
-
+/** One guard per rule; the first violation names the field. */
 function assertDirectoryEntrySafe(
   info: Awaited<ReturnType<typeof lstat>>,
   entryPath: string,
@@ -1518,26 +1595,33 @@ function assertCanonicalPathInsideRoot(root: string, candidate: string, label: s
   }
 }
 
+/** A missing directory simply has no orphans. */
+async function listOrSkip(
+  io: DurableEvolutionFileIo,
+  evolutionDirectory: string,
+): Promise<string[] | undefined> {
+  try {
+    return await io.readdir(evolutionDirectory);
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+}
+
+function isTemporaryFor(entry: string, prefix: string): boolean {
+  return entry.startsWith(prefix) && entry.endsWith(".tmp");
+}
+
 async function cleanOrphanTemporaryFiles(
   io: DurableEvolutionFileIo,
   evolutionDirectory: string,
   filePath: string,
 ): Promise<void> {
-  let entries: string[];
-  try {
-    entries = await io.readdir(evolutionDirectory);
-  } catch (error) {
-    if (isNotFound(error)) {
-      return;
-    }
-    throw error;
-  }
-
+  const entries = await listOrSkip(io, evolutionDirectory);
+  if (!entries) return;
   const prefix = `${path.basename(filePath)}.`;
   for (const entry of entries) {
-    if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) {
-      continue;
-    }
+    if (!isTemporaryFor(entry, prefix)) continue;
     const absolute = path.join(evolutionDirectory, entry);
     try {
       const info = await io.lstat(absolute);
@@ -1549,19 +1633,22 @@ async function cleanOrphanTemporaryFiles(
   }
 }
 
+/** Windows reports directory fsync as one of these codes instead. */
+const UNSUPPORTED_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]);
+
+export function isUnsupportedDirectorySync(error: unknown): boolean {
+  if (process.platform !== "win32") return false;
+  const code = errorCode(error);
+  return code !== undefined && UNSUPPORTED_SYNC_CODES.has(code);
+}
+
 async function defaultSyncDirectory(directoryPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
   try {
     handle = await openAsync(directoryPath, "r");
     await handle.sync();
   } catch (error) {
-    const code = errorCode(error);
-    if (
-      process.platform === "win32" &&
-      (code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM")
-    ) {
-      return;
-    }
+    if (isUnsupportedDirectorySync(error)) return;
     throw error;
   } finally {
     await handle?.close();

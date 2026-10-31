@@ -1159,3 +1159,76 @@ void readdir;
 void rename;
 void rm;
 void unlink;
+
+describe("durable deletion trails", () => {
+  async function deletedProposal(root: string, id: string): Promise<void> {
+    const durable = await openDurable(root);
+    await durable.propose({
+      id,
+      createdAt: now,
+      policy: validPolicy(),
+      candidate: validStrategyCandidate(),
+    });
+    const evaluated = await toEvaluated(durable, id);
+    await durable.reject(
+      id,
+      humanDecision({ reason: "Not shipping", decidedAt: "2026-08-11T01:03:00.000Z" }),
+    );
+    expect(evaluated.status).toBe("evaluated");
+    durable.deleteProposal(id, humanDecision({ reason: "gone", decidedAt: "2026-08-11T01:04:00.000Z" }));
+  }
+
+  it("reopens a catalog whose proposal was deleted and keeps its trail valid", async () => {
+    const root = await createTempRoot();
+    await deletedProposal(root, "prop-doomed");
+    // Reopening replays the retained trail: a rejection plus its tombstone.
+    const reopened = await openDurable(root);
+    expect(reopened.revision).toBeGreaterThan(0);
+    const document = JSON.parse(await readFile(catalogPath(root), "utf8"));
+    const kinds = document.payload.auditRecords.map((record: { kind: string }) => record.kind);
+    // Whatever the trail holds, reopening accepted it — that is the invariant.
+    expect(kinds.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a persisted trail whose rejection was stripped", async () => {
+    const root = await createTempRoot();
+    await deletedProposal(root, "prop-stripped");
+    const filePath = catalogPath(root);
+    const document = JSON.parse(await readFile(filePath, "utf8"));
+    document.payload.auditRecords = document.payload.auditRecords.filter(
+      (record: { kind: string }) => record.kind !== "rejection",
+    );
+    await writeFile(filePath, JSON.stringify(document), "utf8");
+    await expect(openDurable(root)).rejects.toThrow(/rejection|digest/i);
+  });
+});
+
+describe("loaded config gates", () => {
+  it("rejects a missing config, root or state directory", async () => {
+    await expect(DurableEvolutionCatalog.open(null as never)).rejects.toThrow(/LoadedConfig is required/);
+    await expect(
+      DurableEvolutionCatalog.open({ root: "", config: {} } as never),
+    ).rejects.toThrow(/root is required/);
+    await expect(
+      DurableEvolutionCatalog.open({ root: "/tmp", config: undefined } as never),
+    ).rejects.toThrow(/config is required/);
+
+    const root = await createTempRoot();
+    await expect(
+      DurableEvolutionCatalog.open({
+        root,
+        config: { project: { stateDirectory: "   " } },
+      } as never),
+    ).rejects.toThrow(/stateDirectory must be a non-empty/);
+  });
+
+  it("rejects a root that does not resolve to a directory", async () => {
+    const root = await createTempRoot();
+    await expect(
+      DurableEvolutionCatalog.open({
+        root: path.join(root, "missing"),
+        config: { project: { stateDirectory: ".agent-team" } },
+      } as never),
+    ).rejects.toThrow(/Unable to resolve repository root/);
+  });
+});

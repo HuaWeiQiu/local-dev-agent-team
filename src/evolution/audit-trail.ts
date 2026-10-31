@@ -59,3 +59,32 @@ function stepViolation(
   }
   return undefined;
 }
+
+/** Only a rejection, its archival markers and the tombstone may outlive a proposal. */
+const TRAIL_KINDS = new Set(["rejection", "archive", "unarchive", "delete"]);
+
+export function isRetainedTrailKind(kind: TrailKind): boolean {
+  return TRAIL_KINDS.has(kind);
+}
+
+export interface TrailEntry<T> {
+  index: number;
+  audit: T;
+}
+
+/**
+ * Append one retained record, or report that a proposal that no longer exists
+ * may only be referenced by the four retained kinds. The error factory keeps
+ * each caller's own error type and message prefix.
+ */
+export function recordTrail<T extends { kind: TrailKind }>(
+  trail: Array<TrailEntry<T>>,
+  index: number,
+  audit: T,
+  fail: (index: number, message: string) => never,
+): Array<TrailEntry<T>> {
+  if (!isRetainedTrailKind(audit.kind)) {
+    fail(index, `references missing proposal '${(audit as { proposalId?: string }).proposalId ?? ""}'`);
+  }
+  return [...trail, { index, audit }];
+}
