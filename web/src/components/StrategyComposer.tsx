@@ -1,69 +1,32 @@
-import {
-  Background,
-  BackgroundVariant,
-  Controls,
-  Handle,
-  MarkerType,
-  Position,
-  ReactFlow,
-  type Edge,
-  type Node,
-  type NodeProps,
-} from "@xyflow/react";
-import {
-  Bot,
-  Check,
-  CircleAlert,
-  GitPullRequest,
-  LockKeyhole,
-  Network,
-  PanelLeftOpen,
-  Play,
-  RotateCcw,
-  Save,
-  ShieldCheck,
-  SlidersHorizontal,
-  Trash2,
-  Users,
-  X,
-} from "lucide-react";
+import { Background, BackgroundVariant, Controls, ReactFlow } from "@xyflow/react";
+import { Network, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useFlowPalette } from "../flow-theme";
-import { STRATEGY_STAGE_GRID } from "../graph";
-import { agentRoleLabel, orderedRoles, profileDisplayName, strategyDisplayName, topologyDisplayName } from "../presentation";
 import { useMediaQuery } from "../useMediaQuery";
 import type {
-  CompiledStrategyStage,
-  CompiledStrategyTopology,
   PublicConfig,
-  StrategyDefinition,
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
-  StrategyTopologyMode,
 } from "../types";
+import { cn } from "../ui/cn";
+import { Callout } from "../ui/form";
+import { ComposerToolbar } from "./strategy/ComposerToolbar";
+import {
+  blueprintNameFor,
+  buildBlueprintDefinition,
+  buildPreviewTopology,
+  buildStrategyGraph,
+  createDraft,
+  sameDraft,
+  topologyModeLabel,
+  type ComposerFeedback,
+  type StrategyDraft,
+} from "./strategy/draft";
+import { InspectorPanel } from "./strategy/InspectorPanel";
+import { LibraryPanel } from "./strategy/LibraryPanel";
+import { StrategyStageNode } from "./strategy/StageNode";
 
 const nodeTypes = { strategyStage: StrategyStageNode };
-
-interface StrategyDraft {
-  mode: StrategyTopologyMode;
-  maxParallel: number;
-  maxReworkAttempts: number;
-  maxAgentInvocations: number;
-  executionTimeoutSeconds: number;
-  approvalTimeoutSeconds: number;
-  maxProcessOutputBytes: number;
-  maxArtifactBytes: number;
-  planApproval: boolean;
-  exploreEnabled: boolean;
-  swarmMaxConcurrency: number;
-  roleProfiles: Record<string, string>;
-}
-
-interface StrategyNodeData extends Record<string, unknown> {
-  stage: CompiledStrategyStage;
-  sourcePosition: Position;
-  targetPosition: Position;
-}
 
 interface StrategyComposerProps {
   config: PublicConfig;
@@ -73,12 +36,26 @@ interface StrategyComposerProps {
   onLaunch(name: string): void;
 }
 
-interface ComposerFeedback {
-  kind: "valid" | "saved" | "error";
-  message: string;
+export function StrategyComposer(props: StrategyComposerProps) {
+  if (Object.keys(props.config.strategies.definitions).length === 0) {
+    return (
+      <section aria-label="策略编排器" className="grid h-full place-items-center bg-background p-6">
+        <div className="flex max-w-sm flex-col items-center gap-2 text-center">
+          <span aria-hidden className="grid size-10 place-items-center rounded-xl bg-accent-soft text-accent-ink">
+            <Workflow className="size-5" />
+          </span>
+          <strong className="text-base font-semibold text-ink">还没有可编排的策略</strong>
+          <span className="text-sm leading-relaxed text-muted">
+            在项目配置中定义策略后，可在这里可视化调整阶段与限额，并保存为自定义蓝图。
+          </span>
+        </div>
+      </section>
+    );
+  }
+  return <StrategyWorkspace {...props} />;
 }
 
-export function StrategyComposer({
+function StrategyWorkspace({
   config,
   onPreflight,
   onSave,
@@ -110,6 +87,8 @@ export function StrategyComposer({
 
   useEffect(() => {
     setBlueprintName(blueprintNameFor(selectedName, definition));
+    // Only a change of source or selection should rename; other edits keep the typed name.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [definition.source, selectedName]);
 
   useEffect(() => {
@@ -147,13 +126,6 @@ export function StrategyComposer({
     setDraft(update);
   };
 
-  const updateNumber = (
-    field: "maxParallel" | "maxReworkAttempts" | "maxAgentInvocations"
-      | "executionTimeoutSeconds" | "approvalTimeoutSeconds"
-      | "maxProcessOutputBytes" | "maxArtifactBytes",
-    value: number,
-  ) => updateDraft((current) => ({ ...current, [field]: value }));
-
   const selectStrategy = (name: string) => {
     setFeedback(undefined);
     setSelectedName(name);
@@ -188,64 +160,34 @@ export function StrategyComposer({
     }
   };
 
+  const sequential = draft.mode === "sequential";
+  const panelOpen = libraryOpen || inspectorOpen;
+
   return (
     <section
-      className={`strategy-composer ${libraryOpen ? "library-open" : ""} ${inspectorOpen ? "inspector-open" : ""}`}
+      className="strategy-composer @container relative flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-background"
       aria-label="策略编排器"
       aria-busy={submitting}
     >
-      <main className="composer-canvas">
-        <header className="composer-toolbar">
-          <div className="composer-toolbar-group">
-            <button
-              className={`button secondary toolbar-toggle ${libraryOpen ? "is-active" : ""}`}
-              onClick={() => setLibraryOpen((open) => !open)}
-              aria-pressed={libraryOpen}
-              title="打开策略库"
-            >
-              <PanelLeftOpen size={16} /><span>策略库</span>
-            </button>
-            <div className="composer-title">
-              <span className="section-kicker">策略图</span>
-              <select
-                className="composer-strategy-select"
-                aria-label="策略模板"
-                value={selectedName}
-                onChange={(event) => selectStrategy(event.target.value)}
-                disabled={submitting}
-              >
-                {strategyNames.map((name) => (
-                  <option key={name} value={name}>{strategyDisplayName(name)}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="composer-toolbar-actions">
-            <div className={`composer-validation ${feedback?.kind === "error" ? "is-error" : ""}`}>
-              {feedback?.kind === "error" ? <CircleAlert size={14} /> : <Check size={14} />}
-              <span>{feedback?.message ?? (dirty ? "草稿待预检" : "已加载策略")}</span>
-            </div>
-            <button
-              className={`button secondary toolbar-toggle ${inspectorOpen ? "is-active" : ""}`}
-              onClick={() => setInspectorOpen((open) => !open)}
-              aria-pressed={inspectorOpen}
-              title="策略设置"
-            >
-              <SlidersHorizontal size={16} /><span>策略设置</span>
-            </button>
-            <span className="toolbar-divider" />
-            <button className="button secondary" onClick={() => void runAction("preflight")} disabled={submitting || !blueprintName.trim()} title="预检策略" aria-label="预检">
-              <ShieldCheck size={15} /><span>预检</span>
-            </button>
-            <button className="button secondary" onClick={() => void runAction("save")} disabled={submitting || !blueprintName.trim()} title="保存策略" aria-label="保存">
-              <Save size={15} /><span>保存</span>
-            </button>
-            <button className="button primary" onClick={() => onLaunch(selectedName)} disabled={submitting || dirty} title={dirty ? "请先保存当前草稿" : "使用已保存策略启动运行"} aria-label="运行">
-              <Play size={15} fill="currentColor" /><span>运行</span>
-            </button>
-          </div>
-        </header>
-        <div className="composer-flow" aria-label="策略阶段图">
+      <ComposerToolbar
+        strategyNames={strategyNames}
+        selectedName={selectedName}
+        libraryOpen={libraryOpen}
+        inspectorOpen={inspectorOpen}
+        submitting={submitting}
+        dirty={dirty}
+        canSubmit={blueprintName.trim().length > 0}
+        feedback={feedback}
+        onSelect={selectStrategy}
+        onToggleLibrary={() => setLibraryOpen((open) => !open)}
+        onToggleInspector={() => setInspectorOpen((open) => !open)}
+        onPreflight={() => void runAction("preflight")}
+        onSave={() => void runAction("save")}
+        onLaunch={() => onLaunch(selectedName)}
+      />
+
+      <div className="relative min-h-0 flex-1">
+        <div className="absolute inset-0" role="group" aria-label="策略阶段图">
           <ReactFlow
             nodes={graph.nodes}
             edges={graph.edges}
@@ -262,476 +204,95 @@ export function StrategyComposer({
             <Background variant={BackgroundVariant.Dots} gap={24} size={1} color={palette.dot} />
             <Controls showInteractive={false} />
           </ReactFlow>
-          <div className="composer-canvas-summary">
-            <span><strong>{topology.stages.length}</strong> 阶段</span>
-            <span><strong>{topologyModeLabel(draft.mode)}</strong> 拓扑</span>
-            <span><strong>{draft.mode === "sequential" ? 1 : draft.maxParallel}</strong> 并行上限</span>
-            <span><strong>{draft.mode === "sequential" ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel)}</strong> Swarm 并发</span>
-            <span className={draft.exploreEnabled ? "is-enabled" : ""}><strong>{draft.exploreEnabled ? "已启用" : "未启用"}</strong> 探索</span>
-            <span className={draft.planApproval ? "is-enabled" : ""}><strong>{draft.planApproval ? "已启用" : "未启用"}</strong> 计划审批</span>
-          </div>
         </div>
-      </main>
 
-      <aside className="composer-library" aria-hidden={!libraryOpen} inert={!libraryOpen}>
-        <header className="drawer-header">
-          <div><span className="section-kicker">策略库</span><h2>策略与阶段</h2></div>
-          <button className="icon-button" onClick={() => setLibraryOpen(false)} title="关闭策略库" aria-label="关闭策略库"><X size={17} /></button>
-        </header>
-        <div className="composer-strategy-list">
-          {strategyNames.map((name) => {
-            const item = config.strategies.definitions[name]!;
-            return (
-              <button key={name} className={name === selectedName ? "is-selected" : ""} onClick={() => selectStrategy(name)} disabled={submitting} title={name}>
-                <span><Network size={16} /><strong>{strategyDisplayName(name)}</strong></span>
-                <small>{topologyModeLabel(item.topology?.mode ?? item.compiledTopology.mode)} · {item.source === "custom" ? "自定义蓝图" : "项目配置"}</small>
-              </button>
-            );
-          })}
-        </div>
-        <div className="composer-palette">
-          <span className="section-kicker">阶段</span>
-          <h3>执行阶段</h3>
-          <PaletteItem icon={<Bot size={16} />} label="角色阶段" locked />
-          <PaletteItem icon={<Users size={16} />} label="执行池" locked />
-          <PaletteItem icon={<ShieldCheck size={16} />} label="质量门禁" locked />
-          <button className={`palette-item ${draft.planApproval ? "is-active" : ""}`} onClick={() => updateDraft((current) => ({ ...current, planApproval: !current.planApproval }))} aria-pressed={draft.planApproval} disabled={submitting}>
-            <span><Check size={16} />计划审批</span><small>{draft.planApproval ? "已启用" : "可添加"}</small>
-          </button>
-          <PaletteItem icon={<GitPullRequest size={16} />} label="发布边界" locked />
-        </div>
-      </aside>
-
-      <aside className="composer-inspector" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
-        <header className="section-heading composer-inspector-header">
-          <div>
-            <span className="section-kicker">策略</span>
-            <h2>策略属性</h2>
-          </div>
-          <div className="composer-inspector-tools">
-            <button
-              className="icon-button"
-              onClick={() => {
-                setDraft(createDraft(definition, config));
-                setFeedback(undefined);
-              }}
-              title="重置策略草稿"
-              aria-label="重置策略草稿"
-              disabled={submitting}
-            >
-              <RotateCcw size={16} />
-            </button>
-            {definition.source === "custom" && (
-              <button
-                className="icon-button danger-icon"
-                onClick={() => {
-                  if (window.confirm(`删除自定义策略 ${selectedName}？`)) void runAction("delete");
-                }}
-                disabled={submitting}
-                title="删除自定义策略"
-                aria-label="删除自定义策略"
-              >
-                <Trash2 size={16} />
-              </button>
-            )}
-            <button className="icon-button" onClick={() => setInspectorOpen(false)} title="关闭策略设置" aria-label="关闭策略设置"><X size={17} /></button>
-          </div>
-        </header>
-        <div className="composer-inspector-scroll">
-          <section className="composer-form-section blueprint-identity">
-            <label>
-              <span className="field-label">蓝图名称</span>
-              <input
-                value={blueprintName}
-                onChange={(event) => {
-                  setBlueprintName(event.target.value);
-                  setFeedback(undefined);
-                }}
-                aria-label="策略蓝图名称"
-                spellCheck={false}
-                disabled={submitting}
-              />
-            </label>
-            <small>{definition.source === "custom" ? "自定义策略，可原名更新" : "配置策略只读，将另存为自定义蓝图"}</small>
-          </section>
-          <section className="composer-form-section">
-            <span className="field-label">执行拓扑</span>
-            <div className="topology-segments" role="group" aria-label="执行拓扑">
-              <button
-                className={draft.mode === "parallel-dag" ? "is-selected" : ""}
-                aria-pressed={draft.mode === "parallel-dag"}
-                onClick={() => updateDraft((current) => ({ ...current, mode: "parallel-dag" }))}
-                disabled={submitting}
-              >并行 DAG</button>
-              <button
-                className={draft.mode === "sequential" ? "is-selected" : ""}
-                aria-pressed={draft.mode === "sequential"}
-                onClick={() => updateDraft((current) => ({ ...current, mode: "sequential", maxParallel: 1 }))}
-                disabled={submitting}
-              >串行</button>
+        {topology.stages.length === 0 && (
+          <div className="pointer-events-none absolute inset-0 grid place-items-center">
+            <div className="flex flex-col items-center gap-2 text-center text-sm text-muted">
+              <Network aria-hidden className="size-6" />
+              该策略暂无可展示的阶段
             </div>
-          </section>
-          <section className="composer-form-section policy-number-grid">
-            <NumberField
-              label="并行上限"
-              value={draft.mode === "sequential" ? 1 : draft.maxParallel}
-              min={1}
-              max={32}
-              disabled={submitting || draft.mode === "sequential"}
-              onChange={(value) => updateDraft((current) => ({
-                ...current,
-                maxParallel: value,
-                swarmMaxConcurrency: Math.min(current.swarmMaxConcurrency, value),
-              }))}
-            />
-            <NumberField
-              label="Swarm 并发"
-              value={draft.mode === "sequential" ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel)}
-              min={1}
-              max={32}
-              disabled={submitting || draft.mode === "sequential"}
-              onChange={(value) => updateDraft((current) => ({
-                ...current,
-                swarmMaxConcurrency: Math.min(value, current.maxParallel),
-              }))}
-            />
-            <NumberField
-              label="返工上限"
-              value={draft.maxReworkAttempts}
-              min={0}
-              max={10}
-              disabled={submitting}
-              onChange={(value) => updateNumber("maxReworkAttempts", value)}
-            />
-            <NumberField
-              label="角色调用"
-              value={draft.maxAgentInvocations}
-              min={1}
-              max={1000}
-              disabled={submitting}
-              onChange={(value) => updateNumber("maxAgentInvocations", value)}
-            />
-            <NumberField
-              label="执行超时（秒）"
-              value={draft.executionTimeoutSeconds}
-              min={60}
-              max={172_800}
-              disabled={submitting}
-              onChange={(value) => updateNumber("executionTimeoutSeconds", value)}
-            />
-            <NumberField
-              label="审批超时（秒）"
-              value={draft.approvalTimeoutSeconds}
-              min={60}
-              max={604_800}
-              disabled={submitting}
-              onChange={(value) => updateNumber("approvalTimeoutSeconds", value)}
-            />
-            <NumberField
-              label="输出上限（字节）"
-              value={draft.maxProcessOutputBytes}
-              min={65_536}
-              max={104_857_600}
-              disabled={submitting}
-              onChange={(value) => updateNumber("maxProcessOutputBytes", value)}
-            />
-            <NumberField
-              label="产物上限（字节）"
-              value={draft.maxArtifactBytes}
-              min={1_048_576}
-              max={10_737_418_240}
-              disabled={submitting}
-              onChange={(value) => updateNumber("maxArtifactBytes", value)}
-            />
-          </section>
-          <section className="composer-form-section">
-            <label className="policy-toggle">
-              <span><strong>代码探索</strong><small>架构前只读 explore（Kimi 形态）</small></span>
-              <input
-                type="checkbox"
-                checked={draft.exploreEnabled}
-                onChange={(event) => updateDraft((current) => ({ ...current, exploreEnabled: event.target.checked }))}
-                disabled={submitting}
-              />
-            </label>
-            <label className="policy-toggle">
-              <span><strong>计划审批</strong><small>执行波次前暂停</small></span>
-              <input
-                type="checkbox"
-                checked={draft.planApproval}
-                onChange={(event) => updateDraft((current) => ({ ...current, planApproval: event.target.checked }))}
-                disabled={submitting}
-              />
-            </label>
-          </section>
-          <section className="composer-form-section role-policy-list">
-            <h3>角色配置</h3>
-            {orderedRoles(Object.keys(config.roles)).map((role) => {
-              const policy = config.roles[role];
-              if (!policy) return null;
-              return (
-                <label key={role}>
-                  <span>{agentRoleLabel(role)}</span>
-                  <select
-                    value={draft.roleProfiles[role] ?? ""}
-                    disabled={submitting}
-                    onChange={(event) => updateDraft((current) => {
-                      const roleProfiles = { ...current.roleProfiles };
-                      if (event.target.value) roleProfiles[role] = event.target.value;
-                      else delete roleProfiles[role];
-                      return { ...current, roleProfiles };
-                    })}
-                  >
-                    <option value="">策略默认（{profileDisplayName(policy.defaultProfile, config.profiles[policy.defaultProfile])}）</option>
-                    {policy.allowedProfiles.map((profile) => (
-                      <option key={profile} value={profile}>
-                        {profileDisplayName(profile, config.profiles[profile])}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              );
-            })}
-          </section>
+          </div>
+        )}
+
+        {feedback?.kind === "error" && (
+          <Callout
+            tone="danger"
+            role="alert"
+            className="bd absolute left-3 top-3 z-10 max-w-[min(32rem,calc(100%-1.5rem))] shadow-pop"
+          >
+            <span className="break-words">{feedback.message}</span>
+          </Callout>
+        )}
+
+        <div className="composer-canvas-summary bd scroll-thin absolute inset-x-0 bottom-4 z-10 mx-auto flex w-fit max-w-[calc(100%-2rem)] overflow-x-auto rounded-lg bg-surface text-xs">
+          <SummaryItem label="阶段" value={String(topology.stages.length)} />
+          <SummaryItem label="拓扑" value={topologyModeLabel(draft.mode)} />
+          <SummaryItem label="并行上限" value={String(sequential ? 1 : draft.maxParallel)} />
+          <SummaryItem label="Swarm 并发" value={String(sequential ? 1 : Math.min(draft.swarmMaxConcurrency, draft.maxParallel))} />
+          <SummaryItem label="探索" value={draft.exploreEnabled ? "已启用" : "未启用"} on={draft.exploreEnabled} />
+          <SummaryItem label="架构顾问" value={draft.advisorEnabled ? "已启用" : "未启用"} on={draft.advisorEnabled} />
+          <SummaryItem label="计划审批" value={draft.planApproval ? "已启用" : "未启用"} on={draft.planApproval} />
         </div>
-      </aside>
+
+        {compactLayout && panelOpen && (
+          <div
+            aria-hidden
+            className="absolute inset-0 z-10 bg-scrim"
+            onClick={() => {
+              setLibraryOpen(false);
+              setInspectorOpen(false);
+            }}
+          />
+        )}
+
+        <LibraryPanel
+          open={libraryOpen}
+          compact={compactLayout}
+          strategyNames={strategyNames}
+          definitions={config.strategies.definitions}
+          selectedName={selectedName}
+          planApproval={draft.planApproval}
+          submitting={submitting}
+          onSelect={selectStrategy}
+          onTogglePlanApproval={() => updateDraft((current) => ({ ...current, planApproval: !current.planApproval }))}
+          onClose={() => setLibraryOpen(false)}
+        />
+
+        <InspectorPanel
+          open={inspectorOpen}
+          compact={compactLayout}
+          config={config}
+          definition={definition}
+          selectedName={selectedName}
+          draft={draft}
+          blueprintName={blueprintName}
+          submitting={submitting}
+          onBlueprintNameChange={(name) => {
+            setBlueprintName(name);
+            setFeedback(undefined);
+          }}
+          onDraft={updateDraft}
+          onReset={() => {
+            setDraft(createDraft(definition, config));
+            setFeedback(undefined);
+          }}
+          onDelete={() => void runAction("delete")}
+          onClose={() => setInspectorOpen(false)}
+        />
+      </div>
     </section>
   );
 }
 
-function PaletteItem({ icon, label, locked }: { icon: React.ReactNode; label: string; locked: boolean }) {
+function SummaryItem({ label, value, on }: { label: string; value: string; on?: boolean }) {
   return (
-    <div className="palette-item">
-      <span>{icon}{label}</span>
-      {locked && <LockKeyhole size={12} aria-label="固定阶段" />}
+    <div className="not-last:bd-r flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-2">
+      <small className="text-xs text-muted">{label}</small>
+      {on !== undefined && (
+        <i aria-hidden className={cn("size-1.5 rounded-full", on ? "bg-success" : "bg-line-strong")} />
+      )}
+      <strong className={cn("font-semibold", on ? "text-success-ink" : "text-ink")}>{value}</strong>
     </div>
   );
-}
-
-function NumberField({
-  label,
-  value,
-  min,
-  max,
-  disabled = false,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  disabled?: boolean;
-  onChange(value: number): void;
-}) {
-  return (
-    <label className="number-field">
-      <span>{label}</span>
-      <input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        disabled={disabled}
-        onChange={(event) => {
-          const valueAsNumber = event.target.valueAsNumber;
-          if (Number.isFinite(valueAsNumber)) onChange(Math.min(max, Math.max(min, valueAsNumber)));
-        }}
-      />
-    </label>
-  );
-}
-
-function StrategyStageNode({ data, selected }: NodeProps) {
-  const { stage, sourcePosition, targetPosition } = data as StrategyNodeData;
-  const icon = stage.kind === "worker-pool"
-    ? <Users size={16} />
-    : stage.kind === "human-approval" || stage.kind === "quality-gate"
-      ? <ShieldCheck size={16} />
-      : stage.kind === "publication"
-        ? <GitPullRequest size={16} />
-        : <Bot size={16} />;
-  return (
-    <div className={`strategy-stage-node kind-${stage.kind} ${selected ? "is-selected" : ""}`}>
-      <Handle type="target" position={targetPosition} />
-      <span className="strategy-stage-icon">{icon}</span>
-      <span>
-        <small>{stageKindLabel(stage.kind)}</small>
-        <strong>{stage.label}</strong>
-        {stage.roles.length > 0 && <code>{stage.roles.map(agentRoleLabel).join(" + ")}</code>}
-      </span>
-      <Handle type="source" position={sourcePosition} />
-    </div>
-  );
-}
-
-function createDraft(definition: StrategyDefinition, config: PublicConfig): StrategyDraft {
-  const maxParallel = definition.maxParallel ?? config.project.maxParallel;
-  const swarm = definition.taskMorphology?.implement?.swarm?.maxConcurrency ?? maxParallel;
-  return {
-    mode: definition.topology?.mode ?? definition.compiledTopology.mode,
-    maxParallel,
-    maxReworkAttempts: definition.maxReworkAttempts ?? 0,
-    maxAgentInvocations: definition.maxAgentInvocations ?? 64,
-    executionTimeoutSeconds: definition.executionTimeoutSeconds ?? 14_400,
-    approvalTimeoutSeconds: definition.approvalTimeoutSeconds ?? 86_400,
-    maxProcessOutputBytes: definition.maxProcessOutputBytes ?? 1_048_576,
-    maxArtifactBytes: definition.maxArtifactBytes ?? 1_073_741_824,
-    planApproval: definition.approvalGates?.includes("plan") ?? false,
-    exploreEnabled: definition.taskMorphology?.explore?.enabled === true,
-    swarmMaxConcurrency: Math.min(swarm, maxParallel),
-    roleProfiles: { ...(definition.roleProfiles ?? {}) },
-  };
-}
-
-function buildBlueprintDefinition(
-  definition: StrategyDefinition,
-  draft: StrategyDraft,
-): StrategyBlueprintDefinition {
-  const { compiledTopology: _compiledTopology, source: _source, ...persisted } = definition;
-  const maxParallel = draft.mode === "sequential" ? 1 : draft.maxParallel;
-  const swarmMaxConcurrency = draft.mode === "sequential"
-    ? 1
-    : Math.min(draft.swarmMaxConcurrency, maxParallel);
-  return {
-    ...persisted,
-    topology: { mode: draft.mode },
-    maxParallel,
-    maxReworkAttempts: draft.maxReworkAttempts,
-    maxAgentInvocations: draft.maxAgentInvocations,
-    executionTimeoutSeconds: draft.executionTimeoutSeconds,
-    approvalTimeoutSeconds: draft.approvalTimeoutSeconds,
-    maxProcessOutputBytes: draft.maxProcessOutputBytes,
-    maxArtifactBytes: draft.maxArtifactBytes,
-    roleProfiles: { ...draft.roleProfiles },
-    approvalGates: draft.planApproval ? ["plan", "final"] : ["final"],
-    taskMorphology: {
-      explore: {
-        enabled: draft.exploreEnabled,
-        maxInjectedChars: definition.taskMorphology?.explore?.maxInjectedChars ?? 4_000,
-        failOpen: definition.taskMorphology?.explore?.failOpen ?? true,
-        ...(definition.taskMorphology?.explore?.profile
-          ? { profile: definition.taskMorphology.explore.profile }
-          : {}),
-      },
-      plan: { role: "architect" },
-      implement: {
-        role: "worker",
-        swarm: { maxConcurrency: swarmMaxConcurrency },
-      },
-    },
-  };
-}
-
-function blueprintNameFor(name: string, definition: StrategyDefinition): string {
-  return definition.source === "custom" ? name : `${name}-custom`;
-}
-
-function sameDraft(left: StrategyDraft, right: StrategyDraft): boolean {
-  if (
-    left.mode !== right.mode ||
-    left.maxParallel !== right.maxParallel ||
-    left.maxReworkAttempts !== right.maxReworkAttempts ||
-    left.maxAgentInvocations !== right.maxAgentInvocations ||
-    left.executionTimeoutSeconds !== right.executionTimeoutSeconds ||
-    left.approvalTimeoutSeconds !== right.approvalTimeoutSeconds ||
-    left.maxProcessOutputBytes !== right.maxProcessOutputBytes ||
-    left.maxArtifactBytes !== right.maxArtifactBytes ||
-    left.planApproval !== right.planApproval ||
-    left.exploreEnabled !== right.exploreEnabled ||
-    left.swarmMaxConcurrency !== right.swarmMaxConcurrency
-  ) {
-    return false;
-  }
-  const roles = new Set([
-    ...Object.keys(left.roleProfiles),
-    ...Object.keys(right.roleProfiles),
-  ]);
-  return [...roles].every((role) => left.roleProfiles[role] === right.roleProfiles[role]);
-}
-
-function buildPreviewTopology(
-  compiled: CompiledStrategyTopology,
-  draft: StrategyDraft,
-): CompiledStrategyTopology {
-  let stages = compiled.stages.filter(
-    (stage) => stage.id !== "plan-approval" && stage.id !== "explore",
-  );
-  const intakeIndex = stages.findIndex((stage) => stage.id === "intake");
-  if (draft.exploreEnabled && intakeIndex >= 0) {
-    stages = [
-      ...stages.slice(0, intakeIndex + 1),
-      { id: "explore", kind: "agent", label: "代码探索", roles: ["architect"] },
-      ...stages.slice(intakeIndex + 1),
-    ];
-  }
-  if (draft.planApproval) {
-    const architectureIndex = stages.findIndex((stage) => stage.id === "architecture");
-    stages = [
-      ...stages.slice(0, architectureIndex + 1),
-      { id: "plan-approval", kind: "human-approval", label: "计划审批", roles: [] },
-      ...stages.slice(architectureIndex + 1),
-    ];
-  }
-  stages = stages.map((stage) => stage.id === "task-execution"
-    ? { ...stage, label: draft.mode === "sequential" ? "串行执行" : "并行执行（Swarm 波次）" }
-    : stage);
-  return {
-    version: 1,
-    mode: draft.mode,
-    stages,
-    edges: stages.slice(1).map((stage, index) => ({ source: stages[index]!.id, target: stage.id })),
-  };
-}
-
-function buildStrategyGraph(
-  topology: CompiledStrategyTopology,
-  compact: boolean,
-  edgeColor: string,
-): { nodes: Array<Node<StrategyNodeData>>; edges: Edge[] } {
-  const columns = compact ? 2 : 3;
-  const nodes = topology.stages.map((stage, index) => {
-    const row = Math.floor(index / columns);
-    const offset = index % columns;
-    const column = row % 2 === 0 ? offset : columns - 1 - offset;
-    const startsRow = offset === 0 && row > 0;
-    const endsRow = offset === columns - 1 && index < topology.stages.length - 1;
-    const horizontalSource = row % 2 === 0 ? Position.Right : Position.Left;
-    const horizontalTarget = row % 2 === 0 ? Position.Left : Position.Right;
-    return {
-      id: stage.id,
-      type: "strategyStage",
-      position: {
-        x: column * STRATEGY_STAGE_GRID.columnWidth,
-        y: row * STRATEGY_STAGE_GRID.rowHeight,
-      },
-      data: {
-        stage,
-        sourcePosition: endsRow ? Position.Bottom : horizontalSource,
-        targetPosition: startsRow ? Position.Top : horizontalTarget,
-      },
-    };
-  });
-  const edges = topology.edges.map((edge) => ({
-    id: `${edge.source}-${edge.target}`,
-    source: edge.source,
-    target: edge.target,
-    type: "smoothstep",
-    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-    style: { stroke: edgeColor, strokeWidth: 1.5 },
-  }));
-  return { nodes, edges };
-}
-
-function topologyModeLabel(mode: StrategyTopologyMode): string {
-  return topologyDisplayName(mode);
-}
-
-function stageKindLabel(kind: CompiledStrategyStage["kind"]): string {
-  return {
-    agent: "角色阶段",
-    "worker-pool": "执行池",
-    "quality-gate": "质量门禁",
-    "human-approval": "人工审批",
-    publication: "发布",
-  }[kind];
 }

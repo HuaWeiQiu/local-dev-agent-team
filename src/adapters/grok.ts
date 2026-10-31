@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import type { AgentProfile, Reasoning } from "../config/schema.js";
-import { runProcess } from "../process/run.js";
+import { type runProcess } from "../process/run.js";
 import { sanitizedChildEnv } from "../process/env.js";
 import { assertAdapterProfile } from "./conformance.js";
 import {

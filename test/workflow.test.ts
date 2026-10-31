@@ -1241,7 +1241,7 @@ describe("local workflow", () => {
     });
     let workerCalls = 0;
     class FailingWorkerService extends FakeAgentService {
-      override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
+      override async runText(_options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
         workerCalls += 1;
         throw new Error("worker always fails");
       }

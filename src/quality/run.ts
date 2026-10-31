@@ -20,6 +20,10 @@ export interface CommandResult {
 export interface QualityReport {
   passed: boolean;
   commands: CommandResult[];
+  /** Commands that failed once and then passed on rerun (nondeterministic). */
+  flaky?: CommandSpec[];
+  /** How many times the failing command was rerun before the verdict. */
+  reruns?: number;
 }
 
 export async function runQualityCommands(

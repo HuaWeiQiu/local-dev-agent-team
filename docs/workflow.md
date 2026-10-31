@@ -25,14 +25,93 @@
    docs-only task, yields to a passing quality gate.
 8. Failed gates produce bounded feedback for the same worker. Escalation with a
    failed quality gate, or an exhausted retry budget, blocks that task only.
+   When the strategy enables the architect advisor and the same normalized
+   failure repeats on consecutive attempts, a read-only architect is consulted
+   before the next attempt (see [architect-advisor.zh-CN.md](architect-advisor.zh-CN.md)).
 9. Passing task commits merge into the integration branch in stable task-ID
    order. Remaining blocked tasks do not discard already merged work. Final
    project checks and the supervising controller run once more; a final
    escalate cannot veto merged work when the integration quality gate passed.
+   With the advisor enabled, the architect first reviews the integrated result
+   when the integration gate passed, and its advice is added to the final
+   decision context.
 10. A passing or partially successful run creates a durable final approval
     request and stops at `awaiting-human`. Approval moves it to
     `ready-to-merge`; publication, CI observation, repair, and completion
     remain separate explicit commands.
+
+## Flow Templates
+
+Every run follows a **flow template** — a small graph of nodes held as data in
+`src/flow/templates.ts`, not as control flow in the runner. The template is
+chosen when the run starts and persisted on the run (`flow`), so a resumed run
+rebuilds the same graph.
+
+| Template | Run nodes | Per-task nodes | Use |
+| --- | --- | --- | --- |
+| `quick` | plan (single task) → execute → final checks → deterministic decide → final approval | work → quality → commit | small, low-risk edits |
+| `standard` | intake → explore → plan → plan approval → execute → final checks → advise → decide → final approval (optional nodes follow the strategy) | work → quality → review → test → commit | most requirements |
+| `full` | `standard` with exploration, plan approval and architect advice forced on | same as `standard` | large or risky changes |
+
+`quick` never calls a model reviewer: the deterministic quality commands are
+the only gate, and nothing merges without them passing. Template choice order:
+evolution evaluations (always `standard`) → the operator's choice in the run
+launcher or API (`template`) → `workflow.template` in `agent-team.yaml` → the
+deterministic router. The router uses plain rules over the goal text (risk
+keywords, number of `T1…Tn` deliverables, goal length, small-change keywords);
+no model takes part, and the reasons are stored as `flow.selected` and shown in
+the run's **洞察 → 为什么** view.
+
+`GET /api/runs/:id/flow` returns the folded node progress (`flow.node` events).
+
+## Interventions
+
+While an agent runs, the operator can act on it from the run page (or the API):
+
+- **Steer** — send an extra instruction to a live agent
+  (`POST /runs/:id/agents/:agentId/steer`).
+- **Interrupt** — stop the current turn without killing the run
+  (`…/interrupt`).
+- **Answer** — respond when the agent asks the user a question (`…/answer`).
+- **Edit plan / approve with edits** — change tasks, owned paths and acceptance
+  commands at the plan approval gate (`POST /runs/:id/actions/edit-plan`).
+
+Live control needs a session-capable adapter (`workflow.sessions: auto`; Codex
+app-server and Claude stream-json today). Other CLIs fall back to one-shot
+invocation and report the missing capabilities instead of failing. Every
+intervention is written to the event ledger with the acting operator, and the
+operator's messages appear in the transcript.
+
+## Reliability
+
+- **Stall watchdog** — an agent with no output for `workflow.stallSeconds`
+  (default 600; paused while a tool call or a user question is in flight) is
+  interrupted and nudged with a continuation prompt, up to
+  `workflow.maxStallRecoveries` times; then it fails as a timeout.
+  Each stall is recorded as `agent.stalled`.
+- **Flaky quality rerun** — a failing quality command is rerun
+  `workflow.flakyReruns` times from the failing command. A pass on rerun is
+  recorded as `quality.flaky` and does not trigger rework. Timeouts are never
+  rerun, and a command that keeps failing still vetoes the task.
+- **Triage** — when the same normalized failure repeats, the flow records a
+  `flow.triage` decision. `quick` stops after two identical failures instead of
+  using every rework attempt; the architect advisor/Jev consult is unchanged.
+- **Per-task budgets** — optional `workflow.taskBudget` caps agent invocations
+  and minutes per task; a task over budget is `blocked` without ending the run.
+
+## Visibility
+
+Everything shown in the **洞察** tab is a read-only projection over the run
+state, the event ledger and stored artifacts; it never changes run state.
+
+- **为什么** — headline verdict, flow choice and per-task evidence.
+- **成本** — tokens, duration and cost by role, task and profile
+  (`GET /runs/:id/usage`).
+- **对话** — per-agent session transcripts, including operator steering
+  (`GET /runs/:id/transcripts`, `…/transcript?id=`).
+- **回放** — ordered timeline of the run (`GET /runs/:id/replay`).
+- **Diff** — each task's merged diff in the task detail
+  (`GET /runs/:id/tasks/:taskId/diff`).
 
 ## Git Layout
 

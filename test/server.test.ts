@@ -230,6 +230,60 @@ describe("control HTTP server", () => {
     events.close();
   });
 
+  it("serves flow progress and maps intervention failures to HTTP statuses", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
+    await writeFile(
+      path.join(root, "agent-team.yaml"),
+      stringifyYaml(createDefaultConfig("intervention-fixture")),
+    );
+    const loaded = await loadConfig(root);
+    const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+    const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+    const state = fakeState("intervention-run", "Check interventions");
+    state.status = "awaiting-human";
+    await states.save(state);
+    events.emit(state.id, "flow.selected", {
+      template: "quick",
+      source: "router",
+      reasons: ["small"],
+      engine: "v2",
+    });
+    events.emit(state.id, "flow.node", { nodeId: "plan", status: "started" });
+    const supervisor = new RunSupervisor(loaded, events);
+    const staticDirectory = path.join(root, "web");
+    await mkdir(staticDirectory, { recursive: true });
+    await writeFile(path.join(staticDirectory, "index.html"), "<main>Agent Team</main>");
+    const listening = await listenControlServer(loaded, supervisor, {
+      host: "127.0.0.1",
+      port: 0,
+      staticDirectory,
+    });
+    const post = (route: string, body: unknown) =>
+      fetch(`${listening.url}/api/runs/${state.id}/${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const flow = await fetch(`${listening.url}/api/runs/${state.id}/flow`);
+    await expect(flow.json()).resolves.toMatchObject({
+      selection: { template: "quick" },
+      current: "plan",
+      nodes: [{ nodeId: "plan", status: "started" }],
+    });
+    const agents = await fetch(`${listening.url}/api/runs/${state.id}/agents`);
+    await expect(agents.json()).resolves.toEqual({ agents: [] });
+
+    expect((await post("agents/missing/steer", { actor: "a", text: "hi" })).status).toBe(404);
+    expect((await post("agents/missing/steer", { actor: "a" })).status).toBe(400);
+    expect((await post("agents/missing/answer", { actor: "a", questionId: "q", answer: "x" })).status).toBe(404);
+    expect((await post("actions/edit-plan", { actor: "a", reason: "r", plan: {} })).status).toBe(409);
+
+    await listening.close();
+    await supervisor.close();
+    events.close();
+  });
+
   it("routes durable final approval responses through the supervisor", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-server-"));
     await writeFile(

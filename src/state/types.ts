@@ -1,4 +1,5 @@
 import type {
+  ExploreSummary,
   FinalDecision,
   GoalIntake,
   ReviewVerdict,
@@ -6,9 +7,11 @@ import type {
   TaskPlan,
   TestVerdict,
 } from "../domain/contracts.js";
+import type { RepoTrace, RepoTree } from "../domain/repo-tree.js";
 import type { QualityReport } from "../quality/run.js";
 import type { ResolvedStrategy } from "../strategies/resolve.js";
 import type { ApprovalGate } from "../config/schema.js";
+import type { FlowSelection } from "../flow/types.js";
 
 export type RunStatus =
   | "created"
@@ -56,6 +59,8 @@ export interface TaskRunState {
    */
   merging?: string;
   profile?: string;
+  /** Agent invocations this task has used; checked against `workflow.taskBudget`. */
+  agentInvocations?: number;
   quality?: QualityReport;
   review?: ReviewVerdict;
   test?: TestVerdict;
@@ -140,6 +145,8 @@ export interface RunSummary {
   taskCounts: Record<TaskStatus, number>;
   error?: string;
   parentRunId?: string;
+  /** Live agent questions waiting for an operator answer; set by the supervisor, never persisted. */
+  agentQuestions?: number;
 }
 
 export interface RunRoleBinding {
@@ -169,10 +176,18 @@ export interface RunState {
   /** CLI/model/reasoning actually bound per role (global picker or evolution defaults). */
   roleBindings?: Record<string, RunRoleBinding>;
   strategy: ResolvedStrategy;
+  /** Workflow template chosen for this run; absent only on runs persisted before the flow engine existed; those resume on the default pipeline. */
+  flow?: FlowSelection;
   supervisorId?: string;
   parentRunId?: string;
   purpose?: "evolution-evaluation" | "evolution-proposer";
   intake?: GoalIntake;
+  /** Read-only research written before planning. Absent when explore was skipped or failed open. */
+  explore?: ExploreSummary;
+  /** Bounded path index of the project root, frozen when the run starts. */
+  repoTree?: RepoTree;
+  /** The part of repoTree walked for this goal. Absent when the index is only the root. */
+  repoTrace?: RepoTrace;
   plan?: TaskPlan;
   tasks: TaskRunState[];
   finalQuality?: QualityReport;
@@ -188,6 +203,8 @@ export interface RunState {
    * budget; a run whose accumulated time reached the limit is blocked.
    */
   executionElapsedMs?: number;
+  /** Architect advisor consultations used by this run; persists across resume. */
+  advisorConsultations?: number;
   usage?: RunUsage;
   pullRequestUrl?: string;
   pullRequestNumber?: number;

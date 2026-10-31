@@ -22,7 +22,7 @@ import {
   evolutionReasonRequestSchema,
   evolutionStrategyProposalRequestSchema,
 } from "./contracts.js";
-import { EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
+import { type EvolutionProjectService, EvolutionServiceError } from "./evolution-service.js";
 import { AutomaticEvolutionError } from "./evolution-automation.js";
 import { ProjectMutationConflictError } from "./supervisor.js";
 import {

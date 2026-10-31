@@ -2,11 +2,13 @@ import type { LoadedConfig } from "./config/load.js";
 import type { DoctorCheck } from "./adapters/types.js";
 import { AdapterRegistry } from "./adapters/registry.js";
 import { qualityCommandAvailability } from "./quality/optional-tools.js";
+import { SessionFactory } from "./sessions/factory.js";
 
 export async function runDoctor(
   loaded: LoadedConfig,
   options: { probeModel: boolean; profileName?: string },
   registry = new AdapterRegistry(),
+  sessions = new SessionFactory({ registry }),
 ): Promise<DoctorCheck[]> {
   const entries = Object.entries(loaded.config.profiles).filter(
     ([name]) => !options.profileName || name === options.profileName,
@@ -26,6 +28,24 @@ export async function runDoctor(
         probeModel: options.probeModel,
       })),
     );
+    const executable = checks.find(
+      (check) => check.profile === profileName && check.check === "executable",
+    );
+    if (executable?.status === "fail") continue;
+    const plan = await sessions.plan(profile.adapter, profile, loaded.root);
+    const enabled = Object.entries(plan.capabilities)
+      .filter(([, on]) => on)
+      .map(([name]) => name);
+    checks.push({
+      profile: profileName,
+      adapter: profile.adapter,
+      check: "session",
+      status: plan.kind === "one-shot" && plan.reason ? "skip" : "pass",
+      detail:
+        plan.kind === "one-shot"
+          ? `one-shot invocation${plan.reason ? ` (${plan.reason})` : ""}`
+          : `${plan.kind} ${plan.version ?? ""}: ${enabled.join(", ")}`.replace("  ", " "),
+    });
   }
 
   // Optional quality CLIs (e.g. ocr) — fail when configured but missing.

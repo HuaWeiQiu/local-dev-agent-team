@@ -113,6 +113,69 @@ select `inherit`. A2A `1.0` remote task ingress is disabled because the loopback
 service has no remote identity or authorization layer; it must sit behind a
 separately authenticated HTTPS gateway before that boundary can change.
 
+## Sessions, Flow, Visibility And Onboarding (v2)
+
+Four layers sit on the workflow core. They were added by strangling the old
+pipeline in place rather than rewriting it (see
+[ADR 0018](adr/0018-agent-sessions-and-flow-engine.md)).
+
+```text
+onboarding  src/onboarding   repo detection -> in-memory starter config -> optional yaml
+flow        src/flow         templates as data, deterministic router, ledger fold
+sessions    src/sessions     AgentSession: Codex app-server, Claude stream-json, one-shot
+interventions src/interventions  live registry: steer / interrupt / answer, ledger-audited
+reliability src/reliability  stall watchdog, task budget; src/quality/flaky.ts
+visibility  src/visibility   explain, usage, transcript, replay as read-only projections
+```
+
+Authority is split deliberately:
+
+- **RunState is authoritative for Git recovery.** Resume trusts the checkpoint
+  and the Git-verified integration branch HEAD, never a session or the ledger.
+- **The event ledger is authoritative for flow progress and interventions**
+  (`flow.selected`, `flow.node`, `flow.triage`, `agent.stalled`,
+  `quality.flaky`, operator messages). Projections fold events; they never
+  write state.
+- A deterministic failure cannot be overridden by a model verdict in any
+  template, including `quick`.
+- Agent processes are still owned only by the supervisor. The browser sends
+  intents (steer, answer, edit plan); the supervisor validates the operator and
+  target agent before acting, and sessions stay an optimization on top of
+  Git-verified recovery.
+- The architect returns one design (`plan.design`: elements, relations,
+  sequence) and a task DAG that points at those elements. The system map and
+  the sequence are projections of that object. A plan whose paths or
+  dependencies disagree with the design is sent back to the architect. Runs
+  that never stored a design keep a path-prefix diagram labeled as inferred.
+  Explore writes `run.explore` so that stage stays readable after planning.
+
+## Module Layout And Layering
+
+`src/` packages are layered; `test/architecture.test.ts` fails when a runtime
+import breaks the rules (type-only imports and lazy `import()` are ignored):
+
+- no runtime import cycles between packages;
+- foundation packages (`domain`, `process`, `security`, `events`, `state`,
+  `git`, `quality`, `config`) never import agents, sessions, workflow, server,
+  evolution or the desktop shell;
+- only `server`, `workspace` and the CLI entry import `server`/`workspace`, and
+  only `server` imports `evolution`;
+- the run engine (`workflow`, `flow`, `sessions`, `agents`, `interventions`,
+  `reliability`, `visibility`) never imports `desktop`, `evolution`, `server`
+  or `onboarding`;
+- `adapters`, `sessions`, `providers` and `process` know nothing about
+  workflow policy.
+
+`src/workflow/` is split by responsibility behind a shared read-only
+`RunnerEnv`: `runner.ts` owns `run`/`resume` and the flow wiring;
+`planning.ts`, `decision.ts`, `checkpoints.ts` (checkpoint/approval/recovery),
+`scheduler.ts` (dependency waves), `task-attempt.ts` (one task: work, quality,
+review, commit), `advisor.ts` (architect/Jev consultation) and `agents.ts`
+(role agent construction) are small services wired in the runner constructor.
+HTTP routes under `src/server/` are likewise one file per concern
+(`http-routes-{project,runs,interventions,insights,experience,strategies,
+evolution,onboarding}.ts`).
+
 ## Workflow State
 
 ```text

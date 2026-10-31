@@ -42,6 +42,11 @@
 - **经验库**：运行终态抽取候选 → 人工/评测晋升为已验证 → 可共享到本机公共目录；规划与返工会注入已验证经验（默认不注入候选）。
 - **运行历史清理**：支持单条删除终态运行，以及按保留天数批量清理；删除会连同该运行的 Git worktree 与本地分支一起回收，控制服务启动时还会清扫历史遗留的孤儿 worktree 目录。
 - **运行暂停**：执行中的运行可以「暂停」——立即中止当前任务并以可恢复的 `interrupted` 状态落盘（保留检查点与任务 worktree），稍后从工作台「从检查点继续」即可接着跑；已合并的任务不会被重做。
+- **流程模板**：`quick` / `standard` / `full` 三种流程，由确定性路由按目标自动选择（理由可见），也可在启动时手动指定；`quick` 只用确定性质量门，不调用模型评审。
+- **运行中介入**：对实时 Agent 追加指令（steer）、中断、回答 Agent 的提问，并在计划审批处编辑计划后再批准；全部写入账本可审计。
+- **可靠性**：卡死检测与自动续跑、失败命令的 flaky 重跑、同一失败重复时提前止损、可选的每任务预算。
+- **可见性**：「洞察」页提供判定理由、按角色/任务的成本、Agent 对话记录、运行回放与每个任务的 diff。
+- **零配置上手**：自动检测 CLI 与仓库命令，首次运行向导，`agent-team.yaml` 只在你需要时才生成。
 - **可选外挂质量门**：可把已安装的 CLI（例如阿里 `ocr review`）写进 `quality.commands`，不内嵌第二套评审引擎。
 
 当前内置以下 CLI 适配器：
@@ -91,11 +96,20 @@ pnpm dev <命令>
 
 ```bash
 cd /path/to/your-project
+agent-team serve
+```
+
+**无需配置文件即可启动**：没有 `agent-team.yaml` 时，会根据本机已安装的 Agent CLI
+和仓库里检测到的类型检查 / Lint / 测试命令在内存中生成默认配置（不写任何文件），
+首次打开工作台会出现引导向导，确认后才保存为 `agent-team.yaml`。需要高级配置时，
+也可以直接写入检测结果再手工编辑：
+
+```bash
 agent-team init
 ```
 
-这会生成 `agent-team.yaml`。编辑其中的 Agent profile、角色映射和项目测试
-命令，然后执行：
+这会生成 `agent-team.yaml`（YAML 始终优先于自动检测）。编辑其中的 Agent profile、
+角色映射和项目测试命令，然后执行：
 
 ```bash
 agent-team validate
@@ -805,7 +819,9 @@ Agent CLI 需要通过适配器接口接入。
 ## 更多文档
 
 - [配置说明](docs/configuration.md)
-- [工作流说明](docs/workflow.md)
+- [工作流说明](docs/workflow.md)（含流程模板、介入、可靠性与可见性）
+- [ADR 0018：Agent 会话与流程引擎](docs/adr/0018-agent-sessions-and-flow-engine.md)
+- [Web 工作台开发指南](docs/web-workbench.zh-CN.md)
 - [安全模型](docs/security.md)（含受限自演进信任、持久化、应用、控制面与前端边界）
 - [系统架构](docs/architecture.md)（含 domain / catalog / persistence / application 分层）
 - [可选外部集成](docs/integrations-optional.zh-CN.md)（经验闭环、外挂 OCR、不内嵌边界）

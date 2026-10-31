@@ -15,12 +15,12 @@ import {
 import path from "node:path";
 import type { LoadedConfig } from "../config/load.js";
 import {
-  GitManager,
+  type GitManager,
   GitManagerError,
   type ExactTrackedFileCommitAuthorization,
 } from "../git/manager.js";
 import {
-  StrategyBlueprintCatalog,
+  type StrategyBlueprintCatalog,
   StrategyBlueprintError,
 } from "../strategies/catalog.js";
 import type { EvolutionCatalogSnapshot } from "./catalog.js";
@@ -36,7 +36,7 @@ import {
   type RollbackRecord,
   type UnarchiveRecord,
 } from "./domain.js";
-import { DurableEvolutionCatalog } from "./persistence.js";
+import { type DurableEvolutionCatalog } from "./persistence.js";
 import {
   EVOLUTION_APPLICATION_FILENAME,
   EVOLUTION_PREVIEW_TTL_MS,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  advisorMorphologySchema,
   approvalGateSchema,
   namedStrategySchema,
   strategyTopologyModeSchema,
@@ -278,6 +279,7 @@ const evolutionStrategyDefinitionObjectSchema = z
           })
           .strict()
           .optional(),
+        advisor: advisorMorphologySchema.optional(),
         plan: z
           .object({
             role: z.literal("architect").default("architect"),

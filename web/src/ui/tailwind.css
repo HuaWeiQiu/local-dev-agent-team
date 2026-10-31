@@ -1,0 +1,81 @@
+/* Tailwind 只引入主题与工具类，不引入 preflight：旧页面仍依赖浏览器默认样式，
+   迁移完成后再启用完整 base。所有语义色都指向 theme.css 令牌，主题切换自动生效。 */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-surface: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-line: var(--accent-line);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-ink: var(--success-ink);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-ink: var(--info-ink);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-ink: var(--warning-ink);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-ink: var(--danger-ink);
+  --color-violet: var(--violet);
+  --color-scrim: var(--scrim);
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  --shadow-card: var(--shadow-1);
+  --shadow-pop: var(--shadow-2);
+  --shadow-modal: var(--shadow-3);
+}
+
+/* 一像素描边：旧样式表依赖浏览器默认边框样式，所以这里不用 Tailwind 的 border 工具类。 */
+@utility bd {
+  border: 1px solid var(--line);
+}
+@utility bd-t {
+  border-top: 1px solid var(--line);
+}
+@utility bd-b {
+  border-bottom: 1px solid var(--line);
+}
+@utility bd-l {
+  border-left: 1px solid var(--line);
+}
+@utility bd-r {
+  border-right: 1px solid var(--line);
+}
+@utility bd-strong {
+  border: 1px solid var(--line-strong);
+}
+
+@utility focus-ring {
+  &:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+}
+
+@utility scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}

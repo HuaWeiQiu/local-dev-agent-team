@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { clearPromptTemplateCache } from "../agents/service.js";
-import { GitManager } from "../git/manager.js";
+import { type GitManager } from "../git/manager.js";
 import type { EvolutionCatalogSnapshot } from "./catalog.js";
 import {
   computeCandidateDigest,
@@ -12,7 +12,7 @@ import {
 } from "./domain.js";
 import {
   computePayloadDigest,
-  DurableEvolutionCatalog,
+  type DurableEvolutionCatalog,
   EvolutionPersistenceValidationError,
 } from "./persistence.js";
 import { applicationPayloadSchema } from "./application-schemas.js";

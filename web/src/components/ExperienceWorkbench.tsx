@@ -1,16 +1,4 @@
-import {
-  ArchiveX,
-  BookMarked,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleAlert,
-  Globe2,
-  RefreshCw,
-  Search,
-  Share2,
-  X,
-} from "lucide-react";
+import { BookMarked, LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getEvolution,
@@ -21,51 +9,22 @@ import {
   retrieveExperience,
   shareExperience,
 } from "../api";
-import {
-  errorMessage,
-  formatExperienceCondition,
-  formatExperienceTag,
-  formatTimestamp,
-  shortRunId,
-  summarizeGoal,
-} from "../presentation";
-import type {
-  AutomaticEvolutionSnapshot,
-  ExperienceEntry,
-  ExperiencePlanningBundle,
-  ExperienceSnapshot,
-  ExperienceStatus,
-  ProjectScope,
-} from "../types";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { errorMessage } from "../presentation";
+import type { ExperiencePlanningBundle, ExperienceSnapshot, ProjectScope } from "../types";
+import { Button } from "../ui/button";
+import { cn } from "../ui/cn";
+import { Callout } from "../ui/form";
+import { Tooltip } from "../ui/tooltip";
+import { ExperienceActionDialog } from "./experience/ExperienceActionDialog";
+import { ExperienceDetail, ExperienceEmpty } from "./experience/ExperienceDetail";
+import { ExperienceInspector } from "./experience/ExperienceInspector";
+import { ExperienceList } from "./experience/ExperienceList";
+import type { ActionMode, ExperienceFilter, LatestEvaluation } from "./experience/model";
 
 interface ExperienceWorkbenchProps {
   scope: ProjectScope;
 }
-
-type ExperienceFilter = "all" | ExperienceStatus | "shared" | "project";
-type ActionMode = "promote" | "reject" | "share" | "retire";
-type LatestEvaluation = NonNullable<AutomaticEvolutionSnapshot["lastEvaluation"]>;
-
-const actionLabels: Record<ActionMode, string> = {
-  promote: "晋升",
-  reject: "拒绝",
-  share: "共享",
-  retire: "退役",
-};
-
-const statusLabels: Record<ExperienceStatus, string> = {
-  candidate: "候选",
-  verified: "已验证",
-  rejected: "已拒绝",
-  retired: "已退役",
-};
-
-const statusTone: Record<ExperienceStatus, string> = {
-  candidate: "warning",
-  verified: "success",
-  rejected: "danger",
-  retired: "neutral",
-};
 
 export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
   const [snapshot, setSnapshot] = useState<ExperienceSnapshot>();
@@ -75,7 +34,6 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const [pathsOpen, setPathsOpen] = useState(false);
   const [action, setAction] = useState<{ mode: ActionMode; experienceId: string }>();
   const [reason, setReason] = useState("");
   const [suiteDigest, setSuiteDigest] = useState("");
@@ -85,6 +43,7 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
   const [previewQuery, setPreviewQuery] = useState("");
   const [previewResult, setPreviewResult] = useState<ExperiencePlanningBundle>();
   const [previewLoading, setPreviewLoading] = useState(false);
+  const wide = useMediaQuery("(min-width: 1280px)");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -215,498 +174,154 @@ export function ExperienceWorkbench({ scope }: ExperienceWorkbenchProps) {
 
   if (!snapshot) {
     return (
-      <section className="experience-boot" aria-label="经验工作台">
+      <section aria-label="经验工作台" className="grid h-full place-items-center px-6">
         {loading ? (
-          <>
-            <RefreshCw className="is-spinning" size={24} />
+          <div role="status" className="flex flex-col items-center gap-3 text-sm text-muted">
+            <LoaderCircle aria-hidden className="size-6 animate-spin text-accent" />
             <span>加载中…</span>
-          </>
+          </div>
         ) : (
-          <>
-            <CircleAlert size={24} />
-            <strong>加载失败</strong>
-            <span>{error}</span>
-            <button className="button secondary" onClick={() => void refresh()}>
+          <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+            <strong className="text-base font-semibold text-ink">加载失败</strong>
+            <Callout tone="danger" role="alert" className="w-full text-left">{error}</Callout>
+            <Button onClick={() => void refresh()}>
+              <RefreshCw />
               重试
-            </button>
-          </>
+            </Button>
+          </div>
         )}
       </section>
     );
   }
 
+  const openAction = (mode: ActionMode, experienceId: string, initialReason: string) => {
+    setAction({ mode, experienceId });
+    setReason(initialReason);
+    setDialogError(undefined);
+  };
+
+  const inspector = (
+    <ExperienceInspector
+      previewQuery={previewQuery}
+      previewResult={previewResult}
+      previewLoading={previewLoading}
+      busy={busy}
+      projectPath={snapshot.projectPath}
+      sharedPath={snapshot.sharedPath}
+      onPreviewQueryChange={setPreviewQuery}
+    />
+  );
+
   return (
-    <section className="experience-workbench is-compact" aria-label="经验工作台">
-      <header className="experience-banner experience-banner-compact">
-        <div className="experience-banner-main">
-          <span className="experience-banner-icon">
-            <BookMarked size={16} />
+    <section aria-label="经验工作台" className="flex h-full min-h-0 flex-col bg-background">
+      <header className="bd-b flex flex-wrap items-center gap-x-4 gap-y-2 bg-surface px-4 py-2.5">
+        <div className="flex min-w-0 flex-1 basis-56 items-center gap-3">
+          <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent-ink">
+            <BookMarked className="size-4" />
           </span>
-          <div>
-            <strong>经验</strong>
-            <span>
+          <div className="min-w-0">
+            <strong className="block text-sm font-semibold text-ink">经验</strong>
+            <span className="block truncate text-xs text-muted">
               候选需晋升 · 已验证进规划 · 共享后跨项目
               {snapshot.enabled ? "" : " · 已关闭"}
             </span>
           </div>
         </div>
-        <div className="experience-banner-metrics" aria-label="经验统计">
-          <span className="experience-metric-chip">
-            候选 <strong>{snapshot.counts.candidate}</strong>
-          </span>
-          <span className="experience-metric-chip">
-            已验证 <strong>{snapshot.counts.verified}</strong>
-          </span>
-          <span className="experience-metric-chip">
-            公共 <strong>{snapshot.counts.shared}</strong>
-          </span>
+        <div className="flex items-center gap-2" aria-label="经验统计" role="group">
+          <Metric label="候选" value={snapshot.counts.candidate} tone="text-warning-ink" />
+          <Metric label="已验证" value={snapshot.counts.verified} tone="text-success-ink" />
+          <Metric label="公共" value={snapshot.counts.shared} tone="text-info-ink" />
+          <Tooltip label="刷新">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void refresh()}
+              disabled={loading || busy}
+              aria-label="刷新"
+            >
+              <RefreshCw className={cn(loading && "animate-spin")} />
+            </Button>
+          </Tooltip>
         </div>
-        <button
-          className="icon-button"
-          onClick={() => void refresh()}
-          disabled={loading || busy}
-          aria-label="刷新"
-          title="刷新"
-        >
-          <RefreshCw size={16} className={loading ? "is-spinning" : ""} />
-        </button>
       </header>
 
-      <aside className="experience-rail">
-        <div className="experience-rail-tools">
-          <label className="experience-search">
-            <Search size={15} />
-            <input
-              value={query}
-              disabled={busy}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索"
-              aria-label="搜索经验"
-            />
-          </label>
-          <select
-            value={filter}
-            disabled={busy}
-            onChange={(event) => setFilter(event.target.value as ExperienceFilter)}
-            aria-label="筛选"
-          >
-            <option value="all">全部</option>
-            <option value="candidate">候选</option>
-            <option value="verified">已验证</option>
-            <option value="shared">公共</option>
-            <option value="project">本项目</option>
-            <option value="rejected">已拒绝</option>
-            <option value="retired">已退役</option>
-          </select>
-        </div>
-        <div className="experience-list">
-          {entries.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              className={entry.id === selectedId ? "is-selected" : ""}
-              disabled={busy}
-              onClick={() => setSelectedId(entry.id)}
-            >
-              <span className="experience-list-topline">
-                <span className={`status-badge tone-${statusTone[entry.status]}`}>
-                  {statusLabels[entry.status]}
-                </span>
-                <span className="experience-list-scope">
-                  {entry.scope === "shared" ? "公共" : "项目"}
-                </span>
-              </span>
-              <strong title={entry.summary}>{summarizeGoal(entry.summary, 56)}</strong>
-              <small>
-                命中 {entry.hitCount} · {formatTimestamp(entry.updatedAt)}
-              </small>
-            </button>
-          ))}
-          {entries.length === 0 && (
-            <div className="experience-list-empty">
-              <BookMarked size={22} />
-              <span>
-                {snapshot.entries.length === 0
-                  ? "暂无经验。跑完任务后会出现候选。"
-                  : "无匹配项"}
-              </span>
-            </div>
-          )}
-        </div>
-      </aside>
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto md:grid md:grid-cols-[minmax(240px,300px)_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:overflow-hidden xl:grid-cols-[300px_minmax(0,1fr)_280px]">
+        <ExperienceList
+          entries={entries}
+          total={snapshot.entries.length}
+          selectedId={selectedId}
+          query={query}
+          filter={filter}
+          busy={busy}
+          onQueryChange={setQuery}
+          onFilterChange={setFilter}
+          onSelect={setSelectedId}
+          onResetFilters={() => {
+            setQuery("");
+            setFilter("all");
+          }}
+        />
 
-      <main className="experience-detail">
-        {selected ? (
-          <ExperienceDetail
-            entry={selected}
-            busy={busy}
-            onPromote={() => {
-              setAction({ mode: "promote", experienceId: selected.id });
-              setReason("确认可作为已验证经验");
-              setSuiteDigest("");
-              setForceWithoutSuite(false);
-              setDialogError(undefined);
-              void loadLatestEvaluation();
-            }}
-            onReject={() => {
-              setAction({ mode: "reject", experienceId: selected.id });
-              setReason("");
-              setDialogError(undefined);
-            }}
-            onShare={() => {
-              setAction({ mode: "share", experienceId: selected.id });
-              setReason("跨项目可复用");
-              setDialogError(undefined);
-            }}
-            onRetire={() => {
-              setAction({ mode: "retire", experienceId: selected.id });
-              setReason("不再适用于后续规划");
-              setDialogError(undefined);
-            }}
-          />
-        ) : (
-          <div className="experience-detail-empty">
-            <BookMarked size={26} />
-            <strong>选一条经验</strong>
-            <span>晋升 / 共享 / 拒绝</span>
-          </div>
-        )}
-        {error && (
-          <p className="experience-inline-error" role="alert">
-            {error}
-          </p>
-        )}
-      </main>
-
-      <aside className="experience-inspector">
-        <section className="experience-preview">
-          <h3>检索预览</h3>
-          <label className="experience-search">
-            <Search size={15} />
-            <input
-              value={previewQuery}
-              disabled={busy}
-              onChange={(event) => setPreviewQuery(event.target.value)}
-              placeholder="输入目标文本"
-              aria-label="检索预览"
-            />
-          </label>
-          {previewQuery.trim() ? (
-            previewLoading ? (
-              <p className="experience-muted">检索中…</p>
-            ) : previewResult && previewResult.items.length > 0 ? (
-              <>
-                <p className="experience-muted">
-                  规划时将注入 {previewResult.items.length} 条已验证经验
-                </p>
-                <ul className="experience-preview-list">
-                  {previewResult.items.map((item) => (
-                    <li key={item.id}>
-                      <strong title={item.summary}>{summarizeGoal(item.summary, 48)}</strong>
-                      <small>
-                        {item.scope === "shared" ? "公共" : "项目"} · 命中 {item.hitCount}
-                        {item.tags.length > 0
-                          ? ` · ${item.tags.slice(0, 3).map(formatExperienceTag).join(" / ")}`
-                          : ""}
-                      </small>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <p className="experience-muted">无匹配的已验证经验</p>
-            )
-          ) : (
-            <p className="experience-muted">预览启动新运行时注入规划的经验</p>
-          )}
-        </section>
-        <section className="experience-help experience-help-compact">
-          <div>
-            <CheckCircle2 size={15} />
-            <span>
-              <strong>晋升</strong>后才进规划
-            </span>
-          </div>
-          <div>
-            <Globe2 size={15} />
-            <span>
-              <strong>共享</strong>写入公共库
-            </span>
-          </div>
-          <div>
-            <BookMarked size={15} />
-            <span>
-              <strong>新项目</strong>自动带上已验证
-            </span>
-          </div>
-        </section>
-        <button
-          type="button"
-          className="experience-paths-toggle"
-          onClick={() => setPathsOpen((open) => !open)}
-          aria-expanded={pathsOpen}
-        >
-          {pathsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          存储路径
-        </button>
-        {pathsOpen && (
-          <section className="experience-paths">
-            <dl className="detail-list">
-              <div>
-                <dt>本项目</dt>
-                <dd>
-                  <code title={snapshot.projectPath}>{shortPath(snapshot.projectPath)}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>公共</dt>
-                <dd>
-                  <code title={snapshot.sharedPath}>{shortPath(snapshot.sharedPath)}</code>
-                </dd>
-              </div>
-            </dl>
-          </section>
-        )}
-      </aside>
-
-      {action && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onClick={() => !busy && setAction(undefined)}
-        >
-          <div
-            className="experience-action-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="experience-action-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header>
-              <div>
-                <span className="section-kicker">{actionLabels[action.mode]}</span>
-                <h2 id="experience-action-title">
-                  {action.mode === "promote"
-                    ? "晋升为已验证"
-                    : action.mode === "share"
-                      ? "写入公共库"
-                      : action.mode === "retire"
-                        ? "退役（不再注入规划）"
-                        : "拒绝"}
-                </h2>
-              </div>
-              <button
-                className="icon-button"
-                onClick={() => setAction(undefined)}
-                disabled={busy}
-                aria-label="关闭"
-              >
-                <X size={17} />
-              </button>
-            </header>
-            <label className="experience-reason-field">
-              <span>原因</span>
-              <textarea
-                value={reason}
-                disabled={busy}
-                rows={3}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="简短说明"
+        <div className="scroll-thin min-h-0 min-w-0 md:overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 p-4 md:p-6">
+            {selected ? (
+              <ExperienceDetail
+                entry={selected}
+                busy={busy}
+                onPromote={() => {
+                  openAction("promote", selected.id, "确认可作为已验证经验");
+                  setSuiteDigest("");
+                  setForceWithoutSuite(false);
+                  void loadLatestEvaluation();
+                }}
+                onReject={() => openAction("reject", selected.id, "")}
+                onShare={() => openAction("share", selected.id, "跨项目可复用")}
+                onRetire={() => openAction("retire", selected.id, "不再适用于后续规划")}
               />
-            </label>
-            {action.mode === "promote" && (
-              <div className="experience-promote-evidence">
-                <label className="experience-reason-field">
-                  <span>
-                    评测 suiteDigest
-                    {snapshot.requireSuiteForPromote ? "（推荐/必填）" : "（可选）"}
-                  </span>
-                  <input
-                    value={suiteDigest}
-                    disabled={busy}
-                    onChange={(event) => setSuiteDigest(event.target.value)}
-                    placeholder="64 位 hex，来自 EvaluationSuite"
-                    spellCheck={false}
-                  />
-                </label>
-                {latestEvaluation && (
-                  <button
-                    type="button"
-                    className="experience-suite-fill"
-                    disabled={busy}
-                    onClick={() => {
-                      setSuiteDigest(latestEvaluation.suiteDigest);
-                      setForceWithoutSuite(false);
-                      setDialogError(undefined);
-                    }}
-                  >
-                    使用最近评测：{latestEvaluation.suiteName} ·{" "}
-                    {formatTimestamp(latestEvaluation.completedAt)}
-                  </button>
-                )}
-                {snapshot.requireSuiteForPromote && (
-                  <label className="experience-force-suite">
-                    <input
-                      type="checkbox"
-                      checked={forceWithoutSuite}
-                      disabled={busy}
-                      onChange={(event) => setForceWithoutSuite(event.target.checked)}
-                    />
-                    无评测，强制晋升
-                  </label>
-                )}
-              </div>
+            ) : (
+              <ExperienceEmpty />
             )}
-            {action.mode === "retire" && (
-              <p className="experience-muted experience-retire-hint">
-                退役后保留在目录中供审计，但不再注入规划或返工上下文；当前审计模型不支持恢复。
-              </p>
-            )}
-            {dialogError && (
-              <p className="experience-inline-error" role="alert">
-                {dialogError}
-              </p>
-            )}
-            <footer>
-              <button
-                className="button secondary"
-                disabled={busy}
-                onClick={() => setAction(undefined)}
-              >
-                取消
-              </button>
-              <button
-                className={
-                  action.mode === "reject" || action.mode === "retire"
-                    ? "button danger-quiet"
-                    : "button primary"
-                }
-                disabled={busy || !reason.trim()}
-                onClick={() => void submitAction()}
-              >
-                {busy ? "提交中…" : "确认"}
-              </button>
-            </footer>
+            {error && <Callout tone="danger" role="alert">{error}</Callout>}
+            {!wide && <div className="bd-t pt-5">{inspector}</div>}
           </div>
         </div>
-      )}
+
+        {wide && (
+          <aside className="scroll-thin bd-l min-h-0 min-w-0 overflow-y-auto bg-surface p-4">
+            {inspector}
+          </aside>
+        )}
+      </div>
+
+      <ExperienceActionDialog
+        mode={action?.mode}
+        busy={busy}
+        reason={reason}
+        suiteDigest={suiteDigest}
+        forceWithoutSuite={forceWithoutSuite}
+        requireSuite={Boolean(snapshot.requireSuiteForPromote)}
+        latestEvaluation={latestEvaluation}
+        error={dialogError}
+        onReasonChange={setReason}
+        onSuiteDigestChange={setSuiteDigest}
+        onForceChange={setForceWithoutSuite}
+        onUseLatestEvaluation={(evaluation) => {
+          setSuiteDigest(evaluation.suiteDigest);
+          setForceWithoutSuite(false);
+          setDialogError(undefined);
+        }}
+        onClose={() => setAction(undefined)}
+        onSubmit={() => void submitAction()}
+      />
     </section>
   );
 }
 
-function ExperienceDetail({
-  entry,
-  busy,
-  onPromote,
-  onReject,
-  onShare,
-  onRetire,
-}: {
-  entry: ExperienceEntry;
-  busy: boolean;
-  onPromote(): void;
-  onReject(): void;
-  onShare(): void;
-  onRetire(): void;
-}) {
-  const canPromote = entry.scope === "project" && entry.status === "candidate";
-  const canShare =
-    entry.scope === "project" &&
-    entry.status === "verified" &&
-    entry.sensitivity === "low" &&
-    entry.portability === "cross-project";
-  const canReject = entry.status === "candidate" || entry.status === "verified";
-  const canRetire = entry.status === "verified";
-  const conditions = entry.conditions.slice(0, 5).map(formatExperienceCondition);
-  const tags = entry.tags.slice(0, 6).map(formatExperienceTag);
-
+function Metric({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
-    <>
-      <header className="experience-detail-header">
-        <div>
-          <div className="experience-detail-badges">
-            <span className={`status-badge tone-${statusTone[entry.status]}`}>
-              {statusLabels[entry.status]}
-            </span>
-            <span className="experience-pill">
-              {entry.scope === "shared" ? "公共" : "项目"}
-            </span>
-            <span className="experience-pill">
-              {entry.portability === "cross-project" ? "可跨项目" : "仅本项目"}
-            </span>
-          </div>
-          <h1 title={entry.summary}>{entry.summary}</h1>
-        </div>
-      </header>
-
-      <div className="experience-actions">
-        {canPromote && (
-          <button className="button primary" disabled={busy} onClick={onPromote}>
-            <CheckCircle2 size={16} />
-            晋升
-          </button>
-        )}
-        {canShare && (
-          <button className="button secondary" disabled={busy} onClick={onShare}>
-            <Share2 size={16} />
-            共享
-          </button>
-        )}
-        {canRetire && (
-          <button className="button secondary" disabled={busy} onClick={onRetire}>
-            <ArchiveX size={16} />
-            退役
-          </button>
-        )}
-        {canReject && (
-          <button className="button danger-quiet" disabled={busy} onClick={onReject}>
-            拒绝
-          </button>
-        )}
-        {!canPromote && !canShare && !canReject && !canRetire && (
-          <span className="experience-action-hint">只读</span>
-        )}
-      </div>
-
-      <section className="experience-section">
-        <h3>条件</h3>
-        {conditions.length === 0 ? (
-          <p className="experience-muted">无</p>
-        ) : (
-          <ul className="experience-chip-list">
-            {conditions.map((condition) => (
-              <li key={condition}>{condition}</li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {tags.length > 0 && (
-        <section className="experience-section">
-          <h3>标签</h3>
-          <ul className="experience-chip-list">
-            {tags.map((tag) => (
-              <li key={tag}>{tag}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section className="experience-section experience-meta-compact">
-        <span>
-          来源 <code title={entry.sourceRunId}>{shortRunId(entry.sourceRunId)}</code>
-        </span>
-        <span>
-          命中 {entry.hitCount}
-        </span>
-        <span>{formatTimestamp(entry.updatedAt)}</span>
-        {entry.failureReason ? <span className="is-error">拒绝：{entry.failureReason}</span> : null}
-      </section>
-    </>
+    <span className="bd inline-flex h-6 items-center gap-1.5 rounded-full bg-surface-2 px-2.5 text-2xs text-muted">
+      {label}
+      <strong className={cn("text-xs font-semibold tabular-nums", tone)}>{value}</strong>
+    </span>
   );
-}
-
-function shortPath(value: string): string {
-  if (value.length <= 48) return value;
-  return `…${value.slice(-44)}`;
 }

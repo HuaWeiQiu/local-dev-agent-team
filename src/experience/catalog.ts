@@ -377,6 +377,30 @@ export class ExperienceCatalog {
       .map((entry) => ({ ...entry }));
   }
 
+  /** Count a retrieval that was chosen by the repository trace rather than token overlap. */
+  async recordRetrieval(experienceIds: string[], actor: string, reason: string): Promise<void> {
+    if (experienceIds.length === 0) return;
+    const doc = await this.load();
+    const idSet = new Set(experienceIds);
+    const timestamp = new Date(this.now()).toISOString();
+    let updated = 0;
+    for (const entry of doc.entries) {
+      if (!idSet.has(entry.id) || entry.status !== "verified") continue;
+      entry.hitCount += 1;
+      entry.updatedAt = timestamp;
+      updated += 1;
+      doc.audit.push({
+        id: randomUUID(),
+        at: timestamp,
+        actor,
+        action: "retrieve",
+        experienceId: entry.id,
+        reason,
+      });
+    }
+    if (updated > 0) await this.save(doc);
+  }
+
   /** Increment successCount for verified experiences that helped a later success. */
   async recordSuccess(experienceIds: string[]): Promise<number> {
     if (experienceIds.length === 0) return 0;

@@ -186,6 +186,112 @@ describe("run supervisor", () => {
     events.close();
   });
 
+  describe("plan edits at the approval gate", () => {
+    const task = (id: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      title: `Task ${id}`,
+      description: `Do ${id}`,
+      dependsOn: [] as string[],
+      ownedPaths: [`${id}.txt`],
+      acceptanceCommands: [],
+      profile: null,
+      ...extra,
+    });
+    const setup = async (name: string) => {
+      const { root, loaded } = await fixtureConfig();
+      const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
+      const states = new RunStateStore(path.join(root, ".agent-team", "runs"), events);
+      const state = fakeApprovalState(name, "plan");
+      state.plan = { summary: "Original", tasks: [task("T1"), task("T2")] };
+      state.tasks = state.plan.tasks.map((item) => ({ task: item, status: "pending", attempts: 0 }));
+      await states.save(state);
+      return { loaded, events, state, root };
+    };
+
+    it("approves with edits, replacing the plan and recording the change", async () => {
+      const { loaded, events, state } = await setup("edit-approve");
+      let resumedPlan: string[] | undefined;
+      const supervisor = new RunSupervisor(loaded, events, {
+        resumeWorkflow: async (resumed) => {
+          resumedPlan = resumed.plan?.tasks.map((item) => item.id);
+          return resumed;
+        },
+      });
+      const edited = { summary: "Original", tasks: [task("T1", { title: "Renamed" }), task("T3")] };
+      const action = await supervisor.respondApproval(state.id, {
+        requestId: state.approvals![0]!.id,
+        decision: "approved",
+        actor: "tech-lead",
+        reason: "Swap T2 for T3",
+        plan: edited,
+      });
+      expect(action.status).toBe("resuming");
+      await supervisor.wait(state.id);
+      expect(resumedPlan).toEqual(["T1", "T3"]);
+      const stored = await supervisor.get(state.id);
+      expect(stored?.tasks.map((item) => item.task.id)).toEqual(["T1", "T3"]);
+      const edit = events
+        .listAfter(0, state.id, 100)
+        .find((event) => event.type === "plan.edited");
+      expect(edit?.payload).toMatchObject({
+        actor: "tech-lead",
+        added: ["T3"],
+        removed: ["T2"],
+        changed: ["T1"],
+      });
+      await supervisor.close();
+      events.close();
+    });
+
+    it("saves a draft without resolving the gate", async () => {
+      const { loaded, events, state } = await setup("edit-draft");
+      const supervisor = new RunSupervisor(loaded, events, {});
+      await supervisor.editPlan(state.id, {
+        actor: "tech-lead",
+        reason: "Drop T2",
+        plan: { summary: "Smaller", tasks: [task("T1")] },
+      });
+      const stored = await supervisor.get(state.id);
+      expect(stored?.plan?.summary).toBe("Smaller");
+      expect(stored?.approvals?.at(-1)?.status).toBe("pending");
+      await supervisor.close();
+      events.close();
+    });
+
+    it("rejects invalid, disallowed or late edits without touching the plan", async () => {
+      const { loaded, events, state } = await setup("edit-invalid");
+      const supervisor = new RunSupervisor(loaded, events, {});
+      const attempt = (plan: unknown) =>
+        supervisor.editPlan(state.id, { actor: "a", reason: "r", plan });
+      await expect(attempt({ summary: "x", tasks: [] })).rejects.toThrow(/Edited plan is invalid/);
+      await expect(
+        attempt({ summary: "x", tasks: [task("T1", { dependsOn: ["ghost"] })] }),
+      ).rejects.toThrow(/unknown task/);
+      await expect(
+        attempt({ summary: "x", tasks: [task("T1", { profile: "not-allowed" })] }),
+      ).rejects.toThrow(/does not allow/);
+      await expect(
+        supervisor.respondApproval(state.id, {
+          requestId: state.approvals![0]!.id,
+          decision: "rejected",
+          actor: "a",
+          reason: "no",
+          plan: { summary: "x", tasks: [task("T1")] },
+        }),
+      ).rejects.toThrow(/Only an approved plan gate/);
+      expect((await supervisor.get(state.id))?.plan?.tasks.map((item) => item.id)).toEqual(["T1", "T2"]);
+
+      const started = (await supervisor.get(state.id))!;
+      started.tasks[0]!.status = "merged";
+      await new RunStateStore(path.join(loaded.root, ".agent-team", "runs"), events).save(started);
+      await expect(
+        attempt({ summary: "x", tasks: [task("T1")] }),
+      ).rejects.toThrow(/after task execution has started/);
+      await supervisor.close();
+      events.close();
+    });
+  });
+
   it("marks an approved plan interrupted when continuation cannot start", async () => {
     const { root, loaded } = await fixtureConfig();
     const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));

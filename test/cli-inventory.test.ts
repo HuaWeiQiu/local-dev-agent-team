@@ -10,7 +10,7 @@ import {
   materializeRoleBindings,
   parseRuntimeProfileName,
   roleBindingsFromRunState,
-} from "../src/desktop/role-bindings.js";
+} from "../src/profiles/role-bindings.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import {
   getInventory,

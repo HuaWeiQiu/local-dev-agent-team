@@ -11,9 +11,8 @@ export interface PlanCompletenessReport {
   reconTaskIds: string[];
 }
 
-const NAMED_ID_PATTERN = /\b(?:T\d+|P\d+[.\-]\d+)\b/gi;
+const NAMED_ID_PATTERN = /\b(?:T\d+|P\d+[.-]\d+)\b/gi;
 const RANGE_PATTERN = /\bT(\d+)\s*[-–—]\s*T?(\d+)\b/gi;
-const VAGUE_HANDOVER_PATTERN = /交接文档|HANDOFF\.zh-CN|根据交接|根据文档执行/i;
 const RECON_PATTERN =
   /\binspect\b|(?<![-/])read-only(?!\s+(?:reviewer|tester|review|test)\b)|read only(?!\s+(?:reviewer|tester|review|test)\b)|read handover|只读侦察|只读任务|侦察/i;
 const DOCS_PATTERN = /\bdocs?\b|文档|readme|changelog/i;
@@ -195,7 +194,7 @@ function normalizeDeliverableId(raw: string): string {
   if (match) {
     return `T${match[1]}`;
   }
-  const priority = raw.match(/^P(\d+)[.\-](\d+)$/i);
+  const priority = raw.match(/^P(\d+)[.-](\d+)$/i);
   if (priority) {
     return `P${priority[1]}.${priority[2]}`;
   }

@@ -30,22 +30,52 @@ export function streamEvents(
       response.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   };
-  let replayCursor = cursor;
-  while (true) {
-    const events = supervisor.events.listAfter(replayCursor, runId, 1_000);
-    for (const event of events) {
+  // Subscribe before replaying so events appended while the replay yields to
+  // the event loop are buffered instead of lost; they are flushed afterwards,
+  // skipping anything the replay already delivered.
+  let replaying = true;
+  let closed = false;
+  const buffered: RunEvent[] = [];
+  const unsubscribe = supervisor.events.subscribe((event) => {
+    if (replaying) {
+      buffered.push(event);
+    } else {
       write(event);
-      replayCursor = event.sequence;
     }
-    if (events.length < 1_000) {
-      break;
-    }
-  }
-  const unsubscribe = supervisor.events.subscribe(write);
+  });
   const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
   heartbeat.unref();
   request.once("close", () => {
+    closed = true;
     clearInterval(heartbeat);
     unsubscribe();
   });
+
+  void (async () => {
+    let replayCursor = cursor;
+    while (!closed) {
+      const events = supervisor.events.listAfter(replayCursor, runId, replayBatchSize);
+      for (const event of events) {
+        write(event);
+        replayCursor = event.sequence;
+      }
+      if (events.length < replayBatchSize) {
+        break;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    replaying = false;
+    for (const event of buffered.splice(0)) {
+      if (event.sequence > replayCursor) {
+        write(event);
+      }
+    }
+  })().catch(() => {
+    closed = true;
+    clearInterval(heartbeat);
+    unsubscribe();
+    response.end();
+  });
 }
+
+const replayBatchSize = 1_000;

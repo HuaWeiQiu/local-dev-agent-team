@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { RunState } from "../state/types.js";
-import { assertRunId, RunStateStore } from "../state/store.js";
+import { assertRunId, type RunStateStore } from "../state/store.js";
 import type {
   EvidenceArtifact,
   EvidenceCheck,

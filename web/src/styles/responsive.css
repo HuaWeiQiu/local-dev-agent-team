@@ -1,0 +1,36 @@
+/* 策略编排画布的窄屏微调：这些类名同时是 e2e 钩子，样式不能用工具类表达（画布内部元素由 xyflow 渲染）。 */
+
+@media (max-width: 900px) {
+  .composer-canvas-summary {
+    max-width: calc(100% - 28px);
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 800px) {
+  .strategy-composer {
+    overflow: hidden;
+  }
+
+  .composer-canvas-summary {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    justify-content: flex-start;
+    transform: none;
+  }
+
+  .strategy-composer .react-flow__controls {
+    bottom: 64px;
+  }
+
+  .strategy-stage-node {
+    width: 224px;
+  }
+}
+
+@media (max-width: 520px) {
+  .composer-canvas-summary span:nth-child(2) {
+    display: none;
+  }
+}

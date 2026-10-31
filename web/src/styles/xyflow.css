@@ -1,0 +1,42 @@
+/* xyflow 的共享皮肤：任务图与策略编排画布共用，颜色全部来自主题令牌。 */
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-1);
+}
+
+.react-flow__controls-button {
+  color: var(--ink-2);
+  border-bottom-color: var(--line);
+  background: var(--surface-1);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--surface-2);
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-1);
+}
+
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface-1);
+  background: var(--muted);
+}

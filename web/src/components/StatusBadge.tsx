@@ -1,10 +1,10 @@
-import { runStatusLabel, statusTone, taskStatusLabel } from "../presentation";
 import type { RunStatus, TaskStatus } from "../types";
+import { RunStatusPill, TaskStatusPill } from "../ui/status";
 
 export function RunStatusBadge({ status }: { status: RunStatus }) {
-  return <span className={`status-badge tone-${statusTone(status)}`}>{runStatusLabel(status)}</span>;
+  return <RunStatusPill status={status} />;
 }
 
 export function TaskStatusBadge({ status }: { status: TaskStatus }) {
-  return <span className={`status-badge tone-${statusTone(status)}`}>{taskStatusLabel(status)}</span>;
+  return <TaskStatusPill status={status} />;
 }

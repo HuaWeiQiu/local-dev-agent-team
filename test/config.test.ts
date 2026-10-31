@@ -184,6 +184,60 @@ describe("configuration", () => {
     );
   });
 
+  it("loads an architect advisor with schema defaults applied", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const config = createDefaultConfig("fixture");
+    config.strategies!.definitions.balanced!.taskMorphology = {
+      advisor: {
+        enabled: true,
+        profile: "codex-planner",
+      } as never,
+    };
+    await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+    const loaded = await loadConfig(root);
+    expect(loaded.config.strategies!.definitions.balanced!.taskMorphology?.advisor).toEqual({
+      enabled: true,
+      triggers: ["repeated-failure", "pre-final"],
+      maxConsultationsPerRun: 3,
+      profile: "codex-planner",
+    });
+  });
+
+  it("rejects advisor profiles that are undefined or write-enabled", async () => {
+    for (const [profile, message] of [
+      ["missing", "Advisor profile 'missing' is not defined"],
+      ["codex-worker", "Advisor profile 'codex-worker' must be read-only"],
+    ] as const) {
+      const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+      const config = createDefaultConfig("fixture");
+      config.strategies!.definitions.balanced!.taskMorphology = {
+        advisor: { enabled: true, profile } as never,
+      };
+      await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
+
+      await expect(loadConfig(root)).rejects.toThrow(message);
+    }
+  });
+
+  it("rejects duplicate advisor triggers and out-of-range consultation limits", async () => {
+    const duplicateRoot = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const duplicate = createDefaultConfig("fixture");
+    duplicate.strategies!.definitions.balanced!.taskMorphology = {
+      advisor: { enabled: true, triggers: ["pre-final", "pre-final"] } as never,
+    };
+    await writeFile(path.join(duplicateRoot, "agent-team.yaml"), stringifyYaml(duplicate));
+    await expect(loadConfig(duplicateRoot)).rejects.toThrow("Advisor triggers must be unique");
+
+    const limitRoot = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
+    const limit = createDefaultConfig("fixture");
+    limit.strategies!.definitions.balanced!.taskMorphology = {
+      advisor: { enabled: true, maxConsultationsPerRun: 11 } as never,
+    };
+    await writeFile(path.join(limitRoot, "agent-team.yaml"), stringifyYaml(limit));
+    await expect(loadConfig(limitRoot)).rejects.toThrow("Too big");
+  });
+
   it("rejects observability and budget limits outside bounded ranges", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
     const config = createDefaultConfig("fixture");

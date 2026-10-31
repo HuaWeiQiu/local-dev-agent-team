@@ -1,8 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { openRun, openRunTab } from "./helpers";
 
 const VISUAL_RUN_ID = "run-visual-20260808";
 
-test("export button downloads the run event log as NDJSON", async ({ page }, testInfo) => {
+test("export button downloads the run event log as NDJSON", async ({ page }) => {
   let exportRequested = false;
   await page.route(`**/runs/${VISUAL_RUN_ID}/export`, async (route) => {
     exportRequested = true;
@@ -23,11 +24,8 @@ test("export button downloads the run event log as NDJSON", async ({ page }, tes
   });
 
   await page.goto("/");
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "日志", exact: true }).click();
-  } else {
-    await page.getByRole("tab", { name: "活动日志" }).click();
-  }
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "活动日志");
   const exportButton = page.getByRole("button", { name: "导出日志" });
   await expect(exportButton).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
@@ -40,11 +38,8 @@ test("export button downloads the run event log as NDJSON", async ({ page }, tes
 
 test("usage panel aggregates telemetry across runs", async ({ page }, testInfo) => {
   await page.goto("/");
-  if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "用量", exact: true }).click();
-  } else {
-    await page.getByRole("tab", { name: "用量" }).click();
-  }
+  await openRun(page, "实现订单退款幂等控制并提供可视化审计");
+  await openRunTab(page, "用量");
   const panel = page.getByLabel("用量与成本");
   await expect(panel).toBeVisible();
   // 用量按当前项目聚合：visual fixture 运行带 agentInvocations 11、inputTokens 48,220、cost 0.4187

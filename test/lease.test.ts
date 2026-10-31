@@ -28,7 +28,7 @@ describe("project control lease", () => {
 
   it.each([
     "",
-    `{\"pid\":${process.pid}`,
+    `{"pid":${process.pid}`,
     JSON.stringify({ pid: process.pid, token: "not-a-lease-token" }),
   ])("fails closed without replacing an incomplete or invalid lock", async (contents) => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-invalid-"));

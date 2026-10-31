@@ -26,6 +26,17 @@ export interface IntegrationDiffEvidence {
   detail?: string;
 }
 
+export interface TaskDiffEvidence {
+  taskId: string;
+  available: boolean;
+  source?: "commit" | "worktree";
+  commit?: string;
+  changedFiles: string[];
+  content?: string;
+  truncated: boolean;
+  detail?: string;
+}
+
 export interface RunEvidence {
   runId: string;
   status: RunStatus;

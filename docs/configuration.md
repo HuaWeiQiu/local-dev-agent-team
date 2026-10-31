@@ -1,14 +1,62 @@
 # Configuration
 
-`agent-team.yaml` is the only project configuration file. The CLI searches the
-current directory and its parents, or accepts an explicit path with `--config`.
-Validate it before every first run:
+`agent-team.yaml` is the only project configuration file, and it is optional.
+The CLI searches the current directory and its parents, or accepts an explicit
+path with `--config`. Without a file, Agent Team runs on **detected defaults**
+(see [Zero-Config Start](#zero-config-start)). Validate before the first run:
 
 ```bash
 agent-team validate
 agent-team profiles
 agent-team doctor
 ```
+
+## Zero-Config Start
+
+Inside a Git repository with no `agent-team.yaml`, `agent-team serve`, `run`
+and `validate` build a configuration in memory:
+
+- **Agent CLI** — chosen from the installed, runnable, non-logged-out CLIs in
+  the order Codex, Claude, Kimi, Grok. Codex keeps the stock
+  `codex-planner` / `codex-worker` profiles; any other CLI gets the same shape
+  (`<cli>-planner` read-only, `<cli>-worker` workspace-write) with the CLI's
+  default model. Model names stay opaque.
+- **Quality commands** — detected from the repository root and always run
+  without a shell: `package.json` scripts (`typecheck`/`check`, `lint`, `test`;
+  `build` is offered but not pre-selected; the package manager follows the
+  lockfile), `pyproject.toml` (mypy, ruff, pytest), `Cargo.toml` (`cargo check`,
+  `cargo test`; clippy offered), `go.mod` (`go vet`, `go test`; build offered)
+  and Makefile `test`/`lint`/`typecheck` targets when nothing else provides
+  that role.
+- **Default branch** — the remote HEAD, or the current branch.
+- **State directory** — `.agent-team/` is added to `.git/info/exclude` so runs
+  do not dirty `git status`.
+
+Nothing is written until you customize. The web workbench opens a first-run
+wizard (reopen it from the command palette) that shows the detected CLIs and
+commands; **保存到 agent-team.yaml** writes the file (`PUT
+/api/onboarding/quality`), while **先用默认值** keeps using the in-memory
+defaults. `GET /api/onboarding` reports the source (`file` or `detected`).
+`agent-team init` remains available: it writes the same detected configuration
+to disk. An existing file always wins and is edited in place, keeping comments.
+
+## Workflow
+
+```yaml
+workflow:
+  template: auto        # auto | quick | standard | full
+  sessions: auto        # auto | off — live steer/interrupt/ask-user when supported
+  stallSeconds: 600     # 0 disables the stall watchdog
+  maxStallRecoveries: 2
+  flakyReruns: 1        # reruns of a failing quality command before it counts
+  taskBudget:           # optional per-task caps
+    maxAgentInvocations: 12
+    maxMinutes: 45
+```
+
+The whole block is optional. See [Flow Templates](workflow.md#flow-templates)
+and [Reliability](workflow.md#reliability) for behavior. `template` is only a
+project default: the run launcher and `POST /api/runs` (`template`) override it.
 
 ## Multi-Project Workspace
 
@@ -162,6 +210,54 @@ Optional first-class role:
   `architect`'s profile chain (built-in `prompts/researcher.md`), so every project
   shows it in the run launcher and CLI picker without editing the file. New
   defaults and `agent-team.example.yaml` include it explicitly.
+
+Architect advisor (`taskMorphology.advisor`, per strategy, default disabled):
+
+```yaml
+taskMorphology:
+  advisor:
+    enabled: true
+    triggers: [repeated-failure, pre-final]   # subset, unique
+    maxConsultationsPerRun: 3                  # 1-10, persisted across resume
+    profile: grok-architect                    # optional; read-only and in architect's allowlist
+```
+
+The advisor reuses the `architect` role and its profile chain with the bundled
+`prompts/architect-advisor.md` (a role-level `promptFile` does not replace it).
+`repeated-failure` fires only when the same normalized failure occurs on two
+consecutive attempts, so it needs `maxReworkAttempts >= 2`. Advisor failures
+are fail-open; budget exhaustion and aborts are not swallowed. Events:
+`run.advisor.consulted`, `run.advisor.skipped`, `run.advisor.failed`.
+
+Optional local fork model (top-level `jev`, default disabled):
+
+```yaml
+jev:
+  enabled: true
+  baseUrl: http://127.0.0.1:9931/v1   # OpenAI-compatible; loopback hosts only
+  protocol: openai-chat               # or laya (typed-decision classifier host)
+  model: jev                          # opaque; validated by the local server
+  timeoutMs: 3000                     # 200-30000
+  minConfidence: 0.8                  # 0.5-1; below this the deterministic rule applies
+```
+
+After a task fails and before the next attempt, Jev may answer
+`{"decision":"retry"|"consult","confidence":0..1}` through
+`POST {baseUrl}/chat/completions`. It is only asked when the architect advisor is
+enabled for `repeated-failure` and has quota left. A confident `consult` brings the
+advisor forward. A `retry` never skips a consultation that the repeated-failure
+rule requires, so Jev can only add consultations, not remove them. Errors,
+timeouts, invalid output and low confidence keep the deterministic rule. It cannot block a
+task or affect any quality gate, and no credentials are accepted. Event:
+`run.jev.decided`.
+
+With `protocol: laya` the request is `POST {baseUrl}/decide` with
+`{state, questions}` and the answer is read from `answers.route`
+(`choice` and `confidence`). `scripts/laya-jev-server.py` hosts a Laya MLX
+checkpoint on loopback for this protocol. Laya is a classifier, not a chat
+model, and it ships uncalibrated; in a zero-shot check it chose `retry` with
+high confidence even for repeated, design-level failures. Evaluate it on your
+own failures and raise `minConfidence` before enabling it.
 
 Other notes:
 

@@ -13,15 +13,25 @@ import type {
   EvolutionPreviewResponse,
   EvolutionProposal,
   EvolutionSnapshot,
+  JevProbeResult,
+  OnboardingStatus,
   RoleBindingInput,
   RunCleanupPreview,
   RunCleanupResult,
   RunEvidence,
+  LiveAgent,
+  ReplayStep,
+  RunExplanation,
+  RunUsageBreakdown,
+  TaskDiff,
+  Transcript,
+  TranscriptSummary,
   RunState,
   RunSummary,
   StartRunInput,
   StrategyBlueprintDefinition,
   StrategyBlueprintResult,
+  Task,
   UsageReport,
   WorkspaceInfo,
   CliInventory,
@@ -89,6 +99,13 @@ export async function getConfig(scope: ProjectScope): Promise<PublicConfig> {
   return await request<PublicConfig>(`${apiRoot(scope)}/config`);
 }
 
+export async function probeJev(scope: ProjectScope): Promise<JevProbeResult> {
+  return await request<JevProbeResult>(`${apiRoot(scope)}/jev/probe`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
 export async function getProjectRoleSettings(scope: ProjectScope): Promise<ProjectRoleSettingsView> {
   return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`);
 }
@@ -100,6 +117,20 @@ export async function saveProjectRoleSettings(
   return await request<ProjectRoleSettingsView>(`${apiRoot(scope)}/role-settings`, {
     method: "PUT",
     body: JSON.stringify({ roles }),
+  });
+}
+
+export async function getOnboarding(scope: ProjectScope): Promise<OnboardingStatus> {
+  return await request<OnboardingStatus>(`${apiRoot(scope)}/onboarding`);
+}
+
+export async function saveOnboardingQuality(
+  scope: ProjectScope,
+  commands: Array<{ command: string; args: string[] }>,
+): Promise<OnboardingStatus> {
+  return await request<OnboardingStatus>(`${apiRoot(scope)}/onboarding/quality`, {
+    method: "PUT",
+    body: JSON.stringify({ commands }),
   });
 }
 
@@ -248,12 +279,83 @@ export async function respondApproval(
     decision: "approved" | "rejected";
     actor: string;
     reason: string;
+    /** Approve-with-edits: replaces the architect's plan. */
+    plan?: { summary: string; tasks: Task[] };
   },
 ): Promise<void> {
   await request(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/actions/respond-approval`, {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+function runUrl(scope: ProjectScope, runId: string, tail: string): string {
+  return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/${tail}`;
+}
+
+export async function getRunExplanation(scope: ProjectScope, runId: string): Promise<RunExplanation> {
+  return (await request<{ explanation: RunExplanation }>(runUrl(scope, runId, "explain"))).explanation;
+}
+
+export async function getRunUsageBreakdown(scope: ProjectScope, runId: string): Promise<RunUsageBreakdown> {
+  return (await request<{ usage: RunUsageBreakdown }>(runUrl(scope, runId, "usage"))).usage;
+}
+
+export async function getRunReplay(scope: ProjectScope, runId: string): Promise<ReplayStep[]> {
+  return (await request<{ steps: ReplayStep[] }>(runUrl(scope, runId, "replay"))).steps;
+}
+
+export async function getTranscripts(scope: ProjectScope, runId: string): Promise<TranscriptSummary[]> {
+  return (await request<{ transcripts: TranscriptSummary[] }>(runUrl(scope, runId, "transcripts"))).transcripts;
+}
+
+export async function getTranscript(scope: ProjectScope, runId: string, id: string): Promise<Transcript> {
+  return (
+    await request<{ transcript: Transcript }>(runUrl(scope, runId, `transcript?id=${encodeURIComponent(id)}`))
+  ).transcript;
+}
+
+export async function getTaskDiff(scope: ProjectScope, runId: string, taskId: string): Promise<TaskDiff> {
+  return (
+    await request<{ diff: TaskDiff }>(runUrl(scope, runId, `tasks/${encodeURIComponent(taskId)}/diff`))
+  ).diff;
+}
+
+export async function getRunAgents(scope: ProjectScope, runId: string): Promise<LiveAgent[]> {
+  return (
+    await request<{ agents: LiveAgent[] }>(`${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/agents`)
+  ).agents;
+}
+
+export async function steerAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; text: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "steer"), { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function interruptAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; note?: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "interrupt"), { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function answerAgent(
+  scope: ProjectScope,
+  runId: string,
+  agentId: string,
+  input: { actor: string; questionId: string; answer: string },
+): Promise<void> {
+  await request(agentUrl(scope, runId, agentId, "answer"), { method: "POST", body: JSON.stringify(input) });
+}
+
+function agentUrl(scope: ProjectScope, runId: string, agentId: string, action: string): string {
+  return `${apiRoot(scope)}/runs/${encodeURIComponent(runId)}/agents/${encodeURIComponent(agentId)}/${action}`;
 }
 
 export async function resumeRun(

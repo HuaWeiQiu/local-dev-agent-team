@@ -8,6 +8,7 @@ import { THEME_CHANGE_EVENT } from "./theme";
  */
 export interface FlowPalette {
   edge: string;
+  edgeActive: string;
   dot: string;
   minimapMask: string;
   tones: Record<"success" | "danger" | "warning" | "active" | "neutral", string>;
@@ -27,6 +28,7 @@ export function flowPalette(): FlowPalette {
     styles ? styles.getPropertyValue(name).trim() || fallback : fallback;
   cached = {
     edge: token("--line-strong", "#8a9691"),
+    edgeActive: token("--accent", "#2f8f83"),
     dot: token("--line", "#d2d3cb"),
     minimapMask: withAlpha(token("--bg", "#f4f6f5"), 0.72),
     tones: {

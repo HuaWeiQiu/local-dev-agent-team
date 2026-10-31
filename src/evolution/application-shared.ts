@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, writeFile } from "node:fs/promises";
+import { type chmod, type writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { NamedStrategy } from "../config/schema.js";
 import { GitManagerError } from "../git/manager.js";
