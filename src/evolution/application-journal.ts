@@ -60,6 +60,41 @@ export interface EvolutionApplicationJournalEnvironment {
  * All methods run on the coordinator's serial queue; the journal never
  * reorders or retries on its own.
  */
+type ReconcileSituation = "aborted" | "finalize" | "finish" | "unknown";
+
+interface ReconcileState {
+  situation: ReconcileSituation;
+  liveTarget: TargetDigestState;
+  revision: number;
+}
+
+interface ReconcileFacts {
+  targetIsOld: boolean;
+  targetIsNew: boolean;
+  catalogIsOld: boolean;
+  catalogIsNew: boolean;
+  promptGitApplied: boolean;
+  candidateKind: string;
+}
+
+/**
+ * The crash matrix: the application is only safe to settle when exactly one
+ * side moved, or when the prompt git work already landed.
+ */
+export function pickSituation(facts: ReconcileFacts): ReconcileSituation {
+  if (facts.targetIsOld && facts.catalogIsOld) return "aborted";
+  if (facts.targetIsNew && facts.catalogIsNew && facts.promptGitApplied) return "finalize";
+  if (facts.targetIsNew && facts.catalogIsOld) return "finish";
+  return "unknown";
+}
+
+/** The rename landed; only the directory fsync failed. */
+class RenameCompletedButSyncFailed extends Error {
+  constructor(readonly cause: unknown) {
+    super("directory fsync failed after rename");
+  }
+}
+
 export class EvolutionApplicationJournal {
   readonly #io: EvolutionApplicationFileIo;
   readonly #catalog: DurableEvolutionCatalog;
@@ -435,120 +470,159 @@ export class EvolutionApplicationJournal {
 
   async reconcilePendingOnOpen(): Promise<void> {
     const pending = this.#state.pending;
-    if (!pending) {
-      return;
-    }
-
+    if (!pending) return;
     const proposal = this.#catalog.getProposal(pending.proposalId);
-    if (!proposal) {
-      this.#state.recoveryRequired = true;
-      return;
-    }
+    if (!proposal) return this.#requireRecovery();
     if (proposal.candidate.kind === "role-prompt") {
       await this.#cleanPendingPromptTemps(proposal.candidate.path);
     }
+    const state = await this.#situationFor(pending, proposal);
+    if (!state) return this.#requireRecovery();
+    await this.#settlePending(pending, proposal, state);
+  }
 
+  /** Dispatch on where the crash left the target and the catalog. */
+  async #settlePending(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    state: ReconcileState,
+  ): Promise<void> {
+    if (state.situation === "aborted") {
+      return await this.#abortPending(pending, proposal, state.revision, state.liveTarget);
+    }
+    if (state.situation === "finalize") {
+      return await this.#completePendingFromLive(
+        pending,
+        proposal,
+        state.revision,
+        state.liveTarget,
+      );
+    }
+    if (state.situation === "finish") {
+      return await this.#finishCatalogMutation(pending, proposal, state.revision, state.liveTarget);
+    }
+    this.#requireRecovery();
+  }
+
+  /** Where the crash left the target and the catalog, or nothing when unsure. */
+  async #situationFor(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): Promise<ReconcileState | undefined> {
     let liveTarget: TargetDigestState;
     try {
       liveTarget = await this.#targets.readTargetState(proposal.candidate);
     } catch {
-      this.#state.recoveryRequired = true;
-      return;
+      return undefined;
     }
-
-    const { revision: catalogRevision, snapshot } = await this.#catalog.readSnapshot();
+    const { revision, snapshot } = await this.#catalog.readSnapshot();
     const targetIsOld = targetStatesEqual(liveTarget, pending.beforeTarget);
     const targetIsNew = targetStatesEqual(liveTarget, pending.afterTarget);
-    const catalogIsOld = catalogRevision === pending.catalogRevisionBefore;
-    const catalogIsNew = this.#catalogOutcomeMatchesPending(pending, snapshot, catalogRevision);
+    const catalogIsOld = revision === pending.catalogRevisionBefore;
+    const catalogIsNew = this.#catalogOutcomeMatchesPending(pending, snapshot, revision);
     const promptGitApplied =
       proposal.candidate.kind === "role-prompt"
         ? await this.#verifyPromptGitOutcome(pending)
         : true;
+    const situation = pickSituation({
+      targetIsOld,
+      targetIsNew,
+      catalogIsOld,
+      catalogIsNew,
+      promptGitApplied,
+      candidateKind: proposal.candidate.kind,
+    });
+    return { situation, liveTarget, revision };
+  }
 
-    // old target + old catalog => aborted
-    if (targetIsOld && catalogIsOld) {
-      if (
-        proposal.candidate.kind === "role-prompt" &&
-        !(await this.#verifyPromptAbortOutcome(pending))
-      ) {
-        this.#state.recoveryRequired = true;
-        return;
-      }
-      await this.finalizePendingAs("aborted", catalogRevision, liveTarget.digest);
-      return;
-    }
-
-    // new target + new catalog => finalize
-    if (targetIsNew && catalogIsNew && promptGitApplied) {
-      await this.#completePendingFromLive(pending, proposal, catalogRevision, liveTarget);
-      return;
-    }
-
-    // new target + old catalog => idempotently finish catalog mutation
-    if (targetIsNew && catalogIsOld) {
-      try {
-        if (proposal.candidate.kind === "role-prompt" && !promptGitApplied) {
-          await this.#restoreInterruptedPrompt(proposal, pending.beforeTarget);
-          await this.finalizePendingAs(
-            "aborted",
-            catalogRevision,
-            pending.beforeTarget.digest,
-          );
-          return;
-        }
-        if (pending.operation === "promote-and-apply") {
-          if (proposal.status === "evaluated") {
-            const evidence = proposal.evaluation?.evidence;
-            if (!evidence) {
-              this.#state.recoveryRequired = true;
-              return;
-            }
-            await this.#catalog.promote(
-              proposal.id,
-              evidence,
-              pending.humanDecision,
-              this.#state.catalogWriter,
-              pending.commandId,
-            );
-          } else if (proposal.status !== "promoted") {
-            this.#state.recoveryRequired = true;
-            return;
-          }
-        } else if (pending.operation === "rollback-applied") {
-          if (proposal.status === "promoted") {
-            await this.#catalog.rollback(
-              proposal.id,
-              pending.humanDecision,
-              this.#state.catalogWriter,
-              pending.commandId,
-            );
-          } else if (proposal.status !== "rolled-back") {
-            this.#state.recoveryRequired = true;
-            return;
-          }
-        } else if (pending.operation === "reconcile-promoted") {
-          // Catalog already promoted; only application record needed
-        } else {
-          this.#state.recoveryRequired = true;
-          return;
-        }
-        const finalProposal = this.#catalog.getProposal(pending.proposalId)!;
-        await this.#completePendingFromLive(
-          pending,
-          finalProposal,
-          this.#catalog.revision,
-          liveTarget,
-        );
-        return;
-      } catch {
-        this.#state.recoveryRequired = true;
-        return;
-      }
-    }
-
-    // anything else => fail closed
+  /** Used by the reconciliation steps: give up and demand operator recovery. */
+  #requireRecovery(): void {
     this.#state.recoveryRequired = true;
+  }
+
+  /** New target, old catalog: finish the catalog mutation idempotently. */
+  async #finishCatalogMutation(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    revision: number,
+    liveTarget: TargetDigestState,
+  ): Promise<void> {
+    try {
+      if (proposal.candidate.kind === "role-prompt" && !(await this.#verifyPromptGitOutcome(pending))) {
+        await this.#restoreInterruptedPrompt(proposal, pending.beforeTarget);
+        await this.finalizePendingAs("aborted", revision, pending.beforeTarget.digest);
+        return;
+      }
+      if (!(await this.#applyCatalogForPending(pending, proposal))) return this.#requireRecovery();
+      const finalProposal = this.#catalog.getProposal(pending.proposalId)!;
+      await this.#completePendingFromLive(pending, finalProposal, this.#catalog.revision, liveTarget);
+    } catch {
+      this.#requireRecovery();
+    }
+  }
+
+  /** Promote or roll back as the pending command asked, or report a conflict. */
+  async #applyCatalogForPending(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): Promise<boolean> {
+    if (pending.operation === "reconcile-promoted") return true;
+    if (pending.operation === "promote-and-apply") {
+      return await this.#finishPromotion(pending, proposal);
+    }
+    if (pending.operation === "rollback-applied") {
+      return await this.#finishRollback(pending, proposal);
+    }
+    return false;
+  }
+
+  async #finishPromotion(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): Promise<boolean> {
+    if (proposal.status === "promoted") return true;
+    if (proposal.status !== "evaluated") return false;
+    const evidence = proposal.evaluation?.evidence;
+    if (!evidence) return false;
+    await this.#catalog.promote(
+      proposal.id,
+      evidence,
+      pending.humanDecision,
+      this.#state.catalogWriter,
+      pending.commandId,
+    );
+    return true;
+  }
+
+  async #finishRollback(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): Promise<boolean> {
+    if (proposal.status === "rolled-back") return true;
+    if (proposal.status !== "promoted") return false;
+    await this.#catalog.rollback(
+      proposal.id,
+      pending.humanDecision,
+      this.#state.catalogWriter,
+      pending.commandId,
+    );
+    return true;
+  }
+
+  /** Old target, old catalog: nothing happened, so mark the command aborted. */
+  async #abortPending(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    revision: number,
+    liveTarget: TargetDigestState,
+  ): Promise<void> {
+    if (
+      proposal.candidate.kind === "role-prompt" &&
+      !(await this.#verifyPromptAbortOutcome(pending))
+    ) {
+      return this.#requireRecovery();
+    }
+    await this.finalizePendingAs("aborted", revision, liveTarget.digest);
   }
 
   #catalogOutcomeMatchesPending(
@@ -794,19 +868,7 @@ export class EvolutionApplicationJournal {
   ): Promise<void> {
     const pending = this.#state.pending;
     if (!pending) return;
-    const syntheticPredecessorCommandId = pending.previousApplication?.commandId;
-    if (
-      pending.operation === "reconcile-promoted" &&
-      syntheticPredecessorCommandId?.startsWith("legacy:") &&
-      !this.#state.commands.has(syntheticPredecessorCommandId) &&
-      ![...this.#state.applications.values()].some((application) =>
-        applicationHistoryHasCommand(application, syntheticPredecessorCommandId),
-      )
-    ) {
-      this.#state.completed = this.#state.completed.filter(
-        (record) => record.commandId !== syntheticPredecessorCommandId,
-      );
-    }
+    this.#dropSyntheticPredecessor(pending);
     this.#state.completed.push({
       commandId: pending.commandId,
       operation: pending.operation,
@@ -822,8 +884,33 @@ export class EvolutionApplicationJournal {
       completedAt: new Date(this.#now()).toISOString(),
       humanDecision: pending.humanDecision,
     });
+    this.#rememberCommand(pending, catalogRevision, afterDigest);
+    this.#state.pending = null;
+    this.#state.recoveryRequired = false;
+    await this.persist(this.#state.revision + 1);
+  }
+
+  /** A legacy synthetic predecessor leaves no trace once it is settled. */
+  #dropSyntheticPredecessor(pending: PendingApplicationOperation): void {
+    const id = pending.previousApplication?.commandId;
+    if (pending.operation !== "reconcile-promoted" || !id?.startsWith("legacy:")) return;
+    if (this.#state.commands.has(id)) return;
+    const seen = [...this.#state.applications.values()].some((application) =>
+      applicationHistoryHasCommand(application, id),
+    );
+    if (seen) return;
+    this.#state.completed = this.#state.completed.filter((record) => record.commandId !== id);
+  }
+
+  /** Record the completed command so a replay binds it to its result. */
+  #rememberCommand(
+    pending: PendingApplicationOperation,
+    catalogRevision: number,
+    afterDigest: string | null,
+  ): void {
     const proposal = this.#catalog.getProposal(pending.proposalId);
-    if (proposal && !this.#state.commands.has(pending.commandId)) {
+    if (!proposal || this.#state.commands.has(pending.commandId)) return;
+    {
       this.#state.commands.set(pending.commandId, {
         commandId: pending.commandId,
         operation: pending.operation,
@@ -844,9 +931,6 @@ export class EvolutionApplicationJournal {
         },
       });
     }
-    this.#state.pending = null;
-    this.#state.recoveryRequired = false;
-    await this.persist(this.#state.revision + 1);
   }
 
   async persist(nextRevision: number): Promise<void> {
@@ -856,6 +940,18 @@ export class EvolutionApplicationJournal {
         "Application state revision must advance by exactly one",
       );
     }
+    const payload = this.#validatedPayload();
+    const document: ApplicationDocument = {
+      version: EVOLUTION_APPLICATION_DOCUMENT_VERSION,
+      revision: nextRevision,
+      payloadDigest: computePayloadDigest(payload),
+      payload,
+    };
+    await this.#writeDocument(`${JSON.stringify(document)}\n`, nextRevision);
+  }
+
+  /** The in-memory state, validated: persisting an invalid state demands recovery. */
+  #validatedPayload(): ApplicationPayload {
     const candidatePayload: ApplicationPayload = {
       applications: [...this.#state.applications.values()].sort((a, b) =>
         a.proposalId < b.proposalId ? -1 : a.proposalId > b.proposalId ? 1 : 0,
@@ -867,81 +963,73 @@ export class EvolutionApplicationJournal {
       ),
       recoveryRequired: this.#state.recoveryRequired,
     };
-    const validatedPayload = applicationPayloadSchema.safeParse(candidatePayload);
-    if (!validatedPayload.success) {
-      this.#state.recoveryRequired = true;
-      this.#state.opened = false;
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        `Refusing to persist invalid application state: ${validatedPayload.error.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-          .join("; ")}`,
-      );
-    }
-    const payload = isolate(validatedPayload.data) as ApplicationPayload;
-    const document: ApplicationDocument = {
-      version: EVOLUTION_APPLICATION_DOCUMENT_VERSION,
-      revision: nextRevision,
-      payloadDigest: computePayloadDigest(payload),
-      payload,
-    };
-    const serialized = `${JSON.stringify(document)}\n`;
+    const validated = applicationPayloadSchema.safeParse(candidatePayload);
+    if (validated.success) return isolate(validated.data) as ApplicationPayload;
+    this.#state.recoveryRequired = true;
+    this.#state.opened = false;
+    const issues = validated.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ");
+    throw new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      `Refusing to persist invalid application state: ${issues}`,
+    );
+  }
+
+  /** Write through a temporary file, then rename and fsync the directory. */
+  async #writeDocument(serialized: string, nextRevision: number): Promise<void> {
     const temporaryPath = `${this.#applicationFilePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-    let renamed = false;
     try {
-      await assertSafeRegularFileOrMissing(
-        this.#io,
-        this.#catalog.root,
-        this.#applicationFilePath,
-      );
-      let diskContents: string | null;
-      try {
-        diskContents = await this.#io.readFile(this.#applicationFilePath, "utf8");
-      } catch (error) {
-        if (!isNotFound(error)) throw error;
-        diskContents = null;
-      }
-      if (diskContents !== this.#state.persistedContents) {
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          "Application state changed on disk; reopen before another mutation",
-        );
-      }
-      const handle = await this.#io.open(temporaryPath, "wx", 0o600);
-      try {
-        await handle.writeFile(serialized, "utf8");
-        await this.#io.chmod(temporaryPath, 0o600);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await this.#writeTemporary(serialized, temporaryPath);
       await this.#io.rename(temporaryPath, this.#applicationFilePath);
-      renamed = true;
-      await this.#io.syncDirectory(this.#evolutionDirectory);
-      this.#state.revision = nextRevision;
-      this.#state.persistedContents = serialized;
-      this.publishCommittedState();
+      await this.#commitAfterRename(serialized, nextRevision);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       this.#state.recoveryRequired = true;
       this.#state.opened = false;
-      if (renamed) {
-        this.#state.recoveryRequired = true;
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          `Application state rename completed but directory fsync failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-      throw new EvolutionApplicationError(
+      throw this.#persistError(error);
+    }
+  }
+
+  async #writeTemporary(serialized: string, temporaryPath: string): Promise<void> {
+    await assertSafeRegularFileOrMissing(this.#io, this.#catalog.root, this.#applicationFilePath);
+    const handle = await this.#io.open(temporaryPath, "wx", 0o600);
+    try {
+      await handle.writeFile(serialized, "utf8");
+      await this.#io.chmod(temporaryPath, 0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async #commitAfterRename(serialized: string, nextRevision: number): Promise<void> {
+    try {
+      await this.#io.syncDirectory(this.#evolutionDirectory);
+    } catch (error) {
+      this.#state.recoveryRequired = true;
+      throw new RenameCompletedButSyncFailed(error);
+    }
+    this.#state.revision = nextRevision;
+    this.#state.persistedContents = serialized;
+    this.publishCommittedState();
+  }
+
+  #persistError(error: unknown): EvolutionApplicationError {
+    if (error instanceof RenameCompletedButSyncFailed) {
+      return new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Failed to persist application state: ${
-          error instanceof Error ? error.message : String(error)
+        `Application state rename completed but directory fsync failed: ${
+          error.cause instanceof Error ? error.cause.message : String(error.cause)
         }`,
       );
     }
+    return new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      `Failed to persist application state: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
+
 
   publishCommittedState(): void {
     this.#state.publishedState = isolate({
@@ -992,53 +1080,78 @@ function parseApplicationDocument(
   text: string,
   filePath: string,
 ): { revision: number; payload: ApplicationPayload } {
+  assertDocumentSize(text, filePath);
+  const record = asDocument(parseJson(text, filePath), filePath);
+  assertDocumentKeys(record, filePath);
+  const payloadRecord = asPayload(record, filePath);
+  assertPayloadDepth(payloadRecord, filePath);
+  assertDigest(record, payloadRecord, filePath);
+  const payload = parsePayload(payloadRecord, filePath);
+  assertUniqueness(payload, filePath);
+  validateBindings(payload, filePath);
+  return { revision: record.revision as number, payload: isolate(payload) as ApplicationPayload };
+}
+
+function invalid(filePath: string, detail: string): EvolutionPersistenceValidationError {
+  return new EvolutionPersistenceValidationError(`Invalid application state at ${filePath}: ${detail}`);
+}
+
+function assertDocumentSize(text: string, filePath: string): void {
   if (Buffer.byteLength(text, "utf8") > 16 * 1024 * 1024) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: document exceeds 16 MiB`,
-    );
+    throw invalid(filePath, "document exceeds 16 MiB");
   }
-  let document: unknown;
+}
+
+function parseJson(text: string, filePath: string): unknown {
   try {
-    document = JSON.parse(text) as unknown;
+    return JSON.parse(text) as unknown;
   } catch {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: malformed JSON`,
-    );
+    throw invalid(filePath, "malformed JSON");
   }
+}
+
+function asDocument(document: unknown, filePath: string): Record<string, unknown> {
   if (!document || typeof document !== "object" || Array.isArray(document)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: expected object document`,
-    );
+    throw invalid(filePath, "expected object document");
   }
-  const record = document as Record<string, unknown>;
+  return document as Record<string, unknown>;
+}
+
+/** Version, revision and digest are the header every document must carry. */
+function assertDocumentKeys(record: Record<string, unknown>, filePath: string): void {
   assertExactKeys(
     record,
     ["version", "revision", "payloadDigest", "payload"],
     `application state at ${filePath}`,
   );
-  if (record.version !== EVOLUTION_APPLICATION_DOCUMENT_VERSION) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: unsupported version`,
-    );
+  for (const check of DOCUMENT_CHECKS) {
+    if (!check.holds(record)) throw invalid(filePath, check.detail);
   }
-  if (
-    typeof record.revision !== "number" ||
-    !Number.isSafeInteger(record.revision) ||
-    record.revision < 1
-  ) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: revision must be a positive safe integer`,
-    );
-  }
-  if (typeof record.payloadDigest !== "string" || !/^[a-f0-9]{64}$/.test(record.payloadDigest)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: payloadDigest must be lowercase SHA-256 hex`,
-    );
-  }
+}
+
+/** Every header rule names the value it protects. */
+const DOCUMENT_CHECKS: Array<{ holds(record: Record<string, unknown>): boolean; detail: string }> = [
+  {
+    holds: (record) => record.version === EVOLUTION_APPLICATION_DOCUMENT_VERSION,
+    detail: "unsupported version",
+  },
+  {
+    holds: (record) =>
+      typeof record.revision === "number" &&
+      Number.isSafeInteger(record.revision) &&
+      record.revision >= 1,
+    detail: "revision must be a positive safe integer",
+  },
+  {
+    holds: (record) =>
+      typeof record.payloadDigest === "string" && /^[a-f0-9]{64}$/.test(record.payloadDigest),
+    detail: "payloadDigest must be lowercase SHA-256 hex",
+  },
+];
+
+function asPayload(record: Record<string, unknown>, filePath: string): Record<string, unknown> {
   if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: payload must be an object`,
-    );
+    throw invalid(filePath, "payload must be an object");
   }
   const payloadRecord = record.payload as Record<string, unknown>;
   assertExactKeys(
@@ -1046,90 +1159,107 @@ function parseApplicationDocument(
     ["applications", "pending", "completed", "commands", "recoveryRequired"],
     `application state payload at ${filePath}`,
   );
+  return payloadRecord;
+}
+
+function assertPayloadDepth(payloadRecord: Record<string, unknown>, filePath: string): void {
   assertJsonNestingDepth(payloadRecord, filePath);
   assertRawApplicationHistoryDepth(payloadRecord, filePath);
-  const expectedDigest = computePayloadDigest(payloadRecord);
-  if (expectedDigest !== record.payloadDigest) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: payload digest mismatch`,
-    );
-  }
-  const parsedPayload = applicationPayloadSchema.safeParse(payloadRecord);
-  if (!parsedPayload.success) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: ${parsedPayload.error.issues
-        .map((issue) => `${issue.path.join(".") || "payload"}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
-  assertUniqueBy(
-    parsedPayload.data.applications,
-    (item) => item.proposalId,
-    "application proposalId",
-    filePath,
-  );
-  assertUniqueBy(
-    parsedPayload.data.applications,
-    (item) => targetKey(item.target),
-    "active application target",
-    filePath,
-  );
-  assertUniqueBy(
-    parsedPayload.data.completed,
-    (item) => item.commandId,
-    "completed commandId",
-    filePath,
-  );
-  assertUniqueBy(
-    parsedPayload.data.commands,
-    (item) => item.commandId,
-    "idempotency commandId",
-    filePath,
-  );
-  for (const application of parsedPayload.data.applications) {
-    validateApplicationRecord(application, filePath);
-  }
-  for (const command of parsedPayload.data.commands) {
-    const completed = parsedPayload.data.completed.find(
-      (record) => record.commandId === command.commandId,
-    );
-    if (
-      command.result.proposal.id !== command.proposalId ||
-      computeCandidateDigest(command.result.proposal.candidate) !== command.candidateDigest ||
-      !completed ||
-      completed.operation !== command.operation ||
-      completed.proposalId !== command.proposalId ||
-      completed.candidateDigest !== command.candidateDigest ||
-      completed.operator !== command.operator ||
-      completed.reason !== command.reason ||
-      completed.catalogRevisionBefore !== command.expectedRevision ||
-      completed.catalogRevisionAfter !== command.result.committedCatalogRevision ||
-      completed.status !== command.result.applicationStatus ||
-      completed.beforeTargetDigest !== command.result.beforeTargetDigest ||
-      completed.afterTargetDigest !== command.result.afterTargetDigest ||
-      completed.humanDecision.actor !== command.operator ||
-      completed.humanDecision.reason !== command.reason
-    ) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid application state at ${filePath}: command '${command.commandId}' result binding mismatch`,
-      );
-    }
-  }
-  const pending = parsedPayload.data.pending;
-  if (
-    pending &&
-    (parsedPayload.data.commands.some((item) => item.commandId === pending.commandId) ||
-      parsedPayload.data.completed.some((item) => item.commandId === pending.commandId))
-  ) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: pending commandId is already completed`,
-    );
-  }
+}
 
-  return {
-    revision: record.revision,
-    payload: isolate(parsedPayload.data) as ApplicationPayload,
-  };
+function assertDigest(
+  record: Record<string, unknown>,
+  payloadRecord: Record<string, unknown>,
+  filePath: string,
+): void {
+  if (computePayloadDigest(payloadRecord) !== record.payloadDigest) {
+    throw invalid(filePath, "payload digest mismatch");
+  }
+}
+
+function parsePayload(payloadRecord: Record<string, unknown>, filePath: string): ApplicationPayload {
+  const parsed = applicationPayloadSchema.safeParse(payloadRecord);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues
+    .map((issue) => `${issue.path.join(".") || "payload"}: ${issue.message}`)
+    .join("; ");
+  throw invalid(filePath, issues);
+}
+
+function assertUniqueness(payload: ApplicationPayload, filePath: string): void {
+  assertUniqueBy(payload.applications, (item) => item.proposalId, "application proposalId", filePath);
+  assertUniqueBy(payload.applications, (item) => targetKey(item.target), "active application target", filePath);
+  assertUniqueBy(payload.completed, (item) => item.commandId, "completed commandId", filePath);
+  assertUniqueBy(payload.commands, (item) => item.commandId, "idempotency commandId", filePath);
+}
+
+/** Every command must be completed exactly as recorded, and none twice. */
+function validateBindings(payload: ApplicationPayload, filePath: string): void {
+  for (const application of payload.applications) validateApplicationRecord(application, filePath);
+  for (const command of payload.commands) assertCommandBinding(payload, command, filePath);
+  assertNoPendingCollision(payload, filePath);
+}
+
+function assertCommandBinding(
+  payload: ApplicationPayload,
+  command: ApplicationPayload["commands"][number],
+  filePath: string,
+): void {
+  const completed = payload.completed.find((record) => record.commandId === command.commandId);
+  if (bindingMatches(command, completed)) return;
+  throw invalid(filePath, `command '${command.commandId}' result binding mismatch`);
+}
+
+/** Every recorded field must echo the command it answers. */
+function bindingMatches(
+  command: ApplicationPayload["commands"][number],
+  completed: ApplicationPayload["completed"][number] | undefined,
+): boolean {
+  if (!completed) return false;
+  return BINDING_FIELDS.every((field) => field.matches(command, completed));
+}
+
+const BINDING_FIELDS: Array<{
+  matches(
+    command: ApplicationPayload["commands"][number],
+    completed: ApplicationPayload["completed"][number],
+  ): boolean;
+}> = [
+  { matches: (command) => command.result.proposal.id === command.proposalId },
+  {
+    matches: (command) =>
+      computeCandidateDigest(command.result.proposal.candidate) === command.candidateDigest,
+  },
+  { matches: (command, completed) => completed.operation === command.operation },
+  { matches: (command, completed) => completed.proposalId === command.proposalId },
+  { matches: (command, completed) => completed.candidateDigest === command.candidateDigest },
+  { matches: (command, completed) => completed.operator === command.operator },
+  { matches: (command, completed) => completed.reason === command.reason },
+  { matches: (command, completed) => completed.catalogRevisionBefore === command.expectedRevision },
+  {
+    matches: (command, completed) =>
+      completed.catalogRevisionAfter === command.result.committedCatalogRevision,
+  },
+  { matches: (command, completed) => completed.status === command.result.applicationStatus },
+  {
+    matches: (command, completed) =>
+      completed.beforeTargetDigest === command.result.beforeTargetDigest,
+  },
+  {
+    matches: (command, completed) =>
+      completed.afterTargetDigest === command.result.afterTargetDigest,
+  },
+  { matches: (command, completed) => completed.humanDecision.actor === command.operator },
+  { matches: (command, completed) => completed.humanDecision.reason === command.reason },
+];
+
+function assertNoPendingCollision(payload: ApplicationPayload, filePath: string): void {
+  const pending = payload.pending;
+  if (!pending) return;
+  const clashes =
+    payload.commands.some((item) => item.commandId === pending.commandId) ||
+    payload.completed.some((item) => item.commandId === pending.commandId);
+  if (clashes) throw invalid(filePath, "pending commandId is already completed");
 }
 
 function assertJsonNestingDepth(value: unknown, filePath: string): void {
@@ -1148,16 +1278,21 @@ function assertJsonNestingDepth(value: unknown, filePath: string): void {
   }
 }
 
+/** Applications plus any pending predecessor are the history entry points. */
+function historyRoots(payload: Record<string, unknown>): unknown[] {
+  const roots: unknown[] = Array.isArray(payload.applications) ? [...payload.applications] : [];
+  const pending = payload.pending;
+  if (pending && typeof pending === "object" && !Array.isArray(pending)) {
+    roots.push((pending as Record<string, unknown>).previousApplication);
+  }
+  return roots;
+}
+
 function assertRawApplicationHistoryDepth(
   payload: Record<string, unknown>,
   filePath: string,
 ): void {
-  const roots: unknown[] = Array.isArray(payload.applications)
-    ? [...payload.applications]
-    : [];
-  if (payload.pending && typeof payload.pending === "object" && !Array.isArray(payload.pending)) {
-    roots.push((payload.pending as Record<string, unknown>).previousApplication);
-  }
+  const roots = historyRoots(payload);
   for (const root of roots) {
     let current = root;
     let depth = 0;
@@ -1197,32 +1332,40 @@ function validateApplicationRecord(
   depth = 0,
 ): void {
   if (depth >= MAX_APPLICATION_HISTORY_DEPTH) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: application history is too deep`,
-    );
+    throw invalid(filePath, "application history is too deep");
   }
-  if (
-    application.beforeTargetDigest !== application.beforeTarget.digest ||
-    application.afterTargetDigest !== application.afterTarget.digest ||
-    targetKey(application.target) !== targetKeyFromState(application.afterTarget) ||
-    targetKeyFromState(application.beforeTarget) !== targetKey(application.target)
-  ) {
-    throw new EvolutionPersistenceValidationError(
-      `Invalid application state at ${filePath}: application '${application.proposalId}' target binding mismatch`,
-    );
-  }
+  assertTargetBinding(application, filePath);
+  assertHistoryBinding(application, filePath);
   if (application.previousApplication) {
-    if (
-      targetKey(application.previousApplication.target) !== targetKey(application.target) ||
-      application.previousApplication.afterTargetDigest !== application.beforeTargetDigest
-    ) {
-      throw new EvolutionPersistenceValidationError(
-        `Invalid application state at ${filePath}: application '${application.proposalId}' history mismatch`,
-      );
-    }
     validateApplicationRecord(application.previousApplication, filePath, depth + 1);
   }
 }
+
+/** The digests and targets must agree with the state each side claims. */
+function assertTargetBinding(application: ApplicationRecord, filePath: string): void {
+  const key = targetKey(application.target);
+  const matches =
+    application.beforeTargetDigest === application.beforeTarget.digest &&
+    application.afterTargetDigest === application.afterTarget.digest &&
+    key === targetKeyFromState(application.afterTarget) &&
+    targetKeyFromState(application.beforeTarget) === key;
+  if (!matches) {
+    throw invalid(filePath, `application '${application.proposalId}' target binding mismatch`);
+  }
+}
+
+/** A history entry must describe the state its successor started from. */
+function assertHistoryBinding(application: ApplicationRecord, filePath: string): void {
+  const previous = application.previousApplication;
+  if (!previous) return;
+  const matches =
+    targetKey(previous.target) === targetKey(application.target) &&
+    previous.afterTargetDigest === application.beforeTargetDigest;
+  if (!matches) {
+    throw invalid(filePath, `application '${application.proposalId}' history mismatch`);
+  }
+}
+
 
 function assertExactKeys(
   record: Record<string, unknown>,
