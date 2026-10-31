@@ -35,7 +35,7 @@ export function Modal({ open, onOpenChange, title, description, children, footer
           onInteractOutside={(event) => locked && event.preventDefault()}
           {...(description ? {} : { "aria-describedby": undefined })}
           className={cn(
-            "bd fixed left-1/2 top-1/2 z-50 flex max-h-[min(88vh,820px)] w-[min(640px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl bg-surface shadow-modal outline-none data-[state=open]:animate-[pop-in_160ms_cubic-bezier(0.2,0.8,0.2,1)]",
+            "bd fixed left-1/2 top-1/2 z-50 flex max-h-[min(88vh,820px)] w-[min(640px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl bg-surface shadow-modal outline-none data-[state=open]:animate-[pop-in_120ms_ease-out_both]",
             className,
           )}
         >
