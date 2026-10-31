@@ -1175,7 +1175,10 @@ describe("durable deletion trails", () => {
       humanDecision({ reason: "Not shipping", decidedAt: "2026-08-11T01:03:00.000Z" }),
     );
     expect(evaluated.status).toBe("evaluated");
-    durable.deleteProposal(id, humanDecision({ reason: "gone", decidedAt: "2026-08-11T01:04:00.000Z" }));
+    await durable.deleteProposal(
+      id,
+      humanDecision({ reason: "gone", decidedAt: "2026-08-11T01:04:00.000Z" }),
+    );
   }
 
   it("reopens a catalog whose proposal was deleted and keeps its trail valid", async () => {
