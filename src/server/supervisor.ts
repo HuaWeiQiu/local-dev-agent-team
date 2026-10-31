@@ -11,6 +11,7 @@ import {
 } from "../interventions/plan-edit.js";
 import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
 import { TicketService } from "../authority/ticket-service.js";
+import type { Ticket } from "../authority/ticket.js";
 import { readAdmission } from "../intake/admission.js";
 import type { DroppedEvent } from "../intake/github-source.js";
 import type { Trigger } from "../intake/types.js";
@@ -491,6 +492,11 @@ export class RunSupervisor {
         runId: started.runId,
       },
     };
+  }
+
+  /** Every Ticket this project knows about, oldest first. */
+  async listTickets(): Promise<Ticket[]> {
+    return await this.ticketService().list();
   }
 
   /** Whether this deployment accepts work from a webhook. */

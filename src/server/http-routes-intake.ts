@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { attentionQueue, workingCount } from "../authority/attention.js";
 import { HttpError, readJson, sendJson, type ProjectApiRoute } from "./http-common.js";
 
 /** One webhook: the event name, its payload, and who counts as the agent. */
@@ -24,6 +25,18 @@ const githubIntakeRequestSchema = z.object({
 });
 
 export const intakeRoutes: ProjectApiRoute[] = [
+  {
+    method: "GET",
+    pattern: "/tickets",
+    handler: async (context, _request, response) => {
+      const tickets = await context.supervisor.listTickets();
+      sendJson(response, 200, {
+        attention: attentionQueue(tickets),
+        working: workingCount(tickets),
+        total: tickets.length,
+      });
+    },
+  },
   {
     method: "POST",
     pattern: "/intake/github",

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { intakeRoutes } from "../src/server/http-routes-intake.js";
 
-const route = intakeRoutes[0]!;
+const route = intakeRoutes.find((entry) => entry.pattern === "/intake/github")!;
 
 function context(intakeEnabled: boolean) {
   const calls: unknown[] = [];
@@ -77,5 +77,29 @@ describe("intake route with intake on", () => {
         undefined,
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("tickets route", () => {
+  it("answers with the attention queue and a count of what is moving", async () => {
+    const route = intakeRoutes.find((entry) => entry.pattern === "/tickets")!;
+    expect(route.method).toBe("GET");
+    const written: unknown[] = [];
+    const res = {
+      statusCode: 0,
+      setHeader: () => res,
+      writeHead: (status: number) => ((res.statusCode = status), res),
+      end: (chunk: string) => {
+        written.push(JSON.parse(chunk));
+        return res;
+      },
+    } as never;
+    const context = {
+      supervisor: {
+        listTickets: async () => [],
+      },
+    } as never;
+    await route.handler(context, {} as never, res, new URL("http://x/tickets"), "/api", "http://x", undefined);
+    expect(written[0]).toEqual({ attention: [], working: 0, total: 0 });
   });
 });
