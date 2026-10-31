@@ -115,39 +115,19 @@ async function listenHttpServer(
   ) => Promise<void>,
   options: HttpServerOptions,
 ): Promise<ListeningControlServer> {
-  assertLoopbackHost(options.host);
-  if (options.sessionToken && !desktopSessionTokenPattern.test(options.sessionToken)) {
-    throw new Error("Desktop session token must contain 64 lowercase hexadecimal characters");
-  }
+  assertServerOptions(options);
   const staticDirectory = options.staticDirectory ?? bundledWebDirectory;
   let serverOrigin = "";
-  const sessionOperator = options.sessionToken
-    ? `local-session:${createHash("sha256").update(options.sessionToken).digest("hex").slice(0, 16)}`
-    : undefined;
+  const sessionOperator = sessionOperatorFor(options.sessionToken);
   const server = createServer((request, response) => {
     setSecurityHeaders(response);
-    void Promise.resolve()
-      .then(() => handleDesktopSession(request, response, options.sessionToken))
-      .then(async (handled) => {
-        if (!handled) {
-          await handler(request, response, staticDirectory, serverOrigin, sessionOperator);
-        }
-      })
-      .catch((error: unknown) => {
-        if (response.headersSent) {
-          response.destroy(error instanceof Error ? error : undefined);
-          return;
-        }
-        const handled = error instanceof HttpError;
-        sendJson(response, handled ? error.status : 500, {
-          error: handled ? error.message : "Internal server error",
-          ...(handled
-            ? error.code
-              ? { code: error.code }
-              : {}
-            : { code: "INTERNAL_ERROR" }),
-        });
-      });
+    void runRequest(request, response, {
+      sessionToken: options.sessionToken,
+      handler,
+      staticDirectory,
+      origin: () => serverOrigin,
+      sessionOperator,
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -171,6 +151,72 @@ async function listenHttpServer(
       return closePromise;
     },
   };
+}
+
+/**
+ * One request: the session handshake first, then the caller's handler, and one
+ * place that turns a thrown error into a response.
+ */
+async function runRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  context: {
+    sessionToken: string | undefined;
+    handler: (
+      request: IncomingMessage,
+      response: ServerResponse,
+      staticDirectory: string,
+      serverOrigin: string,
+      sessionOperator: string | undefined,
+    ) => Promise<void>;
+    staticDirectory: string;
+    origin: () => string;
+    sessionOperator: string | undefined;
+  },
+): Promise<void> {
+  try {
+    if (await handleDesktopSession(request, response, context.sessionToken)) return;
+    await context.handler(
+      request,
+      response,
+      context.staticDirectory,
+      context.origin(),
+      context.sessionOperator,
+    );
+  } catch (error) {
+    respondWithError(response, error);
+  }
+}
+
+function respondWithError(response: ServerResponse, error: unknown): void {
+  if (response.headersSent) {
+    response.destroy(error instanceof Error ? error : undefined);
+    return;
+  }
+  sendJson(response, ...errorBody(error));
+}
+
+/** One place decides what a client is told: its own error, or a generic 500. */
+function errorBody(error: unknown): [number, { error: string; code: string }] {
+  if (error instanceof HttpError) {
+    return [error.status, { error: error.message, code: error.code ?? "REQUEST_FAILED" }];
+  }
+  return [500, { error: "Internal server error", code: "INTERNAL_ERROR" }];
+}
+
+/** The listen host and session token are checked before the socket opens. */
+function assertServerOptions(options: HttpServerOptions): void {
+  assertLoopbackHost(options.host);
+  if (options.sessionToken && !desktopSessionTokenPattern.test(options.sessionToken)) {
+    throw new Error("Desktop session token must contain 64 lowercase hexadecimal characters");
+  }
+}
+
+/** A desktop session names its operator without keeping the token. */
+function sessionOperatorFor(sessionToken: string | undefined): string | undefined {
+  if (!sessionToken) return undefined;
+  const digest = createHash("sha256").update(sessionToken).digest("hex").slice(0, 16);
+  return `local-session:${digest}`;
 }
 
 function handleDesktopSession(
@@ -229,6 +275,59 @@ function secureEqual(candidate: string | null | undefined, expected: string): bo
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/** `/api/projects/:id/...` belongs to one project; anything else is not ours. */
+async function dispatchProjectScoped(
+  byId: Map<string, ProjectHttpContext>,
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  serverOrigin: string,
+  sessionOperator: string | undefined,
+): Promise<boolean> {
+  const match = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/|$)/);
+  if (!match?.[1]) return false;
+  const context = byId.get(decodePathSegment(match[1]));
+  if (!context) throw new HttpError(404, "Project not found");
+  return await dispatchProjectApi(
+    context,
+    request,
+    response,
+    url,
+    `/api/projects/${match[1]}`,
+    serverOrigin,
+    sessionOperator,
+  );
+}
+
+/** Every API request starts the same way: security headers, origin, target. */
+function beginApiRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  serverOrigin: string,
+): { url: URL; method: string } {
+  setSecurityHeaders(response);
+  validateOrigin(request, serverOrigin);
+  return { url: requestUrl(request), method: request.method ?? "GET" };
+}
+
+function requestUrl(request: IncomingMessage): URL {
+  return new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+}
+
+/** A request no route claimed is served as a web asset or reported as missing. */
+async function finishApiRequest(
+  response: ServerResponse,
+  url: URL,
+  method: string,
+  staticDirectory: string,
+): Promise<void> {
+  const readable = method === "GET" || method === "HEAD";
+  if (readable && !isApiPath(url.pathname)) {
+    if (await serveWebAsset(response, url.pathname, staticDirectory, method === "HEAD")) return;
+  }
+  throw new HttpError(404, "Route not found");
+}
+
 async function handleSingleProjectRequest(
   context: ProjectHttpContext,
   request: IncomingMessage,
@@ -237,10 +336,7 @@ async function handleSingleProjectRequest(
   serverOrigin: string,
   sessionOperator: string | undefined,
 ): Promise<void> {
-  setSecurityHeaders(response);
-  validateOrigin(request, serverOrigin);
-  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  const method = request.method ?? "GET";
+  const { url, method } = beginApiRequest(request, response, serverOrigin);
 
   if (method === "GET" && url.pathname === "/api/workspace") {
     sendJson(response, 200, workspaceProjection("single", [context]));
@@ -262,12 +358,7 @@ async function handleSingleProjectRequest(
   ) {
     return;
   }
-  if ((method === "GET" || method === "HEAD") && !isApiPath(url.pathname)) {
-    if (await serveWebAsset(response, url.pathname, staticDirectory, method === "HEAD")) {
-      return;
-    }
-  }
-  throw new HttpError(404, "Route not found");
+  await finishApiRequest(response, url, method, staticDirectory);
 }
 
 async function handleWorkspaceRequest(
@@ -279,10 +370,7 @@ async function handleWorkspaceRequest(
   serverOrigin: string,
   sessionOperator: string | undefined,
 ): Promise<void> {
-  setSecurityHeaders(response);
-  validateOrigin(request, serverOrigin);
-  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  const method = request.method ?? "GET";
+  const { url, method } = beginApiRequest(request, response, serverOrigin);
 
   if (method === "GET" && (url.pathname === "/api/workspace" || url.pathname === "/api/projects")) {
     sendJson(response, 200, workspaceProjection("workspace", projects));
@@ -299,34 +387,10 @@ async function handleWorkspaceRequest(
   if (await dispatchDesktopApi(request, response, url, method, serverOrigin, sessionOperator)) {
     return;
   }
-  const match = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/|$)/);
-  if (match?.[1]) {
-    const projectId = decodePathSegment(match[1]);
-    const context = byId.get(projectId);
-    if (!context) {
-      throw new HttpError(404, "Project not found");
-    }
-    const apiRoot = `/api/projects/${match[1]}`;
-    if (
-      await dispatchProjectApi(
-        context,
-        request,
-        response,
-        url,
-        apiRoot,
-        serverOrigin,
-        sessionOperator,
-      )
-    ) {
-      return;
-    }
+  if (await dispatchProjectScoped(byId, request, response, url, serverOrigin, sessionOperator)) {
+    return;
   }
-  if ((method === "GET" || method === "HEAD") && !isApiPath(url.pathname)) {
-    if (await serveWebAsset(response, url.pathname, staticDirectory, method === "HEAD")) {
-      return;
-    }
-  }
-  throw new HttpError(404, "Route not found");
+  await finishApiRequest(response, url, method, staticDirectory);
 }
 
 // Route matching is unambiguous across slices (no two patterns share method,
@@ -432,25 +496,35 @@ function readDesktopProjectRegistry(
   connected: Array<{ id: string; name: string; defaultBranch: string; connected: true }>,
 ): DesktopRegistryEntry[] | undefined {
   const registryPath = process.env.AGENT_TEAM_PROJECT_REGISTRY?.trim();
-  if (!registryPath) {
-    return connected.map((project) => ({
-      id: project.id,
-      name: project.name,
-      path: "",
-      connected: true,
-      occupancy: "ours",
-    }));
-  }
+  if (!registryPath) return connectedOnly(connected);
+  return readRegistry(registryPath, connected);
+}
+
+/** Without a registry file, the projects this process serves are the whole list. */
+export function connectedOnly(
+  connected: Array<{ id: string; name: string; defaultBranch: string; connected: true }>,
+): DesktopRegistryEntry[] {
+  return connected.map((project) => ({
+    id: project.id,
+    name: project.name,
+    path: "",
+    connected: true,
+    occupancy: "ours",
+  }));
+}
+
+/** A registry file lists every known project and flags the ones served here. */
+export function readRegistry(
+  registryPath: string,
+  connected: Array<{ id: string }>,
+): DesktopRegistryEntry[] | undefined {
   try {
     const raw = JSON.parse(readFileSync(registryPath, "utf8")) as {
       projects?: DesktopRegistryEntry[];
     };
     if (!Array.isArray(raw.projects) || raw.projects.length === 0) return undefined;
     const connectedIds = new Set(connected.map((project) => project.id));
-    return raw.projects.map((entry) => ({
-      ...entry,
-      connected: connectedIds.has(entry.id),
-    }));
+    return raw.projects.map((entry) => ({ ...entry, connected: connectedIds.has(entry.id) }));
   } catch {
     return undefined;
   }
