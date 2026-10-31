@@ -25,7 +25,6 @@ async function fixture() {
     stringify(createDefaultConfig("fixture")),
   );
   const loaded = await loadConfig(root);
-  const loaded_state_dir = loaded.config.project.stateDirectory;
   const events = new SqliteEventStore(path.join(root, ".agent-team", "events.sqlite"));
   return { root, loaded, events };
 }

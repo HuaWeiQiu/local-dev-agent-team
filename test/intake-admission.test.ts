@@ -1,18 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { addressesAgent, admissionThread, readAdmission } from "../src/intake/admission.js";
 import { makeTrigger } from "../src/intake/types.js";
-import { evaluateGate } from "../src/authority/gate.js";
-import type { PolicySnapshot } from "../src/authority/types.js";
-
-const policy: PolicySnapshot = {
-  version: "v1",
-  allowedActors: ["alice"],
-  allowsProactive: false,
-  rules: ["gate:plan"],
-};
-
-const decide = (trigger: Parameters<typeof evaluateGate>[0]["trigger"], addressed: boolean) =>
-  evaluateGate({ trigger, policy, addressed, openTickets: [] });
 
 function comment(body: string, login = "alice"): Record<string, unknown> {
   return {
