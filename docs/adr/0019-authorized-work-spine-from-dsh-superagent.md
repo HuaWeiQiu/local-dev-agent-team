@@ -148,7 +148,7 @@ exit 0、走正式 PR。**任何阶段都不允许让现存的 run 流水线停�
 
 ## 实施记录（2026-10-31）
 
-13 个 PR，测试 1320 → 1586。每一阶段独立合并，每次都跑过 `pnpm test` / `check` / `lint` 与门禁。
+19 个 PR（#69–#92），测试 1320 → 1615。每一阶段独立合并，每次都跑过 `pnpm test` / `check` / `lint` 与门禁。
 
 | 阶段 | 落地 | PR | 接到真实路径了吗 |
 | --- | --- | --- | --- |
@@ -161,6 +161,8 @@ exit 0、走正式 PR。**任何阶段都不允许让现存的 run 流水线停�
 | P4 入口 | `intake/admission.ts`、`Supervisor.admitEvent`、`POST /api/intake/github` | #78、#80、#81 | 是，默认关闭 |
 | P5 attention | `authority/attention.ts`、`GET /api/tickets`、`web/src/components/AttentionPanel.tsx` | #82、#83 | 数据源是；**面板未挂页面** |
 | P6 Outbox | `authority/outbox.ts`、`outbox-store.ts`、接 `github/publish.ts` | #84、#86、#87 | 是：发布前写回执 |
+
+收口：ADR 本身 #69/#88，baseline 冻结 #85/#92，另有背景债清理 #89–#91。
 
 ### 没有做的，以及为什么
 
