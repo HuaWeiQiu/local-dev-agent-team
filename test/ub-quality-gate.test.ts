@@ -8,6 +8,7 @@ import {
   parseArgs,
   readBaseline,
   baselineStep,
+  layerTargets,
   layers,
   readScores,
   regressions,
@@ -45,17 +46,20 @@ describe("ub quality gate wrapper", () => {
       ub: "",
       extra: [],
     });
-    expect(toolArgs(options)).toEqual([
+    // Changed mode analyzes exactly the changed files, per layer.
+    expect(toolArgs(options, "typescript", [])).toBeUndefined();
+    expect(toolArgs(options, "typescript", ["web/src/App.tsx"])).toEqual([
       "crapper",
-      "--changed",
-      "--source-root",
-      "src",
-      "--source-root",
-      "web",
-      "--source-root",
-      "scripts",
+      "web/src/App.tsx",
       "--threshold",
       "10",
+    ]);
+    expect(toolArgs(options, "rust", ["src-tauri/src/lib.rs", "web/src/App.tsx"])).toEqual([
+      "crapper",
+      "src-tauri/src/lib.rs",
+      "--no-coverage",
+      "--threshold",
+      "20",
     ]);
   });
 
@@ -88,19 +92,10 @@ describe("ub quality gate wrapper", () => {
     expect(result.status).toBe(2);
 
     // The stub logs its last call: the TypeScript layer (Rust runs first).
+    // Only the TypeScript layer has a changed file in this repository state.
     const forwarded = (await readFile(log, "utf8")).trim().split("\n");
-    expect(forwarded).toEqual([
-      "crapper",
-      "--changed",
-      "--source-root",
-      "src",
-      "--source-root",
-      "web",
-      "--source-root",
-      "scripts",
-      "--threshold",
-      "12",
-    ]);
+    expect(forwarded[0]).toBe("crapper");
+    expect(forwarded.at(-2)).toBe("--threshold");
   });
 
   it("scans the whole project when --all is given", async () => {
@@ -135,16 +130,16 @@ describe("ub quality gate wrapper", () => {
 describe("gate layering and baseline", () => {
   it("scores the Rust crate with its own complexity-only threshold", () => {
     const options = parseArgs([], {});
-    expect(toolArgs(options, "rust")).toEqual([
+    expect(toolArgs(options, "rust", ["src-tauri/src/lib.rs"])).toEqual([
       "crapper",
-      "src-tauri",
+      "src-tauri/src/lib.rs",
       "--no-coverage",
       "--threshold",
       "20",
     ]);
     const custom = parseArgs(["--rust-threshold", "8"], {});
     expect(custom.rustThreshold).toBe("8");
-    expect(toolArgs(custom, "rust")).toContain("8");
+    expect(toolArgs(custom, "rust", ["src-tauri/src/lib.rs"])).toContain("8");
   });
 
   it("reads scores from the EDN crapper writes", async () => {
@@ -254,5 +249,20 @@ describe("baseline step", () => {
     const root = await workdir([]);
     expect(baselineStep({ ...parseArgs([], {}), baseline: "missing.json" }, root)).toBe(0);
     expect(baselineStep({ ...parseArgs(["--tool", "dryer"], {}) }, root)).toBe(0);
+  });
+});
+
+describe("layer targets", () => {
+  it("partitions the changed files by extension owner", () => {
+    const options = parseArgs([], {});
+    const changed = ["web/src/App.tsx", "src-tauri/src/lib.rs", "scripts/ub-quality-gate.mjs"];
+    expect(layerTargets(options, "rust", changed)).toEqual(["src-tauri/src/lib.rs"]);
+    expect(layerTargets(options, "typescript", changed)).toEqual([
+      "web/src/App.tsx",
+      "scripts/ub-quality-gate.mjs",
+    ]);
+    const all = parseArgs(["--all"], {});
+    expect(layerTargets(all, "rust", [])).toEqual(["src-tauri"]);
+    expect(layerTargets(all, "typescript", [])).toEqual(["src", "web", "scripts"]);
   });
 });

@@ -121,20 +121,46 @@ function installedOrUndefined(candidate) {
   return existsSync(candidate) ? candidate : undefined;
 }
 
-export function toolArgs(options, layer = "typescript") {
-  const args = [options.tool];
-  if (options.tool === "crapper" && layer === "rust") {
+/**
+ * Paths to analyze for one layer. crapper honors `--changed` over any filter,
+ * so a layered run has to name its files: the changed set is partitioned here.
+ */
+export function layerTargets(options, layer, changedFiles) {
+  if (!options.changed) {
+    return layer === "rust" ? [RUST_ROOT] : [...SOURCE_ROOTS];
+  }
+  const wanted = changedFiles.filter((file) =>
+    layer === "rust" ? file.startsWith(`${RUST_ROOT}/`) : !file.startsWith(`${RUST_ROOT}/`),
+  );
+  return wanted;
+}
+
+export function toolArgs(options, layer = "typescript", changedFiles = []) {
+  const targets = layerTargets(options, layer, changedFiles);
+  if (options.tool !== "crapper") {
+    return [options.tool, "--threshold", options.threshold, ...options.extra];
+  }
+  if (targets.length === 0) return undefined;
+  const args = [options.tool, ...targets];
+  if (layer === "rust") {
     // Complexity only: see RUST_ROOT above.
-    args.push(RUST_ROOT, "--no-coverage", "--threshold", options.rustThreshold);
-  } else if (options.tool === "crapper") {
-    if (options.changed) args.push("--changed");
-    // The Rust crate is scored by its own layer; keep it out of this walk.
-    for (const root of SOURCE_ROOTS) args.push("--source-root", root);
-    args.push("--threshold", options.threshold);
+    args.push("--no-coverage", "--threshold", options.rustThreshold);
   } else {
     args.push("--threshold", options.threshold);
   }
   return [...args, ...options.extra];
+}
+
+/** Source files reported by git, relative to the repository root. */
+export function changedSources(cwd = process.cwd()) {
+  const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+  if (result.status !== 0 || !result.stdout) return undefined;
+  const files = result.stdout
+    .split("\n")
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean)
+    .map((entry) => entry.split(" -> ").pop() ?? entry);
+  return files.filter((file) => /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|rs)$/.test(file));
 }
 
 /** Worst CRAP per function, read from the EDN crapper writes. */
@@ -174,6 +200,9 @@ export function regressions(scores, baseline, threshold = 10) {
 export function main(argv = process.argv.slice(2)) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
+  if (prepared.options.changed && layersInput(prepared.options).length === 0) {
+    return baselineStep(prepared.options);
+  }
   const failed = runLayers(prepared.ub, prepared.options);
   // Seeding a baseline records reality even when the layers are still red.
   if (prepared.options.updateBaseline) return baselineStep(prepared.options);
@@ -181,12 +210,17 @@ export function main(argv = process.argv.slice(2)) {
 }
 
 function runLayers(ub, options) {
-  let worst = 0;
-  for (const layer of layers(options)) {
-    const status = runLayer(ub, options, layer);
-    if (status !== 0 && worst === 0) worst = status;
-  }
-  return worst;
+  const files = layersInput(options);
+  return layers(options).reduce((worst, layer) => {
+    const args = toolArgs(options, layer, files);
+    return args ? Math.max(worst, runLayer(ub, args, layer)) : worst;
+  }, 0);
+}
+
+/** The changed files, or an empty list when nothing changed. */
+function layersInput(options) {
+  if (!options.changed) return [];
+  return changedSources() ?? [];
 }
 
 /** Parse the arguments and find the tool chain, or report why we stop. */
@@ -213,8 +247,9 @@ function prepare(argv) {
   return { ub, options };
 }
 
-function runLayer(ub, options, layer) {
-  const result = spawnSync(ub, toolArgs(options, layer), { stdio: "inherit" });
+function runLayer(ub, args, layer) {
+  process.stdout.write(`gate: ${layer} layer -> ${args[1]}\n`);
+  const result = spawnSync(ub, args, { stdio: "inherit" });
   if (result.error) {
     process.stderr.write(`failed to run ${ub}: ${result.error.message}\n`);
     return 1;
