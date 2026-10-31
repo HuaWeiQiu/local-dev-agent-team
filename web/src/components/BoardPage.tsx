@@ -1,14 +1,10 @@
-import { ArrowUp, CheckCircle2, Clock, Loader2, Search, Sparkles, Trash2, TriangleAlert } from "lucide-react";
-import { useMemo, useState, type KeyboardEvent } from "react";
-import { boardLaneLabels, buildBoard, type BoardCard, type BoardLane } from "../board";
-import { strategyDisplayName, summarizeGoal, humanizeFailure } from "../presentation";
-import { formatRelative } from "../time";
+import { CheckCircle2, type Clock, Loader2, Sparkles, TriangleAlert } from "lucide-react";
+import { boardLaneLabels, type BoardCard, type BoardLane } from "../board";
+import { RunCard } from "./board/RunCard";
+import { BOARD_LANES, BoardToolbar, GoalComposer } from "./board/sections";
+import { useBoardState } from "./board/useBoardState";
 import type { PublicConfig, RunStatus, RunSummary } from "../types";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
-import { cn } from "../ui/cn";
-import { Kbd } from "../ui/kbd";
-import { RunStatusPill, StatusDot } from "../ui/status";
+import { StatusDot } from "../ui/status";
 
 const deletableStatuses = new Set<RunStatus>(["completed", "cancelled", "blocked", "interrupted"]);
 
@@ -38,95 +34,31 @@ const laneMeta: Record<BoardLane, { icon: typeof Clock; empty: string; dot: "war
 };
 
 export function BoardPage({ runs, config, selectedRunId, busy, loading, demo, onOpenRun, onCreate, onCleanup, onDeleteRun }: BoardPageProps) {
-  const [query, setQuery] = useState("");
-  const [goal, setGoal] = useState("");
-  const strategies = config ? Object.keys(config.strategies.definitions) : [];
-  const [strategy, setStrategy] = useState<string>();
-  const activeStrategy = strategy ?? config?.strategies.default;
-
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return runs;
-    return runs.filter((run) => [run.goal, run.id, run.status, run.strategy].some((value) => value.toLocaleLowerCase().includes(needle)));
-  }, [query, runs]);
-  const board = useMemo(() => buildBoard(filtered), [filtered]);
-
-  const submit = () => {
-    if (!goal.trim() || !config) return;
-    onCreate(goal.trim(), activeStrategy);
-    setGoal("");
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      submit();
-    }
-  };
-
+  const state = useBoardState({ runs, config, onCreate });
   const empty = !loading && runs.length === 0;
 
   return (
     <section aria-label="运行工作台" className="scroll-thin mx-auto flex h-full w-full max-w-[1280px] flex-col gap-6 overflow-y-auto px-4 pb-10 pt-6 md:px-8">
-      <div className="bd rounded-lg bg-surface p-1">
-        <label htmlFor="board-goal" className="sr-only">描述目标</label>
-        <textarea
-          id="board-goal"
-          value={goal}
-          rows={2}
-          onChange={(event) => setGoal(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="描述你想让团队完成的目标，例如：为订单列表增加 CSV 导出…"
-          className="block min-h-[68px] w-full resize-none rounded-lg border-0 bg-transparent px-3.5 pb-1 pt-3 text-base leading-relaxed text-ink outline-none placeholder:text-muted"
-        />
-        <div className="flex flex-wrap items-center gap-2 px-2 pb-2">
-          <div role="radiogroup" aria-label="执行策略" className="flex items-center gap-1">
-            {strategies.map((name) => (
-              <button
-                key={name}
-                role="radio"
-                aria-checked={name === activeStrategy}
-                type="button"
-                onClick={() => setStrategy(name)}
-                className={cn(
-                  "h-6 cursor-pointer rounded-full px-2.5 text-xs font-medium transition-colors focus-ring",
-                  name === activeStrategy ? "bg-accent-soft text-accent-ink" : "text-muted hover:bg-surface-3 hover:text-ink",
-                )}
-              >
-                {strategyDisplayName(name)}
-              </button>
-            ))}
-          </div>
-          <span className="ml-auto hidden items-center gap-1 text-2xs text-muted sm:flex"><Kbd>⌘</Kbd><Kbd>↵</Kbd>继续</span>
-          <Button variant="primary" size="sm" disabled={!goal.trim() || !config || busy} onClick={submit} aria-label="配置并启动">
-            配置并启动<ArrowUp className="rotate-45" />
-          </Button>
-        </div>
-      </div>
+      <GoalComposer
+        goal={state.goal}
+        strategies={state.strategies}
+        activeStrategy={state.activeStrategy}
+        config={config}
+        busy={busy}
+        onGoal={state.setGoal}
+        onStrategy={state.setStrategy}
+        onSubmit={state.submit}
+        onKeyDown={state.onKeyDown}
+      />
 
       {empty ? (
-        <Onboarding demo={demo} onPick={(value) => setGoal(value)} />
+        <Onboarding demo={demo} onPick={(value) => state.setGoal(value)} />
       ) : (
         <>
-          <div className="flex flex-wrap items-center gap-3">
-            <h2 className="m-0 text-sm font-semibold text-ink">运行</h2>
-            <span className="text-xs text-muted">共 {runs.length} 个</span>
-            <div className="bd ml-auto flex h-8 w-full max-w-64 items-center gap-2 rounded-md bg-surface px-2.5 focus-within:shadow-[var(--focus-ring)]">
-              <Search className="size-3.5 shrink-0 text-muted" />
-              <input
-                aria-label="搜索运行"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索目标、状态…"
-                className="h-full min-w-0 flex-1 border-0 bg-transparent text-sm text-ink outline-none placeholder:text-muted"
-              />
-            </div>
-            <Button size="md" onClick={onCleanup} disabled={busy} aria-label="清理历史" title="清理历史">
-              <Trash2 />清理历史
-            </Button>
-          </div>
+          <BoardToolbar total={runs.length} query={state.query} busy={busy} onQuery={state.setQuery} onCleanup={onCleanup} />
           <div className="flex flex-col gap-6">
-            {(["attention", "active", "done"] as const).map((lane) => (
-              <Lane key={lane} lane={lane} cards={board[lane]} selectedRunId={selectedRunId} busy={busy} loading={loading} onOpenRun={onOpenRun} onDeleteRun={onDeleteRun} />
+            {BOARD_LANES.map((lane) => (
+              <Lane key={lane} lane={lane} cards={state.board[lane]} selectedRunId={selectedRunId} busy={busy} loading={loading} onOpenRun={onOpenRun} onDeleteRun={onDeleteRun} />
             ))}
           </div>
         </>
@@ -150,74 +82,12 @@ function Lane({ lane, cards, selectedRunId, busy, loading, onOpenRun, onDeleteRu
         <ul className="bd m-0 flex list-none flex-col divide-y divide-line overflow-hidden rounded-lg bg-surface p-0">
           {cards.map((card) => (
             <li key={card.run.id}>
-              <RunCard card={card} selected={card.run.id === selectedRunId} busy={busy} onOpen={() => onOpenRun(card.run.id)} onDelete={() => onDeleteRun(card.run.id)} />
+              <RunCard card={card} selected={card.run.id === selectedRunId} busy={busy} deletable={deletableStatuses.has(card.run.status)} onOpen={() => onOpenRun(card.run.id)} onDelete={() => onDeleteRun(card.run.id)} />
             </li>
           ))}
         </ul>
       )}
     </section>
-  );
-}
-
-function RunCard({ card, selected, busy, onOpen, onDelete }: { card: BoardCard; selected: boolean; busy: boolean; onOpen(): void; onDelete(): void }) {
-  const { run, reason, progress } = card;
-  const failure = humanizeFailure(run.error);
-  const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
-  const rail = card.lane === "attention" && reason?.tone === "danger"
-    ? "border-l-danger"
-    : card.lane === "attention"
-      ? "border-l-warning"
-      : card.lane === "active"
-        ? "border-l-accent"
-        : "border-l-success";
-  return (
-    <article className={cn("group relative border-l-[3px] bg-surface pr-8", rail, selected && "bg-accent-soft/40")}>
-      <button type="button" onClick={onOpen} className="block w-full cursor-pointer border-0 bg-transparent px-3 py-2.5 text-left focus-ring" aria-label={`打开运行：${summarizeGoal(run.goal, 80)}`}>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 sm:grid sm:grid-cols-[minmax(0,1fr)_5.5rem_4.5rem_5.25rem_7.5rem]">
-          <h4 className="m-0 min-w-0 truncate text-sm font-medium text-ink" title={run.goal}>{summarizeGoal(run.goal, 90)}</h4>
-          <span className="justify-self-start">
-            {reason ? (
-              <Badge tone={reason.tone === "neutral" ? "neutral" : reason.tone}>{reason.label}</Badge>
-            ) : (
-              <RunStatusPill status={run.status} />
-            )}
-          </span>
-          <span className="truncate text-2xs text-muted">{strategyDisplayName(run.strategy)}</span>
-          <span className="flex items-center justify-end gap-1 text-2xs text-muted"><Clock className="size-3 shrink-0" />{formatRelative(run.updatedAt)}</span>
-          {progress.total > 0 ? (
-            <span className="flex items-center gap-2">
-              <span
-                role="progressbar"
-                aria-label="任务进度"
-                aria-valuemin={0}
-                aria-valuemax={progress.total}
-                aria-valuenow={progress.done}
-                aria-valuetext={`${progress.done}/${progress.total} 个任务`}
-                className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-3"
-              >
-                <span className={cn("block h-full rounded-full", card.lane === "attention" && reason?.tone === "danger" ? "bg-danger" : "bg-accent")} style={{ width: `${percent}%` }} />
-              </span>
-              <span className="w-7 text-right text-2xs tabular-nums text-muted">{progress.done}/{progress.total}</span>
-            </span>
-          ) : (
-            <span />
-          )}
-        </div>
-        {failure && card.lane !== "active" && <p className="m-0 mt-1 line-clamp-1 text-xs text-danger-ink">{failure}</p>}
-      </button>
-      {deletableStatuses.has(run.status) && (
-        <button
-          type="button"
-          disabled={busy}
-          aria-label="删除运行"
-          title="删除运行"
-          onClick={onDelete}
-          className="absolute right-2 top-2 grid size-6 cursor-pointer place-items-center rounded-md border-0 bg-surface-2 text-muted opacity-0 transition-opacity hover:text-danger-ink focus-visible:opacity-100 group-hover:opacity-100 focus-ring"
-        >
-          <Trash2 className="size-3.5" />
-        </button>
-      )}
-    </article>
   );
 }
 
