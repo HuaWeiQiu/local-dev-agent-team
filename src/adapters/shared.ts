@@ -173,65 +173,102 @@ export async function runAdapterDoctor(
   spec: AdapterDoctorSpec,
 ): Promise<DoctorCheck[]> {
   const executable = options.profile.executable ?? spec.executableFallback;
-  const checks: DoctorCheck[] = [];
-  const version = await runProcess({
+  const version = await probeVersion(executable, options);
+  const checks: DoctorCheck[] = [executableCheck(adapter, options, executable, version)];
+  if (version?.exitCode !== 0) return checks;
+  checks.push(await authCheck(adapter, options, spec, executable));
+  checks.push(capabilityCheck(adapter, options));
+  checks.push(await modelCheck(adapter, options, spec));
+  return checks;
+}
+
+async function probeVersion(
+  executable: string,
+  options: AdapterDoctorOptions,
+): Promise<ProcessResult | undefined> {
+  return runProcess({
     command: executable,
     args: ["--version"],
     cwd: options.cwd,
     timeoutMs: 10_000,
   }).catch(() => undefined);
-  checks.push({
+}
+
+function executableCheck(
+  adapter: AgentAdapter,
+  options: AdapterDoctorOptions,
+  executable: string,
+  version: ProcessResult | undefined,
+): DoctorCheck {
+  return {
     profile: options.profileName,
     adapter: adapter.name,
     check: "executable",
     status: version?.exitCode === 0 ? "pass" : "fail",
     detail: version?.stdout.trim() || version?.stderr.trim() || `${executable} not found`,
-  });
-  if (version?.exitCode !== 0) {
-    return checks;
-  }
+  };
+}
 
+async function authCheck(
+  adapter: AgentAdapter,
+  options: AdapterDoctorOptions,
+  spec: AdapterDoctorSpec,
+  executable: string,
+): Promise<DoctorCheck> {
   const auth = await runProcess({
     command: executable,
     args: spec.authArgs,
     cwd: options.cwd,
     timeoutMs: 10_000,
   });
-  const authValidation = spec.validateAuth?.(auth) ?? {
-    ok: auth.exitCode === 0,
-    detail: auth.exitCode === 0 ? spec.authPassDetail : auth.stderr.trim(),
-  };
-  checks.push({
+  const validation = spec.validateAuth?.(auth) ?? defaultAuthValidation(auth, spec);
+  return {
     profile: options.profileName,
     adapter: adapter.name,
     check: "authentication",
-    status: authValidation.ok ? "pass" : "fail",
-    detail: authValidation.detail,
-  });
+    status: validation.ok ? "pass" : "fail",
+    detail: validation.detail,
+  };
+}
 
-  const capabilityOk = adapter.supportedReasoning.includes(options.profile.reasoning);
-  checks.push({
+function defaultAuthValidation(
+  auth: ProcessResult,
+  spec: AdapterDoctorSpec,
+): { ok: boolean; detail: string } {
+  if (auth.exitCode === 0) return { ok: true, detail: spec.authPassDetail };
+  return { ok: false, detail: auth.stderr.trim() };
+}
+
+function capabilityCheck(adapter: AgentAdapter, options: AdapterDoctorOptions): DoctorCheck {
+  const ok = adapter.supportedReasoning.includes(options.profile.reasoning);
+  return {
     profile: options.profileName,
     adapter: adapter.name,
     check: "capability",
-    status: capabilityOk ? "pass" : "fail",
-    detail: capabilityOk
-      ? `reasoning=${options.profile.reasoning}, permission=${options.profile.permission}, externalTools=${options.profile.externalTools}`
-      : `Unsupported reasoning '${options.profile.reasoning}'`,
-  });
+    status: ok ? "pass" : "fail",
+    detail: ok ? capabilityDetail(options.profile) : `Unsupported reasoning '${options.profile.reasoning}'`,
+  };
+}
 
-  checks.push(
-    options.probeModel
-      ? await probeAdapterModel(adapter, options, spec)
-      : {
-          profile: options.profileName,
-          adapter: adapter.name,
-          check: "model",
-          status: "skip",
-          detail: "Active model probe not requested",
-        },
-  );
-  return checks;
+function capabilityDetail(profile: AgentProfile): string {
+  return `reasoning=${profile.reasoning}, permission=${profile.permission}, externalTools=${profile.externalTools}`;
+}
+
+async function modelCheck(
+  adapter: AgentAdapter,
+  options: AdapterDoctorOptions,
+  spec: AdapterDoctorSpec,
+): Promise<DoctorCheck> {
+  if (!options.probeModel) {
+    return {
+      profile: options.profileName,
+      adapter: adapter.name,
+      check: "model",
+      status: "skip",
+      detail: "Active model probe not requested",
+    };
+  }
+  return probeAdapterModel(adapter, options, spec);
 }
 
 async function probeAdapterModel(
@@ -239,55 +276,90 @@ async function probeAdapterModel(
   options: AdapterDoctorOptions,
   spec: AdapterDoctorSpec,
 ): Promise<DoctorCheck> {
-  const profile: AgentProfile = {
-    ...spec.prepareProbeProfile(options.profile),
+  const profile = probeProfile(options.profile, spec);
+  const prompt = "Reply with exactly OK. Do not call tools.";
+  const promptDirectory = await makePromptDirectory(adapter);
+  const promptFile = promptDirectory ? path.join(promptDirectory, "prompt.txt") : undefined;
+  try {
+    if (promptFile) await writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
+    const outcome = await runProbe(adapter, { profile, prompt, cwd: options.cwd, promptFile });
+    return probeResult(adapter, options, spec, outcome);
+  } finally {
+    if (promptDirectory) await rm(promptDirectory, { recursive: true, force: true });
+  }
+}
+
+function probeProfile(profile: AgentProfile, spec: AdapterDoctorSpec): AgentProfile {
+  return {
+    ...spec.prepareProbeProfile(profile),
     permission: "read-only",
     externalTools: "deny",
-    timeoutSeconds: Math.min(options.profile.timeoutSeconds, 120),
+    timeoutSeconds: Math.min(profile.timeoutSeconds, 120),
     args: [],
   };
-  const prompt = "Reply with exactly OK. Do not call tools.";
-  const promptDirectory =
-    adapter.promptTransport === "file"
-      ? await mkdtemp(path.join(tmpdir(), "agent-team-doctor-prompt-"))
-      : undefined;
-  const promptFile = promptDirectory ? path.join(promptDirectory, "prompt.txt") : undefined;
-  if (promptFile) {
-    await writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
-  }
-  let result: ProcessResult;
-  let parseError: unknown;
+}
+
+async function makePromptDirectory(adapter: AgentAdapter): Promise<string | undefined> {
+  if (adapter.promptTransport !== "file") return undefined;
+  return mkdtemp(path.join(tmpdir(), "agent-team-doctor-prompt-"));
+}
+
+interface ProbeOutcome {
+  result: ProcessResult;
+  parseError: unknown;
+}
+
+async function runProbe(
+  adapter: AgentAdapter,
+  input: {
+    profile: AgentProfile;
+    prompt: string;
+    cwd: string;
+    promptFile: string | undefined;
+  },
+): Promise<ProbeOutcome> {
+  const invocation = adapter.buildInvocation(input.profile, {
+    cwd: input.cwd,
+    prompt: input.prompt,
+    ...(input.promptFile ? { promptFile: input.promptFile } : {}),
+  });
+  const result = await runProcess(invocation);
+  if (result.exitCode !== 0) return { result, parseError: undefined };
   try {
-    const invocation = adapter.buildInvocation(profile, {
-      cwd: options.cwd,
-      prompt,
-      ...(promptFile ? { promptFile } : {}),
-    });
-    result = await runProcess(invocation);
-    if (result.exitCode === 0) {
-      try {
-        await adapter.parseResult(invocation, result);
-      } catch (error) {
-        parseError = error;
-      }
-    }
-  } finally {
-    if (promptDirectory) {
-      await rm(promptDirectory, { recursive: true, force: true });
-    }
+    await adapter.parseResult(invocation, result);
+    return { result, parseError: undefined };
+  } catch (error) {
+    return { result, parseError: error };
   }
+}
+
+function probeResult(
+  adapter: AgentAdapter,
+  options: AdapterDoctorOptions,
+  spec: AdapterDoctorSpec,
+  outcome: ProbeOutcome,
+): DoctorCheck {
+  const passed = outcome.result.exitCode === 0 && outcome.parseError === undefined;
   return {
     profile: options.profileName,
     adapter: adapter.name,
     check: "model",
-    status: result.exitCode === 0 && parseError === undefined ? "pass" : "fail",
-    detail:
-      result.exitCode === 0 && parseError === undefined
-        ? `Model '${options.profile.model}' accepted by ${spec.displayName}`
-        : parseError
-          ? `${spec.displayName} model probe returned invalid output: ${errorMessage(parseError)}`
-          : result.stderr.trim() || `${spec.displayName} model probe failed`,
+    status: passed ? "pass" : "fail",
+    detail: probeDetail(options, spec, outcome, passed),
   };
+}
+
+function probeDetail(
+  options: AdapterDoctorOptions,
+  spec: AdapterDoctorSpec,
+  outcome: ProbeOutcome,
+  passed: boolean,
+): string {
+  if (passed) return `Model '${options.profile.model}' accepted by ${spec.displayName}`;
+  if (outcome.parseError) {
+    return `${spec.displayName} model probe returned invalid output: ${errorMessage(outcome.parseError)}`;
+  }
+  return outcome.result.stderr.trim() || `${spec.displayName} model probe failed`;
 }
 
 function errorMessage(error: unknown): string {
@@ -298,46 +370,59 @@ export async function parseOutputFileResult(
   invocation: AgentInvocation,
   process: ProcessResult,
 ): Promise<AgentRunResult> {
-  let text = process.stdout.trim();
-  if (invocation.outputFile) {
-    try {
-      text = (await readFile(invocation.outputFile, "utf8")).trim();
-    } catch {
-      // The process error below carries the actionable failure details.
-    }
-  }
+  const text = await outputText(invocation, process);
+  return runResult(text, tryParseJson(text), extractCodexUsage(process.stdout), process);
+}
 
-  let structured: unknown;
-  if (text) {
-    try {
-      structured = JSON.parse(text);
-    } catch {
-      structured = undefined;
-    }
+/** The output file wins when the adapter writes one; otherwise stdout. */
+async function outputText(invocation: AgentInvocation, process: ProcessResult): Promise<string> {
+  if (!invocation.outputFile) return process.stdout.trim();
+  try {
+    return (await readFile(invocation.outputFile, "utf8")).trim();
+  } catch {
+    // The process error below carries the actionable failure details.
+    return process.stdout.trim();
   }
+}
 
-  const usage = extractCodexUsage(process.stdout);
-  return structured === undefined
-    ? { text, process, ...(usage ? { usage } : {}) }
-    : { text, structured, process, ...(usage ? { usage } : {}) };
+function tryParseJson(text: string): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Structured output only when parsing produced one; usage only when reported. */
+function runResult(
+  text: string,
+  structured: unknown,
+  usage: AgentUsage | undefined,
+  process: ProcessResult,
+): AgentRunResult {
+  return {
+    text,
+    ...(structured === undefined ? {} : { structured }),
+    process,
+    ...(usage ? { usage } : {}),
+  };
 }
 
 export function parseClaudeJson(process: ProcessResult): AgentRunResult {
   const text = process.stdout.trim();
-  if (!text) {
-    return { text: "", process };
-  }
-  try {
-    const envelope = JSON.parse(text) as Record<string, unknown>;
-    const structured = envelope.structured_output ?? envelope.structuredOutput;
-    const result = typeof envelope.result === "string" ? envelope.result : text;
-    const usage = extractUsage(envelope);
-    return structured === undefined
-      ? { text: result, process, ...(usage ? { usage } : {}) }
-      : { text: result, structured, process, ...(usage ? { usage } : {}) };
-  } catch {
-    return { text, process };
-  }
+  if (!text) return { text: "", process };
+  const envelope = asRecord(tryParseJson(text));
+  if (!envelope) return { text, process };
+  const structured = envelope.structured_output ?? envelope.structuredOutput;
+  const result = typeof envelope.result === "string" ? envelope.result : text;
+  return runResult(result, structured, extractUsage(envelope), process);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /**
@@ -347,50 +432,40 @@ export function parseClaudeJson(process: ProcessResult): AgentRunResult {
 export function parseKimiStreamJson(process: ProcessResult): AgentRunResult {
   const raw = process.stdout.trim();
   if (!raw) {
-    if (process.exitCode !== 0) {
-      return { text: "", process };
-    }
+    if (process.exitCode !== 0) return { text: "", process };
     throw new Error("Kimi returned no stream-json output");
   }
+  const text = assistantText(raw);
+  return runResult(text, structuredFromText(text), undefined, process);
+}
 
-  const assistantChunks: string[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{")) continue;
-    try {
-      const event = JSON.parse(trimmed) as Record<string, unknown>;
-      if (event.role === "assistant" && typeof event.content === "string") {
-        assistantChunks.push(event.content);
-      } else if (event.type === "assistant" && typeof event.content === "string") {
-        assistantChunks.push(event.content);
-      } else if (typeof event.text === "string" && event.role !== "meta") {
-        assistantChunks.push(event.text);
-      }
-    } catch {
-      // ignore non-JSON lines
-    }
-  }
+/** Assistant chunks across NDJSON lines; the raw stream when nothing parsed. */
+function assistantText(raw: string): string {
+  const chunks = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"))
+    .map((line) => assistantChunk(line))
+    .filter((chunk): chunk is string => chunk !== undefined);
+  return chunks.join("").trim() || raw;
+}
 
-  const text = assistantChunks.join("").trim() || raw;
-  let structured: unknown;
-  try {
-    structured = JSON.parse(text);
-  } catch {
-    // Try fenced or trailing JSON object
-    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const candidate = fence?.[1]?.trim() ?? extractTrailingJsonObject(text);
-    if (candidate) {
-      try {
-        structured = JSON.parse(candidate);
-      } catch {
-        structured = undefined;
-      }
-    }
-  }
+function assistantChunk(line: string): string | undefined {
+  const event = asRecord(tryParseJson(line));
+  if (!event) return undefined;
+  if (event.role === "assistant" && typeof event.content === "string") return event.content;
+  if (event.type === "assistant" && typeof event.content === "string") return event.content;
+  if (typeof event.text === "string" && event.role !== "meta") return event.text;
+  return undefined;
+}
 
-  return structured === undefined
-    ? { text, process }
-    : { text, structured, process };
+/** Plain JSON, else a fenced block, else the trailing object. */
+function structuredFromText(text: string): unknown {
+  const direct = tryParseJson(text);
+  if (direct !== undefined) return direct;
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fence?.[1]?.trim() ?? extractTrailingJsonObject(text);
+  return candidate ? tryParseJson(candidate) : undefined;
 }
 
 function extractTrailingJsonObject(text: string): string | undefined {
@@ -406,36 +481,46 @@ function isGrokCompletedStop(stopReason: string): boolean {
 
 export function parseGrokJson(process: ProcessResult): AgentRunResult {
   const rawText = process.stdout.trim();
-  if (!rawText) {
-    if (process.exitCode !== 0) {
-      return { text: "", process };
-    }
-    throw new Error("Grok returned no JSON output");
-  }
+  if (!rawText) return emptyGrokResult(process);
+  const envelope = parseGrokEnvelope(rawText, process);
+  if (!envelope) return { text: rawText, process };
+  const structured = envelope.structuredOutput ?? envelope.structured_output;
+  const text = typeof envelope.text === "string" ? envelope.text : rawText;
+  assertGrokCompleted(envelope, text, structured);
+  return runResult(text, structured, extractUsage(envelope), process);
+}
+
+function emptyGrokResult(process: ProcessResult): AgentRunResult {
+  if (process.exitCode !== 0) return { text: "", process };
+  throw new Error("Grok returned no JSON output");
+}
+
+function parseGrokEnvelope(
+  rawText: string,
+  process: ProcessResult,
+): Record<string, unknown> | undefined {
   try {
-    const envelope = JSON.parse(rawText) as Record<string, unknown>;
-    const structured = envelope.structuredOutput ?? envelope.structured_output;
-    const text = typeof envelope.text === "string" ? envelope.text : rawText;
-    const stopReason =
-      typeof envelope.stopReason === "string" ? envelope.stopReason : undefined;
-    if (stopReason && !isGrokCompletedStop(stopReason)) {
-      throw new Error(`Grok stopped without completing: ${stopReason}`);
-    }
-    if (!text && structured === undefined) {
-      throw new Error("Grok returned no completion text or structured output");
-    }
-    const usage = extractUsage(envelope);
-    return structured === undefined
-      ? { text, process, ...(usage ? { usage } : {}) }
-      : { text, structured, process, ...(usage ? { usage } : {}) };
+    return JSON.parse(rawText) as Record<string, unknown>;
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      if (process.exitCode !== 0) {
-        return { text: rawText, process };
-      }
-      throw new Error("Grok returned invalid JSON output", { cause: error });
-    }
-    throw error;
+    if (!(error instanceof SyntaxError)) throw error;
+    // A failing process may still print prose; only a clean exit must be JSON.
+    if (process.exitCode !== 0) return undefined;
+    throw new Error("Grok returned invalid JSON output", { cause: error });
+  }
+}
+
+/** A stop reason other than completion, or an empty body, is a failure. */
+function assertGrokCompleted(
+  envelope: Record<string, unknown>,
+  text: string,
+  structured: unknown,
+): void {
+  const stopReason = typeof envelope.stopReason === "string" ? envelope.stopReason : undefined;
+  if (stopReason && !isGrokCompletedStop(stopReason)) {
+    throw new Error(`Grok stopped without completing: ${stopReason}`);
+  }
+  if (!text && structured === undefined) {
+    throw new Error("Grok returned no completion text or structured output");
   }
 }
 
@@ -466,12 +551,22 @@ export function extractUsage(envelope: Record<string, unknown>): AgentUsage | un
   ) {
     return undefined;
   }
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
-  };
+  return compactUsage({ inputTokens, cachedInputTokens, outputTokens, reportedCostUsd });
+}
+
+/** Drop the counters the provider did not report. */
+function compactUsage(input: {
+  inputTokens: number | undefined;
+  cachedInputTokens: number | undefined;
+  outputTokens: number | undefined;
+  reportedCostUsd: number | undefined;
+}): AgentUsage {
+  const usage: AgentUsage = {};
+  if (input.inputTokens !== undefined) usage.inputTokens = input.inputTokens;
+  if (input.cachedInputTokens !== undefined) usage.cachedInputTokens = input.cachedInputTokens;
+  if (input.outputTokens !== undefined) usage.outputTokens = input.outputTokens;
+  if (input.reportedCostUsd !== undefined) usage.reportedCostUsd = input.reportedCostUsd;
+  return usage;
 }
 
 function numberField(
