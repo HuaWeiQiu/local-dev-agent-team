@@ -48,28 +48,38 @@ export function adapterRoleWarning(role: string, profile: AgentProfile): string 
 }
 
 export function assertAdapterContract(adapter: AgentAdapter): void {
+  assertIdentity(adapter);
+  assertDeclarationLists(adapter);
+  if (typeof adapter.contract.structuredOutput !== "boolean") {
+    throw new Error(`Adapter '${adapter.name}' declares invalid structured-output support`);
+  }
+}
+
+function assertIdentity(adapter: AgentAdapter): void {
   if (!adapterNamePattern.test(adapter.name)) {
     throw new Error(`Invalid agent adapter name '${adapter.name}'`);
   }
   if (adapter.contract.version !== 1 || adapter.contract.transport !== "local-process") {
     throw new Error(`Adapter '${adapter.name}' uses an unsupported contract`);
   }
-  assertUniqueNonEmpty(adapter.name, "reasoning level", adapter.supportedReasoning);
-  assertUniqueNonEmpty(adapter.name, "permission", adapter.contract.permissions);
-  assertUniqueNonEmpty(adapter.name, "external-tools policy", adapter.contract.externalTools);
-  assertUnique(adapter.name, "usage field", adapter.contract.usage);
-  assertAllowed(adapter.name, "reasoning level", adapter.supportedReasoning, reasoningValues);
-  assertAllowed(adapter.name, "permission", adapter.contract.permissions, permissionValues);
-  assertAllowed(
-    adapter.name,
-    "external-tools policy",
-    adapter.contract.externalTools,
-    externalToolsValues,
-  );
-  assertAllowed(adapter.name, "usage field", adapter.contract.usage, usageValues);
-  if (typeof adapter.contract.structuredOutput !== "boolean") {
-    throw new Error(`Adapter '${adapter.name}' declares invalid structured-output support`);
+}
+
+/**
+ * Every declared list must be unique and drawn from the known values; only the
+ * capability lists must also be non-empty — an adapter may report no usage.
+ */
+function assertDeclarationLists(adapter: AgentAdapter): void {
+  const required: Array<[string, readonly string[], ReadonlySet<string>]> = [
+    ["reasoning level", adapter.supportedReasoning, reasoningValues],
+    ["permission", adapter.contract.permissions, permissionValues],
+    ["external-tools policy", adapter.contract.externalTools, externalToolsValues],
+  ];
+  for (const [label, values, allowed] of required) {
+    assertUniqueNonEmpty(adapter.name, label, values);
+    assertAllowed(adapter.name, label, values, allowed);
   }
+  assertUnique(adapter.name, "usage field", adapter.contract.usage);
+  assertAllowed(adapter.name, "usage field", adapter.contract.usage, usageValues);
 }
 
 export function assertAdapterProfile(
@@ -77,39 +87,53 @@ export function assertAdapterProfile(
   profile: AgentProfile,
   structuredOutput: boolean,
 ): void {
-  if (profile.adapter !== adapter.name) {
-    throw new Error(
-      `Profile adapter '${profile.adapter}' does not match requested adapter '${adapter.name}'`,
-    );
-  }
-  if (profile.nativeProfile && adapter.name !== "codex") {
-    throw new Error("nativeProfile is supported only by the Codex adapter");
-  }
-  if (profile.maxTurns !== undefined && adapter.name !== "grok") {
-    throw new Error("maxTurns is currently supported only by the Grok adapter");
-  }
-  if (!adapter.supportedReasoning.includes(profile.reasoning)) {
-    throw new Error(
-      `Adapter '${adapter.name}' does not support reasoning '${profile.reasoning}'`,
-    );
-  }
-  if (!adapter.contract.permissions.includes(profile.permission)) {
-    throw new Error(
-      `Adapter '${adapter.name}' does not support permission '${profile.permission}'`,
-    );
-  }
-  if (!adapter.contract.externalTools.includes(profile.externalTools)) {
-    throw new Error(
-      `Adapter '${adapter.name}' does not support external-tools policy '${profile.externalTools}'`,
-    );
-  }
-  if (profile.permission === "read-only" && profile.externalTools === "inherit") {
-    throw new Error("Read-only profiles cannot inherit external MCP tools");
-  }
-  if (structuredOutput && !adapter.contract.structuredOutput) {
-    throw new Error(`Adapter '${adapter.name}' does not support structured output`);
+  for (const rule of PROFILE_RULES) {
+    const failure = rule(adapter, profile, structuredOutput);
+    if (failure) throw new Error(failure);
   }
 }
+
+type ProfileRule = (
+  adapter: AgentAdapter,
+  profile: AgentProfile,
+  structuredOutput: boolean,
+) => string | undefined;
+
+/** Every reason a profile cannot run on an adapter, in check order. */
+const PROFILE_RULES: ProfileRule[] = [
+  (adapter, profile) =>
+    profile.adapter === adapter.name
+      ? undefined
+      : `Profile adapter '${profile.adapter}' does not match requested adapter '${adapter.name}'`,
+  (adapter, profile) =>
+    profile.nativeProfile && adapter.name !== "codex"
+      ? "nativeProfile is supported only by the Codex adapter"
+      : undefined,
+  (adapter, profile) =>
+    profile.maxTurns !== undefined && adapter.name !== "grok"
+      ? "maxTurns is currently supported only by the Grok adapter"
+      : undefined,
+  (adapter, profile) =>
+    adapter.supportedReasoning.includes(profile.reasoning)
+      ? undefined
+      : `Adapter '${adapter.name}' does not support reasoning '${profile.reasoning}'`,
+  (adapter, profile) =>
+    adapter.contract.permissions.includes(profile.permission)
+      ? undefined
+      : `Adapter '${adapter.name}' does not support permission '${profile.permission}'`,
+  (adapter, profile) =>
+    adapter.contract.externalTools.includes(profile.externalTools)
+      ? undefined
+      : `Adapter '${adapter.name}' does not support external-tools policy '${profile.externalTools}'`,
+  (_adapter, profile) =>
+    profile.permission === "read-only" && profile.externalTools === "inherit"
+      ? "Read-only profiles cannot inherit external MCP tools"
+      : undefined,
+  (adapter, _profile, structuredOutput) =>
+    structuredOutput && !adapter.contract.structuredOutput
+      ? `Adapter '${adapter.name}' does not support structured output`
+      : undefined,
+];
 
 export function assertInvocationContract(
   adapter: AgentAdapter,
@@ -117,32 +141,60 @@ export function assertInvocationContract(
   request: AgentInvocationRequest,
   invocation: AgentInvocation,
 ): void {
-  if (!invocation.command.trim()) {
-    throw new Error(`Adapter '${adapter.name}' returned an empty executable`);
+  for (const rule of INVOCATION_RULES) {
+    const failure = rule({ adapter, profile, request, invocation });
+    if (failure) throw new Error(failure);
   }
-  if (invocation.cwd !== request.cwd) {
-    throw new Error(`Adapter '${adapter.name}' changed the managed working directory`);
+}
+
+interface InvocationContext {
+  adapter: AgentAdapter;
+  profile: AgentProfile;
+  request: AgentInvocationRequest;
+  invocation: AgentInvocation;
+}
+
+/** Every way an invocation may break its contract, in check order. */
+const INVOCATION_RULES: Array<(context: InvocationContext) => string | undefined> = [
+  ({ adapter, invocation }) =>
+    invocation.command.trim() ? undefined : `Adapter '${adapter.name}' returned an empty executable`,
+  ({ adapter, request, invocation }) =>
+    invocation.cwd === request.cwd
+      ? undefined
+      : `Adapter '${adapter.name}' changed the managed working directory`,
+  ({ adapter, request, invocation }) =>
+    adapter.promptTransport === "file" ? filePromptFailure(adapter, request, invocation) : undefined,
+  ({ adapter, request, invocation }) =>
+    adapter.promptTransport !== "file" && invocation.stdin !== request.prompt
+      ? `Adapter '${adapter.name}' must pass the prompt through stdin`
+      : undefined,
+  ({ adapter, profile, invocation }) =>
+    validTimeout(invocation.timeoutMs, profile.timeoutSeconds)
+      ? undefined
+      : `Adapter '${adapter.name}' returned an invalid process timeout`,
+  ({ adapter, request, invocation }) =>
+    invocation.outputFile && invocation.outputFile !== request.outputFile
+      ? `Adapter '${adapter.name}' changed the managed output path`
+      : undefined,
+];
+
+/** A file-delivered prompt must arrive once, at the managed path. */
+function filePromptFailure(
+  adapter: AgentAdapter,
+  request: AgentInvocationRequest,
+  invocation: AgentInvocation,
+): string | undefined {
+  if (!request.promptFile || invocation.promptFile !== request.promptFile) {
+    return `Adapter '${adapter.name}' changed the managed prompt path`;
   }
-  if (adapter.promptTransport === "file") {
-    if (!request.promptFile || invocation.promptFile !== request.promptFile) {
-      throw new Error(`Adapter '${adapter.name}' changed the managed prompt path`);
-    }
-    if (invocation.stdin !== undefined) {
-      throw new Error(`Adapter '${adapter.name}' must not duplicate a file-delivered prompt`);
-    }
-  } else if (invocation.stdin !== request.prompt) {
-    throw new Error(`Adapter '${adapter.name}' must pass the prompt through stdin`);
+  if (invocation.stdin !== undefined) {
+    return `Adapter '${adapter.name}' must not duplicate a file-delivered prompt`;
   }
-  if (
-    !Number.isFinite(invocation.timeoutMs) ||
-    invocation.timeoutMs <= 0 ||
-    invocation.timeoutMs > profile.timeoutSeconds * 1_000
-  ) {
-    throw new Error(`Adapter '${adapter.name}' returned an invalid process timeout`);
-  }
-  if (invocation.outputFile && invocation.outputFile !== request.outputFile) {
-    throw new Error(`Adapter '${adapter.name}' changed the managed output path`);
-  }
+  return undefined;
+}
+
+function validTimeout(timeoutMs: number, timeoutSeconds: number): boolean {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= timeoutSeconds * 1_000;
 }
 
 function assertUniqueNonEmpty(
