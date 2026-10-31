@@ -96,6 +96,61 @@ describe("web live status", () => {
   });
 });
 
+describe("timeline event builders", () => {
+  const build = (type: string, payload: unknown) =>
+    deriveTimeline(undefined, [event(1, type, payload)])[0];
+
+  it("maps agent lifecycle and failure shapes", () => {
+    expect(build("agent.profile.failed", { role: "worker", profile: "p1", failure: { message: "boom" } }))
+      .toMatchObject({ kind: "issue", tone: "danger", title: expect.stringContaining("p1"), detail: "boom" });
+    expect(build("agent.profile.failed", { role: "worker", failure: { reason: "why" } })).toMatchObject({ detail: "why" });
+    expect(build("agent.profile.failed", { role: "worker", failure: { kind: "timeout" } })).toMatchObject({ detail: "timeout" });
+    expect(build("agent.profile.failed", { role: "worker", failure: "plain text" })).toMatchObject({ detail: "plain text" });
+    expect(build("agent.profile.failed", { role: "worker" })).toMatchObject({ kind: "issue" });
+    expect(build("agent.profile.skipped", { role: "worker", profile: "p2", reason: "no auth" }))
+      .toMatchObject({ tone: "warning", detail: "no auth" });
+    expect(build("agent.profile.skipped", { role: "worker" })).toMatchObject({ title: expect.stringContaining("候选") });
+  });
+
+  it("maps wave, explore and advisor events", () => {
+    expect(build("run.wave.started", { taskIds: ["T1", "T2"] })).toMatchObject({ kind: "flow", tone: "active", detail: "T1、T2" });
+    expect(build("run.wave.completed", { status: "blocked" })).toMatchObject({ tone: "danger" });
+    expect(build("run.wave.completed", { status: "rework" })).toMatchObject({ tone: "warning" });
+    expect(build("run.wave.completed", { status: "ok" })).toMatchObject({ tone: "success" });
+    expect(build("run.wave.started", { taskIds: "nope" })).toMatchObject({ kind: "flow" });
+
+    expect(build("run.explore.started", {})).toMatchObject({ title: "开始探索代码库" });
+    expect(build("run.explore.completed", { success: true })).toMatchObject({ tone: "success" });
+    expect(build("run.explore.completed", { success: false, error: "net" })).toMatchObject({ kind: "issue", detail: "net" });
+
+    expect(build("run.advisor.consulted", { trigger: "plan", recommendation: "stop", summary: "risky" }))
+      .toMatchObject({ kind: "advisor", tone: "danger" });
+    expect(build("run.advisor.consulted", { trigger: "plan", recommendation: "continue" })).toMatchObject({ tone: "success" });
+    expect(build("run.advisor.skipped", {})).toMatchObject({ kind: "advisor", tone: "warning" });
+    expect(build("run.advisor.failed", { error: "timeout" })).toMatchObject({ kind: "issue", detail: "timeout" });
+  });
+
+  it("maps jev decisions and run lifecycle events", () => {
+    const jev = build("run.jev.decided", { source: "jev", decision: "consult", confidence: 0.4, consult: true });
+    expect(jev).toMatchObject({ kind: "advisor", tone: "neutral", title: "Jev 分流" });
+    expect(typeof jev?.detail).toBe("string");
+    expect(build("run.jev.decided", { source: "deterministic", changedOutcome: true })).toMatchObject({ title: "Jev 分流" });
+
+    expect(build("run.crashed", { error: "segfault" })).toMatchObject({ kind: "issue", tone: "danger", detail: "segfault" });
+    expect(build("run.pause-requested", {})).toMatchObject({ title: "已请求暂停" });
+    expect(build("run.cancel-requested", {})).toMatchObject({ title: "已请求取消" });
+    expect(build("run.resume-requested", {})).toMatchObject({ title: "已请求恢复" });
+    expect(build("run.recovered", {})).toMatchObject({ title: "已从检查点恢复" });
+    expect(build("run.unknown-type", {})).toBeUndefined();
+  });
+
+  it("handles non-object payloads and long task lists", () => {
+    expect(deriveTimeline(undefined, [event(1, "run.wave.started", ["a"])])).toHaveLength(1);
+    const long = deriveTimeline(undefined, [event(1, "run.wave.started", { taskIds: ["T1", "T2", "T3", "T4", "T5"] })]);
+    expect(long[0]?.detail).toContain("等 5 个");
+  });
+});
+
 function event(sequence: number, type: string, payload: unknown): RunEvent {
   return {
     sequence,
