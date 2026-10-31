@@ -539,6 +539,27 @@ fn start_service(
 ) -> Result<ManagedService, String> {
     let token = random_session_token();
     write_session_token_file(token_path, &token)?;
+    let mut command = service_command(paths, root, config, registry_path, token_path);
+    let mut child = spawn_service(&mut command, paths)?;
+    let (lines, stderr_detail) = drain_service_output(&mut child)?;
+    let url = await_bootstrap_url(&mut child, &lines, &stderr_detail)?;
+    Ok(ManagedService {
+        child,
+        project_root: root.to_path_buf(),
+        project_name: project_name(root),
+        bootstrap_url: format!("{url}/__agent_team/session?token={token}"),
+        url,
+    })
+}
+
+/// Node CLI, one process group, and the token passed by path only.
+fn service_command(
+    paths: &RuntimePaths,
+    root: &Path,
+    config: &SelectedConfig,
+    registry_path: Option<&Path>,
+    token_path: &Path,
+) -> Command {
     let mut command = Command::new(&paths.node);
     command
         .arg(&paths.cli)
@@ -547,10 +568,7 @@ fn start_service(
         .arg("127.0.0.1")
         .arg("--port")
         .arg("0")
-        .arg(match config.kind {
-            ConfigKind::Project => "--config",
-            ConfigKind::Workspace => "--workspace",
-        })
+        .arg(config_flag(config))
         .arg(&config.path)
         .current_dir(root)
         // 令牌经 0600 文件传递，env 里只出现路径：同 uid 进程用 ps eww
@@ -575,74 +593,88 @@ fn start_service(
         // 让控制服务独占一个进程组，terminate_child 才能按组整棵清理。
         command.process_group(0);
     }
+    command
+}
 
-    let mut child = command.spawn().map_err(|error| {
+fn config_flag(config: &SelectedConfig) -> &'static str {
+    match config.kind {
+        ConfigKind::Project => "--config",
+        ConfigKind::Workspace => "--workspace",
+    }
+}
+
+fn spawn_service(command: &mut Command, paths: &RuntimePaths) -> Result<std::process::Child, String> {
+    command.spawn().map_err(|error| {
         format!(
             "无法启动控制服务（{}）：{error}",
             paths.node.to_string_lossy()
         )
-    })?;
+    })
+}
+
+/// Both pipes are drained for the life of the child: dropping stdout after the
+/// first URL makes Node see EPIPE on later writes.
+fn drain_service_output(
+    child: &mut std::process::Child,
+) -> Result<(mpsc::Receiver<String>, Arc<Mutex<String>>), String> {
     let stdout = child.stdout.take().ok_or("无法读取控制服务启动状态")?;
     let stderr = child.stderr.take().ok_or("无法读取控制服务错误信息")?;
     let (line_sender, line_receiver) = mpsc::channel::<String>();
-    // Keep draining stdout for the life of the child. Dropping the pipe after
-    // the first URL makes Node see EPIPE / SIGPIPE on later writes.
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    let _ = line_sender.send(line);
-                }
-                Err(_) => break,
-            }
+            let Ok(line) = line else { break };
+            let _ = line_sender.send(line);
         }
     });
     let stderr_detail = Arc::new(Mutex::new(String::new()));
     let stderr_target = Arc::clone(&stderr_detail);
     thread::spawn(move || collect_process_detail(stderr, stderr_target));
+    Ok((line_receiver, stderr_detail))
+}
 
+/// Wait for the bootstrap URL, with the two ways a start can fail.
+fn await_bootstrap_url(
+    child: &mut std::process::Child,
+    lines: &mpsc::Receiver<String>,
+    stderr_detail: &Arc<Mutex<String>>,
+) -> Result<String, String> {
     let started = Instant::now();
-    let url = loop {
-        match line_receiver.recv_timeout(Duration::from_millis(150)) {
+    loop {
+        match lines.recv_timeout(Duration::from_millis(150)) {
             Ok(line) => {
                 if let Some(url) = parse_service_url(&line) {
-                    break url;
+                    return Ok(url);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let exit = child
-                    .wait()
-                    .map(|status| status.to_string())
-                    .unwrap_or_else(|error| error.to_string());
-                return Err(format!(
-                    "控制服务启动后立即退出（{exit}）{}",
-                    process_detail_suffix(&stderr_detail)
-                ));
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(early_exit(child, stderr_detail)),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         if let Ok(Some(exit)) = child.try_wait() {
-            return Err(format!(
-                "控制服务启动后立即退出（{exit}）{}",
-                process_detail_suffix(&stderr_detail)
-            ));
+            return Err(early_exit_detail(&exit.to_string(), stderr_detail));
         }
         if started.elapsed() >= STARTUP_TIMEOUT {
-            terminate_child(&mut child);
+            terminate_child(child);
             return Err(format!(
                 "等待控制服务就绪超时{}",
-                process_detail_suffix(&stderr_detail)
+                process_detail_suffix(stderr_detail)
             ));
         }
-    };
+    }
+}
 
-    Ok(ManagedService {
-        child,
-        project_root: root.to_path_buf(),
-        project_name: project_name(root),
-        bootstrap_url: format!("{url}/__agent_team/session?token={token}"),
-        url,
-    })
+fn early_exit(child: &mut std::process::Child, stderr_detail: &Arc<Mutex<String>>) -> String {
+    let exit = child
+        .wait()
+        .map(|status| status.to_string())
+        .unwrap_or_else(|error| error.to_string());
+    early_exit_detail(&exit, stderr_detail)
+}
+
+fn early_exit_detail(exit: &str, stderr_detail: &Arc<Mutex<String>>) -> String {
+    format!(
+        "控制服务启动后立即退出（{exit}）{}",
+        process_detail_suffix(stderr_detail)
+    )
 }
 
 fn collect_process_detail(mut stream: impl Read, target: Arc<Mutex<String>>) {
@@ -1008,17 +1040,37 @@ struct ControlLeaseInfo {
 /// content is `Err` so callers fail closed instead of treating
 /// attacker-influenceable bytes as a removable lock.
 fn read_control_lease(root: &Path) -> Result<Option<ControlLeaseInfo>, String> {
-    let lock_path = root.join(".agent-team").join("control.lock");
-    let text = match fs::read_to_string(&lock_path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("cannot read lock: {error}")),
+    let Some(text) = read_lock_text(root)? else {
+        return Ok(None);
     };
+    let object = parse_lock_object(&text)?;
+    let pid = lease_pid(&object)?;
+    let token = lease_token(&object)?;
+    let started = lease_started(&object)?;
+    assert_lock_fields(&object, started.is_some())?;
+    Ok(Some(ControlLeaseInfo { pid, token, started }))
+}
+
+/// A missing lock file simply means "no lease".
+fn read_lock_text(root: &Path) -> Result<Option<String>, String> {
+    let lock_path = root.join(".agent-team").join("control.lock");
+    match fs::read_to_string(&lock_path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read lock: {error}")),
+    }
+}
+
+fn parse_lock_object(text: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| format!("invalid lock JSON: {error}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "lock must be a JSON object".to_string())?;
+        serde_json::from_str(text).map_err(|error| format!("invalid lock JSON: {error}"))?;
+    match value {
+        serde_json::Value::Object(object) => Ok(object),
+        _ => Err("lock must be a JSON object".to_string()),
+    }
+}
+
+fn lease_pid(object: &serde_json::Map<String, serde_json::Value>) -> Result<u32, String> {
     let pid = object
         .get("pid")
         .and_then(serde_json::Value::as_u64)
@@ -1026,6 +1078,10 @@ fn read_control_lease(root: &Path) -> Result<Option<ControlLeaseInfo>, String> {
     if pid == 0 || pid > u64::from(u32::MAX) {
         return Err(format!("pid out of range: {pid}"));
     }
+    Ok(pid as u32)
+}
+
+fn lease_token(object: &serde_json::Map<String, serde_json::Value>) -> Result<String, String> {
     let token = object
         .get("token")
         .and_then(serde_json::Value::as_str)
@@ -1033,27 +1089,32 @@ fn read_control_lease(root: &Path) -> Result<Option<ControlLeaseInfo>, String> {
     if !is_uuid_token(token) {
         return Err("token is not a UUID".to_string());
     }
-    let started = match object.get("started") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => {
-            let started = value
-                .as_str()
-                .ok_or_else(|| "invalid started field".to_string())?;
-            if started.is_empty() || started.len() > 64 {
-                return Err("started field must be 1-64 characters".to_string());
-            }
-            Some(started.to_string())
-        }
+    Ok(token.to_string())
+}
+
+/// The start stamp is optional, but a present one must be 1-64 characters.
+fn lease_started(object: &serde_json::Map<String, serde_json::Value>) -> Result<Option<String>, String> {
+    let Some(value) = object.get("started").filter(|value| !value.is_null()) else {
+        return Ok(None);
     };
-    let expected_keys = if started.is_some() { 3 } else { 2 };
-    if object.len() != expected_keys {
+    let started = value
+        .as_str()
+        .ok_or_else(|| "invalid started field".to_string())?;
+    if started.is_empty() || started.len() > 64 {
+        return Err("started field must be 1-64 characters".to_string());
+    }
+    Ok(Some(started.to_string()))
+}
+
+fn assert_lock_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    has_started: bool,
+) -> Result<(), String> {
+    let expected = if has_started { 3 } else { 2 };
+    if object.len() != expected {
         return Err("unexpected lock fields".to_string());
     }
-    Ok(Some(ControlLeaseInfo {
-        pid: pid as u32,
-        token: token.to_string(),
-        started,
-    }))
+    Ok(())
 }
 
 fn is_uuid_token(token: &str) -> bool {
@@ -1178,54 +1239,73 @@ fn project_has_active_run(root: &Path) -> bool {
 
 fn release_project_lease(root: &Path, force: bool) -> Result<(), String> {
     let lock_path = root.join(".agent-team").join("control.lock");
-    let lease = match read_control_lease(root) {
-        Ok(Some(lease)) => lease,
-        Ok(None) => {
-            let _ = fs::remove_file(&lock_path);
-            return Ok(());
-        }
-        Err(detail) => {
-            // Fail closed: never kill or delete based on bytes we could not
-            // fully validate. The lock may be half-written while a service is
-            // still running.
-            return Err(format!(
-                "锁文件内容损坏或不完整（{detail}）。为安全起见拒绝释放；请先确认该项目的控制服务与 Agent 进程已停止，再手动删除 {}",
-                lock_path.display()
-            ));
-        }
+    let Some(lease) = lease_for_release(root, &lock_path)? else {
+        return Ok(());
     };
     if is_our_control_pid(lease.pid) {
         return Err("不能释放当前窗口自己持有的控制权".into());
     }
     if lease_owner_is_alive(&lease) {
-        if project_has_active_run(root) && !force {
-            return Err("仍有进行中的任务，已拒绝释放".into());
-        }
-        terminate_pid(lease.pid);
-        // Wait briefly for exit.
-        for _ in 0..20 {
-            if !process_is_alive(lease.pid) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        if process_is_alive(lease.pid) {
-            force_kill_pid(lease.pid);
-            thread::sleep(Duration::from_millis(200));
-        }
-        if process_is_alive(lease.pid) {
-            return Err(format!("无法结束占用进程 PID {}", lease.pid));
-        }
+        stop_lease_owner(root, &lease, force)?;
     }
-    // Only remove lock if it still points at the same token/pid we inspected.
+    remove_lock_if_unchanged(root, &lock_path, &lease)
+}
+
+/// A missing lock is already "released"; a corrupt one fails closed.
+fn lease_for_release(root: &Path, lock_path: &Path) -> Result<Option<ControlLeaseInfo>, String> {
     match read_control_lease(root) {
-        Ok(Some(current)) if current.pid == lease.pid && current.token == lease.token => {
-            fs::remove_file(&lock_path).map_err(|error| error.to_string())?;
-        }
-        Ok(_) => {}
-        Err(_) => return Err("锁文件在释放过程中损坏，已停止后续操作".into()),
+        Ok(found) => Ok(found),
+        Err(detail) => Err(corrupt_lock_message(lock_path, &detail)),
     }
+}
+
+/// Never kill or delete based on bytes we could not fully validate: the lock
+/// may be half-written while a service is still running.
+fn corrupt_lock_message(lock_path: &Path, detail: &str) -> String {
+    format!(
+        "锁文件内容损坏或不完整（{detail}）。为安全起见拒绝释放；请先确认该项目的控制服务与 Agent 进程已停止，再手动删除 {}",
+        lock_path.display()
+    )
+}
+
+fn stop_lease_owner(root: &Path, lease: &ControlLeaseInfo, force: bool) -> Result<(), String> {
+    if project_has_active_run(root) && !force {
+        return Err("仍有进行中的任务，已拒绝释放".into());
+    }
+    terminate_pid(lease.pid);
+    wait_for_exit(lease.pid);
     Ok(())
+}
+
+/// Ask politely, wait, then escalate — and fail if the process outlives both.
+fn wait_for_exit(pid: u32) {
+    for _ in 0..20 {
+        if !process_is_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    force_kill_pid(pid);
+    thread::sleep(Duration::from_millis(200));
+}
+
+/// Only remove the lock when it still points at the lease we inspected.
+fn remove_lock_if_unchanged(
+    root: &Path,
+    lock_path: &Path,
+    lease: &ControlLeaseInfo,
+) -> Result<(), String> {
+    match read_control_lease(root) {
+        Ok(Some(current)) if same_lease(&current, lease) => {
+            fs::remove_file(lock_path).map_err(|error| error.to_string())
+        }
+        Ok(_) => Ok(()),
+        Err(_) => Err("锁文件在释放过程中损坏，已停止后续操作".into()),
+    }
+}
+
+fn same_lease(left: &ControlLeaseInfo, right: &ControlLeaseInfo) -> bool {
+    left.pid == right.pid && left.token == right.token
 }
 
 fn terminate_pid(pid: u32) {
