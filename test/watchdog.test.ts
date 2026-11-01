@@ -132,3 +132,154 @@ describe("describeVerdict", () => {
     expect(describeVerdict("insufficient", 0)).toContain("样本不足");
   });
 });
+
+describe("sampleRun", () => {
+  it("reads the working task, its attempts, the artifacts and the history", async () => {
+    const { sampleRun } = await import("../src/runtime/watchdog.js");
+    const sample = sampleRun(
+      {
+        status: "implementing",
+        tasks: [
+          { task: { id: "T1" }, status: "merged", attempts: 1 },
+          { task: { id: "T2" }, status: "reworking", attempts: 2 },
+        ],
+        history: [{}, {}, {}],
+        usage: { artifactBytes: 4096 },
+      },
+      123,
+    );
+    expect(sample).toEqual({
+      at: 123,
+      status: "implementing",
+      taskId: "T2",
+      attempts: 2,
+      artifactBytes: 4096,
+      historyLength: 3,
+    });
+  });
+
+  it("reports no task while nothing is working", async () => {
+    const { sampleRun } = await import("../src/runtime/watchdog.js");
+    const sample = sampleRun({ status: "awaiting-human", tasks: [], history: [] }, 1);
+    expect(sample.taskId).toBeUndefined();
+    expect(sample.attempts).toBe(0);
+    expect(sample.artifactBytes).toBe(0);
+  });
+});
+
+describe("Watchdog", () => {
+  async function watchdog(samples: Record<string, WatchSample[]>, options = {}) {
+    const { Watchdog } = await import("../src/runtime/watchdog.js");
+    const seen: { runId: string; verdict: string }[] = [];
+    let index = 0;
+    const instance = new Watchdog(
+      {
+        liveRuns: async () => Object.keys(samples),
+        sample: async (runId) => {
+          const list = samples[runId]!;
+          return list[Math.min(index, list.length - 1)];
+        },
+      },
+      (finding) => {
+        seen.push({ runId: finding.runId, verdict: finding.verdict });
+      },
+      options,
+    );
+    return { instance, seen, advance: () => (index += 1) };
+  }
+
+  it("says nothing while a run keeps changing", async () => {
+    const { instance, seen, advance } = await watchdog({
+      "run-1": [
+        sample(0),
+        sample(MIN, { historyLength: 6 }),
+        sample(2 * MIN, { historyLength: 7 }),
+      ],
+    });
+    await instance.tick();
+    advance();
+    await instance.tick();
+    advance();
+    await instance.tick();
+    expect(seen).toEqual([]);
+    expect(instance.samples("run-1")).toHaveLength(3);
+  });
+
+  it("reports a run that stopped changing once the window passes", async () => {
+    const { instance, seen, advance } = await watchdog(
+      { "run-1": [sample(0), sample(10 * MIN), sample(20 * MIN), sample(30 * MIN)] },
+      { stallAfterMs: 15 * MIN, samplesToStall: 2 },
+    );
+    for (let step = 0; step < 4; step += 1) {
+      await instance.tick();
+      advance();
+    }
+    expect(seen).toEqual([{ runId: "run-1", verdict: "stalled" }]);
+  });
+
+  it("caps the samples it keeps", async () => {
+    const { instance, advance } = await watchdog(
+      { "run-1": Array.from({ length: 20 }, (_, at) => sample(at, { historyLength: 5 + at })) },
+      { historyLimit: 4 },
+    );
+    for (let step = 0; step < 10; step += 1) {
+      await instance.tick();
+      advance();
+    }
+    expect(instance.samples("run-1")).toHaveLength(4);
+  });
+
+  it("skips a run whose state is gone", async () => {
+    const { Watchdog } = await import("../src/runtime/watchdog.js");
+    const instance = new Watchdog(
+      { liveRuns: async () => ["gone"], sample: async () => undefined },
+      () => undefined,
+    );
+    await expect(instance.tick()).resolves.toEqual([]);
+  });
+
+  it("forgets a run on request", async () => {
+    const { instance, advance } = await watchdog({ "run-1": [sample(0), sample(1)] });
+    await instance.tick();
+    advance();
+    await instance.tick();
+    expect(instance.samples("run-1")).toHaveLength(2);
+    instance.forget("run-1");
+    expect(instance.samples("run-1")).toEqual([]);
+  });
+
+  it("does not keep the process alive when started", async () => {
+    const { instance } = await watchdog({ "run-1": [sample(0)] });
+    const timer = instance.start(50);
+    expect(timer.hasRef?.()).toBe(false);
+    clearInterval(timer);
+  });
+});
+
+describe("Watchdog reporting discipline", () => {
+  it("reports one stall once, and again only after the run moves", async () => {
+    const { Watchdog } = await import("../src/runtime/watchdog.js");
+    const seen: string[] = [];
+    const timeline = [
+      sample(0),
+      sample(10 * MIN),
+      sample(20 * MIN),
+      sample(30 * MIN),
+      sample(31 * MIN, { attempts: 2 }),
+      sample(40 * MIN, { attempts: 2 }),
+      sample(60 * MIN, { attempts: 2 }),
+    ];
+    let step = 0;
+    const instance = new Watchdog(
+      { liveRuns: async () => ["run-1"], sample: async () => timeline[step]! },
+      () => {
+        seen.push(timeline[step]!.at.toString());
+      },
+      { stallAfterMs: 15 * MIN, samplesToStall: 2 },
+    );
+    for (step = 0; step < timeline.length; step += 1) await instance.tick();
+    // Quiet since 0, so by the third sample (20 min) it is stalled; silent while it
+    // stays stalled; a retry at 31 counts as movement; quiet again by 60.
+    expect(seen).toEqual(["1200000", "3600000"]);
+  });
+});
