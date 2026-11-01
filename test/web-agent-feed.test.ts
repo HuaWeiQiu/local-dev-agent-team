@@ -3,7 +3,7 @@ import { buildAgentFeed, isLiveAgentEvent } from "../web/src/agent-feed.js";
 import type { RunEvent } from "../web/src/types.js";
 
 let sequence = 0;
-function event(type: string, payload: Record<string, unknown>): RunEvent {
+function event(type: string, payload: unknown): RunEvent {
   sequence += 1;
   return {
     sequence,
@@ -55,6 +55,37 @@ describe("buildAgentFeed", () => {
     );
     expect(feed.map((entry) => entry.kind)).toEqual(["answer", "interrupt"]);
     expect(feed[0]?.text).toContain("保密");
+  });
+
+  it("ignores events that carry nothing this agent should see", () => {
+    const feed = buildAgentFeed(
+      [
+        event("agent.session.opened", { agentId: "a1" }),
+        event("agent.steered", null),
+        event("agent.stdout", { artifactKey: "T1-worker", chunk: 42 }),
+      ],
+      agent,
+    );
+    expect(feed).toEqual([]);
+  });
+
+  it("takes each intervention's own words, and an empty string when it has none", () => {
+    const feed = buildAgentFeed(
+      [
+        event("agent.interrupted", { agentId: "a1", note: "停掉构建" }),
+        event("agent.steered", { agentId: "a1" }),
+        event("agent.question", { agentId: "a1" }),
+        event("agent.answered", { agentId: "a1" }),
+      ],
+      agent,
+    );
+    expect(feed.map((entry) => [entry.kind, entry.text])).toEqual([
+      ["interrupt", "停掉构建"],
+      ["steer", ""],
+      ["question", ""],
+      ["answer", ""],
+    ]);
+    expect(Object.keys(feed[1]!)).toEqual(["id", "at", "kind", "text"]);
   });
 
   it("trims runaway output to a bounded tail", () => {
