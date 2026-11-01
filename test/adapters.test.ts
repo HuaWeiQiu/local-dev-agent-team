@@ -7,7 +7,14 @@ import { CodexAdapter } from "../src/adapters/codex.js";
 import { CodexActivityParser } from "../src/adapters/codex-events.js";
 import { GrokAdapter } from "../src/adapters/grok.js";
 import { KimiAdapter } from "../src/adapters/kimi.js";
-import { AgentInvocationError, invokeAgent } from "../src/adapters/invoke.js";
+import {
+  AgentInvocationError,
+  exitFailureMessage,
+  invokeAgent,
+  invocationRequest,
+  needsSchemaSidecar,
+  unparsableOutputMessage,
+} from "../src/adapters/invoke.js";
 import { AdapterRegistry } from "../src/adapters/registry.js";
 import type { AgentProfile } from "../src/config/schema.js";
 import type { AgentAdapter } from "../src/adapters/types.js";
@@ -808,6 +815,51 @@ describe("agent invocation", () => {
         new AdapterRegistry([adapter]),
       ),
     ).resolves.toMatchObject({ text: "-" });
+  });
+});
+
+describe("agent invocation decisions", () => {
+  it("asks the adapter only for the fields that exist", () => {
+    expect(invocationRequest({ cwd: "/tmp/repo", prompt: "Review" }, undefined, undefined)).toEqual(
+      { cwd: "/tmp/repo", prompt: "Review" },
+    );
+    expect(
+      invocationRequest(
+        { cwd: "/tmp/repo", prompt: "Review", outputSchema: { type: "object" } },
+        "/tmp/prompt.txt",
+        "/tmp/run/last-message.json",
+      ),
+    ).toEqual({
+      cwd: "/tmp/repo",
+      prompt: "Review",
+      promptFile: "/tmp/prompt.txt",
+      outputSchema: { type: "object" },
+      outputFile: "/tmp/run/last-message.json",
+    });
+  });
+
+  it("writes a schema sidecar for codex alone", () => {
+    const schema = { type: "object" };
+    expect(needsSchemaSidecar("codex", schema)).toBe(true);
+    expect(needsSchemaSidecar("codex", undefined)).toBe(false);
+    expect(needsSchemaSidecar("kimi", schema)).toBe(false);
+  });
+
+  it("reports the provider stderr, or the parsed text when the stderr is silent", () => {
+    const exited = { ...fixtureProcess("out"), exitCode: 2 };
+    expect(exitFailureMessage("fixture", { ...exited, stderr: "boom\n" }, "out")).toBe(
+      "fixture exited with 2: boom",
+    );
+    expect(exitFailureMessage("fixture", exited, "out")).toBe("fixture exited with 2: out");
+  });
+
+  it("names the adapter and the cause when the output cannot be parsed", () => {
+    expect(unparsableOutputMessage("fixture", new Error("bad json"))).toBe(
+      "fixture output could not be parsed: bad json",
+    );
+    expect(unparsableOutputMessage("fixture", "opaque")).toBe(
+      "fixture output could not be parsed: opaque",
+    );
   });
 });
 
