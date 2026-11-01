@@ -430,10 +430,17 @@ describe("local workflow", () => {
       createAgentService: () => new AcceptanceCommandAgentService(),
     });
     const state = await runner.run({ goal: "Create alpha and beta files" });
-    expect(state.status).toBe("awaiting-human");
-    expect(state.approvals?.at(-1)).toMatchObject({ gate: "final", status: "pending" });
-    expect(state.tasks.map((task) => task.status)).toEqual(["merged", "merged"]);
-  }, 30_000);
+    // This case has failed under full-suite load without saying why. The message
+    // carries the state a reader needs: a run that ended somewhere else, and the
+    // last things it did, rather than one status string against another.
+    const observed = describeRun(state);
+    expect(state.status, observed).toBe("awaiting-human");
+    expect(state.approvals?.at(-1), observed).toMatchObject({ gate: "final", status: "pending" });
+    expect(state.tasks.map((task) => task.status), observed).toEqual(["merged", "merged"]);
+    // One task still declares an acceptance command: it must not add a plan stop
+    // on top of the final approval.
+    expect(state.approvals?.filter((approval) => approval.status === "pending")).toHaveLength(1);
+  }, 60_000);
 
   it("builds a deterministic DAG from named paths without calling the architect", async () => {
     class FailIfArchitectService extends FakeAgentService {
@@ -1500,6 +1507,21 @@ async function createFixture(
   await git(root, ["add", "."]);
   await git(root, ["commit", "-m", "initial"]);
   return { root, loaded: await loadConfig(root) };
+}
+
+/** What a failed assertion needs to say: where the run ended and how it got there. */
+function describeRun(state: {
+  status: string;
+  tasks: { task: { id: string }; status: string; error?: string }[];
+  history: { status: string; message: string }[];
+  approvals?: { gate: string; status: string }[];
+}): string {
+  const tasks = state.tasks
+    .map((task) => `${task.task.id}=${task.status}${task.error ? ` (${task.error.slice(0, 80)})` : ""}`)
+    .join(", ");
+  const approvals = (state.approvals ?? []).map((approval) => `${approval.gate}:${approval.status}`).join(", ");
+  const tail = state.history.slice(-4).map((entry) => `${entry.status}: ${entry.message}`).join(" | ");
+  return `status=${state.status} tasks=[${tasks}] approvals=[${approvals}] last=[${tail}]`;
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {
