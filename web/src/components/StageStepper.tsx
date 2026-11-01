@@ -1,8 +1,9 @@
 import { Check, Loader2, Minus, X } from "lucide-react";
-import type { StageId } from "../stages";
+import type { StageId, StageState } from "../stages";
 import { deriveStages } from "../stages";
 import type { RunState } from "../types";
 import { cn } from "../ui/cn";
+import { isBehind, stageTone } from "./stage-stepper/tone";
 
 interface StageStepperProps {
   run: Pick<RunState, "status" | "history">;
@@ -25,49 +26,52 @@ export function StageStepper({ run, selectedStageId, onSelectStage }: StageStepp
               selectedStageId === stage.id && "bg-accent-soft",
             )}
           >
-            <span
-              aria-hidden
-              className={cn(
-                "grid size-[18px] place-items-center rounded-full text-on-accent transition-colors",
-                stage.state === "done" && "bg-success",
-                stage.state === "current" && "bg-accent",
-                stage.state === "failed" && "bg-danger",
-                (stage.state === "pending" || stage.state === "skipped") && "bg-surface-3 text-muted",
-              )}
-            >
-              {stage.state === "done" && <Check className="size-3" strokeWidth={3} />}
-              {stage.state === "current" && <Loader2 className="size-3 motion-safe:animate-spin" strokeWidth={3} />}
-              {stage.state === "failed" && <X className="size-3" strokeWidth={3} />}
-              {stage.state === "skipped" && <Minus className="size-3" />}
-              {stage.state === "pending" && <span className="size-1 rounded-full bg-muted/60" />}
-            </span>
-            <span
-              className={cn(
-                "text-xs font-medium whitespace-nowrap",
-                stage.state === "current" && "text-ink",
-                stage.state === "failed" && "text-danger-ink",
-                stage.state === "done" && "text-ink-2",
-                (stage.state === "pending" || stage.state === "skipped") && "text-muted",
-              )}
-            >
+            <StageDot state={stage.state} />
+            <span className={cn("text-xs font-medium whitespace-nowrap", stageTone(stage.state).text)}>
               {stage.label}
-              <span className="sr-only">
-                {stage.state === "done" ? "（已完成）" : stage.state === "current" ? "（进行中）" : stage.state === "failed" ? "（在此停止）" : stage.state === "skipped" ? "（已跳过）" : "（未开始）"}
-                ，点击查看
-              </span>
+              <span className="sr-only">{stageTone(stage.state).spoken}，点击查看</span>
             </span>
           </button>
-          {index < stages.length - 1 && (
-            <span
-              aria-hidden
-              className={cn(
-                "mx-2.5 h-px w-5 shrink-0 sm:w-8",
-                stage.state === "done" || stage.state === "skipped" ? "bg-success/50" : "bg-line-strong",
-              )}
-            />
-          )}
+          {index < stages.length - 1 && <StageConnector state={stage.state} />}
         </li>
       ))}
     </ol>
+  );
+}
+
+/** The state's own mark: a tick, a spinner, a cross, a dash, or a small dot. */
+function StageDot({ state }: { state: StageState }) {
+  return (
+    <span
+      aria-hidden
+      className={cn("grid size-[18px] place-items-center rounded-full text-on-accent transition-colors", stageTone(state).dot)}
+    >
+      {markFor(state)}
+    </span>
+  );
+}
+
+function markFor(state: StageState) {
+  switch (state) {
+    case "done":
+      return <Check className="size-3" strokeWidth={3} />;
+    case "current":
+      return <Loader2 className="size-3 motion-safe:animate-spin" strokeWidth={3} />;
+    case "failed":
+      return <X className="size-3" strokeWidth={3} />;
+    case "skipped":
+      return <Minus className="size-3" />;
+    case "pending":
+      return <span className="size-1 rounded-full bg-muted/60" />;
+  }
+}
+
+/** The line to the next stage: green once this one is behind us. */
+function StageConnector({ state }: { state: StageState }) {
+  return (
+    <span
+      aria-hidden
+      className={cn("mx-2.5 h-px w-5 shrink-0 sm:w-8", isBehind(state) ? "bg-success/50" : "bg-line-strong")}
+    />
   );
 }
