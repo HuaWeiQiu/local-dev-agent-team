@@ -115,6 +115,19 @@ export class TicketService {
     });
   }
 
+  /**
+   * Record a Ticket that was built in memory. Idempotent: an existing record with
+   * the same id is left alone, so a retried start cannot overwrite history.
+   */
+  async ensure(ticket: Ticket): Promise<Ticket> {
+    return await this.#serial(async () => {
+      const existing = await this.#store.get(ticket.id);
+      if (existing) return existing;
+      await this.#store.save(ticket);
+      return ticket;
+    });
+  }
+
   /** Bind a run to a Ticket. This is the Assignment the run executes as. */
   async attachRun(input: { ticketId: string; runId: string }): Promise<Ticket> {
     return await this.#serial(async () => {

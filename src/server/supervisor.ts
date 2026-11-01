@@ -11,10 +11,10 @@ import {
 } from "../interventions/plan-edit.js";
 import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
 import { TicketService } from "../authority/ticket-service.js";
-import type { Ticket } from "../authority/ticket.js";
+import { openTicket, type Ticket } from "../authority/ticket.js";
 import { readAdmission } from "../intake/admission.js";
+import { makeTrigger, threadKey, type Trigger } from "../intake/types.js";
 import type { DroppedEvent } from "../intake/github-source.js";
-import type { Trigger } from "../intake/types.js";
 import type { PolicySnapshot } from "../authority/types.js";
 import { TicketStore } from "../authority/ticket-store.js";
 import { assignmentOutcome } from "../authority/assignment-outcome.js";
@@ -278,6 +278,7 @@ export class RunSupervisor {
           signal: controller.signal,
           ...(purpose ? { purpose } : {}),
         }),
+        request.goal,
       );
       const replay = idempotencyKey && hash ? { key: idempotencyKey, hash } : undefined;
       void this.track(runId, controller, workflow, request.parentRunId, replay);
@@ -963,13 +964,49 @@ export class RunSupervisor {
     ticketId: string | undefined,
     runId: string,
     start: () => Promise<RunState>,
+    goal: string,
   ): Promise<RunState> {
-    if (!ticketId) return start();
+    if (ticketId) return this.withNamedTicket(ticketId, runId, start);
+    // A run a person started gets its own Ticket on its own Thread, so recording
+    // it cannot contend with anything: the Thread exists for this run alone.
+    const ticket = localTicket(runId, goal, this.currentPolicy());
+    const workflow = start();
+    const recorded = this.recordLocalTicket(ticket, runId);
+    return workflow.finally(async () => {
+      // Settling needs the Ticket to exist, so it waits for the record rather than
+      // racing it; the workflow itself never waited.
+      await recorded;
+      await this.settleTicketAssignment(ticket.id, runId);
+    });
+  }
+
+  /** A caller-named Ticket: bind before starting, so a busy Ticket refuses the run. */
+  private withNamedTicket(
+    ticketId: string,
+    runId: string,
+    start: () => Promise<RunState>,
+  ): Promise<RunState> {
     return this.ticketService()
       .attachRun({ ticketId, runId })
       .then(async () => await start())
       .finally(async () => await this.settleTicketAssignment(ticketId, runId));
   }
+
+  /**
+   * Write the Ticket and its first Assignment. This runs beside the workflow
+   * rather than before it: a crash between the two loses the Ticket record but
+   * never the run, and a retry of the same goal opens a new one.
+   */
+  private async recordLocalTicket(ticket: Ticket, runId: string): Promise<void> {
+    try {
+      await this.ticketService().ensure(ticket);
+      await this.ticketService().attachRun({ ticketId: ticket.id, runId });
+    } catch {
+      // Bookkeeping must not fail a run that has already started.
+    }
+  }
+
+
 
   /**
    * The Assignment ends with the run; the Ticket keeps its own life. The run
@@ -1248,6 +1285,45 @@ export function buildRunnerRequest(
     ...(request.parentRunId ? { parentRunId: request.parentRunId } : {}),
     ...(purpose ? { purpose } : {}),
   };
+}
+
+/**
+ * A run a person started from this machine, as a Ticket.
+ *
+ * The Trigger is explicit by construction — someone typed the goal, so nobody has
+ * to judge whether it was asked for — and the Thread is this run alone, so the
+ * Ticket cannot contend with another. Everything here is pure: the record is
+ * written beside the workflow, not in front of it.
+ */
+export function localTicket(runId: string, goal: string, policy: PolicySnapshot): Ticket {
+  const trigger = makeTrigger({
+    sourceKind: "local-cli",
+    sourceInstanceId: "operator",
+    externalId: runId,
+    kind: "request",
+    threads: [
+      { sourceKind: "local-cli", sourceInstanceId: "operator", threadId: `run/${runId}` },
+    ],
+    actor: { sourceKind: "local-cli", id: "operator" },
+    at: new Date().toISOString(),
+    payload: { body: goal },
+  })!;
+  return openTicket({
+    id: `ticket-${runId}`,
+    threadKey: threadKey(trigger.threads[0]!),
+    triggerId: trigger.id,
+    mandate: {
+      id: `mandate-${runId}`,
+      triggerId: trigger.id,
+      policyVersion: policy.version,
+      scope: [],
+      strength: "explicit",
+      actor: trigger.actor,
+      sourceKind: trigger.sourceKind,
+      reliedOn: [...policy.rules],
+      grantedAt: trigger.at,
+    },
+  });
 }
 
 /** What a person's message asks for, as a goal the planner can read. */
