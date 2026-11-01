@@ -89,37 +89,12 @@ function resolveNamedStrategy(
   name: string,
   strategy: NamedStrategy,
 ): ResolvedStrategy {
-  const approvalGates: ApprovalGate[] = strategy.approvalGates
-    ? [...strategy.approvalGates]
-    : ["final"];
-  const topologyMode = strategy.topology?.mode ?? "parallel-dag";
-  const maxParallel = topologyMode === "sequential"
-    ? 1
-    : strategy.maxParallel ?? config.project.maxParallel;
-  const swarmCap = strategy.taskMorphology?.implement?.swarm?.maxConcurrency;
-  const swarmMaxConcurrency = Math.min(swarmCap ?? maxParallel, maxParallel);
-  const exploreConfig = strategy.taskMorphology?.explore;
-  const explore: ResolvedExploreMorphology = {
-    enabled: exploreConfig?.enabled ?? false,
-    maxInjectedChars: exploreConfig?.maxInjectedChars ?? 4_000,
-    failOpen: exploreConfig?.failOpen ?? true,
-    ...(exploreConfig?.profile ? { profile: exploreConfig.profile } : {}),
-  };
-  const advisorConfig = strategy.taskMorphology?.advisor;
-  const advisor: ResolvedAdvisorMorphology = advisorConfig
-    ? {
-        enabled: advisorConfig.enabled,
-        triggers: [...advisorConfig.triggers],
-        maxConsultationsPerRun: advisorConfig.maxConsultationsPerRun,
-        ...(advisorConfig.profile ? { profile: advisorConfig.profile } : {}),
-      }
-    : { ...disabledAdvisor, triggers: [...disabledAdvisor.triggers] };
-
+  const approvalGates = approvalGatesOf(strategy);
+  const explore = resolveExplore(strategy);
   return {
     name,
-    maxParallel,
-    maxReworkAttempts:
-      strategy.maxReworkAttempts ?? config.quality.maxReworkAttempts,
+    maxParallel: maxParallelOf(config, strategy),
+    maxReworkAttempts: strategy.maxReworkAttempts ?? config.quality.maxReworkAttempts,
     executionTimeoutSeconds: strategy.executionTimeoutSeconds ?? 14_400,
     maxAgentInvocations: strategy.maxAgentInvocations ?? 64,
     maxProcessOutputBytes: strategy.maxProcessOutputBytes ?? 1_048_576,
@@ -127,11 +102,60 @@ function resolveNamedStrategy(
     roleProfiles: { ...strategy.roleProfiles },
     approvalGates,
     approvalTimeoutSeconds: strategy.approvalTimeoutSeconds ?? 86_400,
-    topology: compileStrategyTopology(topologyMode, approvalGates, {
+    topology: compileStrategyTopology(topologyModeOf(strategy), approvalGates, {
       exploreEnabled: explore.enabled,
     }),
-    swarmMaxConcurrency,
+    swarmMaxConcurrency: swarmConcurrencyOf(config, strategy),
     explore,
-    advisor,
+    advisor: resolveAdvisor(strategy),
   };
 }
+
+function approvalGatesOf(strategy: NamedStrategy): ApprovalGate[] {
+  return strategy.approvalGates ? [...strategy.approvalGates] : ["final"];
+}
+
+function topologyModeOf(strategy: NamedStrategy): "sequential" | "parallel-dag" {
+  return strategy.topology?.mode ?? "parallel-dag";
+}
+
+/** A sequential topology runs one task at a time, whatever else is configured. */
+function maxParallelOf(config: AgentTeamConfig, strategy: NamedStrategy): number {
+  if (topologyModeOf(strategy) === "sequential") return 1;
+  return strategy.maxParallel ?? config.project.maxParallel;
+}
+
+/** Swarm concurrency is a cap on the wave size, never a replacement for it. */
+function swarmConcurrencyOf(config: AgentTeamConfig, strategy: NamedStrategy): number {
+  const maxParallel = maxParallelOf(config, strategy);
+  const cap = strategy.taskMorphology?.implement?.swarm?.maxConcurrency;
+  return Math.min(cap ?? maxParallel, maxParallel);
+}
+
+function resolveExplore(strategy: NamedStrategy): ResolvedExploreMorphology {
+  const config = strategy.taskMorphology?.explore;
+  return {
+    enabled: config?.enabled ?? false,
+    maxInjectedChars: config?.maxInjectedChars ?? 4_000,
+    failOpen: config?.failOpen ?? true,
+    ...profileOf(config),
+  };
+}
+
+/** A profile is carried only when one is named; absent is not the same as empty. */
+function profileOf(config: { profile?: string | undefined } | undefined): { profile?: string } {
+  return config?.profile ? { profile: config.profile } : {};
+}
+
+/** An unconfigured advisor is disabled, and says so with the default triggers. */
+function resolveAdvisor(strategy: NamedStrategy): ResolvedAdvisorMorphology {
+  const config = strategy.taskMorphology?.advisor;
+  if (!config) return { ...disabledAdvisor, triggers: [...disabledAdvisor.triggers] };
+  return {
+    enabled: config.enabled,
+    triggers: [...config.triggers],
+    maxConsultationsPerRun: config.maxConsultationsPerRun,
+    ...profileOf(config),
+  };
+}
+
