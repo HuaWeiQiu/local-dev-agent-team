@@ -117,15 +117,19 @@ function pick<T>(rand: () => number, values: readonly T[]): T {
   return values[Math.floor(rand() * values.length)] as T;
 }
 
+const COSTS = [undefined, 0, 1, 0.5, -3, 1e9, 1e-9, null];
+
 function usageFor(rand: () => number): unknown {
   const roll = rand();
   if (roll < 0.2) return undefined;
-  if (roll < 0.27) return null;
+  if (roll < 0.26) return null;
+  // Non-nullish but not a usage block: `?.` and a plain read must still agree.
+  if (roll < 0.31) return "not-a-usage-object";
   const usage: Record<string, unknown> = {};
   if (rand() < 0.85) usage.inputTokens = pick(rand, NUMBERS);
   if (rand() < 0.35) usage.cachedInputTokens = pick(rand, NUMBERS);
   if (rand() < 0.8) usage.outputTokens = pick(rand, NUMBERS);
-  if (rand() < 0.55) usage.reportedCostUsd = pick(rand, [undefined, 0, 1, 0.5, -3, 1e9, 1e-9]);
+  if (rand() < 0.55) usage.reportedCostUsd = pick(rand, COSTS);
   if (rand() < 0.05) usage.unknownField = "odd";
   return usage;
 }
