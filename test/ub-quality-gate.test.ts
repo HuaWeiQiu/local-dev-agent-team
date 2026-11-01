@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -281,5 +282,46 @@ describe("scored sources", () => {
     expect(isScoredSource("web/src/App.test.tsx")).toBe(false);
     expect(isScoredSource("web/e2e/workbench.e2e.ts")).toBe(false);
     expect(isScoredSource("docs/readme.md")).toBe(false);
+  });
+});
+
+describe("clearMetrics", () => {
+  it("removes a metrics file left by an earlier run", async () => {
+    const { clearMetrics } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-metrics-"));
+    await mkdir(path.join(root, ".metrics"), { recursive: true });
+    const metrics = path.join(root, ".metrics", "crap.edn");
+    await writeFile(metrics, "{:name \"stale\"}\n", "utf8");
+
+    expect(clearMetrics(root)).toBe(true);
+    expect(existsSync(metrics)).toBe(false);
+  });
+
+  it("says so when there was nothing to clear", async () => {
+    const { clearMetrics } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-metrics-"));
+    expect(clearMetrics(root)).toBe(false);
+  });
+
+  it("stops the baseline step from reading a measurement of older code", async () => {
+    // A stale file claiming a function scored 999 would otherwise be reported as a
+    // regression against the frozen baseline; clearing it makes the run honest.
+    const { clearMetrics, baselineStep } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-metrics-"));
+    await mkdir(path.join(root, ".metrics"), { recursive: true });
+    await writeFile(
+      path.join(root, ".metrics", "crap.edn"),
+      '{:name "gone", :namespace "ghost", :complexity 30, :coverage 0.0, :crap 999.0}\n',
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "baseline.json"),
+      JSON.stringify({ scores: { "ghost#gone": 12 } }),
+      "utf8",
+    );
+
+    clearMetrics(root);
+    const status = baselineStep({ tool: "crapper", baseline: "baseline.json" }, root);
+    expect(status).toBe(0);
   });
 });
