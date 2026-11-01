@@ -154,6 +154,33 @@ async function runWith(
   return { state, events };
 }
 
+/**
+ * What a failed advisor assertion needs to say: who was consulted, what the run
+ * did with the quota, and how each task ended.
+ *
+ * The signals are the ones that would explain a race: two consultations recorded
+ * at the same quota, or a skip and a consultation that disagree about the count.
+ */
+function describeAdvisorRun(
+  state: { status: string; advisorConsultations?: number; tasks: { task: { id: string }; status: string }[] },
+  service: AdvisorFixtureService,
+  events: PendingRunEvent[],
+): string {
+  const calls = service.advisorCalls.map((call) => call.trigger).join(",") || "none";
+  const advisorEvents = events
+    .filter((event) => event.type.startsWith("run.advisor."))
+    .map((event) => `${event.type}@${String((event.payload as { taskId?: string }).taskId ?? "-")}`)
+    .join(" ") || "none";
+  const tasks = state.tasks.map((task) => `${task.task.id}=${task.status}`).join(", ") || "none";
+  return [
+    `status=${state.status}`,
+    `consultations=${state.advisorConsultations ?? 0}`,
+    `calls=[${calls}]`,
+    `tasks=[${tasks}]`,
+    `advisorEvents=[${advisorEvents}]`,
+  ].join(" ");
+}
+
 const bothTriggers = ["repeated-failure", "pre-final"] as const;
 
 describe("architect advisor", () => {
@@ -226,9 +253,17 @@ describe("architect advisor", () => {
     const service = new AdvisorFixtureService(["alpha", "beta"]);
     const { state, events } = await runWith(loaded, service);
 
-    expect(service.advisorCalls).toHaveLength(1);
-    expect(state.advisorConsultations).toBe(1);
-    expect(events.filter((event) => event.type === "run.advisor.skipped")).toHaveLength(1);
+    // This case has failed under full-suite load without saying why. The message
+    // carries what a reader needs: who consulted, in what order, and where the
+    // two tasks ended up, rather than one number against another.
+    const observed = describeAdvisorRun(state, service, events);
+
+    expect(service.advisorCalls, observed).toHaveLength(1);
+    expect(state.advisorConsultations, observed).toBe(1);
+    expect(
+      events.filter((event) => event.type === "run.advisor.skipped"),
+      observed,
+    ).toHaveLength(1);
   }, 60_000);
 
   it("reviews the integrated result before the final decision when quality passed", async () => {
