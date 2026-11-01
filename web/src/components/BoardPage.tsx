@@ -1,9 +1,10 @@
 import { CheckCircle2, type Clock, Loader2, Sparkles, TriangleAlert } from "lucide-react";
 import { boardLaneLabels, type BoardCard, type BoardLane } from "../board";
+import { AttentionPanel } from "./AttentionPanel";
 import { RunCard } from "./board/RunCard";
 import { BOARD_LANES, BoardToolbar, GoalComposer } from "./board/sections";
 import { useBoardState } from "./board/useBoardState";
-import type { PublicConfig, RunStatus, RunSummary } from "../types";
+import type { ProjectScope, PublicConfig, RunStatus, RunSummary } from "../types";
 import { StatusDot } from "../ui/status";
 
 const deletableStatuses = new Set<RunStatus>(["completed", "cancelled", "blocked", "interrupted"]);
@@ -17,6 +18,7 @@ const sampleGoals = [
 interface BoardPageProps {
   runs: RunSummary[];
   config: PublicConfig | undefined;
+  scope: ProjectScope | undefined;
   selectedRunId: string | undefined;
   busy: boolean;
   loading: boolean;
@@ -33,7 +35,7 @@ const laneMeta: Record<BoardLane, { icon: typeof Clock; empty: string; dot: "war
   done: { icon: CheckCircle2, empty: "还没有已结束的运行", dot: "neutral" },
 };
 
-export function BoardPage({ runs, config, selectedRunId, busy, loading, demo, onOpenRun, onCreate, onCleanup, onDeleteRun }: BoardPageProps) {
+export function BoardPage({ runs, config, scope, selectedRunId, busy, loading, demo, onOpenRun, onCreate, onCleanup, onDeleteRun }: BoardPageProps) {
   const state = useBoardState({ runs, config, onCreate });
   const empty = !loading && runs.length === 0;
 
@@ -55,6 +57,7 @@ export function BoardPage({ runs, config, selectedRunId, busy, loading, demo, on
         <Onboarding demo={demo} onPick={(value) => state.setGoal(value)} />
       ) : (
         <>
+          {scope && <AttentionPanel scope={scope} />}
           <BoardToolbar total={runs.length} query={state.query} busy={busy} onQuery={state.setQuery} onCleanup={onCleanup} />
           <div className="flex flex-col gap-6">
             {BOARD_LANES.map((lane) => (
