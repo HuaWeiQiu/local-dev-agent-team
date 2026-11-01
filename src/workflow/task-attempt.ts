@@ -44,6 +44,26 @@ interface AttemptMemory {
   architectAdvice: AdvisorVerdict | undefined;
 }
 
+/**
+ * What to answer when the flow has no model review: the deterministic gates
+ * decide alone, and the verdict says so rather than pretending a model read it.
+ */
+function skippedReview(quality: QualityReport): {
+  review: ReviewVerdict;
+  test: TestVerdict;
+  skipped: true;
+} {
+  const verdict = quality.passed ? "approve" : "request_changes";
+  const summary = quality.passed
+    ? "Deterministic quality gates passed; model review is not part of this flow."
+    : "Deterministic quality gates failed.";
+  return {
+    review: { verdict, summary, findings: [] },
+    test: { verdict, summary, missingTests: [] },
+    skipped: true,
+  };
+}
+
 /** A task cannot run before its worktree and the plan exist. */
 function requireInitialized(state: RunState, taskState: TaskRunState): void {
   if (taskState.worktree && state.plan) return;
@@ -140,20 +160,8 @@ export class TaskAttemptRunner {
   ): Promise<void> {
     const scope = this.attemptScope({ state, taskState, store, git, baseAgent, budget, signal });
     const memory = emptyAttemptMemory();
-    const reused = await this.tryFinishAlreadyPassedTask(
-      state,
-      taskState,
-      store,
-      git,
-      scope.agent,
-      signal,
-    );
-    if (reused === "committed") return;
-    if (reused === "rework") {
-      memory.feedback = taskState.error ?? "Previous review requested changes";
-    }
-    const startAttempt = firstAttempt(reused, taskState.attempts, scope.maxAttempts);
-    if (await this.refuseWithoutBudget(scope, startAttempt)) return;
+    const startAttempt = await this.resumePoint(scope, memory);
+    if (startAttempt === undefined) return;
 
     for (let attempt = startAttempt; attempt <= scope.maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
@@ -515,6 +523,26 @@ export class TaskAttemptRunner {
     await store.save(state);
   }
 
+  /**
+   * Where the attempt numbering starts, given what a resumed task already did.
+   * `undefined` means the task is finished or already blocked and the caller stops.
+   */
+  private async resumePoint(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+  ): Promise<number | undefined> {
+    const { state, taskState, store, git, agent, signal } = scope;
+    const reused = await this.tryFinishAlreadyPassedTask(state, taskState, store, git, agent, signal);
+    if (reused === "committed") return undefined;
+    if (reused === "rework") {
+      memory.feedback = taskState.error ?? "Previous review requested changes";
+    }
+    const startAttempt = firstAttempt(reused, taskState.attempts, scope.maxAttempts);
+    if (startAttempt <= scope.maxAttempts) return startAttempt;
+    await this.blockWithoutBudget(scope);
+    return undefined;
+  }
+
   /** Refuse to start when the task resumed with no attempts left. */
   private async refuseWithoutBudget(scope: AttemptScope, startAttempt: number): Promise<boolean> {
     if (startAttempt <= scope.maxAttempts) return false;
@@ -579,32 +607,57 @@ export class TaskAttemptRunner {
       await store.save(state);
       return "committed";
     }
-    const leftover = await this.stagedLeftover(state, taskState, store, git, agent, signal);
+    const leftover = await this.stagedLeftover(state, taskState, store, git, signal);
     if (!leftover) return "fresh";
-    const { quality, review, test, skipped } = leftover;
-    if (this.passedAlready(taskState, quality, review, test)) {
-      await this.commitPassedTask(state, taskState, taskState.worktree!, store, git, signal);
+    const { quality, files, diff } = leftover;
+    // The earlier review is consulted before a new one runs — and before a new one
+    // overwrites it. A resumed task that already cleared the gates is not reviewed
+    // a second time.
+    if (this.earlierReviewPasses(taskState, quality)) {
+      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
+      return "committed";
+    }
+    const { review, test, skipped } = await this.reviewTaskAttempt(
+      state,
+      taskState,
+      taskState.worktree,
+      store,
+      agent,
+      quality,
+      files,
+      diff,
+      Math.max(taskState.attempts, 1),
+    );
+    if (taskPassed(taskState, quality, review, test)) {
+      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
       return "committed";
     }
     if (isHardSpecialistEscalation(review, test) && !quality.passed) return "fresh";
+    await this.recordRework(state, taskState, store, quality, review, test, skipped);
+    return "rework";
+  }
+
+  /** Whether the verdicts this task already carries clear its gates. */
+  private earlierReviewPasses(taskState: TaskRunState, quality: QualityReport): boolean {
+    if (!taskState.review || !taskState.test) return false;
+    return taskPassed(taskState, quality, taskState.review, taskState.test);
+  }
+
+  /** Keep why a resumed attempt needs rework, so the next attempt can read it. */
+  private async recordRework(
+    state: RunState,
+    taskState: TaskRunState,
+    store: RunStateStore,
+    quality: QualityReport,
+    review: ReviewVerdict,
+    test: TestVerdict,
+    skipped: boolean,
+  ): Promise<void> {
     taskState.status = "reworking";
     taskState.error = skipped
       ? buildQualityFeedback(quality)
       : buildReworkFeedback(quality, review, test);
     await store.save(state);
-    return "rework";
-  }
-
-  /** A resumed task whose earlier review already cleared every gate. */
-  private passedAlready(
-    taskState: TaskRunState,
-    quality: QualityReport,
-    review: ReviewVerdict,
-    test: TestVerdict,
-  ): boolean {
-    const earlier =
-      taskState.review && taskState.test && taskPassed(taskState, quality, taskState.review, taskState.test);
-    return Boolean(earlier) || taskPassed(taskState, quality, review, test);
   }
 
   /**
@@ -617,38 +670,15 @@ export class TaskAttemptRunner {
     taskState: TaskRunState,
     store: RunStateStore,
     git: GitManager,
-    agent: RoleAgentService,
     signal: AbortSignal | undefined,
-  ): Promise<
-    | undefined
-    | {
-        quality: QualityReport;
-        files: string[];
-        review: ReviewVerdict;
-        test: TestVerdict;
-        skipped: boolean;
-      }
-  > {
+  ): Promise<undefined | { quality: QualityReport; files: string[]; diff: string }> {
     const worktree = taskState.worktree!;
     await git.stage(worktree, signal);
     const files = await git.changedFiles(worktree, signal);
     if (files.length === 0) return undefined;
     if (ownedPathProblem(git, files, taskState.task.ownedPaths)) return undefined;
-    const attempt = Math.max(taskState.attempts, 1);
     const diff = await git.stagedDiff(worktree, 160_000, signal);
-    const quality = taskState.quality!;
-    const { review, test, skipped } = await this.reviewTaskAttempt(
-      state,
-      taskState,
-      worktree,
-      store,
-      agent,
-      quality,
-      files,
-      diff,
-      attempt,
-    );
-    return { quality, files, review, test, skipped };
+    return { quality: taskState.quality!, files, diff };
   }
 
 
@@ -711,16 +741,7 @@ export class TaskAttemptRunner {
   ): Promise<{ review: ReviewVerdict; test: TestVerdict; skipped: boolean }> {
     const flow = state.flow ? activeFlow(state.flow) : undefined;
     if (!taskStepEnabled(flow, "review") && !taskStepEnabled(flow, "test")) {
-      // The quick template has no model review; deterministic gates decide alone.
-      const verdict = quality.passed ? "approve" : "request_changes";
-      const summary = quality.passed
-        ? "Deterministic quality gates passed; model review is not part of this flow."
-        : "Deterministic quality gates failed.";
-      return {
-        review: { verdict, summary, findings: [] },
-        test: { verdict, summary, missingTests: [] },
-        skipped: true,
-      };
+      return skippedReview(quality);
     }
     await store.transition(
       state,
