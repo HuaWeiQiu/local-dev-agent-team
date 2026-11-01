@@ -7,7 +7,7 @@ import { type GitManager } from "../git/manager.js";
 import { ensureWorktreeNodeModules } from "../quality/install.js";
 import { runQualityWithRerun } from "../quality/flaky.js";
 import { deduplicateCommands, type QualityReport } from "../quality/run.js";
-import { TaskBudgetAgent, TaskBudgetExceededError } from "../reliability/task-budget.js";
+import { TaskBudgetAgent, TaskBudgetExceededError, type TaskBudgetLimits } from "../reliability/task-budget.js";
 import { type RunStateStore } from "../state/store.js";
 import type { RunState, TaskRunState } from "../state/types.js";
 import { pathExists, taskArtifactKey } from "./state-helpers.js";
@@ -18,6 +18,110 @@ import type { RunnerEnv } from "./types.js";
 import type { AdvisorService } from "./advisor.js";
 
 const DEFAULT_FLAKY_RERUNS = 1;
+
+/** The fixed dependencies of one task execution; assembled once, never mutated. */
+interface AttemptScope {
+  state: RunState;
+  taskState: TaskRunState;
+  store: RunStateStore;
+  git: GitManager;
+  budget: RunBudgetTracker;
+  agent: RoleAgentService;
+  triage: TriagePolicy | undefined;
+  maxAttempts: number;
+  signal: AbortSignal | undefined;
+}
+
+type TriagePolicy = NonNullable<ReturnType<typeof activeFlow>>["template"]["triage"];
+
+/** What carries from one attempt to the next. */
+interface AttemptMemory {
+  identicalFailures: number;
+  feedback: string;
+  lastReworkExperienceIds: string[];
+  failureInput: FailureSignatureInput | undefined;
+  previousSignature: FailureSignature | undefined;
+  architectAdvice: AdvisorVerdict | undefined;
+}
+
+/** A task cannot run before its worktree and the plan exist. */
+function requireInitialized(state: RunState, taskState: TaskRunState): void {
+  if (taskState.worktree && state.plan) return;
+  throw new Error(`Task '${taskState.task.id}' worktree is not initialized`);
+}
+
+function emptyAttemptMemory(): AttemptMemory {
+  return {
+    identicalFailures: 0,
+    feedback: "",
+    lastReworkExperienceIds: [],
+    failureInput: undefined,
+    previousSignature: undefined,
+    architectAdvice: undefined,
+  };
+}
+
+/**
+ * Attempt counts persist across resume segments: a task interrupted at attempt N
+ * continues at N+1, and a task that already exhausted its rework limit stays
+ * blocked instead of being granted a fresh budget.
+ */
+function firstAttempt(
+  reused: "committed" | "rework" | "fresh" | undefined,
+  priorAttempts: number,
+  maxAttempts: number,
+): number {
+  const prior = Math.max(priorAttempts, 0);
+  if (reused === "rework") return Math.min(prior + 1, maxAttempts);
+  return prior > 0 ? prior + 1 : 1;
+}
+
+/** Wrap the agent so a task cannot spend more than its share of the run's budget. */
+function withTaskBudget(
+  taskBudget: TaskBudgetLimits | undefined,
+  baseAgent: RoleAgentService,
+  taskState: TaskRunState,
+): RoleAgentService {
+  if (!taskBudget) return baseAgent;
+  return new TaskBudgetAgent(
+    baseAgent,
+    taskState.task.id,
+    taskBudget,
+    taskState.agentInvocations ?? 0,
+    (count) => {
+      taskState.agentInvocations = count;
+    },
+  );
+}
+
+/** Whether the attempt cleared every gate it had to clear. */
+function taskPassed(
+  taskState: TaskRunState,
+  quality: QualityReport,
+  review: ReviewVerdict,
+  test: TestVerdict,
+): boolean {
+  if (!quality.passed) return false;
+  return (
+    passesTaskGates(quality, review, test)
+    || shouldTrustQualityOverReview(review, test)
+    || shouldAcceptDocsDespiteEscalate(taskState.task, review, test)
+  );
+}
+
+/** The first owned-path violation, or nothing when every change is allowed. */
+function ownedPathProblem(
+  git: GitManager,
+  files: readonly string[],
+  ownedPaths: readonly string[],
+): string | undefined {
+  try {
+    git.assertOwnedPaths([...files], [...ownedPaths]);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
 
 export class TaskAttemptRunner {
   constructor(
@@ -34,278 +138,399 @@ export class TaskAttemptRunner {
     budget: RunBudgetTracker,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (!taskState.worktree || !state.plan) {
-      throw new Error(`Task '${taskState.task.id}' worktree is not initialized`);
-    }
-    const taskBudget = this.env.loaded.config.workflow?.taskBudget;
-    const agent: RoleAgentService = taskBudget
-      ? new TaskBudgetAgent(
-          baseAgent,
-          taskState.task.id,
-          taskBudget,
-          taskState.agentInvocations ?? 0,
-          (count) => {
-            taskState.agentInvocations = count;
-          },
-        )
-      : baseAgent;
-    const triagePolicy = (state.flow ? activeFlow(state.flow) : undefined)?.template.triage;
-    let identicalFailures = 0;
-    const maxAttempts = state.strategy.maxReworkAttempts + 1;
-    let feedback = "";
-    let lastReworkExperienceIds: string[] = [];
-    let failureInput: FailureSignatureInput | undefined;
-    let previousSignature: FailureSignature | undefined;
-    let architectAdvice: AdvisorVerdict | undefined;
+    const scope = this.attemptScope({ state, taskState, store, git, baseAgent, budget, signal });
+    const memory = emptyAttemptMemory();
     const reused = await this.tryFinishAlreadyPassedTask(
       state,
       taskState,
       store,
       git,
-      agent,
+      scope.agent,
       signal,
     );
-    if (reused === "committed") {
-      return;
-    }
+    if (reused === "committed") return;
     if (reused === "rework") {
-      feedback = taskState.error ?? "Previous review requested changes";
+      memory.feedback = taskState.error ?? "Previous review requested changes";
     }
-    // Attempt counts persist across resume segments: a task interrupted at
-    // attempt N continues at N+1, and a task that already exhausted its
-    // rework limit stays blocked instead of being granted a fresh budget.
-    const priorAttempts = Math.max(taskState.attempts, 0);
-    const startAttempt =
-      reused === "rework"
-        ? Math.min(priorAttempts + 1, maxAttempts)
-        : priorAttempts > 0
-          ? priorAttempts + 1
-          : 1;
-    if (startAttempt > maxAttempts) {
-      taskState.status = "blocked";
-      taskState.error = `Rework attempts exhausted: ${priorAttempts} attempt(s) against limit ${state.strategy.maxReworkAttempts}`;
-      await store.save(state);
-      return;
-    }
+    const startAttempt = firstAttempt(reused, taskState.attempts, scope.maxAttempts);
+    if (await this.refuseWithoutBudget(scope, startAttempt)) return;
 
-    for (let attempt = startAttempt; attempt <= maxAttempts; attempt += 1) {
+    for (let attempt = startAttempt; attempt <= scope.maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
-      if (failureInput) {
-        // Deterministic fork: the same normalized failure twice in a row means
-        // a blind retry is unlikely to help, so escalate to the architect.
-        const currentSignature = computeFailureSignature(failureInput);
-        const repeated = isRepeatedFailure(previousSignature, currentSignature);
-        identicalFailures = repeated ? identicalFailures + 1 : 1;
-        previousSignature = currentSignature;
-        failureInput = undefined;
-        architectAdvice = undefined;
-        let consult = repeated;
-        let escalatedBy: "jev" | undefined;
-        if (this.env.forkAdvisor && this.advisor.canConsultAdvisor(state, "repeated-failure")) {
-          const resolution = await this.advisor.decideWithFork(state, store, {
-            taskId: taskState.task.id,
-            taskTitle: taskState.task.title,
-            attempt,
-            maxAttempts,
-            repeated,
-            failureSummary: currentSignature.summary,
-            ...(signal ? { signal } : {}),
-          });
-          consult = resolution.consult;
-          if (consult && !repeated) {
-            escalatedBy = "jev";
-          }
-        }
-        if (consult) {
-          const verdict = await this.advisor.consultAdvisor({
-            state,
-            store,
-            agent,
-            trigger: "repeated-failure",
-            taskId: taskState.task.id,
-            cwd: taskState.worktree,
-            artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "advisor"),
-            ...(signal ? { signal } : {}),
-            context: {
-              trigger: "repeated-failure",
-              goal: state.goal,
-              planSummary: state.plan.summary,
-              task: taskState.task,
-              attempt,
-              repeatedFailure: currentSignature.summary,
-              repeated,
-              ...(escalatedBy ? { escalatedBy } : {}),
-              feedback: feedback.slice(-20_000),
-              diff: await git.stagedDiff(taskState.worktree, 60_000, signal).catch(() => ""),
-            },
-          });
-          if (verdict?.recommendation === "stop") {
-            this.emitTriage(state, store, {
-              taskId: taskState.task.id,
-              attempt,
-              decision: "stop",
-              source: "advisor",
-              reason: verdict.summary,
-            });
-            taskState.status = "blocked";
-            taskState.error = `Architect advisor stopped the task after a repeated failure: ${verdict.summary}`;
-            await store.save(state);
-            return;
-          }
-          architectAdvice = verdict;
-        }
-        const stopAfter = triagePolicy?.stopAfterIdenticalFailures;
-        if (stopAfter !== undefined && repeated && identicalFailures >= stopAfter && !architectAdvice) {
-          const reason = `The same failure repeated ${identicalFailures} times: ${currentSignature.summary}`;
-          this.emitTriage(state, store, {
-            taskId: taskState.task.id,
-            attempt,
-            decision: "stop",
-            source: "limit",
-            reason,
-          });
-          taskState.status = "blocked";
-          taskState.error = `Stopped after a repeated identical failure: ${currentSignature.summary}`;
-          await store.save(state);
-          return;
-        }
-        this.emitTriage(state, store, {
-          taskId: taskState.task.id,
-          attempt,
-          decision: architectAdvice ? "consult" : "retry",
-          source: architectAdvice ? (escalatedBy === "jev" ? "jev" : "advisor") : "signature",
-          reason: repeated
-            ? `Repeated failure: ${currentSignature.summary}`
-            : `New failure: ${currentSignature.summary}`,
-        });
-      }
+      if ((await this.decideBeforeRetry(scope, memory, attempt)) === "stop") return;
       taskState.attempts = attempt;
       taskState.status = attempt === 1 ? "working" : "reworking";
       await store.save(state);
-      try {
-        const reworkExperiences =
-          attempt > 1 && feedback
-            ? await this.env.experience.loadRework(state, store, {
-                feedback,
-                taskId: taskState.task.id,
-                taskTitle: taskState.task.title,
-              })
-            : undefined;
-        lastReworkExperienceIds = reworkExperiences?.items.map((item) => item.id) ?? [];
-        const worker = await agent.runText({
-          role: "worker",
-          cwd: taskState.worktree,
-          runId: state.id,
-          artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "worker"),
-          ...(taskState.task.profile ? { profileName: taskState.task.profile } : {}),
-          context: {
-            goal: state.goal,
-            planSummary: state.plan.summary,
-            task: taskState.task,
-            attempt,
-            feedback,
-            ...(reworkExperiences ? { verifiedFailureExperiences: reworkExperiences } : {}),
-            ...(architectAdvice ? { architectAdvice } : {}),
-          },
-        });
-        taskState.profile = worker.profileName;
+      const outcome = await this.runWorkerOnce(scope, memory, attempt);
+      if (outcome !== "retry") return;
+    }
+    await this.blockExhausted(scope, memory);
+  }
 
-        const quality = await this.runTaskQualityGates(
-          state,
-          taskState,
-          taskState.worktree,
-          store,
-          budget,
-          attempt,
-          signal,
-        );
+  /** The fixed dependencies of one task execution, assembled once per call. */
+  private attemptScope(input: {
+    state: RunState;
+    taskState: TaskRunState;
+    store: RunStateStore;
+    git: GitManager;
+    baseAgent: RoleAgentService;
+    budget: RunBudgetTracker;
+    signal: AbortSignal | undefined;
+  }): AttemptScope {
+    const { state, taskState, baseAgent } = input;
+    requireInitialized(state, taskState);
+    return {
+      state,
+      taskState,
+      store: input.store,
+      git: input.git,
+      budget: input.budget,
+      agent: withTaskBudget(this.env.loaded.config.workflow?.taskBudget, baseAgent, taskState),
+      triage: (state.flow ? activeFlow(state.flow) : undefined)?.template.triage,
+      maxAttempts: state.strategy.maxReworkAttempts + 1,
+      signal: input.signal,
+    };
+  }
 
-        await git.stage(taskState.worktree, signal);
-        const files = await git.changedFiles(taskState.worktree, signal);
-        if (files.length === 0) {
-          feedback = "No repository changes were produced. Implement the assigned task.";
-          failureInput = { quality, errorMessage: feedback };
-          await this.env.experience.recordAttempt(state, store, taskState, attempt, feedback);
-          continue;
-        }
-        try {
-          git.assertOwnedPaths(files, taskState.task.ownedPaths);
-        } catch (error) {
-          feedback = error instanceof Error ? error.message : String(error);
-          failureInput = { quality, errorMessage: feedback };
-          await this.env.experience.recordAttempt(state, store, taskState, attempt, feedback);
-          continue;
-        }
-        const diff = await git.stagedDiff(taskState.worktree, 160_000, signal);
-        const { review, test, skipped } = await this.reviewTaskAttempt(
-          state,
-          taskState,
-          taskState.worktree,
-          store,
-          agent,
-          quality,
-          files,
-          diff,
-          attempt,
-        );
+  /**
+   * The decision taken before an attempt runs: whether a repeated failure has
+   * earned an architect's opinion, and whether either the architect or the
+   * configured limit says stop. "stop" means the task is already blocked and saved.
+   */
+  private async decideBeforeRetry(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+  ): Promise<"stop" | "continue"> {
+    if (!memory.failureInput) return "continue";
+    // Deterministic fork: the same normalized failure twice in a row means a
+    // blind retry is unlikely to help, so escalate to the architect.
+    const currentSignature = computeFailureSignature(memory.failureInput);
+    const repeated = isRepeatedFailure(memory.previousSignature, currentSignature);
+    memory.identicalFailures = repeated ? memory.identicalFailures + 1 : 1;
+    memory.previousSignature = currentSignature;
+    memory.failureInput = undefined;
+    memory.architectAdvice = undefined;
 
-        if (
-          quality.passed
-          && (
-            passesTaskGates(quality, review, test)
-            || shouldTrustQualityOverReview(review, test)
-            || shouldAcceptDocsDespiteEscalate(taskState.task, review, test)
-          )
-        ) {
-          if (attempt > 1 && lastReworkExperienceIds.length > 0) {
-            await this.env.experience.recordSuccess(state, store, lastReworkExperienceIds);
-          }
-          await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
-          return;
-        }
-        if (isHardSpecialistEscalation(review, test) && !quality.passed) {
-          throw new Error(
-            `Specialist escalated task: ${review.summary}; ${test.summary}`,
-          );
-        }
-        feedback = skipped
-          ? buildQualityFeedback(quality)
-          : buildReworkFeedback(quality, review, test);
-        failureInput = { quality, review, test };
-        await this.env.experience.recordAttempt(state, store, taskState, attempt, feedback);
-        await store.transition(
-          state,
-          "reworking",
-          `Task ${taskState.task.id} failed gates on attempt ${attempt}`,
-        );
-      } catch (error) {
-        if (error instanceof RunBudgetExceededError || signal?.aborted) {
-          // Budget exhaustion and aborts are control-plane signals, not
-          // rework feedback; never spin them into further attempts.
-          throw error;
-        }
-        if (error instanceof TaskBudgetExceededError) {
-          taskState.status = "blocked";
-          taskState.error = error.message;
-          await store.save(state);
-          return;
-        }
-        feedback = error instanceof Error ? error.message : String(error);
-        failureInput = { errorMessage: feedback };
-        await this.env.experience.recordAttempt(state, store, taskState, attempt, feedback);
-        if (feedback.startsWith("Specialist escalated")) {
-          taskState.status = "blocked";
-          taskState.error = feedback;
-          await store.save(state);
-          return;
-        }
-      }
+    const escalation = await this.escalate(scope, memory, attempt, repeated, currentSignature);
+    if (escalation === "stop") return "stop";
+    if (this.exceededIdenticalLimit(scope, memory, attempt, repeated, currentSignature)) return "stop";
+
+    this.emitTriage(scope.state, scope.store, {
+      taskId: scope.taskState.task.id,
+      attempt,
+      decision: memory.architectAdvice ? "consult" : "retry",
+      source: memory.architectAdvice ? (escalation === "jev" ? "jev" : "advisor") : "signature",
+      reason: repeated
+        ? `Repeated failure: ${currentSignature.summary}`
+        : `New failure: ${currentSignature.summary}`,
+    });
+    return "continue";
+  }
+
+  /**
+   * Ask the architect when a failure repeated. Returns "stop" when it says so,
+   * otherwise the source that asked, so the triage record can name it.
+   */
+  private async escalate(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+    repeated: boolean,
+    currentSignature: FailureSignature,
+  ): Promise<"stop" | "jev" | "advisor" | "none"> {
+    const { state, taskState, store, agent, signal } = scope;
+    const fork = await this.consultFork(scope, attempt, repeated, currentSignature);
+    if (!fork.consult) return "none";
+    const escalatedBy = fork.escalatedBy;
+
+    const verdict = await this.advisor.consultAdvisor({
+      state,
+      store,
+      agent,
+      trigger: "repeated-failure",
+      taskId: taskState.task.id,
+      cwd: taskState.worktree!,
+      artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "advisor"),
+      ...(signal ? { signal } : {}),
+      context: {
+        trigger: "repeated-failure",
+        goal: state.goal,
+        planSummary: state.plan!.summary,
+        task: taskState.task,
+        attempt,
+        repeatedFailure: currentSignature.summary,
+        repeated,
+        ...(escalatedBy ? { escalatedBy } : {}),
+        feedback: memory.feedback.slice(-20_000),
+        diff: await scope.git.stagedDiff(taskState.worktree!, 60_000, signal).catch(() => ""),
+      },
+    });
+    if (verdict?.recommendation === "stop") {
+      this.emitTriage(state, store, {
+        taskId: taskState.task.id,
+        attempt,
+        decision: "stop",
+        source: "advisor",
+        reason: verdict.summary,
+      });
+      taskState.status = "blocked";
+      taskState.error = `Architect advisor stopped the task after a repeated failure: ${verdict.summary}`;
+      await store.save(state);
+      return "stop";
+    }
+    memory.architectAdvice = verdict;
+    return escalatedBy ?? "advisor";
+  }
+
+  /** Let the fork advisor decide whether an architect is worth consulting at all. */
+  private async consultFork(
+    scope: AttemptScope,
+    attempt: number,
+    repeated: boolean,
+    currentSignature: FailureSignature,
+  ): Promise<{ consult: boolean; escalatedBy: "jev" | undefined }> {
+    const { state, taskState, store, signal, maxAttempts } = scope;
+    if (!this.env.forkAdvisor || !this.advisor.canConsultAdvisor(state, "repeated-failure")) {
+      return { consult: repeated, escalatedBy: undefined };
+    }
+    const resolution = await this.advisor.decideWithFork(state, store, {
+      taskId: taskState.task.id,
+      taskTitle: taskState.task.title,
+      attempt,
+      maxAttempts,
+      repeated,
+      failureSummary: currentSignature.summary,
+      ...(signal ? { signal } : {}),
+    });
+    return {
+      consult: resolution.consult,
+      escalatedBy: resolution.consult && !repeated ? "jev" : undefined,
+    };
+  }
+
+  /** The configured limit on identical failures, unless the architect advised. */
+  private exceededIdenticalLimit(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+    repeated: boolean,
+    currentSignature: FailureSignature,
+  ): boolean {
+    const stopAfter = scope.triage?.stopAfterIdenticalFailures;
+    if (stopAfter === undefined || !repeated) return false;
+    if (memory.identicalFailures < stopAfter || memory.architectAdvice) return false;
+    const reason = `The same failure repeated ${memory.identicalFailures} times: ${currentSignature.summary}`;
+    this.emitTriage(scope.state, scope.store, {
+      taskId: scope.taskState.task.id,
+      attempt,
+      decision: "stop",
+      source: "limit",
+      reason,
+    });
+    scope.taskState.status = "blocked";
+    scope.taskState.error = `Stopped after a repeated identical failure: ${currentSignature.summary}`;
+    return true;
+  }
+
+  /**
+   * One attempt: run the worker, run the gates, review, and either commit or record
+   * why the next attempt is needed. "retry" leaves the feedback in `memory`.
+   */
+  private async runWorkerOnce(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+  ): Promise<"passed" | "blocked" | "retry"> {
+    try {
+      const outcome = await this.attemptWork(scope, memory, attempt);
+      return outcome;
+    } catch (error) {
+      return await this.handleAttemptError(scope, memory, attempt, error);
+    }
+  }
+
+  /** One worker turn: the experiences it should see, the call, and its profile. */
+  private async runWorkerTurn(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+  ): Promise<void> {
+    const { state, taskState, agent } = scope;
+    const reworkExperiences = await this.loadReworkExperiences(scope, memory, attempt);
+    memory.lastReworkExperienceIds = reworkExperiences?.items.map((item) => item.id) ?? [];
+    const worker = await agent.runText({
+      role: "worker",
+      cwd: taskState.worktree!,
+      runId: state.id,
+      artifactKey: taskArtifactKey(state, taskState.task.id, attempt, "worker"),
+      ...(taskState.task.profile ? { profileName: taskState.task.profile } : {}),
+      context: {
+        goal: state.goal,
+        planSummary: state.plan!.summary,
+        task: taskState.task,
+        attempt,
+        feedback: memory.feedback,
+        ...(reworkExperiences ? { verifiedFailureExperiences: reworkExperiences } : {}),
+        ...(memory.architectAdvice ? { architectAdvice: memory.architectAdvice } : {}),
+      },
+    });
+    taskState.profile = worker.profileName;
+  }
+
+  /** Verified experiences from earlier failures, but only once there is feedback. */
+  private async loadReworkExperiences(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+  ) {
+    if (attempt === 1 || !memory.feedback) return undefined;
+    return await this.env.experience.loadRework(scope.state, scope.store, {
+      feedback: memory.feedback,
+      taskId: scope.taskState.task.id,
+      taskTitle: scope.taskState.task.title,
+    });
+  }
+
+  private async attemptWork(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+  ): Promise<"passed" | "retry"> {
+    const { state, taskState, store, git, agent, budget, signal } = scope;
+    const worktree = taskState.worktree!;
+    await this.runWorkerTurn(scope, memory, attempt);
+    const quality = await this.runTaskQualityGates(
+      state,
+      taskState,
+      worktree,
+      store,
+      budget,
+      attempt,
+      signal,
+    );
+    await git.stage(worktree, signal);
+    const files = await git.changedFiles(worktree, signal);
+    if (files.length === 0) {
+      return await this.rejectAttempt(scope, memory, attempt, quality, {
+        feedback: "No repository changes were produced. Implement the assigned task.",
+      });
+    }
+    const owned = ownedPathProblem(git, files, taskState.task.ownedPaths);
+    if (owned) {
+      return await this.rejectAttempt(scope, memory, attempt, quality, { feedback: owned });
     }
 
+    const diff = await git.stagedDiff(worktree, 160_000, signal);
+    const { review, test, skipped } = await this.reviewTaskAttempt(
+      state,
+      taskState,
+      worktree,
+      store,
+      agent,
+      quality,
+      files,
+      diff,
+      attempt,
+    );
+    if (taskPassed(taskState, quality, review, test)) {
+      if (attempt > 1 && memory.lastReworkExperienceIds.length > 0) {
+        await this.env.experience.recordSuccess(state, store, memory.lastReworkExperienceIds);
+      }
+      await this.commitPassedTask(state, taskState, worktree, store, git, signal);
+      return "passed";
+    }
+    if (isHardSpecialistEscalation(review, test) && !quality.passed) {
+      throw new Error(`Specialist escalated task: ${review.summary}; ${test.summary}`);
+    }
+    const feedback = skipped
+      ? buildQualityFeedback(quality)
+      : buildReworkFeedback(quality, review, test);
+    memory.feedback = feedback;
+    memory.failureInput = { quality, review, test };
+    await this.env.experience.recordAttempt(state, store, taskState, attempt, feedback);
+    await store.transition(
+      state,
+      "reworking",
+      `Task ${taskState.task.id} failed gates on attempt ${attempt}`,
+    );
+    return "retry";
+  }
+
+  /** A gate that failed before review: record why and ask for another attempt. */
+  private async rejectAttempt(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+    quality: QualityReport,
+    input: { feedback: string },
+  ): Promise<"retry"> {
+    memory.feedback = input.feedback;
+    memory.failureInput = { quality, errorMessage: input.feedback };
+    await this.env.experience.recordAttempt(
+      scope.state,
+      scope.store,
+      scope.taskState,
+      attempt,
+      input.feedback,
+    );
+    return "retry";
+  }
+
+  /**
+   * A failed attempt that threw. Budget exhaustion and aborts are control-plane
+   * signals, never rework feedback, so they stop the loop instead of feeding it.
+   */
+  private async handleAttemptError(
+    scope: AttemptScope,
+    memory: AttemptMemory,
+    attempt: number,
+    error: unknown,
+  ): Promise<"blocked" | "retry"> {
+    const { state, taskState, store, signal } = scope;
+    if (error instanceof RunBudgetExceededError || signal?.aborted) throw error;
+    if (error instanceof TaskBudgetExceededError) {
+      taskState.status = "blocked";
+      taskState.error = error.message;
+      await store.save(state);
+      return "blocked";
+    }
+    memory.feedback = error instanceof Error ? error.message : String(error);
+    memory.failureInput = { errorMessage: memory.feedback };
+    await this.env.experience.recordAttempt(state, store, taskState, attempt, memory.feedback);
+    if (memory.feedback.startsWith("Specialist escalated")) {
+      taskState.status = "blocked";
+      taskState.error = memory.feedback;
+      await store.save(state);
+      return "blocked";
+    }
+    return "retry";
+  }
+
+  /** Every attempt ran and none passed: block with the last reason. */
+  private async blockExhausted(scope: AttemptScope, memory: AttemptMemory): Promise<void> {
+    const { state, taskState, store } = scope;
     taskState.status = "blocked";
-    taskState.error = `Exceeded ${maxAttempts} attempt(s): ${feedback}`;
+    taskState.error = `Exceeded ${scope.maxAttempts} attempt(s): ${memory.feedback}`;
     await store.save(state);
   }
+
+  /** Refuse to start when the task resumed with no attempts left. */
+  private async refuseWithoutBudget(scope: AttemptScope, startAttempt: number): Promise<boolean> {
+    if (startAttempt <= scope.maxAttempts) return false;
+    await this.blockWithoutBudget(scope);
+    return true;
+  }
+
+  /** The task resumed with no attempts left: it was already out of budget. */
+  private async blockWithoutBudget(scope: AttemptScope): Promise<void> {
+    const { state, taskState, store } = scope;
+    const prior = Math.max(taskState.attempts, 0);
+    taskState.status = "blocked";
+    taskState.error = `Rework attempts exhausted: ${prior} attempt(s) against limit ${state.strategy.maxReworkAttempts}`;
+    await store.save(state);
+  }
+
 
   flakyReruns(): number {
     return this.env.loaded.config.workflow?.flakyReruns ?? DEFAULT_FLAKY_RERUNS;
@@ -354,52 +579,14 @@ export class TaskAttemptRunner {
       await store.save(state);
       return "committed";
     }
-    await git.stage(taskState.worktree, signal);
-    const files = await git.changedFiles(taskState.worktree, signal);
-    if (files.length === 0) {
-      return "fresh";
-    }
-    try {
-      git.assertOwnedPaths(files, taskState.task.ownedPaths);
-    } catch {
-      return "fresh";
-    }
-    const attempt = Math.max(taskState.attempts, 1);
-    const diff = await git.stagedDiff(taskState.worktree, 160_000, signal);
-    const quality = taskState.quality!;
-    if (
-      taskState.review &&
-      taskState.test &&
-      (passesTaskGates(quality, taskState.review, taskState.test) ||
-        shouldTrustQualityOverReview(taskState.review, taskState.test) ||
-        shouldAcceptDocsDespiteEscalate(taskState.task, taskState.review, taskState.test))
-    ) {
-      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
+    const leftover = await this.stagedLeftover(state, taskState, store, git, agent, signal);
+    if (!leftover) return "fresh";
+    const { quality, review, test, skipped } = leftover;
+    if (this.passedAlready(taskState, quality, review, test)) {
+      await this.commitPassedTask(state, taskState, taskState.worktree!, store, git, signal);
       return "committed";
     }
-    const { review, test, skipped } = await this.reviewTaskAttempt(
-      state,
-      taskState,
-      taskState.worktree,
-      store,
-      agent,
-      quality,
-      files,
-      diff,
-      attempt,
-    );
-    if (
-      quality.passed &&
-      (passesTaskGates(quality, review, test) ||
-        shouldTrustQualityOverReview(review, test) ||
-        shouldAcceptDocsDespiteEscalate(taskState.task, review, test))
-    ) {
-      await this.commitPassedTask(state, taskState, taskState.worktree, store, git, signal);
-      return "committed";
-    }
-    if (isHardSpecialistEscalation(review, test) && !quality.passed) {
-      return "fresh";
-    }
+    if (isHardSpecialistEscalation(review, test) && !quality.passed) return "fresh";
     taskState.status = "reworking";
     taskState.error = skipped
       ? buildQualityFeedback(quality)
@@ -407,6 +594,63 @@ export class TaskAttemptRunner {
     await store.save(state);
     return "rework";
   }
+
+  /** A resumed task whose earlier review already cleared every gate. */
+  private passedAlready(
+    taskState: TaskRunState,
+    quality: QualityReport,
+    review: ReviewVerdict,
+    test: TestVerdict,
+  ): boolean {
+    const earlier =
+      taskState.review && taskState.test && taskPassed(taskState, quality, taskState.review, taskState.test);
+    return Boolean(earlier) || taskPassed(taskState, quality, review, test);
+  }
+
+  /**
+   * The work a resumed task already produced: its staged changes and the review
+   * they earned. Nothing to reuse — no changes, or changes outside the task's
+   * owned paths — means the attempt starts fresh.
+   */
+  private async stagedLeftover(
+    state: RunState,
+    taskState: TaskRunState,
+    store: RunStateStore,
+    git: GitManager,
+    agent: RoleAgentService,
+    signal: AbortSignal | undefined,
+  ): Promise<
+    | undefined
+    | {
+        quality: QualityReport;
+        files: string[];
+        review: ReviewVerdict;
+        test: TestVerdict;
+        skipped: boolean;
+      }
+  > {
+    const worktree = taskState.worktree!;
+    await git.stage(worktree, signal);
+    const files = await git.changedFiles(worktree, signal);
+    if (files.length === 0) return undefined;
+    if (ownedPathProblem(git, files, taskState.task.ownedPaths)) return undefined;
+    const attempt = Math.max(taskState.attempts, 1);
+    const diff = await git.stagedDiff(worktree, 160_000, signal);
+    const quality = taskState.quality!;
+    const { review, test, skipped } = await this.reviewTaskAttempt(
+      state,
+      taskState,
+      worktree,
+      store,
+      agent,
+      quality,
+      files,
+      diff,
+      attempt,
+    );
+    return { quality, files, review, test, skipped };
+  }
+
 
   async prepareWorktreeDependencies(
     worktree: string,
