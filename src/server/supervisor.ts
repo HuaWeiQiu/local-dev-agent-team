@@ -12,6 +12,7 @@ import {
 import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScope } from "../authority/mandate.js";
 import { TicketService } from "../authority/ticket-service.js";
 import { openTicket, type Ticket } from "../authority/ticket.js";
+import { assertCapability } from "../runtime/roles.js";
 import { readAdmission } from "../intake/admission.js";
 import { makeTrigger, threadKey, type Trigger } from "../intake/types.js";
 import type { DroppedEvent } from "../intake/github-source.js";
@@ -520,6 +521,7 @@ export class RunSupervisor {
     refused: Array<{ triggerId: string; code: string }>;
     dropped: DroppedEvent[];
   }> {
+    assertCapability("router", "admit");
     const reading = readAdmission({
       request: {
         event: input.event,
