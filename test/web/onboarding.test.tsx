@@ -4,6 +4,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { OnboardingWizard, parseCommandLine } from "../../web/src/components/OnboardingWizard.js";
+import { selectedCommands } from "../../web/src/components/onboarding/commands.js";
 import type { OnboardingStatus } from "../../web/src/types.js";
 
 function status(patch: Partial<OnboardingStatus> = {}): OnboardingStatus {
@@ -37,6 +38,19 @@ describe("parseCommandLine", () => {
   it("splits on whitespace and never builds a shell string", () => {
     expect(parseCommandLine("  make   verify  ")).toEqual({ command: "make", args: ["verify"] });
     expect(parseCommandLine("   ")).toBeUndefined();
+  });
+});
+
+describe("selectedCommands", () => {
+  it("keeps detection order and appends the extra line only when it parsed", () => {
+    const { detection } = status();
+    expect(selectedCommands(detection, new Set([2, 0]), undefined)).toEqual([
+      { command: "pnpm", args: ["run", "check"] },
+      { command: "pnpm", args: ["run", "build"] },
+    ]);
+    expect(selectedCommands(detection, new Set(), { command: "make", args: ["verify"] })).toEqual([
+      { command: "make", args: ["verify"] },
+    ]);
   });
 });
 
@@ -92,3 +106,19 @@ describe("OnboardingWizard", () => {
     expect(boxes.map((box) => box.checked)).toEqual([false, false, true]);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * Differential proof that the split is render-identical.
+ *
+ * The bodies moved into `onboarding/panels.tsx`, but the markup must not have
+ * moved with them. Each state below is rendered twice with identical props:
+ * once by the frozen pre-split component (test/web/baseline/…baseline.tsx,
+ * taken verbatim from `git show HEAD:web/src/components/OnboardingWizard.tsx`)
+ * and once by the split one. The comparison is on the DOM the modal actually
+ * produces — Radix portals it into `document.body`, so the render container
+ * stays empty and `document.body.innerHTML` is the real output.
+ *
+ * Element order, element counts, text, class names and aria attributes are all
+ * part of the compared string, so any of them drifting fails the state.
+ * ------------------------------------------------------------------------- */
+
