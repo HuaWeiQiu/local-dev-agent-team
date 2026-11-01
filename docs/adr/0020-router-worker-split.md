@@ -1,6 +1,6 @@
 # ADR 0020: 从「一个 run」到 Router / Worker 两层
 
-- Status: Proposed
+- Status: Accepted（R1–R5 已实现，见文末实施记录）
 - Date: 2026-10-31
 - 依据: 《Super-agent 设计探索：迈向更自主的 Agent System》（DeepSeek Harness 团队）与
   ADR 0019 的实施结果
@@ -149,4 +149,46 @@ R3 是本 ADR 里最大的一期，动手前先量了一次。结论：**它不�
 ### 这一期不做的事
 
 不改 `tryFinishAlreadyPassedTask` 与 `reviewTaskAttempt` 的行为——它们只是被同一文件的规则带进来，拆到 ≤10 即可。
+
+## 实施记录（2026-10-31）
+
+7 个 PR（#98–#104），测试 1609 → 1677。每期独立合并，每次都跑过 `pnpm test` / `check` / `lint` 与门禁。
+
+| 期 | 落地 | PR | 接到真实路径了吗 |
+| --- | --- | --- | --- |
+| R1 词表与守卫 | `runtime/roles.ts`：七个能力、各归一层、`assertCapability` | #98 | 是：`admitEvent` 断言 router 面 |
+| R2 订阅直通 | `Ticket.subscriptions` + `subscribe`/`unsubscribe` + `admit` 先查订阅 | #99 | 是：`TicketService.admit` 的入口 |
+| R3a 拆分 | `task-attempt.ts`：`executeOneTask` 280 行 / CC 64 → 五个具名步骤 | #101 | 是（行为不变） |
+| R3b 分层 | `scheduler.ts`：`executeTasks` CC 49 → 6，执行入口断言 worker 面 | #102 | 是：`assertCapability("worker","execute")` |
+| R4 对象 ID | `runtime/references.ts` + worker context 的 `references` | #103 | 是：`runWorkerTurn` |
+| R5 Inline & Spill | `runtime/spill.ts` + 反馈上限 4000 字符 | #104 | 是：`inlineFeedback` |
+
+顺带：ADR 0019 的 attention 面板挂到了看板页顶部（#97），issue #95 关闭。
+
+### 一件在实施中修正的事
+
+R3 原计划一期做完，动手前量了一次：`executeOneTask` 280 行、CC 64，同文件另两个函数也超阈值，而文件级门禁要求三个一起清。**部分拆分合不进去**——半成品只能留在本地。
+
+于是 R3 重新界定为 a（机械拆分）与 b（分层与守卫）。顺序不能反：拆分是可验证的，分层依赖拆分后的形状。这个判断写进了 [PR #100](https://github.com/HuaWeiQiu/local-dev-agent-team/pull/100)，也救回了此前三次在同一处的回滚。
+
+### 数字
+
+| 函数 | 前 | 后 |
+| --- | --- | --- |
+| `executeOneTask` | CC 64 / CRAP 75.9 | CC 10 / CRAP 10.0 |
+| `executeTasks` | CC 49 / CRAP 61.2 | CC 6 / CRAP 7.9 |
+| `tryFinishAlreadyPassedTask` | CC 18 / CRAP 58.5 | CC 9 / CRAP 9.1 |
+| 全仓 CRAP > 100 | 0 | 0 |
+| 全仓 CRAP > 10 | 234 | 229 |
+
+### 三个值得记住的判断
+
+1. **测试抓到过一次「编译得过但语义变了」**：把「检查上一次评审」放在 `reviewTaskAttempt` 之后——它会覆盖 `taskState.review`，于是「已通过」被当成「要求返工」。
+2. **`lastIndexOf` 返回 -1 时，「没有换行」被当成了「换行在第 -1 个字符」**：`slice(0, -1)` 静默吃掉每条单行文本的最后一个字符。
+3. **测试逼我改掉想当然**：两个任务 `ownedPaths` 重叠时不同波；计划耗尽要「都完成」且「都不再可启动」。
+
+### 没有做的
+
+- **常驻 Router LLM 会话**、**Router 分片**、**存算分离**：见「不做什么」，我们的场景与文章的部署形态不同。
+- **Watchdog**：文章第六节的独立监督 Session。现在分层有了，它才有意义——留作后续。
 
