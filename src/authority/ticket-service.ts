@@ -20,6 +20,9 @@ import { threadKey } from "../intake/types.js";
 import { evaluateGate, type GateDecision, type OpenTicket } from "./gate.js";
 import {
   acceptTrigger,
+  isSubscribed,
+  subscribe as subscribeTicket,
+  unsubscribe as unsubscribeTicket,
   endAssignment,
   endTicket,
   openTicket,
@@ -63,21 +66,72 @@ export class TicketService {
   }
 
   /**
-   * Decide one Trigger. An accept opens a Ticket, or adds the Trigger to the
-   * Ticket already open on that Thread; a refusal changes nothing.
+   * The decision for one Trigger.
+   *
+   * A Thread an open Ticket is subscribed to takes the direct path: the Trigger
+   * joins that Ticket without an Eval, because the authorization was decided when
+   * the Ticket was opened and a follow-up does not re-open it. Everything else
+   * goes through the gate.
    */
   async admit(input: {
     trigger: Trigger;
     addressed: boolean;
-    /** What an accept would be allowed to touch; empty means "decided later". */
     scope?: readonly string[];
   }): Promise<Admission> {
     return await this.#serial(async () => {
-      const thread = threadKey(input.trigger.threads[0] ?? {
-        sourceKind: input.trigger.sourceKind,
-        sourceInstanceId: input.trigger.sourceInstanceId,
-        threadId: "",
-      });
+      const direct = await this.#subscribedTicket(input.trigger);
+      if (direct) {
+        // The same event delivered twice is still one Trigger: a Subscription
+        // decides where a follow-up goes, never whether a duplicate counts.
+        if (direct.triggerIds.includes(input.trigger.id)) {
+          return { decision: duplicateDecision(input.trigger.id) };
+        }
+        const joined = acceptTrigger(direct, input.trigger.id);
+        await this.#store.save(joined);
+        return { decision: directPassDecision(), ticket: joined };
+      }
+      return await this.#admitThroughGate(input);
+    });
+  }
+
+  /** The open Ticket subscribed to this Trigger's Thread, if there is one. */
+  async #subscribedTicket(trigger: Trigger): Promise<Ticket | undefined> {
+    const thread = threadKeyOf(trigger);
+    const tickets = await this.#store.list();
+    return tickets.find((ticket) => isSubscribed(ticket, thread));
+  }
+
+  /** Subscribe an open Ticket to another Thread it should keep following. */
+  async subscribe(ticketId: string, threadKey: string): Promise<Ticket> {
+    return await this.#serial(async () => {
+      const ticket = await this.#requireTicket(ticketId);
+      const next = subscribeTicket(ticket, threadKey);
+      await this.#store.save(next);
+      return next;
+    });
+  }
+
+  /** Stop following a Thread. A Ticket keeps its own Thread either way. */
+  async unsubscribe(ticketId: string, threadKey: string): Promise<Ticket> {
+    return await this.#serial(async () => {
+      const ticket = await this.#requireTicket(ticketId);
+      const next = unsubscribeTicket(ticket, threadKey);
+      await this.#store.save(next);
+      return next;
+    });
+  }
+
+  /**
+   * Decide one Trigger through the gate. An accept opens a Ticket, or adds the
+   * Trigger to the Ticket already open on that Thread; a refusal changes nothing.
+   */
+  async #admitThroughGate(input: {
+    trigger: Trigger;
+    addressed: boolean;
+    scope?: readonly string[];
+  }): Promise<Admission> {
+    {
+      const thread = threadKeyOf(input.trigger);
       const tickets = await this.#store.list();
       const onThread = tickets.filter((ticket) => ticket.threadKey === thread);
       const decision = evaluateGate({
@@ -112,7 +166,7 @@ export class TicketService {
       });
       await this.#store.save(created);
       return { decision, ticket: created };
-    });
+    }
   }
 
   /**
@@ -220,6 +274,39 @@ export class TicketService {
     );
     return next;
   }
+}
+
+/** The Thread a Trigger belongs to, or a Thread of its own when it names none. */
+function threadKeyOf(trigger: Trigger): string {
+  return threadKey(
+    trigger.threads[0] ?? {
+      sourceKind: trigger.sourceKind,
+      sourceInstanceId: trigger.sourceInstanceId,
+      threadId: "",
+    },
+  );
+}
+
+/** A Trigger this Ticket already holds: accepted once, refused ever after. */
+function duplicateDecision(triggerId: string): GateDecision {
+  return {
+    outcome: "ignore",
+    strength: "inferred",
+    reasons: [{ code: "duplicate_trigger", values: [triggerId] }],
+  };
+}
+
+/**
+ * A direct pass is not a judgement: the Ticket already holds the authority, and
+ * this Trigger only joins it. The reason says so, so a reader of the record does
+ * not mistake it for a gate decision.
+ */
+function directPassDecision(): GateDecision {
+  return {
+    outcome: "accept",
+    strength: "explicit",
+    reasons: [{ code: "subscription_direct_pass" }],
+  };
 }
 
 function toOpenTicket(ticket: Ticket): OpenTicket {
