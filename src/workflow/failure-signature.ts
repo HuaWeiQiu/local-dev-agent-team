@@ -54,48 +54,75 @@ export function normalizeFailureText(text: string): string {
  * retry is unlikely to help and the approach should be reconsidered.
  */
 export function computeFailureSignature(input: FailureSignatureInput): FailureSignature {
-  const facts: string[] = [];
+  const facts = failureFacts(input);
+  const canonical = [...new Set(facts)].sort();
+  return {
+    signature: createHash("sha256").update(canonical.join("\n")).digest("hex").slice(0, 16),
+    summary: (canonical.length === 0 ? "no failure facts" : canonical.join(" ; ")).slice(
+      0,
+      SUMMARY_MAX_CHARS,
+    ),
+  };
+}
 
-  for (const command of input.quality?.commands ?? []) {
-    if (command.exitCode === 0 && !command.timedOut) {
-      continue;
-    }
+/**
+ * Everything the failure actually said, one fact per line.
+ *
+ * Order matters only for reading; the signature sorts and de-duplicates these, so
+ * the same failure cannot produce two signatures because it was reported twice.
+ */
+export function failureFacts(input: FailureSignatureInput): string[] {
+  const facts = [
+    ...commandFacts(input.quality),
+    ...reviewFacts(input.review),
+    ...testFacts(input.test),
+  ];
+  // The bare error message is a last resort: a real command, review or test result
+  // says more than the message that wrapped it.
+  if (facts.length === 0 && input.errorMessage) {
+    facts.push(`error|${normalizeFailureText(input.errorMessage)}`);
+  }
+  return facts;
+}
+
+/** One fact per failed command, carrying its exit status and the tail of output. */
+function commandFacts(quality: FailureSignatureInput["quality"]): string[] {
+  const facts: string[] = [];
+  for (const command of quality?.commands ?? []) {
+    if (command.exitCode === 0 && !command.timedOut) continue;
     const name = [command.spec.command, ...command.spec.args].join(" ");
     const output = normalizeFailureText(
       `${command.stderr.slice(-OUTPUT_TAIL_CHARS)}\n${command.stdout.slice(-OUTPUT_TAIL_CHARS)}`,
     );
-    const status = command.timedOut ? "timeout" : `exit:${command.exitCode ?? "null"}`;
-    facts.push(`cmd|${name}|${status}|${output}`);
+    facts.push(`cmd|${name}|${commandStatus(command)}|${output}`);
   }
-
-  for (const finding of input.review?.findings ?? []) {
-    if (finding.required) {
-      facts.push(`review|${finding.path}|${normalizeFailureText(finding.message)}`);
-    }
-  }
-  if (input.review && input.review.verdict !== "approve" && input.review.findings.length === 0) {
-    facts.push(`review|${input.review.verdict}|${normalizeFailureText(input.review.summary)}`);
-  }
-
-  for (const missing of input.test?.missingTests ?? []) {
-    facts.push(`test|${normalizeFailureText(missing)}`);
-  }
-  if (input.test && input.test.verdict !== "approve" && input.test.missingTests.length === 0) {
-    facts.push(`test|${input.test.verdict}|${normalizeFailureText(input.test.summary)}`);
-  }
-
-  if (facts.length === 0 && input.errorMessage) {
-    facts.push(`error|${normalizeFailureText(input.errorMessage)}`);
-  }
-
-  const canonical = [...new Set(facts)].sort();
-  const signature = createHash("sha256").update(canonical.join("\n")).digest("hex").slice(0, 16);
-  const summary = (canonical.length === 0 ? "no failure facts" : canonical.join(" ; ")).slice(
-    0,
-    SUMMARY_MAX_CHARS,
-  );
-  return { signature, summary };
+  return facts;
 }
+
+function commandStatus(command: { exitCode: number | null; timedOut: boolean }): string {
+  return command.timedOut ? "timeout" : `exit:${command.exitCode ?? "null"}`;
+}
+
+/** A required finding is a fact; a verdict with no findings is a fact of its own. */
+function reviewFacts(review: FailureSignatureInput["review"]): string[] {
+  const facts = (review?.findings ?? [])
+    .filter((finding) => finding.required)
+    .map((finding) => `review|${finding.path}|${normalizeFailureText(finding.message)}`);
+  if (review && review.verdict !== "approve" && review.findings.length === 0) {
+    facts.push(`review|${review.verdict}|${normalizeFailureText(review.summary)}`);
+  }
+  return facts;
+}
+
+/** The same rule as reviews, for what the tester says is missing. */
+function testFacts(test: FailureSignatureInput["test"]): string[] {
+  const facts = (test?.missingTests ?? []).map((missing) => `test|${normalizeFailureText(missing)}`);
+  if (test && test.verdict !== "approve" && test.missingTests.length === 0) {
+    facts.push(`test|${test.verdict}|${normalizeFailureText(test.summary)}`);
+  }
+  return facts;
+}
+
 
 /** True when two consecutive attempts failed for the same normalized reason. */
 export function isRepeatedFailure(
