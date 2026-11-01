@@ -16,6 +16,7 @@ import { computeFailureSignature, isRepeatedFailure, type FailureSignature, type
 import { RunBudgetExceededError, type RunBudgetTracker } from "../observability/budget.js";
 import type { RunnerEnv } from "./types.js";
 import { attemptReferences } from "../runtime/references.js";
+import { inlineWithin, spillNote } from "../runtime/spill.js";
 import type { AdvisorService } from "./advisor.js";
 
 const DEFAULT_FLAKY_RERUNS = 1;
@@ -63,6 +64,23 @@ function skippedReview(quality: QualityReport): {
     test: { verdict, summary, missingTests: [] },
     skipped: true,
   };
+}
+
+/** How much of a failure transcript a worker prompt carries before it is spilled. */
+const FEEDBACK_INLINE_CHARS = 4_000;
+
+/**
+ * Feedback is the longest thing a retry carries, and the least of it is usually
+ * enough to act on. What is kept out becomes a note saying where the rest is.
+ */
+function inlineFeedback(feedback: string, taskId: string): string {
+  const inlined = inlineWithin({
+    text: feedback,
+    maxChars: FEEDBACK_INLINE_CHARS,
+    ref: { kind: "task", id: taskId },
+  });
+  if (!inlined.spilled) return inlined.head;
+  return `${inlined.head}\n${spillNote(inlined.spilled)}`;
 }
 
 /** A task cannot run before its worktree and the plan exist. */
@@ -379,7 +397,7 @@ export class TaskAttemptRunner {
         planSummary: state.plan!.summary,
         task: taskState.task,
         attempt,
-        feedback: memory.feedback,
+        feedback: inlineFeedback(memory.feedback, taskState.task.id),
         // Named, not pasted: what this attempt belongs to, and what it is.
         references: attemptReferences({
           runId: state.id,
