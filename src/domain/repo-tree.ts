@@ -90,9 +90,13 @@ export function buildRepoTree(relativePaths: string[]): RepoTree {
     // Registered before the parent is read: a path whose first segment is
     // empty yields the "" directory, which then resolves to its own id.
     idByPath.set(directory, id);
+    // A path can lead with "/" after normalization ("//a/b" keeps one slash), which
+    // makes the "" directory its own parent. That is a cycle, and walking up from it
+    // never ends; the root is the only thing with no parent.
+    const parent = idByPath.get(parentPath(directory));
     nodes.push({
       id,
-      parentId: idByPath.get(parentPath(directory)) ?? ROOT_ID,
+      parentId: parent === undefined || parent === id ? ROOT_ID : parent,
       path: directory,
       name: baseName(directory),
       kind: "directory",
@@ -252,7 +256,11 @@ function withAncestors(nodes: RepoTreeNode[], byId: Map<string, RepoTreeNode>): 
   const keep = new Set<string>();
   for (const node of nodes) {
     let current: RepoTreeNode | undefined = node;
-    while (current) {
+    // Visited set: a tree from a malformed path once contained a node that was its
+    // own parent, and this loop ran forever. A walk must terminate on any input.
+    const seen = new Set<string>();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
       keep.add(current.id);
       current = current.parentId ? byId.get(current.parentId) : undefined;
     }
