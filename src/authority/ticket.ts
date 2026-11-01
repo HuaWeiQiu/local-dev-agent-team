@@ -47,6 +47,11 @@ export interface Ticket {
   delivery?: { error: string; at: string };
   /** The Thread this Ticket was opened on. */
   threadKey: string;
+  /**
+   * Every Thread whose later Triggers reach this Ticket without a fresh Eval.
+   * The Ticket's own Thread is always one of them.
+   */
+  subscriptions: readonly string[];
   mandate: Mandate;
   /** Every Trigger this Ticket has accepted; a Trigger is accepted once. */
   triggerIds: readonly string[];
@@ -81,6 +86,7 @@ export function openTicket(input: {
   return {
     id: input.id,
     threadKey: input.threadKey,
+    subscriptions: [input.threadKey],
     mandate: input.mandate,
     triggerIds: [input.triggerId],
     state: "open",
@@ -177,6 +183,27 @@ export function resumeTicket(
   }
   const { ended: _ended, ...rest } = ticket;
   return acceptTrigger({ ...rest, state: "open" }, input.triggerId);
+}
+
+/**
+ * Subscribe this Ticket to a Thread, so that Thread's later Triggers reach it
+ * without a fresh Eval. Subscribing grants nothing: the Ticket already holds its
+ * Mandate, and the Subscription only decides where its follow-ups go.
+ */
+export function subscribe(ticket: Ticket, threadKey: string): Ticket {
+  if (ticket.subscriptions.includes(threadKey)) return ticket;
+  return { ...ticket, subscriptions: [...ticket.subscriptions, threadKey] };
+}
+
+/** Drop a Thread, keeping the Ticket's own Thread: that one is not a choice. */
+export function unsubscribe(ticket: Ticket, threadKey: string): Ticket {
+  if (threadKey === ticket.threadKey) return ticket;
+  return { ...ticket, subscriptions: ticket.subscriptions.filter((entry) => entry !== threadKey) };
+}
+
+/** Whether later Triggers on this Thread come straight to this Ticket. */
+export function isSubscribed(ticket: Ticket, threadKey: string): boolean {
+  return ticket.state === "open" && ticket.subscriptions.includes(threadKey);
 }
 
 /** A Ticket accepts each Trigger once. */
