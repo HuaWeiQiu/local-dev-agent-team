@@ -185,6 +185,7 @@ describe("BoardPage", () => {
       <BoardPage
         runs={[]}
         config={config()}
+        scope={undefined}
         selectedRunId={undefined}
         busy={false}
         loading={false}
@@ -204,6 +205,7 @@ describe("BoardPage", () => {
       <BoardPage
         runs={runs}
         config={config()}
+        scope={undefined}
         selectedRunId={undefined}
         busy={false}
         loading={false}
@@ -225,6 +227,7 @@ describe("BoardPage", () => {
       <BoardPage
         runs={[summary()]}
         config={config()}
+        scope={undefined}
         selectedRunId={undefined}
         busy={false}
         loading={false}

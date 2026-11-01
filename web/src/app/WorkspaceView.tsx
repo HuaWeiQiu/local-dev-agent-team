@@ -139,6 +139,7 @@ function BoardScreen(props: WorkspaceViewProps) {
     <BoardPage
       runs={props.monitor.runs}
       config={props.config}
+      scope={props.scope}
       selectedRunId={undefined}
       busy={props.busy}
       loading={!props.config}
