@@ -15,6 +15,7 @@ import { isPlaceholderVerdict, shouldAcceptDocsDespiteEscalate, isHardSpecialist
 import { computeFailureSignature, isRepeatedFailure, type FailureSignature, type FailureSignatureInput } from "./failure-signature.js";
 import { RunBudgetExceededError, type RunBudgetTracker } from "../observability/budget.js";
 import type { RunnerEnv } from "./types.js";
+import { attemptReferences } from "../runtime/references.js";
 import type { AdvisorService } from "./advisor.js";
 
 const DEFAULT_FLAKY_RERUNS = 1;
@@ -379,6 +380,13 @@ export class TaskAttemptRunner {
         task: taskState.task,
         attempt,
         feedback: memory.feedback,
+        // Named, not pasted: what this attempt belongs to, and what it is.
+        references: attemptReferences({
+          runId: state.id,
+          goal: state.goal,
+          ticketId: state.ticketId,
+          task: taskState.task,
+        }),
         ...(reworkExperiences ? { verifiedFailureExperiences: reworkExperiences } : {}),
         ...(memory.architectAdvice ? { architectAdvice: memory.architectAdvice } : {}),
       },
