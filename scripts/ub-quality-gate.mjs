@@ -23,7 +23,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -203,9 +203,24 @@ export function regressions(scores, baseline, threshold = 10) {
   return worse;
 }
 
+/**
+ * A metrics file left by an earlier run describes code that has since changed.
+ * Reading it would compare the present against a measurement of the past — the
+ * gate once failed on a function that no longer existed for exactly this reason.
+ * Deleting it first means the baseline step can only ever read what this run
+ * measured; when nothing was measured, it reads nothing and reports nothing.
+ */
+export function clearMetrics(cwd = process.cwd()) {
+  const metrics = path.join(cwd, ".metrics", "crap.edn");
+  if (!existsSync(metrics)) return false;
+  rmSync(metrics, { force: true });
+  return true;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
+  clearMetrics();
   // crapper in changed mode has nothing to score when nothing changed; the
   // other tools do not look at git at all.
   if (isIdleCrapperRun(prepared.options)) return baselineStep(prepared.options);
