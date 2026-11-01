@@ -77,7 +77,7 @@ Trigger→│ Router：准入、分派、对外说话      │
 | --- | --- | --- |
 | **R1 词表** | `src/runtime/roles.ts`：`RouterSurface` / `WorkerSurface` 的职责表与守卫（哪些能力属于哪层），纯函数 | 一张表 + 测试：Router 不得持有执行能力的断言 |
 | **R2 Subscription** | `Subscription` 类型 + `TicketService.subscribe/unsubscribe` + `admitEvent` 先查订阅再判定 | 同一 Thread 的第二条事件**不经过 gate**；取消订阅后重新经过 |
-| **R3 分层执行** | 把 `executeOneTask` 从 runner 移到 Worker 面；Router 只保留调度与仲裁 | Runner 里不再出现工具执行；`executeOneTask` 的 CC 拆分成为自然结果 |
+| **R3 分层执行** | 把 `executeOneTask` 从 runner 移到 Worker 面；Router 只保留调度与仲裁 | Runner 里不再出现工具执行；`executeOneTask` 的 CC 拆分成为自然结果（**R3 重新界定为 R3a + R3b，见下**） |
 | **R4 对象 ID** | Trigger/Thread/Ticket 的 ID 注入到提示词上下文 | 提示词里能看到下一跳 ID；有测试钉住注入格式 |
 | **R5 Spill** | 超预算内容截断 + 续读入口 | 长内容不再整段进提示词；有截断与续读的用例 |
 
@@ -110,3 +110,43 @@ Trigger→│ Router：准入、分派、对外说话      │
 0019 回答「谁可以做、做到哪一步」；0020 回答「谁来做、怎么把话传回去」。
 
 0019 的 `Assignment` 现在就是 Worker 的边界，`Report` 就是 Worker→Router 的回话通道——**0020 不需要改 0019 的域模型**，只是把执行体从中拆出去。
+
+## R3 的范围勘定（2026-10-31）
+
+R3 是本 ADR 里最大的一期，动手前先量了一次。结论：**它不能在一轮里完成，硬塞会把一个红色门禁的分支留给人。**
+
+### 量出来的事实
+
+`src/workflow/task-attempt.ts`：
+
+| 项 | 值 |
+| --- | --- |
+| `executeOneTask` | 280 行，CC 64，覆盖率 86% |
+| 同文件其余超阈值 | `tryFinishAlreadyPassedTask` CC 18、`reviewTaskAttempt` CC 10 |
+| 测试形态 | 集成级（真 git、真流程），跑一轮几十秒 |
+
+三件事叠在一起，决定了做法：
+
+1. **文件级门禁**：碰这个文件就要把三个函数一起清到 ≤10。部分拆分 = 门禁红 = 什么都合不进去。
+2. **CC 64 在 86% 覆盖率下**，每块碎片要 CC ≤ 8 才达标——意味着至少六次抽取，每次都要精确搬运七个可变状态（`identicalFailures`、`feedback`、`lastReworkExperienceIds`、`failureInput`、`previousSignature`、`architectAdvice`、`attempt`）。
+3. **测试是集成级的**，抽取错误不会以单测红灯出现，而是以「某个分支偶尔多跑一轮」出现。
+
+### 一次失败的尝试，记录下来
+
+我先试了最小的一步：把「失败信号 → 顾问 → 停止判定」那 65 行抽成 `decideBeforeRetry`，并把六个可变局部收进一个 `memory` 对象。
+
+在改到一半时停下——原因不是难，而是**这类改动必须一次改完**：`feedback` 这类名字既被读又被写，散落在 200 行里，半改状态下 TypeScript 只是报「未定义」，而真正的风险是那些**没报错但语义变了**的地方（例如 `errorMessage: feedback` 引用了改名前的变量）。整支回滚，工作区干净。
+
+### 重新界定
+
+| 期 | 内容 | 完成判据 |
+| --- | --- | --- |
+| **R3a** | 一次提交内完成 `task-attempt.ts` 的三函数拆分：`memory` 对象 + `decideBeforeRetry` + `verifyAndCommit` + `runWorkerOnce` | 门禁绿、`executeOneTask` ≤ 10、测试全绿 |
+| **R3b** | 在拆分完成之后加 Worker 面守卫（`assertCapability("worker","execute")`），并把执行体移到 `src/runtime/worker.ts` | `Rule`：Router 侧不再 import 执行体 |
+
+先 a 后 b：**拆分是机械的、可验证的；分层是语义的、依赖拆分之后的形状。** 顺序反过来会让人在一个 280 行的函数里同时改结构和语义。
+
+### 这一期不做的事
+
+不改 `tryFinishAlreadyPassedTask` 与 `reviewTaskAttempt` 的行为——它们只是被同一文件的规则带进来，拆到 ≤10 即可。
+
