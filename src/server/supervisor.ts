@@ -13,6 +13,7 @@ import { MandateError, assertMandateUsable, grantMandate, needsMandate, planScop
 import { TicketService } from "../authority/ticket-service.js";
 import { openTicket, type Ticket } from "../authority/ticket.js";
 import { assertCapability } from "../runtime/roles.js";
+import { Watchdog, sampleRun, type WatchFinding } from "../runtime/watchdog.js";
 import { readAdmission } from "../intake/admission.js";
 import { makeTrigger, threadKey, type Trigger } from "../intake/types.js";
 import type { DroppedEvent } from "../intake/github-source.js";
@@ -119,6 +120,11 @@ export interface SupervisorDependencies {
     state: RunState,
     options: WorkflowResumeOptions,
   ) => Promise<RunState>;
+  /**
+   * The watchdog (ADR 0020): off unless the deployment asks for it. It only reads
+   * run state and emits a finding; it never moves a run.
+   */
+  watchdog?: { intervalMs: number; stallAfterMs?: number; samplesToStall?: number };
 }
 
 interface ActiveRun {
@@ -159,6 +165,8 @@ export class RunSupervisor {
   private automationOwner: symbol | undefined;
   /** Built on first use: a run without a Ticket never touches the file. */
   #tickets: TicketService | undefined;
+  #watchdog: Watchdog | undefined;
+  #watchdogTimer: NodeJS.Timeout | undefined;
   readonly live: LiveSupport;
   readonly insights: RunInsights;
 
@@ -192,6 +200,8 @@ export class RunSupervisor {
       hasActiveChild: (runId) => this.hasActiveChild(runId),
       serializeActions: async (runIds, action) => await this.serializeActions(runIds, action),
     });
+    this.#watchdog = this.dependencies.watchdog ? this.buildWatchdog(this.dependencies.watchdog) : undefined;
+    this.#watchdogTimer = this.#watchdog?.start(this.dependencies.watchdog!.intervalMs);
     this.recovery = new RunRecovery(this.loaded, this.stateStore, events, {
       recordApprovalResponse: async (state, approval, response) =>
         await this.recordApprovalResponse(state, approval, response),
@@ -904,6 +914,8 @@ export class RunSupervisor {
   }
 
   async close(): Promise<void> {
+    if (this.#watchdogTimer) clearInterval(this.#watchdogTimer);
+    this.#watchdogTimer = undefined;
     this.evolutionOperationsSealed = true;
     await this.evolutionMutationFinished;
     await Promise.all([...new Set(this.actionQueues.values())]);
@@ -915,6 +927,41 @@ export class RunSupervisor {
       active.controller.abort(new Error("Control service is shutting down"));
     }
     await Promise.allSettled([...this.active.values()].map((active) => active.promise));
+  }
+
+  /**
+   * The watchdog reads the runs this supervisor is actually running, and reports
+   * one that stops moving. It cannot change anything: a finding is emitted as an
+   * event, so a silent stall becomes visible without anyone deciding for the run.
+   */
+  private buildWatchdog(options: {
+    stallAfterMs?: number;
+    samplesToStall?: number;
+  }): Watchdog {
+    return new Watchdog(
+      {
+        liveRuns: async () => [...this.active.keys()],
+        sample: async (runId) => {
+          const state = await this.get(runId).catch(() => undefined);
+          return state ? sampleRun(state, Date.now()) : undefined;
+        },
+      },
+      (finding) => {
+        this.events.emit(finding.runId, "run.watchdog.stalled", {
+          quietMs: finding.quietMs,
+          detail: finding.detail,
+        });
+      },
+      {
+        ...(options.stallAfterMs === undefined ? {} : { stallAfterMs: options.stallAfterMs }),
+        ...(options.samplesToStall === undefined ? {} : { samplesToStall: options.samplesToStall }),
+      },
+    );
+  }
+
+  /** One watchdog look. Exposed so the behaviour can be tested without a timer. */
+  async watchdogTick(): Promise<WatchFinding[]> {
+    return (await this.#watchdog?.tick()) ?? [];
   }
 
   private track(
