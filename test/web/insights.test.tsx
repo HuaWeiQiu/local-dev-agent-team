@@ -13,6 +13,7 @@ import type {
   RunUsageBreakdown,
   TaskDiff,
   Transcript,
+  TranscriptEntry,
   TranscriptSummary,
   UsageLine,
 } from "../../web/src/types.js";
@@ -111,6 +112,31 @@ describe("TranscriptView", () => {
   it("explains an empty list", () => {
     render(<TranscriptView transcripts={[]} onLoad={vi.fn()} />);
     expect(screen.getByText("还没有智能体对话记录")).toBeInTheDocument();
+  });
+
+  it("gives each entry kind its own marker, badges and text style", async () => {
+    const entries: TranscriptEntry[] = [
+      { kind: "turn", text: "第 2 轮" },
+      { kind: "tool", label: "shell", status: "completed", text: "ls" },
+      { kind: "tool", label: "shell", status: "failed", text: "boom" },
+      { kind: "notice", status: "running", text: "超时" },
+      { kind: "operator", label: "steer", text: "慢一点" },
+      { kind: "output", text: "done" },
+    ];
+    const onLoad = vi.fn(async (id: string): Promise<Transcript> => ({ id, truncated: true, entries }));
+    render(<TranscriptView transcripts={[{ ...summaries[0]!, success: false, durationMs: 65_000 }]} onLoad={onLoad} />);
+
+    expect(await screen.findByText("第 2 轮")).toHaveClass("text-center");
+    expect(screen.getByText("ls")).toHaveClass("font-mono");
+    expect(screen.getByText("慢一点")).not.toHaveClass("font-mono");
+    expect(screen.getAllByText("shell")[0]).toHaveClass("bg-surface-3");
+    expect(screen.getByText("steer")).toHaveClass("bg-accent-soft");
+    expect(screen.getByText("failed")).toHaveClass("bg-danger-soft");
+    expect(screen.getByText("running")).toHaveClass("bg-info-soft");
+    expect(screen.queryByText("completed")).not.toBeInTheDocument();
+    expect(screen.getByText("内容过长，已截断")).toBeInTheDocument();
+    expect(screen.getByText("失败")).toBeInTheDocument();
+    expect(screen.getByText(/attempt-1\/worker · 1m 5s/)).toBeInTheDocument();
   });
 });
 
