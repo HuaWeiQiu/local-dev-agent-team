@@ -177,14 +177,30 @@ describe("foldRunUsage matches the pre-split implementation", () => {
   it("agrees on 500 randomised histories (mixed types, missing fields, negative and huge numbers)", () => {
     const failures: string[] = [];
     let compared = 0;
+    let folded = 0;
+    let invocations = 0;
+    let throwing = 0;
     for (const { seed, size } of cases) {
       const rand = generator(seed);
       const events = eventsFor(rand, size);
       const found = compare(events);
       compared += 1;
+      const outcome = outcomeOf(foldRunUsage, events);
+      if (outcome.ok) {
+        const total = (outcome.value as { total: { invocations: number } }).total.invocations;
+        invocations += total;
+        if (total > 0) folded += 1;
+      } else {
+        throwing += 1;
+      }
       if (found) failures.push(`seed ${seed} (${size} events): ${found}`);
     }
     expect(compared).toBe(500);
+    // The sample has to be worth comparing: most scenarios fold real invocations,
+    // and the malformed payloads still fail the same way on both sides.
+    expect(folded).toBeGreaterThan(300);
+    expect(invocations).toBeGreaterThan(900);
+    expect(throwing).toBeGreaterThan(30);
     expect(failures.slice(0, 5)).toEqual([]);
   });
 
