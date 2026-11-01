@@ -127,6 +127,96 @@ describe("foldRunUsage", () => {
     expect(usage.unattributed.costReported).toBe(false);
     expect(usage.byProfile.map((line) => line.profile)).toEqual(["codex", "claude"]);
   });
+
+  it("counts nothing for an empty or non-invocation history", () => {
+    const empty = foldRunUsage([]);
+    expect(empty.total).toEqual({
+      invocations: 0,
+      failures: 0,
+      durationMs: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      costReported: false,
+    });
+    expect(empty.byRole).toEqual([]);
+    expect(empty.byTask).toEqual([]);
+    expect(empty.byProfile).toEqual([]);
+    expect(empty.unattributed).toMatchObject({ invocations: 0, costReported: false });
+
+    const ignored = foldRunUsage([
+      event("run.updated", { role: "worker", durationMs: 5_000 }),
+      event("agent.invocation.started", { role: "worker" }),
+      event("AGENT.INVOCATION.COMPLETED", { role: "worker" }),
+    ]);
+    expect(ignored.total.invocations).toBe(0);
+    expect(ignored.byRole).toEqual([]);
+  });
+
+  it("defaults every absent field and only treats a reported cost as known", () => {
+    const usage = foldRunUsage([
+      event("agent.invocation.completed", {}),
+      event("agent.invocation.completed", { role: "worker", success: true }),
+      event("agent.invocation.completed", { usage: { reportedCostUsd: 0 } }),
+    ]);
+
+    expect(usage.total).toMatchObject({
+      invocations: 3,
+      failures: 0,
+      durationMs: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    });
+    expect(usage.total.costUsd).toBe(0);
+    expect(usage.total.costReported).toBe(true);
+    expect(usage.byRole.map((line) => [line.role, line.invocations])).toEqual([
+      ["unknown", 2],
+      ["worker", 1],
+    ]);
+    expect(usage.byTask).toEqual([]);
+    expect(usage.unattributed.invocations).toBe(3);
+    expect(usage.byProfile.map((line) => [line.profile, line.model, line.invocations])).toEqual([
+      ["unknown", "", 3],
+    ]);
+  });
+
+  it("keeps negative and very large numbers unclamped", () => {
+    const usage = foldRunUsage([
+      event("agent.invocation.completed", {
+        role: "worker",
+        durationMs: -25,
+        usage: { inputTokens: Number.MAX_SAFE_INTEGER, cachedInputTokens: -7, outputTokens: Number.MAX_SAFE_INTEGER },
+      }),
+      event("agent.invocation.completed", {
+        role: "worker",
+        durationMs: 25,
+        usage: { inputTokens: Number.MAX_SAFE_INTEGER, reportedCostUsd: -0.5 },
+      }),
+    ]);
+
+    expect(usage.total).toMatchObject({
+      invocations: 2,
+      durationMs: 0,
+      inputTokens: Number.MAX_SAFE_INTEGER * 2,
+      cachedInputTokens: -7,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+    });
+    expect(usage.total.costUsd).toBe(-0.5);
+    expect(usage.total.costReported).toBe(true);
+  });
+
+  it("orders lines by cost, then tokens, then duration", () => {
+    const usage = foldRunUsage([
+      event("agent.invocation.completed", { profile: "codex", model: "slow", durationMs: 900, usage: { inputTokens: 1 } }),
+      event("agent.invocation.completed", { profile: "codex", model: "fast", durationMs: 100, usage: { inputTokens: 1 } }),
+      event("agent.invocation.completed", { profile: "codex", model: "rich", durationMs: 1, usage: { inputTokens: 2 } }),
+      event("agent.invocation.completed", { profile: "codex", model: "costly", durationMs: 1, usage: { reportedCostUsd: 2 } }),
+    ]);
+
+    expect(usage.byProfile.map((line) => line.model)).toEqual(["costly", "rich", "slow", "fast"]);
+  });
 });
 
 describe("explainRun", () => {
