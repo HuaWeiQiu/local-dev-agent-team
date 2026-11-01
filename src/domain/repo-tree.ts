@@ -54,7 +54,11 @@ const STOP_SEGMENTS = new Set([
   "app",
 ]);
 
-export function buildRepoTree(relativePaths: string[]): RepoTree {
+/**
+ * Which paths count as files, and which directories their ancestors imply.
+ * Shallowest directory first, then by name, so a parent always precedes its children.
+ */
+export function collectTreeEntries(relativePaths: string[]): { directories: string[]; files: string[] } {
   const directories = new Set<string>();
   const files = new Set<string>();
   for (const raw of relativePaths) {
@@ -66,17 +70,25 @@ export function buildRepoTree(relativePaths: string[]): RepoTree {
       directories.add(parts.slice(0, index).join("/"));
     }
   }
+  return {
+    directories: [...directories].sort(
+      (left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right),
+    ),
+    files: [...files].sort(),
+  };
+}
 
+export function buildRepoTree(relativePaths: string[]): RepoTree {
+  const { directories, files } = collectTreeEntries(relativePaths);
   const used = new Set<string>([ROOT_ID]);
   const idByPath = new Map<string, string>([["", ROOT_ID]]);
   const nodes: RepoTreeNode[] = [
     { id: ROOT_ID, parentId: null, path: "", name: "root", kind: "directory" },
   ];
-  const orderedDirs = [...directories].sort(
-    (left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right),
-  );
-  for (const directory of orderedDirs) {
+  for (const directory of directories) {
     const id = uniqueId(directory, used);
+    // Registered before the parent is read: a path whose first segment is
+    // empty yields the "" directory, which then resolves to its own id.
     idByPath.set(directory, id);
     nodes.push({
       id,
@@ -86,7 +98,7 @@ export function buildRepoTree(relativePaths: string[]): RepoTree {
       kind: "directory",
     });
   }
-  for (const file of [...files].sort()) {
+  for (const file of files) {
     nodes.push({
       id: uniqueId(file, used),
       parentId: idByPath.get(parentPath(file)) ?? ROOT_ID,
@@ -175,13 +187,17 @@ export function deepestDirectory(tree: RepoTree, elementPaths: string[]): string
   if (targets.length === 0) return undefined;
   let best: RepoTreeNode | undefined;
   for (const node of tree.nodes) {
-    if (node.kind !== "directory" || !node.path) continue;
-    const prefix = `${node.path}/`;
-    const covers = targets.every((target) => target === node.path || target.startsWith(prefix));
-    if (!covers) continue;
+    if (!coversElementPaths(node, targets)) continue;
     if (!best || node.path.length > best.path.length) best = node;
   }
   return best?.id;
+}
+
+/** True when a directory node equals, or is an ancestor of, every target path. */
+export function coversElementPaths(node: RepoTreeNode, targets: string[]): boolean {
+  if (node.kind !== "directory" || !node.path) return false;
+  const prefix = `${node.path}/`;
+  return targets.every((target) => target === node.path || target.startsWith(prefix));
 }
 
 function citationsFor(
@@ -212,17 +228,23 @@ function mentionTokens(node: RepoTreeNode): string[] {
   return tokens;
 }
 
+/** How one query token scores against a path's segments: whole segment 3, partial 1. */
+export function tokenScore(segments: string[], token: string): number {
+  const wholeSegment = segments.some(
+    (segment) => segment === token || segment.replace(/\.[a-z0-9]+$/, "") === token,
+  );
+  if (wholeSegment) return 3;
+  const partial = segments.some(
+    (segment) => segment.length >= 3 && (segment.includes(token) || token.includes(segment)),
+  );
+  return partial ? 1 : 0;
+}
+
 function scoreNode(node: RepoTreeNode, tokens: string[], query: string): number {
   if (query.includes(node.path.toLowerCase()) && node.path.length >= 3) return 8;
   const segments = node.path.toLowerCase().split("/");
   let score = 0;
-  for (const token of tokens) {
-    if (segments.some((segment) => segment === token || segment.replace(/\.[a-z0-9]+$/, "") === token)) {
-      score += 3;
-    } else if (segments.some((segment) => segment.length >= 3 && (segment.includes(token) || token.includes(segment)))) {
-      score += 1;
-    }
-  }
+  for (const token of tokens) score += tokenScore(segments, token);
   return score;
 }
 

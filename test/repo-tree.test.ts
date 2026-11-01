@@ -5,8 +5,11 @@ import { describe, expect, it } from "vitest";
 import { attachTreeNodes } from "../src/domain/architecture-design.js";
 import {
   buildRepoTree,
+  collectTreeEntries,
+  coversElementPaths,
   deepestDirectory,
   selectExperiences,
+  tokenScore,
   traceRepo,
   type ExperienceCiteSource,
 } from "../src/domain/repo-tree.js";
@@ -39,6 +42,73 @@ describe("repository tree", () => {
       ["web-src-app-tsx", "web-src", "file"],
     ]);
     expect(buildRepoTree(["a.b", "a-b"]).nodes.map((node) => node.id)).toEqual(["root", "a-b", "a-b-2"]);
+  });
+
+  it("counts each path once and orders directories parent-first", () => {
+    expect(collectTreeEntries([])).toEqual({ directories: [], files: [] });
+    expect(
+      collectTreeEntries([
+        "src/orders/export.ts",
+        "src\\orders\\export.ts",
+        "web/src/app.tsx",
+        "notes.tar.gz",
+        "b/z.ts",
+        "a.ts",
+      ]),
+    ).toEqual({
+      directories: ["b", "src", "web", "src/orders", "web/src"],
+      files: ["a.ts", "b/z.ts", "notes.tar.gz", "src/orders/export.ts", "web/src/app.tsx"],
+    });
+    const long = `${"deep/".repeat(40)}leaf.weirdext`;
+    const entries = collectTreeEntries([long]);
+    expect(entries.files).toEqual([long]);
+    expect(entries.directories).toHaveLength(40);
+  });
+
+  it("builds from duplicates, deep nesting, and an empty list", () => {
+    expect(buildRepoTree([])).toEqual({
+      nodes: [{ id: "root", parentId: null, path: "", name: "root", kind: "directory" }],
+    });
+    expect(buildRepoTree(["src/a.ts", "src/a.ts"]).nodes.map((node) => node.id)).toEqual([
+      "root",
+      "src",
+      "src-a-ts",
+    ]);
+    expect(buildRepoTree(["a/b/c/d.ts"]).nodes.map((node) => [node.id, node.parentId, node.kind])).toEqual([
+      ["root", null, "directory"],
+      ["a", "root", "directory"],
+      ["a-b", "a", "directory"],
+      ["a-b-c", "a-b", "directory"],
+      ["a-b-c-d-ts", "a-b-c", "file"],
+    ]);
+  });
+
+  it("scores a whole path segment above a partial one", () => {
+    expect(tokenScore(["src", "orders", "export.ts"], "orders")).toBe(3);
+    expect(tokenScore(["src", "orders", "export.ts"], "export")).toBe(3);
+    expect(tokenScore(["src", "orders"], "order")).toBe(1);
+    expect(tokenScore(["ord"], "orders")).toBe(1);
+    expect(tokenScore(["ab"], "abc")).toBe(0);
+    expect(tokenScore(["src"], "worker")).toBe(0);
+  });
+
+  it("keeps a directory that does not cover every sibling lookalike out", () => {
+    const nodes = buildRepoTree(["src/orders/a.ts", "src/orders2/b.ts"]).nodes;
+    const orders = nodes.find((node) => node.path === "src/orders");
+    const file = nodes.find((node) => node.kind === "file");
+    expect(orders && coversElementPaths(orders, ["src/orders", "src/orders/a.ts"])).toBe(true);
+    expect(orders && coversElementPaths(orders, ["src/orders2/b.ts"])).toBe(false);
+    expect(orders && coversElementPaths(orders, [])).toBe(true);
+    expect(file && coversElementPaths(file, ["src/orders/a.ts"])).toBe(false);
+  });
+
+  it("matches a quoted path even when no token is long enough to score", () => {
+    const tree = buildRepoTree(["a/b.ts", "c/d.ts"]);
+    expect(traceRepo(tree, "a/b.ts")).toMatchObject({
+      matched: true,
+      nodes: [{ path: "" }, { path: "a" }, { path: "a/b.ts" }],
+    });
+    expect(traceRepo(tree, "cd").nodes.map((node) => node.path)).toEqual(["", "a", "c"]);
   });
 
   it("walks matching leaves with their ancestors", () => {
