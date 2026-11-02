@@ -1,7 +1,7 @@
 import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { runProcess } from "../process/run.js";
+import { runProcess, type ProcessRequest, type ProcessResult } from "../process/run.js";
 
 export type CliId = "codex" | "grok" | "kimi" | "claude";
 
@@ -55,6 +55,18 @@ const KIMI_REASONING = ["low", "medium", "high", "xhigh"];
 const CLAUDE_REASONING = ["low", "medium", "high"];
 
 /** Known config / auth paths that should trigger inventory refresh when they change. */
+/**
+ * The one thing about this module that cannot be decided from files: which CLIs the
+ * machine has. Injection exists so tests can answer that question instead of the
+ * developer's laptop answering it for them — a probe reading the real `PATH` makes
+ * coverage, and therefore the CRAP ledger, depend on the machine that ran it.
+ */
+export interface CliInventoryExecution {
+  run(request: ProcessRequest): Promise<ProcessResult>;
+}
+
+export const defaultCliInventoryExecution: CliInventoryExecution = { run: runProcess };
+
 export function watchedCliConfigPaths(home = homedir()): string[] {
   return [
     path.join(home, ".codex", "config.toml"),
@@ -82,13 +94,16 @@ export async function inventorySourceFingerprint(home = homedir()): Promise<stri
   return parts.join("|");
 }
 
-export async function scanCliInventory(home = homedir()): Promise<CliInventory> {
+export async function scanCliInventory(
+  home = homedir(),
+  execution: CliInventoryExecution = defaultCliInventoryExecution,
+): Promise<CliInventory> {
   const [clis, sourceFingerprint] = await Promise.all([
     Promise.all([
-      probeCodex(home),
-      probeGrok(home),
-      probeKimi(home),
-      probeClaude(home),
+      probeCodex(home, execution),
+      probeGrok(home, execution),
+      probeKimi(home, execution),
+      probeClaude(home, execution),
     ]),
     inventorySourceFingerprint(home),
   ]);
@@ -286,9 +301,9 @@ function declaredModelIds(value: unknown): string[] {
     .filter((id): id is string => Boolean(id));
 }
 
-async function probeCodex(home: string): Promise<CliProbeResult> {
-  const binary = await whichBinary(["codex"]);
-  const version = binary ? await tryVersion(binary, ["--version"]) : undefined;
+async function probeCodex(home: string, execution: CliInventoryExecution): Promise<CliProbeResult> {
+  const binary = await whichBinary(["codex"], execution);
+  const version = binary ? await tryVersion(binary, ["--version"], execution) : undefined;
   const files = await codexFiles({
     configPath: path.join(home, ".codex", "config.toml"),
     authPath: path.join(home, ".codex", "auth.json"),
@@ -332,12 +347,12 @@ export function cliResult(input: {
   } as CliProbeResult;
 }
 
-async function probeGrok(home: string): Promise<CliProbeResult> {
+async function probeGrok(home: string, execution: CliInventoryExecution): Promise<CliProbeResult> {
   const configPath = path.join(home, ".grok", "config.toml");
   const localBin = path.join(home, ".grok", "bin", "grok");
-  const binary = (await exists(localBin)) ? localBin : await whichBinary(["grok"]);
+  const binary = (await exists(localBin)) ? localBin : await whichBinary(["grok"], execution);
   let version: string | undefined;
-  if (binary) version = await tryVersion(binary, ["--version"]);
+  if (binary) version = await tryVersion(binary, ["--version"], execution);
 
   const configPaths: string[] = [];
   const models: CliModelInfo[] = [];
@@ -369,12 +384,12 @@ async function probeGrok(home: string): Promise<CliProbeResult> {
   };
 }
 
-async function probeKimi(home: string): Promise<CliProbeResult> {
+async function probeKimi(home: string, execution: CliInventoryExecution): Promise<CliProbeResult> {
   const configPath = path.join(home, ".kimi-code", "config.toml");
   const localBin = path.join(home, ".kimi-code", "bin", "kimi");
-  const binary = (await exists(localBin)) ? localBin : await whichBinary(["kimi"]);
+  const binary = (await exists(localBin)) ? localBin : await whichBinary(["kimi"], execution);
   let version: string | undefined;
-  if (binary) version = await tryVersion(binary, ["--version"]);
+  if (binary) version = await tryVersion(binary, ["--version"], execution);
 
   const configPaths: string[] = [];
   const models: CliModelInfo[] = [];
@@ -407,11 +422,11 @@ async function probeKimi(home: string): Promise<CliProbeResult> {
   };
 }
 
-async function probeClaude(home: string): Promise<CliProbeResult> {
+async function probeClaude(home: string, execution: CliInventoryExecution): Promise<CliProbeResult> {
   const settingsPath = path.join(home, ".claude", "settings.json");
-  const binary = await whichBinary(["claude"]);
+  const binary = await whichBinary(["claude"], execution);
   let version: string | undefined;
-  if (binary) version = await tryVersion(binary, ["--version"]);
+  if (binary) version = await tryVersion(binary, ["--version"], execution);
 
   const configPaths: string[] = [];
   const models: CliModelInfo[] = [];
@@ -448,18 +463,24 @@ async function probeClaude(home: string): Promise<CliProbeResult> {
   };
 }
 
-async function whichBinary(names: string[]): Promise<string | undefined> {
+async function whichBinary(
+  names: string[],
+  execution: CliInventoryExecution,
+): Promise<string | undefined> {
   for (const name of names) {
-    const found = await whichOne(name);
+    const found = await whichOne(name, execution);
     if (found) return found;
   }
   return undefined;
 }
 
 /** One `which`/`where` lookup; a failure just means "not this name". */
-export async function whichOne(name: string): Promise<string | undefined> {
+export async function whichOne(
+  name: string,
+  execution: CliInventoryExecution = defaultCliInventoryExecution,
+): Promise<string | undefined> {
   try {
-    const result = await runProcess({
+    const result = await execution.run({
       command: process.platform === "win32" ? "where" : "which",
       args: [name],
       cwd: homedir(),
@@ -472,9 +493,13 @@ export async function whichOne(name: string): Promise<string | undefined> {
   }
 }
 
-async function tryVersion(binary: string, args: string[]): Promise<string | undefined> {
+async function tryVersion(
+  binary: string,
+  args: string[],
+  execution: CliInventoryExecution,
+): Promise<string | undefined> {
   try {
-    const result = await runProcess({
+    const result = await execution.run({
       command: binary,
       args,
       cwd: homedir(),

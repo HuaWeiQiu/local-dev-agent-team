@@ -5,7 +5,42 @@ import { describe, expect, it } from "vitest";
 import {
   inventorySourceFingerprint,
   scanCliInventory,
+  type CliInventoryExecution,
 } from "../src/desktop/cli-inventory.js";
+import type { ProcessRequest, ProcessResult } from "../src/process/run.js";
+
+/**
+ * Answer "which CLIs are installed" from a script instead of from the machine.
+ * The probe logic still runs for real — only the process boundary is answered —
+ * so coverage no longer depends on what the developer or the runner happens to
+ * have on PATH.
+ */
+function scriptedExecution(script: Record<string, { stdout?: string; exitCode?: number }>): {
+  execution: CliInventoryExecution;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    calls,
+    execution: {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        const key = [path.basename(request.command), ...request.args].join(" ");
+        calls.push(key);
+        const hit = script[key] ?? { exitCode: 1, stdout: "" };
+        return {
+          command: request.command,
+          args: request.args,
+          exitCode: hit.exitCode ?? 0,
+          stdout: hit.stdout ?? "",
+          stderr: "",
+          durationMs: 0,
+          timedOut: false,
+          signal: null,
+        };
+      },
+    },
+  };
+}
 import {
   materializeRoleBindings,
   parseRuntimeProfileName,
@@ -35,12 +70,20 @@ describe("cli inventory and role bindings", () => {
       "utf8",
     );
 
-    const inventory = await scanCliInventory(home);
+    const { execution } = scriptedExecution({
+      "which codex": { stdout: "/usr/local/bin/codex\n" },
+      "codex --version": { stdout: "codex-cli 0.147.0\n" },
+      "which grok": { stdout: "/usr/local/bin/grok\n" },
+      "grok --version": { stdout: "grok 4.6.0\n" },
+    });
+    const inventory = await scanCliInventory(home, execution);
     const json = JSON.stringify(inventory);
     expect(json).not.toContain("sk-secret");
     expect(json).not.toContain("xai-secret");
 
     const codex = inventory.clis.find((cli) => cli.id === "codex");
+    expect(codex?.installed).toBe(true);
+    expect(codex?.version).toBe("codex-cli 0.147.0");
     expect(codex?.auth.status).toBe("present");
     expect(codex?.defaultModel).toBe("gpt-5.6-sol");
     expect(codex?.providers?.some((p) => p.id === "sub2api")).toBe(true);
@@ -49,6 +92,18 @@ describe("cli inventory and role bindings", () => {
     expect(grok?.auth.status).toBe("present");
     expect(grok?.auth.detail).toMatch(/api_key/);
     expect(grok?.defaultModel).toBe("grok-4.6");
+  });
+
+  it("reports a machine with nothing installed without consulting PATH", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-inv-empty-"));
+    const { execution, calls } = scriptedExecution({});
+    const inventory = await scanCliInventory(home, execution);
+
+    expect(inventory.clis.every((cli) => cli.installed === false)).toBe(true);
+    expect(inventory.clis.every((cli) => cli.version === undefined)).toBe(true);
+    // The probes asked, and the answers came from the script, not the machine.
+    expect(calls.every((call) => call.startsWith("which "))).toBe(true);
+    expect(calls.length).toBeGreaterThan(0);
   });
 
   it("materializes roleBindings into ephemeral profiles", () => {
@@ -137,13 +192,17 @@ describe("cli inventory and role bindings", () => {
       "utf8",
     );
 
-    const first = await getInventory({ home, maxAgeMs: 60 * 60 * 1000 });
+    const { execution } = scriptedExecution({
+      "which codex": { stdout: "/usr/local/bin/codex\n" },
+      "codex --version": { stdout: "codex-cli 0.147.0\n" },
+    });
+    const first = await getInventory({ home, maxAgeMs: 60 * 60 * 1000, execution });
     expect(first.fromCache).toBe(false);
     expect(first.reason).toBe("miss");
     expect(first.inventory.sourceFingerprint).toBeTruthy();
     expect(first.inventory.clis.find((cli) => cli.id === "codex")?.defaultModel).toBe("gpt-old");
 
-    const second = await getInventory({ home, maxAgeMs: 60 * 60 * 1000 });
+    const second = await getInventory({ home, maxAgeMs: 60 * 60 * 1000, execution });
     expect(second.fromCache).toBe(true);
     expect(second.reason).toBe("hit");
     expect(second.inventory.sourceFingerprint).toBe(first.inventory.sourceFingerprint);
@@ -158,7 +217,7 @@ describe("cli inventory and role bindings", () => {
     const afterFp = await inventorySourceFingerprint(home);
     expect(afterFp).not.toBe(first.inventory.sourceFingerprint);
 
-    const third = await getInventory({ home, maxAgeMs: 60 * 60 * 1000 });
+    const third = await getInventory({ home, maxAgeMs: 60 * 60 * 1000, execution });
     expect(third.fromCache).toBe(false);
     expect(third.reason).toBe("fingerprint");
     expect(third.inventory.clis.find((cli) => cli.id === "codex")?.defaultModel).toBe("gpt-new");
