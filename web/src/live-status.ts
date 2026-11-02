@@ -24,32 +24,58 @@ export interface LiveStatus {
 
 const MAX_VISIBLE_WORKERS = 3;
 
+function activeInvocations(
+  run: RunState,
+  invocations: AgentInvocationActivity[],
+): AgentInvocationActivity[] {
+  if (!activeRunStatuses.has(run.status)) return [];
+  return invocations.filter((invocation) => invocation.status === "running");
+}
+
+function toWorker(invocation: AgentInvocationActivity): LiveWorker {
+  return {
+    id: invocation.id,
+    label: `${agentRoleLabel(invocation.role)} · ${invocation.profile}`,
+    advisor: invocation.advisor === true,
+  };
+}
+
+function taskProgress(tasks: RunState["tasks"]): { done: number; total: number } {
+  return {
+    done: tasks.filter((task) => task.status === "passed" || task.status === "merged").length,
+    total: tasks.length,
+  };
+}
+
+function advisorBudget(run: RunState): LiveStatus["advisor"] {
+  const advisor = run.strategy.advisor;
+  if (!advisor?.enabled) return undefined;
+  return { used: run.advisorConsultations ?? 0, max: advisor.maxConsultationsPerRun };
+}
+
+function pendingApprovals(run: RunState): number {
+  return (run.approvals ?? []).filter((approval) => approval.status === "pending").length;
+}
+
 export function deriveLiveStatus(
   run: RunState | undefined,
   invocations: AgentInvocationActivity[],
 ): LiveStatus | undefined {
   if (!run) return undefined;
-  const running = activeRunStatuses.has(run.status);
-  const active = running ? invocations.filter((invocation) => invocation.status === "running") : [];
+  const active = activeInvocations(run, invocations);
   const visible = active.slice(0, MAX_VISIBLE_WORKERS);
-  const advisor = run.strategy.advisor;
+  const tasks = taskProgress(run.tasks);
   return {
     statusLabel: runStatusLabel(run.status),
-    running,
+    running: activeRunStatuses.has(run.status),
     startedAt: run.createdAt,
-    workers: visible.map((invocation) => ({
-      id: invocation.id,
-      label: `${agentRoleLabel(invocation.role)} · ${invocation.profile}`,
-      advisor: invocation.advisor === true,
-    })),
+    workers: visible.map(toWorker),
     hiddenWorkers: active.length - visible.length,
-    tasksDone: run.tasks.filter((task) => task.status === "passed" || task.status === "merged").length,
-    tasksTotal: run.tasks.length,
-    pendingApprovals: (run.approvals ?? []).filter((approval) => approval.status === "pending").length,
+    tasksDone: tasks.done,
+    tasksTotal: tasks.total,
+    pendingApprovals: pendingApprovals(run),
     invocations: { used: run.usage?.agentInvocations ?? 0, max: run.strategy.maxAgentInvocations },
-    advisor: advisor?.enabled
-      ? { used: run.advisorConsultations ?? 0, max: advisor.maxConsultationsPerRun }
-      : undefined,
+    advisor: advisorBudget(run),
   };
 }
 
