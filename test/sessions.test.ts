@@ -147,9 +147,13 @@ describe("Codex app-server session", () => {
 
   it("aborts through the signal by interrupting the turn", async () => {
     const session = await open();
+    const events = collect(session);
     const controller = new AbortController();
     const turn = session.runTurn({ prompt: "slow", signal: controller.signal });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait for the turn to be observably running. A fixed sleep can elapse before
+    // the CLI has even started the turn on a loaded machine, and then the abort
+    // proves nothing about interrupting it.
+    await until(() => events.some((event) => event.type === "text-delta"));
     controller.abort();
     expect(await turn).toMatchObject({ status: "interrupted" });
     await session.close();
