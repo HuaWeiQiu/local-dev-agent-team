@@ -22,42 +22,88 @@ const QUICK_MAX_CHARS = 200;
 const FULL_MIN_CHARS = 1_500;
 const FULL_MIN_DELIVERABLES = 4;
 
+interface GoalSignals {
+  goal: string;
+  deliverables: number;
+  risk: string | undefined;
+  small: string | undefined;
+}
+
+function firstMatch(pattern: RegExp, goal: string): string | undefined {
+  return pattern.exec(goal)?.[0];
+}
+
+function goalSignals(rawGoal: string): GoalSignals {
+  const goal = rawGoal.trim();
+  return {
+    goal,
+    deliverables: countDeliverables(goal),
+    risk: firstMatch(RISK_PATTERN, goal),
+    small: firstMatch(SMALL_PATTERN, goal),
+  };
+}
+
+/** Operator, evaluation and project-configuration choices win over any heuristic. */
+function forcedSelection(input: RouteInput): FlowSelection | undefined {
+  if (input.evaluation) {
+    return selection("standard", "evaluation", [
+      "evolution evaluations always use the standard flow",
+    ]);
+  }
+  if (input.override) return selection(input.override, "user", ["chosen by the operator"]);
+  if (input.configured && input.configured !== "auto") {
+    return selection(input.configured, "config", ["fixed by the project configuration"]);
+  }
+  return undefined;
+}
+
+function riskSelection(signals: GoalSignals): FlowSelection | undefined {
+  if (!signals.risk) return undefined;
+  return selection("full", "router", [`touches a sensitive area ("${signals.risk}")`]);
+}
+
+function deliverableSelection(signals: GoalSignals): FlowSelection | undefined {
+  if (signals.deliverables < FULL_MIN_DELIVERABLES) return undefined;
+  return selection("full", "router", [
+    `lists ${signals.deliverables} separate deliverables`,
+  ]);
+}
+
+function lengthSelection(signals: GoalSignals): FlowSelection | undefined {
+  if (signals.goal.length < FULL_MIN_CHARS) return undefined;
+  return selection("full", "router", [
+    `the goal is long (${signals.goal.length} characters)`,
+  ]);
+}
+
+function isSmallChange(signals: GoalSignals): boolean {
+  if (signals.small === undefined) return false;
+  return signals.goal.length <= QUICK_MAX_CHARS && signals.deliverables <= 1;
+}
+
+function smallChangeSelection(signals: GoalSignals): FlowSelection | undefined {
+  if (!isSmallChange(signals)) return undefined;
+  return selection("quick", "router", [
+    `short goal (${signals.goal.length} characters) for a small, low-risk change ("${signals.small}")`,
+  ]);
+}
+
 /**
  * Chooses a workflow template with plain rules over the goal text. Models
  * never take part in routing, so the same goal always yields the same flow and
  * the reasons can be shown to the operator verbatim.
  */
 export function routeTemplate(input: RouteInput): FlowSelection {
-  if (input.evaluation) {
-    return selection("standard", "evaluation", ["evolution evaluations always use the standard flow"]);
-  }
-  if (input.override) {
-    return selection(input.override, "user", ["chosen by the operator"]);
-  }
-  if (input.configured && input.configured !== "auto") {
-    return selection(input.configured, "config", ["fixed by the project configuration"]);
-  }
-
-  const goal = input.goal.trim();
-  const deliverables = countDeliverables(goal);
-  const risk = RISK_PATTERN.exec(goal)?.[0];
-  const small = SMALL_PATTERN.exec(goal)?.[0];
-
-  if (risk) {
-    return selection("full", "router", [`touches a sensitive area ("${risk}")`]);
-  }
-  if (deliverables >= FULL_MIN_DELIVERABLES) {
-    return selection("full", "router", [`lists ${deliverables} separate deliverables`]);
-  }
-  if (goal.length >= FULL_MIN_CHARS) {
-    return selection("full", "router", [`the goal is long (${goal.length} characters)`]);
-  }
-  if (small && goal.length <= QUICK_MAX_CHARS && deliverables <= 1) {
-    return selection("quick", "router", [
-      `short goal (${goal.length} characters) for a small, low-risk change ("${small}")`,
-    ]);
-  }
-  return selection("standard", "router", ["no signal that the task is trivial or high risk"]);
+  const forced = forcedSelection(input);
+  if (forced) return forced;
+  const signals = goalSignals(input.goal);
+  return (
+    riskSelection(signals) ??
+    deliverableSelection(signals) ??
+    lengthSelection(signals) ??
+    smallChangeSelection(signals) ??
+    selection("standard", "router", ["no signal that the task is trivial or high risk"])
+  );
 }
 
 function selection(
