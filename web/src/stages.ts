@@ -49,28 +49,49 @@ function stageIndexOf(status: RunStatus): number {
  * the run never entered but later stages passed are shown as skipped (for
  * example explore, or approval when no gate was configured).
  */
+interface StageProgress {
+  current: number;
+  failed: boolean;
+  completed: boolean;
+  visited: ReadonlySet<number>;
+}
+
+function visitedStages(history: ReadonlyArray<{ status: RunStatus }>): Set<number> {
+  const visited = new Set<number>();
+  for (const entry of history) {
+    const index = stageIndexOf(entry.status);
+    if (index >= 0) visited.add(index);
+  }
+  return visited;
+}
+
+/** The stage a run is parked at: its own status, or the last one it reached. */
+function currentStageIndex(status: RunStatus, visited: ReadonlySet<number>): number {
+  const index = stageIndexOf(status);
+  return index < 0 ? Math.max(-1, ...visited) : index;
+}
+
+function stageState(index: number, progress: StageProgress): StageState {
+  if (progress.completed) return progress.visited.has(index) ? "done" : "skipped";
+  if (index < progress.current) return progress.visited.has(index) ? "done" : "skipped";
+  if (index > progress.current) return "pending";
+  return progress.failed ? "failed" : "current";
+}
+
 export function deriveStages(run: {
   status: RunStatus;
   history: ReadonlyArray<{ status: RunStatus }>;
 }): StageView[] {
-  const visited = new Set<number>();
-  for (const entry of run.history) {
-    const index = stageIndexOf(entry.status);
-    if (index >= 0) visited.add(index);
-  }
-  let current = stageIndexOf(run.status);
-  const stopped = terminalStopped.has(run.status);
-  if (current < 0) {
-    current = Math.max(-1, ...visited);
-  }
-  const completed = run.status === "completed";
-  return stageDefinitions.map((stage, index): StageView => {
-    const base = { id: stage.id, label: stage.label };
-    if (completed) return { ...base, state: visited.has(index) ? "done" : "skipped" };
-    if (index < current) return { ...base, state: visited.has(index) ? "done" : "skipped" };
-    if (index === current) {
-      return { ...base, state: stopped || run.status === "ci-failed" ? "failed" : "current" };
-    }
-    return { ...base, state: "pending" };
-  });
+  const visited = visitedStages(run.history);
+  const progress: StageProgress = {
+    visited,
+    current: currentStageIndex(run.status, visited),
+    completed: run.status === "completed",
+    failed: terminalStopped.has(run.status) || run.status === "ci-failed",
+  };
+  return stageDefinitions.map((stage, index): StageView => ({
+    id: stage.id,
+    label: stage.label,
+    state: stageState(index, progress),
+  }));
 }
