@@ -3,7 +3,11 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { CliId, CliInventory } from "./cli-inventory.js";
-import { inventorySourceFingerprint, scanCliInventory } from "./cli-inventory.js";
+import {
+  inventorySourceFingerprint,
+  scanCliInventory,
+  type CliInventoryExecution,
+} from "./cli-inventory.js";
 
 const roleBindingSchema = z.object({
   cli: z.enum(["codex", "grok", "kimi", "claude"]),
@@ -79,7 +83,14 @@ export async function saveDesktopSettings(
 }
 
 export async function getInventory(
-  options: { refresh?: boolean; maxAgeMs?: number; home?: string } = {},
+  options: {
+    refresh?: boolean;
+    maxAgeMs?: number;
+    home?: string;
+    /** Answers "which CLIs are installed"; injected by tests so coverage does not
+     * depend on the machine that runs them. */
+    execution?: CliInventoryExecution;
+  } = {},
 ): Promise<{ inventory: CliInventory; fromCache: boolean; reason: "refresh" | "stale" | "fingerprint" | "miss" | "hit" }> {
   const home = options.home ?? homedir();
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_INVENTORY_MAX_AGE_MS;
@@ -108,7 +119,7 @@ export async function getInventory(
     // Fall through to rescan; fingerprint change is the primary invalidation signal.
   }
 
-  const inventory = await scanCliInventory(home);
+  const inventory = await scanCliInventory(home, options.execution);
   const reason = options.refresh
     ? "refresh"
     : !settings.inventoryCache

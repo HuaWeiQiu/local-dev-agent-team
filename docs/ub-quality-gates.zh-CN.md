@@ -3,6 +3,44 @@
 本文说明如何把 [ub-mode](https://github.com/unclebob/ub-mode) 的确定性质量门接进本仓的
 `quality.commands`，以及它对「自动策略演进」评分到底改变什么、不改变什么。
 
+
+## 让 CRAP 数字说谎的两种机制
+
+CRAP 是 `CC²×(1-cov)³ + CC`。覆盖率在分母里，**分母一错，分数就没有意义**。目前见过两种：
+
+### 1. 分母污染：把不该算的东西算成源码，或把崩溃读成 0%
+
+- `coverage.all` 默认为 true，覆盖率会把项目里所有文件当待测源码，而默认 exclude 只有
+  `coverage/dist/node_modules`，没有 `target/`。于是 `target/coverage/**` 里上一轮的 HTML
+  报告资源被当源码插桩；两个覆盖率进程交错时，删目录的那个让另一个报
+  `ENOENT .../lcov-report/sorter.js`（`V8ToIstanbul.load`），整轮 exit 1，门禁把它读成
+  **0% 覆盖率**——不是红灯，是静默污染，所有人的 CRAP 都被压低。修法见 `#143`：
+  `coverage.exclude` 加 `target/**`、`coverage/reportsDirectory` 显式指到被排除的目录。
+- 同一类还有一次：测试进程 `exit 1` 时 `lcov` 文件仍在（只是缺文件），守卫只看「文件非空」
+  就打分，一次这样的运行报出 **1545 条 new**，全是假债。修法：`steps.coverage.outcome`
+  必须 `success` 才允许评分，否则写 `kind: infrastructure`。
+
+### 2. 测试不 hermetic：覆盖率随「跑测试的机器」变
+
+`desktop.cli-inventory` 的 probe 直接执行 `which` / `<cli> --version`，于是覆盖率取决于
+这台机器装了什么 CLI。同一段判定逻辑在 CI runner 上走不到「已安装」那一半分支。
+
+实测（同代码、同工具 `6fd92c4`、同 `self` 覆盖率来源）：
+
+| 环境 | new / worse / fixed |
+| --- | --- |
+| Linux + Node 24 | 5 / 6 / 4 |
+| macOS-14 + Node 26（runner） | 5 / 7 / 3 |
+| macOS arm64 + Node 26（开发机，装了一堆 CLI） | 0 / 2 / 3 |
+
+注意第二行：**把 runner 换到 macOS、Node 换成 26 也没救**——差异不是 OS 也不是 Node 大版本，
+而是「runner 上一个 CLI 都没有」。修法不是换 baseline，而是给探测层加注入缝
+（`CliInventoryExecution.run`），测试用脚本回答「装了什么」，判定逻辑照旧真实执行。
+修完之后两边 `new` 都是 0。
+
+**判断口诀**：`new` 里出现成批同模块的函数、且幅度与机器相关 → 先怀疑 hermetic；
+`new` 是满屏且数量级异常（上千条）→ 先怀疑分母（崩溃/缺覆盖率）。
+
 ## 1. 为什么需要它
 
 编排器原有的质量门只有**布尔**语义：命令 exit 0 即通过。演进评分
