@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-11-02T07:57:38.708Z",
+  "updatedAt": "2026-11-02T08:02:06.818Z",
   "scores": {
     "evolution.automatic-controller.AutomaticEvolutionController#evaluateStrategy": 84.7131,
     "evolution.automatic-controller.AutomaticEvolutionController#resolveIncumbent": 74.7758,
@@ -156,7 +156,7 @@
     "domain.plan#extractNamedDeliverables": 12.144,
     "process.live-children#reapOrphanAgentProcesses": 12.144,
     "components.AgentsPanel#AgentCard": 12.0737,
-    "server.run-retention.RunRetention#cleanup": 12.0247,
+    "server.run-retention.RunRetention#cleanup": 12.0293,
     "sessions.factory.SessionFactory#plan": 12.0118,
     "board#buildBoard": 12,
     "components.EvidenceCenter#readinessLabel": 12,
