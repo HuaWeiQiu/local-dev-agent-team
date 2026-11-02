@@ -29,8 +29,9 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import os, { arch, platform } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -233,9 +234,10 @@ export function main(argv = process.argv.slice(2)) {
   // crapper in changed mode has nothing to score when nothing changed; the
   // other tools do not look at git at all.
   if (isIdleCrapperRun(prepared.options)) return baselineStep(prepared.options);
+  // Seeding a baseline records reality even when the layers are still red — but only
+  // reality that repeats. See stableBaseline().
+  if (prepared.options.updateBaseline) return stableBaseline(prepared.ub, prepared.options);
   const failed = runLayers(prepared.ub, prepared.options);
-  // Seeding a baseline records reality even when the layers are still red.
-  if (prepared.options.updateBaseline) return baselineStep(prepared.options);
   return failed === 0 ? baselineStep(prepared.options) : failed;
 }
 
@@ -279,6 +281,7 @@ function prepare(argv) {
           error: "ub-mode tool chain not found",
           threshold: Number(options.threshold),
           baseline: options.baseline,
+          provenance: provenance({ env: process.env }),
         }),
       );
     }
@@ -321,6 +324,50 @@ export function baselineStep(options, cwd = process.cwd()) {
   const baseline = readBaseline(baselinePath);
   if (!baseline) return 0;
   return reportRegressions(regressions(scores, baseline));
+}
+
+/**
+ * Keys two scans disagree about. A baseline written from one scan of a run whose
+ * scores wobble freezes a number nobody can reproduce — that is how `getInventory`
+ * ended up frozen at 20.24 while measuring 23.90 at its own commit.
+ */
+export function unstableKeys(first, second) {
+  const keys = new Set([...first.keys(), ...second.keys()]);
+  const drift = [];
+  for (const key of keys) {
+    const before = first.get(key);
+    const after = second.get(key);
+    if (before !== after) drift.push({ key, first: before, second: after });
+  }
+  return drift.sort((left, right) => left.key.localeCompare(right.key));
+}
+
+/** One full scan in a clean state: no metrics from an earlier run may be read. */
+function scanOnce(ub, options, cwd) {
+  clearMetrics(cwd);
+  runLayers(ub, { ...options, changed: false }, cwd);
+  return readScores(path.join(cwd, ".metrics", "crap.edn"));
+}
+
+/**
+ * Seed the baseline only from numbers that repeat. The rule used to be a note in a
+ * document ("two `--all` runs must agree key by key"); a note gets forgotten, so the
+ * gate now refuses to write when the two scans disagree.
+ */
+export function stableBaseline(ub, options, cwd = process.cwd()) {
+  const first = scanOnce(ub, options, cwd);
+  const second = scanOnce(ub, options, cwd);
+  const drift = unstableKeys(first, second);
+  if (drift.length > 0) {
+    process.stderr.write(
+      `baseline: refusing to write — two full scans disagree on ${drift.length} function(s)\n`,
+    );
+    for (const entry of drift.slice(0, 10)) {
+      process.stderr.write(`  ${entry.key}: ${entry.first ?? "absent"} -> ${entry.second ?? "absent"}\n`);
+    }
+    return 2;
+  }
+  return writeBaseline(second, path.resolve(cwd, options.baseline), options.baseline);
 }
 
 function writeBaseline(scores, baselinePath, label) {
@@ -383,17 +430,64 @@ function sortDrift(report) {
   return report;
 }
 
+/** The commit under test: a score without it cannot be reproduced. */
+export function gitHeadSha(cwd = process.cwd()) {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+/** The tool that produced the scores; a moving tool silently changes every number. */
+export function toolCommit(ub, env = process.env) {
+  if (env.UB_TOOL_COMMIT?.trim()) return env.UB_TOOL_COMMIT.trim();
+  const toolDir = path.join(path.dirname(path.resolve(ub)), "crapper");
+  const result = spawnSync("git", ["-C", toolDir, "rev-parse", "HEAD"], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+/**
+ * The coverage report the scores were computed from, pinned by digest. Attribution
+ * used to cost three rounds because nobody could say which lcov a number came from.
+ */
+export function lcovProvenance(file) {
+  if (!existsSync(file)) return undefined;
+  const bytes = readFileSync(file);
+  return {
+    path: path.relative(process.cwd(), file) || file,
+    bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+/** What produced a verdict: code, tool, coverage source, machine. */
+export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPath } = {}) {
+  return {
+    headSha: gitHeadSha(cwd),
+    toolCommit: ub ? toolCommit(ub, env) : undefined,
+    coverageSource: env.COVERAGE_SOURCE?.trim() || "self",
+    platform: `${platform()}/${arch()}`,
+    nodeVersion: process.version,
+    lcov: lcovProvenance(lcovPath ?? path.join(cwd, "target", "coverage", "typescript", "lcov.info")),
+  };
+}
+
 /**
  * The file the nightly workflow reads. `kind` is the whole point: an infrastructure
  * failure (missing tool chain, crashed scan, absent baseline) is not a ledger with
  * three zero counters, and must never be reported as "clean".
  */
-export function driftPayload({ report, error, threshold = 10, baseline = DEFAULT_BASELINE }) {
+export function driftPayload({
+  report,
+  error,
+  threshold = 10,
+  baseline = DEFAULT_BASELINE,
+  provenance: origin,
+}) {
   const empty = { new: [], worse: [], fixed: [] };
   const verdict = report ?? empty;
   return {
     kind: error ? "infrastructure" : "ledger",
     generatedAt: new Date().toISOString(),
+    ...(origin ? { provenance: dropUndefined(origin) } : {}),
     threshold,
     baseline,
     ...(error ? { error } : {}),
@@ -437,12 +531,17 @@ export function driftStep(options, ub, cwd = process.cwd()) {
   return driftVerdict(options, cwd, { report }, 0);
 }
 
+function dropUndefined(object) {
+  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
+}
+
 function driftVerdict(options, cwd, { report, error }, status) {
   const payload = driftPayload({
     ...(report ? { report } : {}),
     ...(error ? { error } : {}),
     threshold: Number(options.threshold),
     baseline: options.baseline,
+    provenance: provenance({ ub: options.ub, cwd, env: process.env }),
   });
   writeDriftReport(options.driftReport, payload, cwd);
   process.stdout.write(
