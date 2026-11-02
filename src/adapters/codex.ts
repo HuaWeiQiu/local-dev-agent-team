@@ -38,60 +38,10 @@ export class CodexAdapter implements AgentAdapter {
   buildInvocation(profile: AgentProfile, request: AgentInvocationRequest): AgentInvocation {
     assertAdapterProfile(this, profile, request.outputSchema !== undefined);
     validateProfileArguments(profile, "codex");
-    if (profile.externalTools === "deny" && profile.nativeProfile) {
-      throw new Error("Codex nativeProfile requires externalTools: inherit");
-    }
-    if (!this.supportedReasoning.includes(profile.reasoning)) {
-      throw new Error(`Codex adapter does not support reasoning '${profile.reasoning}'`);
-    }
-
-    const args = [
-      "exec",
-      "--ephemeral",
-      "--color",
-      "never",
-      "--json",
-      "--sandbox",
-      profile.permission,
-      "-C",
-      request.cwd,
-      "-c",
-      `model_reasoning_effort="${profile.reasoning}"`,
-    ];
-
-    if (profile.externalTools === "deny") {
-      args.push(
-        "--ignore-user-config",
-        "-c",
-        "project_root_markers=[]",
-        "-c",
-        `projects.${JSON.stringify(request.cwd)}.trust_level="untrusted"`,
-      );
-    }
-    if (profile.codexProvider) {
-      args.push(...codexProviderArguments(profile.codexProvider));
-    }
-
-    if (profile.nativeProfile) {
-      args.push("--profile", profile.nativeProfile);
-    }
-    if (profile.model !== "inherit") {
-      args.push("--model", profile.model);
-    }
-    if (request.outputSchema) {
-      if (!request.outputFile) {
-        throw new Error("Codex structured output requires an output file");
-      }
-      args.push("--output-schema", `${request.outputFile}.schema.json`);
-      args.push("--output-last-message", request.outputFile);
-    } else if (request.outputFile) {
-      args.push("--output-last-message", request.outputFile);
-    }
-
-    args.push(...profile.args, "-");
+    assertExternalToolPolicy(profile);
     return {
       command: profile.executable ?? "codex",
-      args,
+      args: codexArgs(profile, request),
       cwd: request.cwd,
       stdin: request.prompt,
       timeoutMs: profile.timeoutSeconds * 1_000,
@@ -106,6 +56,77 @@ export class CodexAdapter implements AgentAdapter {
   async doctor(options: AdapterDoctorOptions): Promise<DoctorCheck[]> {
     return await runAdapterDoctor(this, options, doctorSpec);
   }
+}
+
+/** A native profile pulls in user configuration, which the deny policy forbids. */
+function assertExternalToolPolicy(profile: AgentProfile): void {
+  if (profile.externalTools !== "deny" || !profile.nativeProfile) return;
+  throw new Error("Codex nativeProfile requires externalTools: inherit");
+}
+
+function baseArgs(profile: AgentProfile, request: AgentInvocationRequest): string[] {
+  return [
+    "exec",
+    "--ephemeral",
+    "--color",
+    "never",
+    "--json",
+    "--sandbox",
+    profile.permission,
+    "-C",
+    request.cwd,
+    "-c",
+    `model_reasoning_effort="${profile.reasoning}"`,
+  ];
+}
+
+/** Denied external tools isolate the child from the user's own Codex config. */
+function isolationArgs(profile: AgentProfile, request: AgentInvocationRequest): string[] {
+  if (profile.externalTools !== "deny") return [];
+  return [
+    "--ignore-user-config",
+    "-c",
+    "project_root_markers=[]",
+    "-c",
+    `projects.${JSON.stringify(request.cwd)}.trust_level="untrusted"`,
+  ];
+}
+
+function providerArgs(profile: AgentProfile): string[] {
+  return profile.codexProvider ? codexProviderArguments(profile.codexProvider) : [];
+}
+
+function identityArgs(profile: AgentProfile): string[] {
+  const args: string[] = [];
+  if (profile.nativeProfile) args.push("--profile", profile.nativeProfile);
+  if (profile.model !== "inherit") args.push("--model", profile.model);
+  return args;
+}
+
+/** Structured output needs a file to write the schema and the last message to. */
+function outputArgs(request: AgentInvocationRequest): string[] {
+  if (request.outputSchema) {
+    if (!request.outputFile) throw new Error("Codex structured output requires an output file");
+    return [
+      "--output-schema",
+      `${request.outputFile}.schema.json`,
+      "--output-last-message",
+      request.outputFile,
+    ];
+  }
+  return request.outputFile ? ["--output-last-message", request.outputFile] : [];
+}
+
+function codexArgs(profile: AgentProfile, request: AgentInvocationRequest): string[] {
+  return [
+    ...baseArgs(profile, request),
+    ...isolationArgs(profile, request),
+    ...providerArgs(profile),
+    ...identityArgs(profile),
+    ...outputArgs(request),
+    ...profile.args,
+    "-",
+  ];
 }
 
 const doctorSpec: AdapterDoctorSpec = {
