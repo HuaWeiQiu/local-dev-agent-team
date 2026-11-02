@@ -20,6 +20,160 @@ interface ExperienceListProps {
   onResetFilters(): void;
 }
 
+function ListToolbar({
+  query,
+  filter,
+  busy,
+  filtered,
+  count,
+  total,
+  onQueryChange,
+  onFilterChange,
+}: {
+  query: string;
+  filter: ExperienceFilter;
+  busy: boolean;
+  filtered: boolean;
+  count: number;
+  total: number;
+  onQueryChange(value: string): void;
+  onFilterChange(value: ExperienceFilter): void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 p-3">
+      <div className="relative">
+        <Search
+          aria-hidden
+          className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted"
+        />
+        <Input
+          value={query}
+          disabled={busy}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="搜索"
+          aria-label="搜索经验"
+          className="h-8 pl-8 text-xs"
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <Select
+            value={filter}
+            disabled={busy}
+            onChange={(event) => onFilterChange(event.target.value as ExperienceFilter)}
+            aria-label="筛选"
+          >
+            {filterOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <span className="shrink-0 text-2xs tabular-nums text-muted" aria-live="polite">
+          {filtered ? `${count} / ${total}` : `${total} 条`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function EntryRow({
+  entry,
+  selected,
+  busy,
+  onSelect,
+}: {
+  entry: ExperienceEntry;
+  selected: boolean;
+  busy: boolean;
+  onSelect(id: string): void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        disabled={busy}
+        aria-current={selected ? "true" : undefined}
+        onClick={() => onSelect(entry.id)}
+        className={cn(
+          "flex w-full cursor-pointer flex-col gap-1 border-0 bg-transparent px-3 py-2.5 text-left text-ink hover:bg-surface-2 focus-ring disabled:cursor-not-allowed disabled:opacity-60",
+          selected && "bg-accent-soft/60 hover:bg-accent-soft/60",
+        )}
+      >
+        <span className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-2">
+          <span className="justify-self-start">
+            <Badge tone={statusTone[entry.status]}>{statusLabels[entry.status]}</Badge>
+          </span>
+          <span className="justify-self-end text-2xs text-muted">{scopeLabel(entry.scope)}</span>
+        </span>
+        <strong title={entry.summary} className="line-clamp-3 text-sm font-medium leading-snug text-ink">
+          {summarizeGoal(entry.summary, 56)}
+        </strong>
+        <small className="grid grid-cols-[4.75rem_minmax(0,1fr)] text-2xs text-muted">
+          <span className="tabular-nums">命中 {entry.hitCount}</span>
+          <span className="justify-self-end tabular-nums">{formatTimestamp(entry.updatedAt)}</span>
+        </small>
+      </button>
+    </li>
+  );
+}
+
+function EntryList({
+  entries,
+  selectedId,
+  busy,
+  onSelect,
+}: {
+  entries: ExperienceEntry[];
+  selectedId: string | undefined;
+  busy: boolean;
+  onSelect(id: string): void;
+}) {
+  return (
+    <ul className="m-0 flex list-none flex-col divide-y divide-line p-0">
+      {entries.map((entry) => (
+        <EntryRow
+          key={entry.id}
+          entry={entry}
+          selected={entry.id === selectedId}
+          busy={busy}
+          onSelect={onSelect}
+        />
+      ))}
+    </ul>
+  );
+}
+
+/** What an empty list means depends on whether the library is empty or just filtered out. */
+function EmptyList({
+  total,
+  filtered,
+  busy,
+  onResetFilters,
+}: {
+  total: number;
+  filtered: boolean;
+  busy: boolean;
+  onResetFilters(): void;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-muted">
+      <span aria-hidden className="grid size-10 place-items-center rounded-full bg-surface-3">
+        {filtered ? <FilterX className="size-4" /> : <BookMarked className="size-4" />}
+      </span>
+      <span className="text-sm text-ink-2">
+        {total === 0 ? "暂无经验。跑完任务后会出现候选。" : "无匹配项"}
+      </span>
+      {total > 0 && filtered ? (
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onResetFilters}>
+          清除筛选
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 export function ExperienceList({
   entries,
   total,
@@ -36,87 +190,21 @@ export function ExperienceList({
 
   return (
     <aside className="bd-b flex max-h-[44dvh] min-h-0 flex-col bg-surface md:max-h-none md:border-b-0 md:bd-r">
-      <div className="flex flex-col gap-2 p-3">
-        <div className="relative">
-          <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" />
-          <Input
-            value={query}
-            disabled={busy}
-            onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="搜索"
-            aria-label="搜索经验"
-            className="h-8 pl-8 text-xs"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <Select
-              value={filter}
-              disabled={busy}
-              onChange={(event) => onFilterChange(event.target.value as ExperienceFilter)}
-              aria-label="筛选"
-            >
-              {filterOptions.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </Select>
-          </div>
-          <span className="shrink-0 text-2xs tabular-nums text-muted" aria-live="polite">
-            {filtered ? `${entries.length} / ${total}` : `${total} 条`}
-          </span>
-        </div>
-      </div>
-
+      <ListToolbar
+        query={query}
+        filter={filter}
+        busy={busy}
+        filtered={filtered}
+        count={entries.length}
+        total={total}
+        onQueryChange={onQueryChange}
+        onFilterChange={onFilterChange}
+      />
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {entries.length > 0 ? (
-          <ul className="m-0 flex list-none flex-col divide-y divide-line p-0">
-            {entries.map((entry) => {
-              const selected = entry.id === selectedId;
-              return (
-                <li key={entry.id}>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    aria-current={selected ? "true" : undefined}
-                    onClick={() => onSelect(entry.id)}
-                    className={cn(
-                      "flex w-full cursor-pointer flex-col gap-1 border-0 bg-transparent px-3 py-2.5 text-left text-ink hover:bg-surface-2 focus-ring disabled:cursor-not-allowed disabled:opacity-60",
-                      selected && "bg-accent-soft/60 hover:bg-accent-soft/60",
-                    )}
-                  >
-                    <span className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-2">
-                      <span className="justify-self-start"><Badge tone={statusTone[entry.status]}>{statusLabels[entry.status]}</Badge></span>
-                      <span className="justify-self-end text-2xs text-muted">{scopeLabel(entry.scope)}</span>
-                    </span>
-                    <strong
-                      title={entry.summary}
-                      className="line-clamp-3 text-sm font-medium leading-snug text-ink"
-                    >
-                      {summarizeGoal(entry.summary, 56)}
-                    </strong>
-                    <small className="grid grid-cols-[4.75rem_minmax(0,1fr)] text-2xs text-muted">
-                      <span className="tabular-nums">命中 {entry.hitCount}</span>
-                      <span className="justify-self-end tabular-nums">{formatTimestamp(entry.updatedAt)}</span>
-                    </small>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          <EntryList entries={entries} selectedId={selectedId} busy={busy} onSelect={onSelect} />
         ) : (
-          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-muted">
-            <span aria-hidden className="grid size-10 place-items-center rounded-full bg-surface-3">
-              {filtered ? <FilterX className="size-4" /> : <BookMarked className="size-4" />}
-            </span>
-            <span className="text-sm text-ink-2">
-              {total === 0 ? "暂无经验。跑完任务后会出现候选。" : "无匹配项"}
-            </span>
-            {total > 0 && filtered ? (
-              <Button size="sm" variant="ghost" disabled={busy} onClick={onResetFilters}>
-                清除筛选
-              </Button>
-            ) : null}
-          </div>
+          <EmptyList total={total} filtered={filtered} busy={busy} onResetFilters={onResetFilters} />
         )}
       </div>
     </aside>
