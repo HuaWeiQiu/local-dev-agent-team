@@ -34,7 +34,11 @@ concurrency:
 
 jobs:
   drift:
-    runs-on: ubuntu-latest
+    # Pinned to the machine that produces the baseline: same OS family (arm64 macOS),
+    # same Node major. A guard that measures on a different platform reports drift
+    # that is really the platform. Measured: same code, same tool commit, Linux+Node24
+    # gave 5/6/4 against a macOS+Node26 baseline of 0/2/3.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -42,7 +46,9 @@ jobs:
           version: 10.33.0
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          # The baseline is computed under this Node. CRAP moves with V8 coverage
+          # instrumentation, so the version is part of the measurement, not a detail.
+          node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
