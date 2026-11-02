@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { extractUsage, validateProfileArguments } from "../adapters/shared.js";
 import type { AgentUsage } from "../adapters/types.js";
+import type { AgentProfile } from "../config/schema.js";
 import { sanitizedChildEnv } from "../process/env.js";
 import { spawnStreamProcess, type StreamProcess } from "../process/stream.js";
 import { Deferred, SessionEventHub } from "./hub.js";
@@ -79,16 +80,24 @@ export class ClaudeStreamSession implements AgentSession {
     return this.hub.subscribe(listener);
   }
 
-  async runTurn(input: TurnInput): Promise<TurnResult> {
+  /** Refuses a turn the session cannot take, and starts the child if needed. */
+  private assertCanRunTurn(signal: AbortSignal | undefined): void {
     if (this.closed) throw new SessionError("session is closed", "closed");
     if (this.dead) throw this.dead;
     if (this.active) throw new SessionError("a turn is already running", "protocol");
-    input.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     this.ensureStarted();
+  }
 
-    const schemaMatches =
-      input.outputSchema === undefined ||
-      JSON.stringify(input.outputSchema) === JSON.stringify(this.options.sessionSchema);
+  private schemaMatchesTurn(outputSchema: Record<string, unknown> | undefined): boolean {
+    if (outputSchema === undefined) return true;
+    return JSON.stringify(outputSchema) === JSON.stringify(this.options.sessionSchema);
+  }
+
+  private beginTurn(
+    input: TurnInput,
+    schemaMatches: boolean,
+  ): { active: ActiveTurn; release: () => void } {
     const active: ActiveTurn = {
       turnId: `turn-${++this.turnCounter}`,
       done: new Deferred<TurnResult>(),
@@ -101,24 +110,43 @@ export class ClaudeStreamSession implements AgentSession {
       structuredSchema: input.outputSchema !== undefined,
     };
     this.active = active;
-
     const onAbort = (): void => {
       void this.forceInterrupt(active, "interrupted");
     };
     input.signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = input.timeoutMs
-      ? setTimeout(() => {
-          void this.forceInterrupt(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
-        }, input.timeoutMs)
-      : undefined;
-
+    const timer = this.turnTimeout(input, active);
     this.hub.emit({ type: "turn-started", turnId: active.turnId });
     this.sendUser(schemaMatches ? input.prompt : promptWithSchema(input.prompt, input.outputSchema!));
+    return {
+      active,
+      release: () => {
+        if (timer) clearTimeout(timer);
+        input.signal?.removeEventListener("abort", onAbort);
+      },
+    };
+  }
+
+  /** The turn-level deadline, if the caller asked for one. */
+  private turnTimeout(
+    input: TurnInput,
+    active: ActiveTurn,
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (!input.timeoutMs) return undefined;
+    return setTimeout(() => {
+      void this.forceInterrupt(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
+    }, input.timeoutMs);
+  }
+
+  async runTurn(input: TurnInput): Promise<TurnResult> {
+    this.assertCanRunTurn(input.signal);
+    const { active, release } = this.beginTurn(
+      input,
+      this.schemaMatchesTurn(input.outputSchema),
+    );
     try {
       return await active.done.promise;
     } finally {
-      if (timer) clearTimeout(timer);
-      input.signal?.removeEventListener("abort", onAbort);
+      release();
       if (this.active === active) this.active = undefined;
     }
   }
@@ -173,54 +201,27 @@ export class ClaudeStreamSession implements AgentSession {
 
   private ensureStarted(): void {
     if (this.proc) return;
-    const { profile, cwd } = this.options;
-    validateProfileArguments(profile, "claude");
-    const args = [
-      "--print",
-      "--input-format",
-      "stream-json",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-      "--permission-mode",
-      profile.permission === "read-only" ? "plan" : "acceptEdits",
-      "--permission-prompt-tool",
-      "stdio",
-      "--effort",
-      profile.reasoning,
-    ];
-    if (!this.capabilities.resume) args.push("--no-session-persistence");
-    if (this.options.resumeSessionId) args.push("--resume", this.options.resumeSessionId);
-    if (profile.permission === "read-only") {
-      args.push("--tools", "Read,Glob,Grep", "--disallowed-tools", "Edit,Write,NotebookEdit,Bash");
-    }
-    if (profile.model !== "inherit") args.push("--model", profile.model);
-    if (profile.externalTools === "deny") {
-      args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
-    }
-    if (this.options.sessionSchema) {
-      args.push("--json-schema", JSON.stringify(this.options.sessionSchema));
-    }
-    args.push(...profile.args);
-
+    validateProfileArguments(this.options.profile, "claude");
     const proc = spawnStreamProcess({
       command: this.command,
-      args,
-      cwd,
+      args: claudeArgs(this.options, this.capabilities),
+      cwd: this.options.cwd,
       env: this.options.env ?? sanitizedChildEnv(),
       onLine: (line) => this.handleLine(line),
       ...(this.options.liveChild ? { liveChild: this.options.liveChild } : {}),
     });
     this.proc = proc;
-    void proc.exited.then((exit) => {
-      if (this.closed) return;
-      const reason = exit.error
-        ? `could not start claude: ${exit.error.message}`
-        : `claude exited (code ${exit.exitCode ?? "none"}${exit.signal ? `, ${exit.signal}` : ""}): ${proc.stderrTail().slice(-400)}`;
-      this.dead = new SessionError(reason, "process-exit");
-      this.active?.done.reject(this.dead);
-    });
+    void proc.exited.then((exit) => this.handleProcessExit(proc, exit));
+  }
+
+  /** A child that died outside a turn is only remembered; a live turn is failed. */
+  private handleProcessExit(
+    proc: StreamProcess,
+    exit: { exitCode: number | null; signal: NodeJS.Signals | null; error?: Error },
+  ): void {
+    if (this.closed) return;
+    this.dead = new SessionError(exitReason(exit, proc.stderrTail()), "process-exit");
+    this.active?.done.reject(this.dead);
   }
 
   private sendUser(text: string): void {
@@ -257,17 +258,15 @@ export class ClaudeStreamSession implements AgentSession {
   }
 
   private handleLine(line: string): void {
-    let message: Json;
-    try {
-      message = JSON.parse(line) as Json;
-    } catch {
-      return;
-    }
+    const message = parseLine(line);
+    if (message) this.dispatchLine(message);
+  }
+
+  /** One switch, one line type each; anything unknown is ignored by design. */
+  private dispatchLine(message: Json): void {
     switch (message.type) {
       case "system":
-        if (message.subtype === "init" && typeof message.session_id === "string") {
-          this.sessionId = message.session_id;
-        }
+        this.recordInitSession(message);
         return;
       case "stream_event":
         this.handleStreamEvent(message.event as Json | undefined);
@@ -289,34 +288,26 @@ export class ClaudeStreamSession implements AgentSession {
     }
   }
 
+  /** The init message is the only place the native session id is announced. */
+  private recordInitSession(message: Json): void {
+    if (message.subtype !== "init" || typeof message.session_id !== "string") return;
+    this.sessionId = message.session_id;
+  }
+
   private handleStreamEvent(event: Json | undefined): void {
     const active = this.active;
-    if (!active || event?.type !== "content_block_delta") return;
-    const delta = event.delta as Json | undefined;
-    if (delta?.type === "text_delta" && typeof delta.text === "string") {
-      active.streamed += delta.text;
-      this.hub.emit({ type: "text-delta", turnId: active.turnId, text: delta.text });
-    }
+    const text = active && streamDeltaText(event);
+    if (!active || text === undefined) return;
+    active.streamed += text;
+    this.hub.emit({ type: "text-delta", turnId: active.turnId, text });
   }
 
   private handleAssistant(message: Json | undefined): void {
     const active = this.active;
     if (!active || !Array.isArray(message?.content)) return;
     for (const block of message.content as Json[]) {
-      if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-        this.hub.emit({ type: "message", turnId: active.turnId, text: block.text, final: false });
-      } else if (block.type === "tool_use") {
-        const input = (block.input ?? {}) as Json;
-        const summary = toolSummary(input);
-        this.hub.emit({
-          type: "tool",
-          turnId: active.turnId,
-          toolId: String(block.id),
-          name: String(block.name),
-          status: "started",
-          ...(summary ? { summary } : {}),
-        });
-      }
+      const event = assistantBlockEvent(active.turnId, block);
+      if (event) this.hub.emit(event);
     }
   }
 
@@ -324,15 +315,8 @@ export class ClaudeStreamSession implements AgentSession {
     const active = this.active;
     if (!active || !Array.isArray(message?.content)) return;
     for (const block of message.content as Json[]) {
-      if (block.type === "tool_result") {
-        this.hub.emit({
-          type: "tool",
-          turnId: active.turnId,
-          toolId: String(block.tool_use_id),
-          name: "tool_result",
-          status: block.is_error === true ? "failed" : "completed",
-        });
-      }
+      const event = toolResultEvent(active.turnId, block);
+      if (event) this.hub.emit(event);
     }
   }
 
@@ -340,69 +324,93 @@ export class ClaudeStreamSession implements AgentSession {
     const requestId = String(message.request_id);
     const request = (message.request ?? {}) as Json;
     if (request.subtype !== "can_use_tool") {
-      this.proc?.write(
-        JSON.stringify({
-          type: "control_response",
-          response: { subtype: "error", request_id: requestId, error: `unsupported control request '${String(request.subtype)}'` },
-        }),
-      );
+      this.rejectUnsupportedControl(requestId, request.subtype);
       return;
     }
     const toolInput = (request.input ?? {}) as Json;
-    if (request.tool_name === QUESTION_TOOL && Array.isArray(toolInput.questions)) {
-      const questions = toolInput.questions as Json[];
-      this.approvals.set(requestId, { requestId, toolInput, questions, answers: new Map() });
-      questions.forEach((question, index) => {
-        const options = (question.options as Json[] | undefined)?.map((option) => String(option.label));
-        this.hub.emit({
-          type: "question",
-          turnId: this.active?.turnId ?? "",
-          questionId: `${requestId}::${index}`,
-          prompt: String(question.question ?? ""),
-          ...(options && options.length > 0 ? { options } : {}),
-        });
-      });
+    if (isQuestionRequest(request, toolInput)) {
+      this.registerQuestions(requestId, toolInput, toolInput.questions as Json[]);
       return;
     }
     // Tools the permission mode would not allow on its own are never granted
     // automatically; the model sees the denial and adapts.
+    this.denyTool(requestId, request.tool_name);
+  }
+
+  private rejectUnsupportedControl(requestId: string, subtype: unknown): void {
+    this.proc?.write(
+      JSON.stringify({
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: requestId,
+          error: `unsupported control request '${String(subtype)}'`,
+        },
+      }),
+    );
+  }
+
+  /** Each question becomes its own approval prompt; the answers travel back together. */
+  private registerQuestions(requestId: string, toolInput: Json, questions: Json[]): void {
+    this.approvals.set(requestId, { requestId, toolInput, questions, answers: new Map() });
+    questions.forEach((question, index) => {
+      this.hub.emit(questionEvent(requestId, this.active?.turnId ?? "", index, question));
+    });
+  }
+
+  private denyTool(requestId: string, toolName: unknown): void {
     this.sendControlResponse(requestId, {
       behavior: "deny",
-      message: `${String(request.tool_name)} is not permitted for this role`,
+      message: `${String(toolName)} is not permitted for this role`,
     });
     this.hub.emit({
       type: "notice",
       level: "warning",
-      message: `denied ${String(request.tool_name)}: not allowed for this role`,
+      message: `denied ${String(toolName)}: not allowed for this role`,
     });
   }
 
   private handleResult(message: Json): void {
     const active = this.active;
     if (!active) return;
+    this.recordSessionId(message);
+    this.mergeTurnUsage(active, message);
+    if (this.consumeRedirect(active)) return;
+    this.finishTurn(active, message);
+  }
+
+  private recordSessionId(message: Json): void {
     if (typeof message.session_id === "string") this.sessionId = message.session_id;
+  }
+
+  private mergeTurnUsage(active: ActiveTurn, message: Json): void {
     const usage = extractUsage(message);
-    if (usage) {
-      active.usage = mergeUsage(active.usage, usage);
-      this.hub.emit({ type: "usage", turnId: active.turnId, usage: active.usage });
-    }
+    if (!usage) return;
+    active.usage = mergeUsage(active.usage, usage);
+    this.hub.emit({ type: "usage", turnId: active.turnId, usage: active.usage });
+  }
 
-    if (active.interruptRequested && active.redirect !== undefined) {
-      const guidance = active.redirect;
-      active.redirect = undefined;
-      active.interruptRequested = false;
-      this.hub.emit({ type: "notice", level: "info", message: "turn redirected by the operator" });
-      this.sendUser(`Operator guidance (take this into account and continue the task):\n${guidance}`);
-      return;
-    }
+  /**
+   * An operator redirect eats the interrupt: the guidance goes back as a fresh
+   * user turn and the CLI keeps the same conversation, so the turn has not ended.
+   */
+  private consumeRedirect(active: ActiveTurn): boolean {
+    if (!active.interruptRequested || active.redirect === undefined) return false;
+    const guidance = active.redirect;
+    active.redirect = undefined;
+    active.interruptRequested = false;
+    this.hub.emit({ type: "notice", level: "info", message: "turn redirected by the operator" });
+    this.sendUser(`Operator guidance (take this into account and continue the task):\n${guidance}`);
+    return true;
+  }
 
-    const isError = message.is_error === true;
-    const status: TurnStatus =
-      active.forced?.status ?? (active.interruptRequested ? "interrupted" : isError ? "failed" : "completed");
-    const text = typeof message.result === "string" && message.result.length > 0 ? message.result : active.streamed;
+  private finishTurn(active: ActiveTurn, message: Json): void {
+    const status = turnStatus(active, message);
+    const text = turnText(message, active);
+    const error = active.forced?.error ?? (status === "failed" ? errorText(message, text) : undefined);
     this.hub.emit({ type: "turn-completed", turnId: active.turnId, status });
     active.done.resolve(
-      this.result(active, status, active.forced?.error ?? (status === "failed" ? errorText(message, text) : undefined), text, message.structured_output),
+      this.result(active, status, error, text, message.structured_output),
     );
   }
 
@@ -427,6 +435,167 @@ export class ClaudeStreamSession implements AgentSession {
       ...(error ? { error } : {}),
     };
   }
+}
+
+/** A line of the CLI stream, or nothing when the child printed something else. */
+function parseLine(line: string): Json | undefined {
+  try {
+    return JSON.parse(line) as Json;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Only the question tool carries questions the operator can answer. */
+function isQuestionRequest(request: Json, toolInput: Json): boolean {
+  return request.tool_name === QUESTION_TOOL && Array.isArray(toolInput.questions);
+}
+
+/** One question from a question tool call, with its options when it has any. */
+function questionEvent(
+  requestId: string,
+  turnId: string,
+  index: number,
+  question: Json,
+): SessionEvent {
+  const options = (question.options as Json[] | undefined)?.map((option) =>
+    String(option.label),
+  );
+  return {
+    type: "question",
+    turnId,
+    questionId: `${requestId}::${index}`,
+    prompt: String(question.question ?? ""),
+    ...(options && options.length > 0 ? { options } : {}),
+  };
+}
+
+/** A forced status wins, then an operator interrupt, then the CLI's own verdict. */
+function turnStatus(active: ActiveTurn, message: Json): TurnStatus {
+  if (active.forced) return active.forced.status;
+  if (active.interruptRequested) return "interrupted";
+  return message.is_error === true ? "failed" : "completed";
+}
+
+/** The CLI's final result text wins over what streamed before it. */
+function turnText(message: Json, active: ActiveTurn): string {
+  return typeof message.result === "string" && message.result.length > 0
+    ? message.result
+    : active.streamed;
+}
+
+type SessionEvent = Parameters<SessionEventHub["emit"]>[0];
+
+/** The text of a streamed delta, or nothing when the event is another block kind. */
+function streamDeltaText(event: Json | undefined): string | undefined {
+  if (event?.type !== "content_block_delta") return undefined;
+  const delta = event.delta as Json | undefined;
+  if (delta?.type !== "text_delta" || typeof delta.text !== "string") return undefined;
+  return delta.text;
+}
+
+/** One assistant content block as the event the UI renders, if it renders at all. */
+function assistantBlockEvent(turnId: string, block: Json): SessionEvent | undefined {
+  if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+    return { type: "message", turnId, text: block.text, final: false };
+  }
+  if (block.type !== "tool_use") return undefined;
+  const summary = toolSummary((block.input ?? {}) as Json);
+  return {
+    type: "tool",
+    turnId,
+    toolId: String(block.id),
+    name: String(block.name),
+    status: "started",
+    ...(summary ? { summary } : {}),
+  };
+}
+
+/** One tool_result block as a completed or failed tool event. */
+function toolResultEvent(turnId: string, block: Json): SessionEvent | undefined {
+  if (block.type !== "tool_result") return undefined;
+  return {
+    type: "tool",
+    turnId,
+    toolId: String(block.tool_use_id),
+    name: "tool_result",
+    status: block.is_error === true ? "failed" : "completed",
+  };
+}
+
+/** The argv this CLI needs to speak stream-json; order is part of the contract. */
+function claudeArgs(
+  options: OpenSessionOptions & { sessionSchema?: Record<string, unknown> },
+  capabilities: SessionCapabilities,
+): string[] {
+  return [
+    ...baseArgs(options.profile),
+    ...persistenceArgs(options, capabilities),
+    ...permissionToolArgs(options.profile),
+    ...modelArgs(options.profile),
+    ...isolationArgs(options.profile, options.sessionSchema),
+    ...options.profile.args,
+  ];
+}
+
+function baseArgs(profile: AgentProfile): string[] {
+  return [
+    "--print",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode",
+    profile.permission === "read-only" ? "plan" : "acceptEdits",
+    "--permission-prompt-tool",
+    "stdio",
+    "--effort",
+    profile.reasoning,
+  ];
+}
+
+/** Sessions that cannot resume must not persist state; a resume pins the old id. */
+function persistenceArgs(
+  options: { resumeSessionId?: string },
+  capabilities: SessionCapabilities,
+): string[] {
+  const args = capabilities.resume ? [] : ["--no-session-persistence"];
+  if (options.resumeSessionId) args.push("--resume", options.resumeSessionId);
+  return args;
+}
+
+function permissionToolArgs(profile: AgentProfile): string[] {
+  if (profile.permission !== "read-only") return [];
+  return ["--tools", "Read,Glob,Grep", "--disallowed-tools", "Edit,Write,NotebookEdit,Bash"];
+}
+
+function modelArgs(profile: AgentProfile): string[] {
+  return profile.model === "inherit" ? [] : ["--model", profile.model];
+}
+
+/** A denied tool policy also closes the MCP door; a schema pins the answer shape. */
+function isolationArgs(
+  profile: AgentProfile,
+  sessionSchema: Record<string, unknown> | undefined,
+): string[] {
+  const args =
+    profile.externalTools === "deny"
+      ? ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+      : [];
+  if (sessionSchema) args.push("--json-schema", JSON.stringify(sessionSchema));
+  return args;
+}
+
+function exitReason(
+  exit: { exitCode: number | null; signal: NodeJS.Signals | null; error?: Error },
+  stderrTail: string,
+): string {
+  if (exit.error) return `could not start claude: ${exit.error.message}`;
+  const code = exit.exitCode ?? "none";
+  const signal = exit.signal ? `, ${exit.signal}` : "";
+  return `claude exited (code ${code}${signal}): ${stderrTail.slice(-400)}`;
 }
 
 function mergeUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
@@ -457,9 +626,14 @@ function promptWithSchema(prompt: string, schema: Record<string, unknown>): stri
   return `${prompt}\n\nRespond with a single JSON document and nothing else. It must satisfy this JSON Schema:\n${JSON.stringify(schema)}`;
 }
 
-function tryParseJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  for (const candidate of [text.trim(), fenced?.[1]?.trim()]) {
+/** The content of a ```json fenced block, when the answer wrapped its JSON. */
+function fencedJson(text: string): string | undefined {
+  return text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+}
+
+/** The first candidate that parses; an unparsable answer yields nothing. */
+function parseFirstJson(candidates: Array<string | undefined>): unknown {
+  for (const candidate of candidates) {
     if (!candidate) continue;
     try {
       return JSON.parse(candidate);
@@ -469,3 +643,8 @@ function tryParseJson(text: string): unknown {
   }
   return undefined;
 }
+
+function tryParseJson(text: string): unknown {
+  return parseFirstJson([text.trim(), fencedJson(text)]);
+}
+
