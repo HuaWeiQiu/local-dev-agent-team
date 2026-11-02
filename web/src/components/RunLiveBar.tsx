@@ -8,6 +8,62 @@ interface RunLiveBarProps {
   onOpenActivity(): void;
 }
 
+function statusIcon(running: boolean) {
+  return running ? (
+    <Loader2 className="size-3.5 motion-safe:animate-spin" aria-hidden="true" />
+  ) : (
+    <ShieldQuestion className="size-3.5" aria-hidden="true" />
+  );
+}
+
+function WorkerChip({ worker }: { worker: LiveStatus["workers"][number] }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-5 items-center rounded-full bg-accent-soft px-2 text-2xs font-medium text-accent-ink",
+        worker.advisor && "bg-violet/15 text-violet",
+      )}
+    >
+      {worker.label}
+    </span>
+  );
+}
+
+/** The active workers, or the placeholder that says nobody has started yet. */
+function WorkerChips({ status }: { status: LiveStatus }) {
+  if (status.workers.length === 0) {
+    return <span className="text-xs text-muted">等待角色启动</span>;
+  }
+  return (
+    <>
+      {status.workers.map((worker) => (
+        <WorkerChip key={worker.id} worker={worker} />
+      ))}
+      {status.hiddenWorkers > 0 && <span className="text-xs text-muted">+{status.hiddenWorkers}</span>}
+    </>
+  );
+}
+
+/** Task, invocation, advisor and elapsed counters on the right of the bar. */
+function RunTotals({ status, now }: { status: LiveStatus; now: number }) {
+  return (
+    <span className="ml-auto flex flex-wrap items-center gap-x-3 text-xs tabular-nums text-muted">
+      <span>
+        任务 {status.tasksDone}/{status.tasksTotal}
+      </span>
+      <span>
+        调用 {status.invocations.used}/{status.invocations.max}
+      </span>
+      {status.advisor && (
+        <span>
+          顾问 {status.advisor.used}/{status.advisor.max}
+        </span>
+      )}
+      <span>已运行 {formatElapsed(status.startedAt, now)}</span>
+    </span>
+  );
+}
+
 /** One-line summary of what the selected run is doing right now; renders only for active runs. */
 export function RunLiveBar({ status, onOpenActivity }: RunLiveBarProps) {
   const now = useNow(status.running);
@@ -19,33 +75,12 @@ export function RunLiveBar({ status, onOpenActivity }: RunLiveBarProps) {
       className="bd flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-surface px-3.5 py-2 text-sm"
     >
       <span className="inline-flex items-center gap-1.5 font-semibold text-accent-ink">
-        {status.running ? (
-          <Loader2 className="size-3.5 motion-safe:animate-spin" aria-hidden="true" />
-        ) : (
-          <ShieldQuestion className="size-3.5" aria-hidden="true" />
-        )}
+        {statusIcon(status.running)}
         {status.statusLabel}
       </span>
       {status.running && (
         <span className="flex flex-wrap items-center gap-1.5">
-          {status.workers.length === 0 ? (
-            <span className="text-xs text-muted">等待角色启动</span>
-          ) : (
-            <>
-              {status.workers.map((worker) => (
-                <span
-                  key={worker.id}
-                  className={cn(
-                    "inline-flex h-5 items-center rounded-full bg-accent-soft px-2 text-2xs font-medium text-accent-ink",
-                    worker.advisor && "bg-violet/15 text-violet",
-                  )}
-                >
-                  {worker.label}
-                </span>
-              ))}
-              {status.hiddenWorkers > 0 && <span className="text-xs text-muted">+{status.hiddenWorkers}</span>}
-            </>
-          )}
+          <WorkerChips status={status} />
         </span>
       )}
       {status.pendingApprovals > 0 && (
@@ -53,12 +88,7 @@ export function RunLiveBar({ status, onOpenActivity }: RunLiveBarProps) {
           {status.pendingApprovals} 项待审批
         </span>
       )}
-      <span className="ml-auto flex flex-wrap items-center gap-x-3 text-xs tabular-nums text-muted">
-        <span>任务 {status.tasksDone}/{status.tasksTotal}</span>
-        <span>调用 {status.invocations.used}/{status.invocations.max}</span>
-        {status.advisor && <span>顾问 {status.advisor.used}/{status.advisor.max}</span>}
-        <span>已运行 {formatElapsed(status.startedAt, now)}</span>
-      </span>
+      <RunTotals status={status} now={now} />
       <button
         type="button"
         onClick={onOpenActivity}
