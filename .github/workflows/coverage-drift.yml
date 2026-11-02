@@ -40,12 +40,18 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      # `pnpm test -- --coverage` does NOT enable coverage: the `--` is forwarded
-      # verbatim and vitest reads `--coverage` as a filename filter. Invoke vitest
-      # directly, and keep this step non-fatal so a broken run still gets reported.
+      # Two things this line has to get right, both learned the hard way:
+      #   - `pnpm test -- --coverage` does NOT enable coverage: the `--` is forwarded
+      #     verbatim and vitest reads `--coverage` as a filename filter;
+      #   - `--coverage` alone does not write lcov: the default reporters are
+      #     text/html/clover/json, so a lcov-only reader finds nothing.
+      # The step stays non-fatal so a broken run is reported, not hidden.
       - name: Collect coverage
         continue-on-error: true
-        run: pnpm exec vitest run --coverage
+        run: >-
+          pnpm exec vitest run --coverage
+          --coverage.reporter=lcov
+          --coverage.reporter=text-summary
 
       # A missing coverage report must never be read as "every function is at 0%",
       # which is a whole ledger of new debt invented by a failed measurement.
