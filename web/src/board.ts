@@ -49,24 +49,41 @@ export function taskProgress(counts: RunSummary["taskCounts"]): { done: number; 
   return { done: (counts.merged ?? 0) + (counts.passed ?? 0), total };
 }
 
+function newestFirst(left: BoardCard, right: BoardCard): number {
+  return right.run.updatedAt.localeCompare(left.run.updatedAt);
+}
+
+/** Attention cards sort by urgency first, then by recency. */
+function mostUrgentFirst(left: BoardCard, right: BoardCard): number {
+  const priority = (right.reason?.priority ?? 0) - (left.reason?.priority ?? 0);
+  return priority !== 0 ? priority : newestFirst(left, right);
+}
+
+/** A run with an outstanding question is asking for a human even if its status says otherwise. */
+function askingForAnswer(run: RunSummary): boolean {
+  return run.agentQuestions !== undefined && run.agentQuestions > 0 && activeRunStatuses.has(run.status);
+}
+
+function cardFor(run: RunSummary): BoardCard {
+  const asking = askingForAnswer(run);
+  const lane = asking ? "attention" : laneOf(run.status);
+  const reason = asking ? agentQuestionReason : attentionReason(run.status);
+  return {
+    run,
+    lane,
+    ...(reason ? { reason } : {}),
+    progress: taskProgress(run.taskCounts),
+    statusLabel: runStatusLabel(run.status),
+  };
+}
+
 export function buildBoard(runs: RunSummary[]): Record<BoardLane, BoardCard[]> {
   const board: Record<BoardLane, BoardCard[]> = { attention: [], active: [], done: [] };
   for (const run of runs) {
-    const asking = run.agentQuestions !== undefined && run.agentQuestions > 0 && activeRunStatuses.has(run.status);
-    const lane = asking ? "attention" : laneOf(run.status);
-    const reason = asking ? agentQuestionReason : attentionReason(run.status);
-    board[lane].push({
-      run,
-      lane,
-      ...(reason ? { reason } : {}),
-      progress: taskProgress(run.taskCounts),
-      statusLabel: runStatusLabel(run.status),
-    });
+    const card = cardFor(run);
+    board[card.lane].push(card);
   }
-  const newestFirst = (left: BoardCard, right: BoardCard) =>
-    right.run.updatedAt.localeCompare(left.run.updatedAt);
-  board.attention.sort((left, right) =>
-    (right.reason?.priority ?? 0) - (left.reason?.priority ?? 0) || newestFirst(left, right));
+  board.attention.sort(mostUrgentFirst);
   board.active.sort(newestFirst);
   board.done.sort(newestFirst);
   return board;
