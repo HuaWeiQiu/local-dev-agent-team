@@ -346,27 +346,41 @@ function reportRegressions(worse) {
  * was paid. `new` and `worse` are sorted by score, `fixed` by what it used to cost.
  */
 export function driftBetween(scores, baseline, threshold = 10) {
+  return sortDrift({
+    ...debtSince(scores, baseline, threshold),
+    fixed: paidDebt(scores, baseline, threshold),
+  });
+}
+
+/** Debt that appeared, and debt that grew; both already over the threshold. */
+function debtSince(scores, baseline, threshold) {
   const fresh = [];
   const worse = [];
-  const fixed = [];
   for (const [key, score] of scores) {
     if (score <= threshold) continue;
     const frozen = baseline[key];
-    if (frozen === undefined) {
-      fresh.push({ key, score });
-    } else if (score > frozen) {
-      worse.push({ key, score, frozen });
-    }
+    if (frozen === undefined) fresh.push({ key, score });
+    else if (score > frozen) worse.push({ key, score, frozen });
   }
+  return { new: fresh, worse };
+}
+
+/** Baseline entries that no longer cost anything: gone, or back under the line. */
+function paidDebt(scores, baseline, threshold) {
+  const fixed = [];
   for (const [key, frozen] of Object.entries(baseline)) {
     const score = scores.get(key);
     if (score === undefined || score <= threshold) fixed.push({ key, frozen });
   }
+  return fixed;
+}
+
+function sortDrift(report) {
   const byScore = (left, right) => right.score - left.score || left.key.localeCompare(right.key);
-  fresh.sort(byScore);
-  worse.sort(byScore);
-  fixed.sort((left, right) => right.frozen - left.frozen || left.key.localeCompare(right.key));
-  return { new: fresh, worse, fixed };
+  report.new.sort(byScore);
+  report.worse.sort(byScore);
+  report.fixed.sort((left, right) => right.frozen - left.frozen || left.key.localeCompare(right.key));
+  return report;
 }
 
 /**

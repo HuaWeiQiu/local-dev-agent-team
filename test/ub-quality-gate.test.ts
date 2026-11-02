@@ -498,3 +498,68 @@ describe("drift report loading", () => {
       .toBe("ledger");
   });
 });
+
+describe("drift issue lifecycle", () => {
+  function recorder(issues: Array<{ number: number; title: string }>, failOn?: string) {
+    const calls: string[][] = [];
+    const gh = (args: string[]) => {
+      calls.push(args);
+      if (failOn && args[0] === "issue" && args[1] === failOn) {
+        return { status: 1, stdout: "", stderr: "boom" };
+      }
+      if (args[1] === "list") return { status: 0, stdout: JSON.stringify(issues), stderr: "" };
+      if (args[1] === "create") return { status: 0, stdout: "https://example.test/1\n", stderr: "" };
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    return { gh, calls };
+  }
+
+  it("creates a ledger issue when none exists", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const { gh, calls } = recorder([]);
+    const plan = issuePlan({ kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [{ key: "a#b", score: 11 }] });
+    expect(applyPlan(plan, { gh })).toMatchObject({ action: "created" });
+    expect(calls.some((args) => args[1] === "create")).toBe(true);
+  });
+
+  it("updates the issue that already carries this verdict", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [{ key: "a#b", score: 11 }] });
+    const { gh, calls } = recorder([{ number: 7, title: plan.title }]);
+    expect(applyPlan(plan, { gh })).toMatchObject({ action: "updated", issues: [7] });
+    expect(calls.some((args) => args[1] === "edit")).toBe(true);
+  });
+
+  it("closes everything when the ledger stopped growing", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 2 } });
+    const { gh, calls } = recorder([{ number: 7, title: "【待分诊】Coverage drift · 账本上涨" }]);
+    expect(applyPlan(plan, { gh })).toMatchObject({ action: "closed", issues: [7] });
+    expect(calls.filter((args) => args[1] === "close")).toHaveLength(1);
+  });
+
+  it("closes an infrastructure issue only because a scan completed", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [{ key: "a#b", score: 11 }] });
+    const { gh, calls } = recorder([{ number: 157, title: "Coverage drift · 基础设施失败" }]);
+    applyPlan(plan, { gh });
+    const closed = calls.find((args) => args[1] === "close");
+    expect(closed?.[2]).toBe("157");
+    expect(closed?.join(" ")).toContain("扫描已完成");
+  });
+
+  it("never closes a ledger issue because the scan broke", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "infrastructure", error: "crash", counts: { new: 0, worse: 0, fixed: 0 } });
+    const { gh, calls } = recorder([{ number: 160, title: "【待分诊】Coverage drift · 账本上涨" }]);
+    applyPlan(plan, { gh });
+    expect(calls.some((args) => args[1] === "close")).toBe(false);
+  });
+
+  it("raises when gh cannot list issues", async () => {
+    const { applyPlan, issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 0 } });
+    const gh = () => ({ status: 1, stdout: "", stderr: "no token" });
+    expect(() => applyPlan(plan, { gh })).toThrow(/gh issue list failed/);
+  });
+});

@@ -15,6 +15,12 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      coverage_source:
+        description: "覆盖率来源：self = crapper 自取（与基线刷新一致）；existing = 复用上一步的 lcov"
+        type: choice
+        options: [self, existing]
+        default: self
 
 permissions:
   contents: read
@@ -107,11 +113,17 @@ jobs:
       - name: Build the drift report
         if: steps.coverage_gate.outputs.available == 'true'
         continue-on-error: true
+        env:
+          # The baseline is refreshed with crapper collecting its own coverage, so the
+          # nightly defaults to the same source: a guard that measures differently from
+          # the thing it ratchets reports drift that is really just method.
+          COVERAGE_SOURCE: ${{ inputs.coverage_source || 'self' }}
         run: |
           set -euo pipefail
           args=(--all --drift-report drift-report.json)
           if [ -n "${UB_BIN:-}" ]; then args+=(--ub "$UB_BIN"); fi
-          args+=(-- --use-existing-coverage)
+          if [ "$COVERAGE_SOURCE" = "existing" ]; then args+=(-- --use-existing-coverage); fi
+          echo "coverage source: $COVERAGE_SOURCE" >> "$GITHUB_STEP_SUMMARY"
           node scripts/ub-quality-gate.mjs "${args[@]}"
 
       - name: Open or update the drift issue
