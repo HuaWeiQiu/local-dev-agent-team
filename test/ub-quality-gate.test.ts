@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  driftBetween,
+  driftPayload,
+  driftStep,
   main,
   parseArgs,
   readBaseline,
@@ -45,6 +48,7 @@ describe("ub quality gate wrapper", () => {
       changed: true,
       baseline: ".ub-crap-baseline.json",
       updateBaseline: false,
+      driftReport: "",
       ub: "",
       extra: [],
     });
@@ -323,5 +327,146 @@ describe("clearMetrics", () => {
     clearMetrics(root);
     const status = baselineStep({ tool: "crapper", baseline: "baseline.json" }, root);
     expect(status).toBe(0);
+  });
+});
+
+describe("nightly drift report", () => {
+  const score = (namespace: string, name: string, crap: number) =>
+    `{:name "${name}", :namespace "${namespace}", :complexity 5, :coverage 0.0, :crap ${crap}}`;
+
+  async function driftWorkdir(scores: string[], baseline: Record<string, number> | undefined) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-drift-"));
+    await mkdir(path.join(root, ".metrics"), { recursive: true });
+    if (scores.length > 0) {
+      await writeFile(path.join(root, ".metrics", "crap.edn"), scores.join("\n"), "utf8");
+    }
+    if (baseline) {
+      await writeFile(
+        path.join(root, "base.json"),
+        JSON.stringify({ updatedAt: "2026-01-01T00:00:00.000Z", scores: baseline }),
+        "utf8",
+      );
+    }
+    return root;
+  }
+
+  it("classifies appeared, grown and paid debt", () => {
+    const scores = new Map([
+      ["a#new-debt", 40],
+      ["a#grown", 55],
+      ["a#paid", 8],
+      ["a#same", 30],
+    ]);
+    const baseline = { "a#grown": 50, "a#paid": 60, "a#same": 30, "a#gone": 70 };
+    const report = driftBetween(scores, baseline, 10);
+    expect(report.new.map((entry) => entry.key)).toEqual(["a#new-debt"]);
+    expect(report.worse).toEqual([{ key: "a#grown", score: 55, frozen: 50 }]);
+    expect(report.fixed.map((entry) => entry.key)).toEqual(["a#gone", "a#paid"]);
+    expect(report.worse[0]!.score).toBe(55);
+  });
+
+  it("marks an infrastructure verdict instead of an empty ledger", () => {
+    const ledger = driftPayload({ report: driftBetween(new Map(), {}, 10), threshold: 10 });
+    expect(ledger).toMatchObject({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 0 } });
+    expect(ledger.error).toBeUndefined();
+
+    const broken = driftPayload({ error: "gate: layer exited 1", threshold: 10 });
+    expect(broken.kind).toBe("infrastructure");
+    expect(broken.error).toBe("gate: layer exited 1");
+    expect(broken.counts).toEqual({ new: 0, worse: 0, fixed: 0 });
+  });
+
+  it("writes the verdict and exits 0 on a full scan", async () => {
+    const root = await driftWorkdir(
+      [score("a", "new-debt", 40), score("a", "grown", 55)],
+      { "a#grown": 50, "a#paid": 60 },
+    );
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}" && cat > "${path.join(root, ".metrics", "crap.edn")}" <<'EDN'
+{:name "new-debt", :namespace "a", :complexity 5, :coverage 0.0, :crap 40.0}
+{:name "grown", :namespace "a", :complexity 5, :coverage 0.0, :crap 55.0}
+EDN`,
+    );
+    const options = { ...parseArgs(["--drift-report", "drift.json", "--baseline", "base.json"], {}) };
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(driftStep(options, tool, root)).toBe(0);
+    vi.restoreAllMocks();
+    const written = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(written.kind).toBe("ledger");
+    expect(written.counts).toEqual({ new: 1, worse: 1, fixed: 1 });
+    expect(written.new[0]).toMatchObject({ key: "a#new-debt", score: 40 });
+    expect(written.worse[0]).toMatchObject({ key: "a#grown", frozen: 50 });
+    expect(written.fixed[0]).toMatchObject({ key: "a#paid", frozen: 60 });
+  });
+
+  it("reports a crashed scan as infrastructure, never as a clean ledger", async () => {
+    const root = await driftWorkdir([], { "a#big": 50 });
+    const crashed = await stubTool("exit 1");
+    const options = { ...parseArgs(["--drift-report", "drift.json", "--baseline", "base.json"], {}) };
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(driftStep(options, crashed, root)).toBe(1);
+    vi.restoreAllMocks();
+    const written = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(written.kind).toBe("infrastructure");
+    expect(written.error).toContain("exited 1");
+    expect(written.counts).toEqual({ new: 0, worse: 0, fixed: 0 });
+  });
+
+  it("treats a missing baseline as infrastructure, not as brand-new debt", async () => {
+    const root = await driftWorkdir([], undefined);
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}" && echo '{:name "big", :namespace "a", :complexity 5, :coverage 0.0, :crap 40.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--drift-report", "drift.json", "--baseline", "missing.json"], {}) };
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(driftStep(options, tool, root)).toBe(1);
+    vi.restoreAllMocks();
+    const written = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(written.kind).toBe("infrastructure");
+    expect(written.error).toContain("baseline missing");
+  });
+});
+
+describe("coverage drift issue plan", () => {
+  it("opens a ledger issue that lists appeared and grown debt", async () => {
+    const { issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({
+      kind: "ledger",
+      generatedAt: "2026-11-02T00:00:00.000Z",
+      threshold: 10,
+      baseline: ".ub-crap-baseline.json",
+      counts: { new: 1, worse: 1, fixed: 2 },
+      new: [{ key: "a#fresh", score: 40 }],
+      worse: [{ key: "a#grown", score: 55, frozen: 50 }],
+      fixed: [{ key: "a#paid", frozen: 60 }],
+    });
+    expect(plan).toMatchObject({ kind: "ledger", shouldClose: false });
+    expect(plan.title).toContain("账本上涨");
+    expect(plan.body).toContain("| 1 | 1 | 2 |");
+    expect(plan.body).toContain("a#fresh — 40.0");
+    expect(plan.body).toContain("a#grown — 55.0（基线 50.0）");
+    expect(plan.body).toContain("a#paid（基线 60.0）");
+  });
+
+  it("closes instead of opening when the ledger did not grow", async () => {
+    const { issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 3 } });
+    expect(plan.shouldClose).toBe(true);
+    expect(plan.body).toContain("账本没有上涨");
+  });
+
+  it("keeps an infrastructure failure apart from a clean ledger", async () => {
+    const { issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({
+      kind: "infrastructure",
+      error: "ub-mode tool chain not found",
+      counts: { new: 0, worse: 0, fixed: 0 },
+    });
+    expect(plan.shouldClose).toBe(false);
+    expect(plan.title).toContain("基础设施失败");
+    expect(plan.body).toContain("这不是账本结论");
+    expect(plan.body).toContain("ub-mode tool chain not found");
+    // Zero counters must never read as "clean" when the scan itself broke.
+    expect(plan.title).not.toBe("Coverage drift · 账本上涨");
   });
 });

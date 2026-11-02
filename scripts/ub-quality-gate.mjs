@@ -19,18 +19,24 @@
  * Usage:
  *   node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator]
  *                                    [--threshold 10] [--all] [--ub PATH]
+ *                                    [--drift-report PATH]
  *                                    [-- <extra tool args>]
+ *
+ * `--drift-report PATH` is the nightly mode: score the whole project, compare the
+ * result with the frozen baseline, write `{new, worse, fixed}` as JSON and exit 0.
+ * A tool crash is not a ledger verdict: it writes `kind: "infrastructure"` and
+ * exits non-zero, so a broken run can never be mistaken for a clean ledger.
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
-                                  [--all] [--ub PATH] [-- extra args]`;
+                                  [--all] [--ub PATH] [--drift-report PATH] [-- extra args]`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
@@ -53,6 +59,7 @@ export function defaultOptions(env = process.env) {
     changed: true,
     baseline: DEFAULT_BASELINE,
     updateBaseline: false,
+    driftReport: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -73,6 +80,7 @@ const VALUE_FLAGS = {
   "--rust-threshold": "rustThreshold",
   "--ub": "ub",
   "--baseline": "baseline",
+  "--drift-report": "driftReport",
 };
 
 /** Flags that only flip a boolean. */
@@ -220,6 +228,7 @@ export function clearMetrics(cwd = process.cwd()) {
 export function main(argv = process.argv.slice(2)) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
+  if (prepared.options.driftReport) return driftStep(prepared.options, prepared.ub);
   clearMetrics();
   // crapper in changed mode has nothing to score when nothing changed; the
   // other tools do not look at git at all.
@@ -230,11 +239,11 @@ export function main(argv = process.argv.slice(2)) {
   return failed === 0 ? baselineStep(prepared.options) : failed;
 }
 
-function runLayers(ub, options) {
+function runLayers(ub, options, cwd = process.cwd()) {
   const files = layersInput(options);
   return layers(options).reduce((worst, layer) => {
     const args = toolArgs(options, layer, files);
-    return args ? Math.max(worst, runLayer(ub, args, layer)) : worst;
+    return args ? Math.max(worst, runLayer(ub, args, layer, cwd)) : worst;
   }, 0);
 }
 
@@ -263,6 +272,16 @@ function prepare(argv) {
   }
   const ub = resolveUb(options.ub);
   if (!ub) {
+    if (options.driftReport) {
+      writeDriftReport(
+        options.driftReport,
+        driftPayload({
+          error: "ub-mode tool chain not found",
+          threshold: Number(options.threshold),
+          baseline: options.baseline,
+        }),
+      );
+    }
     process.stderr.write(
       "ub-mode tool chain not found. Install it (https://github.com/unclebob/ub-mode) " +
         "and pass --ub PATH or set UB_BIN.\n",
@@ -272,9 +291,9 @@ function prepare(argv) {
   return { ub, options };
 }
 
-function runLayer(ub, args, layer) {
+function runLayer(ub, args, layer, cwd = process.cwd()) {
   process.stdout.write(`gate: ${layer} layer -> ${args[1]}\n`);
-  const result = spawnSync(ub, args, { stdio: "inherit" });
+  const result = spawnSync(ub, args, { stdio: "inherit", cwd });
   if (result.error) {
     process.stderr.write(`failed to run ${ub}: ${result.error.message}\n`);
     return 1;
@@ -319,6 +338,100 @@ function reportRegressions(worse) {
     process.stderr.write(`  ${entry.key}: ${entry.score.toFixed(1)} (frozen ${entry.frozen})\n`);
   }
   return 2;
+}
+
+/**
+ * Compare a full scan with the frozen baseline. Three answers, because a nightly
+ * reader acts on them differently: debt that appeared, debt that grew, debt that
+ * was paid. `new` and `worse` are sorted by score, `fixed` by what it used to cost.
+ */
+export function driftBetween(scores, baseline, threshold = 10) {
+  const fresh = [];
+  const worse = [];
+  const fixed = [];
+  for (const [key, score] of scores) {
+    if (score <= threshold) continue;
+    const frozen = baseline[key];
+    if (frozen === undefined) {
+      fresh.push({ key, score });
+    } else if (score > frozen) {
+      worse.push({ key, score, frozen });
+    }
+  }
+  for (const [key, frozen] of Object.entries(baseline)) {
+    const score = scores.get(key);
+    if (score === undefined || score <= threshold) fixed.push({ key, frozen });
+  }
+  const byScore = (left, right) => right.score - left.score || left.key.localeCompare(right.key);
+  fresh.sort(byScore);
+  worse.sort(byScore);
+  fixed.sort((left, right) => right.frozen - left.frozen || left.key.localeCompare(right.key));
+  return { new: fresh, worse, fixed };
+}
+
+/**
+ * The file the nightly workflow reads. `kind` is the whole point: an infrastructure
+ * failure (missing tool chain, crashed scan, absent baseline) is not a ledger with
+ * three zero counters, and must never be reported as "clean".
+ */
+export function driftPayload({ report, error, threshold = 10, baseline = DEFAULT_BASELINE }) {
+  const empty = { new: [], worse: [], fixed: [] };
+  const verdict = report ?? empty;
+  return {
+    kind: error ? "infrastructure" : "ledger",
+    generatedAt: new Date().toISOString(),
+    threshold,
+    baseline,
+    ...(error ? { error } : {}),
+    counts: {
+      new: verdict.new.length,
+      worse: verdict.worse.length,
+      fixed: verdict.fixed.length,
+    },
+    new: verdict.new,
+    worse: verdict.worse,
+    fixed: verdict.fixed,
+  };
+}
+
+export function writeDriftReport(pathname, payload, cwd = process.cwd()) {
+  const target = path.resolve(cwd, pathname);
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`);
+  return target;
+}
+
+/** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. */
+export function driftStep(options, ub, cwd = process.cwd()) {
+  const full = { ...options, changed: false };
+  clearMetrics(cwd);
+  const failed = runLayers(ub, full, cwd);
+  const metricsPath = path.join(cwd, ".metrics", "crap.edn");
+  if (failed !== 0) return driftVerdict(options, cwd, { error: `gate: layer exited ${failed}` }, 1);
+  if (!existsSync(metricsPath)) {
+    return driftVerdict(options, cwd, { error: "metrics file missing after a full scan" }, 1);
+  }
+  const baseline = readBaseline(path.resolve(cwd, options.baseline));
+  if (!baseline) {
+    return driftVerdict(options, cwd, { error: `baseline missing at ${options.baseline}` }, 1);
+  }
+  const report = driftBetween(readScores(metricsPath), baseline, Number(options.threshold));
+  return driftVerdict(options, cwd, { report }, 0);
+}
+
+function driftVerdict(options, cwd, { report, error }, status) {
+  const payload = driftPayload({
+    ...(report ? { report } : {}),
+    ...(error ? { error } : {}),
+    threshold: Number(options.threshold),
+    baseline: options.baseline,
+  });
+  writeDriftReport(options.driftReport, payload, cwd);
+  process.stdout.write(
+    `drift: ${payload.kind} new=${payload.counts.new} worse=${payload.counts.worse} ` +
+      `fixed=${payload.counts.fixed}${error ? ` error=${error}` : ""}\n`,
+  );
+  return status;
 }
 
 const invokedDirectly =

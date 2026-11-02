@@ -1,0 +1,82 @@
+name: Coverage drift
+
+# Nightly ledger guard, never a merge gate.
+#
+# The quality job in CI runs `pnpm check/lint/test/build` without coverage, so CRAP
+# drift is invisible there: the ledger can grow for weeks and only a human running
+# the gate by hand would notice. This job makes that drift visible once a day
+# without adding minutes (or a new failure mode) to every pull request.
+#
+# It reports two kinds of trouble, and never mixes them: a crashed scan is
+# `infrastructure` (the #143 class), a grown ledger is `ledger`. Both land in an
+# issue; neither blocks a merge.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# The scan reads coverage reports from the working tree. Two runs sharing that
+# directory is exactly the #143 failure mode, so this job never runs beside itself.
+concurrency:
+  group: coverage-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Collect coverage
+        run: pnpm test -- --coverage
+
+      - name: Install the ub-mode tool chain
+        run: |
+          git clone --depth 1 https://github.com/unclebob/crapper.git "$RUNNER_TEMP/crapper"
+          chmod +x "$RUNNER_TEMP/crapper/crapper"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'tool=$1; shift' \
+            '[ "$tool" = "crapper" ] || { echo "unsupported tool: $tool" >&2; exit 1; }' \
+            'exec "$CRAPPER_BIN" "$@"' > "$RUNNER_TEMP/ub"
+          chmod +x "$RUNNER_TEMP/ub"
+          echo "UB_BIN=$RUNNER_TEMP/ub" >> "$GITHUB_ENV"
+          echo "CRAPPER_BIN=$RUNNER_TEMP/crapper/crapper" >> "$GITHUB_ENV"
+
+      # The verdict is the JSON file, not the exit code: a crashed scan writes
+      # `kind: "infrastructure"` and exits non-zero, which is a finding, not a job
+      # failure. Only the issue step below fails the job.
+      - name: Build the drift report
+        continue-on-error: true
+        run: >-
+          node scripts/ub-quality-gate.mjs --all
+          --drift-report drift-report.json
+          --ub "$UB_BIN"
+          -- --use-existing-coverage
+
+      - name: Open or update the drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/coverage-drift-issue.mjs drift-report.json
+
+      - name: Keep the report for triage
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-drift-report
+          path: drift-report.json
+          if-no-files-found: warn
