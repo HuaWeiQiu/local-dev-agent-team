@@ -1,0 +1,124 @@
+name: Coverage drift
+
+# Nightly ledger guard, never a merge gate.
+#
+# The quality job in CI runs `pnpm check/lint/test/build` without coverage, so CRAP
+# drift is invisible there: the ledger can grow for weeks and only a human running
+# the gate by hand would notice. This job makes that drift visible once a day
+# without adding minutes (or a new failure mode) to every pull request.
+#
+# It reports two kinds of trouble, and never mixes them: a scan that could not run
+# is `infrastructure` (the #143 class), a grown ledger is `ledger`. Both land in an
+# issue; neither blocks a merge.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# The scan reads coverage reports from the working tree. Two runs sharing that
+# directory is exactly the #143 failure mode, so this job never runs beside itself.
+concurrency:
+  group: coverage-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # `pnpm test -- --coverage` does NOT enable coverage: the `--` is forwarded
+      # verbatim and vitest reads `--coverage` as a filename filter. Invoke vitest
+      # directly, and keep this step non-fatal so a broken run still gets reported.
+      - name: Collect coverage
+        continue-on-error: true
+        run: pnpm exec vitest run --coverage
+
+      # A missing coverage report must never be read as "every function is at 0%",
+      # which is a whole ledger of new debt invented by a failed measurement.
+      - name: Refuse to score a run that produced no coverage
+        id: coverage_gate
+        run: |
+          set -euo pipefail
+          lcov="target/coverage/typescript/lcov.info"
+          if [ -s "$lcov" ]; then
+            echo "report=$(wc -c < "$lcov") bytes" >> "$GITHUB_OUTPUT"
+            echo "coverage report: $(wc -c < "$lcov") bytes" >> "$GITHUB_STEP_SUMMARY"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            node -e '
+              const { writeFileSync } = require("node:fs");
+              writeFileSync("drift-report.json", JSON.stringify({
+                kind: "infrastructure",
+                generatedAt: new Date().toISOString(),
+                threshold: 10,
+                baseline: ".ub-crap-baseline.json",
+                error: "coverage report missing at target/coverage/typescript/lcov.info",
+                counts: { new: 0, worse: 0, fixed: 0 },
+                new: [], worse: [], fixed: [],
+              }, null, 2) + "\n");
+            '
+            echo "coverage report missing: reported as infrastructure" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Third-party tool chain, pinned: a moving HEAD would change how every score is
+      # computed without anything in this repository changing. The pinned commit is
+      # the one the local tool chain reports.
+      - name: Install the ub-mode tool chain
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git clone https://github.com/unclebob/crapper.git "$RUNNER_TEMP/crapper"
+          git -C "$RUNNER_TEMP/crapper" checkout 6fd92c4
+          git -C "$RUNNER_TEMP/crapper" rev-parse HEAD | tee -a "$GITHUB_STEP_SUMMARY"
+          chmod +x "$RUNNER_TEMP/crapper/crapper"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'tool=$1; shift' \
+            '[ "$tool" = "crapper" ] || { echo "unsupported tool: $tool" >&2; exit 1; }' \
+            'exec "$CRAPPER_BIN" "$@"' > "$RUNNER_TEMP/ub"
+          chmod +x "$RUNNER_TEMP/ub"
+          echo "UB_BIN=$RUNNER_TEMP/ub" >> "$GITHUB_ENV"
+          echo "CRAPPER_BIN=$RUNNER_TEMP/crapper/crapper" >> "$GITHUB_ENV"
+
+      # The verdict is the JSON file, not the exit code: a crashed scan writes
+      # `kind: "infrastructure"` and exits non-zero, which is a finding, not a job
+      # failure. Only the issue step below is allowed to fail the job.
+      - name: Build the drift report
+        if: steps.coverage_gate.outputs.available == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          args=(--all --drift-report drift-report.json)
+          if [ -n "${UB_BIN:-}" ]; then args+=(--ub "$UB_BIN"); fi
+          args+=(-- --use-existing-coverage)
+          node scripts/ub-quality-gate.mjs "${args[@]}"
+
+      - name: Open or update the drift issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/coverage-drift-issue.mjs drift-report.json
+
+      - name: Keep the report for triage
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-drift-report
+          path: drift-report.json
+          if-no-files-found: warn
