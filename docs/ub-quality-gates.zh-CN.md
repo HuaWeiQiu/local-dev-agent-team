@@ -240,42 +240,44 @@ node scripts/ub-quality-gate.mjs                     # 之后任何回退按 reg
 | 查表代替分支链 | `pickSituation` 把崩溃恢复的 2×2 矩阵变成四行 |
 | 先钉行为再改结构 | `planning.ts` 拆 `architectPlan` 时，「重试条件」和「放弃条件」曾被合并——5 个测试立刻挂掉 |
 
-## 9. 覆盖率噪声：分数上升不等于回归
+## 9. 同 cc 下 CRAP 漂移：先怀疑覆盖率分母，再怀疑代码
 
-CRAP 里的覆盖率来自一次 `vitest --coverage` 采样，而采样本身会漂。同一份代码、
-同一个 `--all` 模式，`src/process/alive.ts#processLiveness`（CC 恒为 9）连续三次测出：
+CRAP 里的覆盖率来自一次 `vitest --coverage`，而它曾经会**漂**：同一份代码、同一个
+`--all` 模式，`src/process/alive.ts#processLiveness`（CC 恒为 9）连续测出 16.1 / 19.1 / 22.9。
 
-| 次数 | 覆盖率 | CRAP |
-| --- | --- | --- |
-| 1 | 55% | 16.1 |
-| 2 | 50% | 19.1 |
-| 3 | 45% | 22.9 |
+**根因不是采样噪声，是分母被污染。** `coverage.all` 会把 `target/coverage/**` 里上一轮
+残留的 `sorter.js`、`block-navigation.js` 这些 HTML 报告资源也当成「待测源文件」：
+残留文件有多少，分母就有多大，覆盖率被稀释的程度就不同。反解上面三个 CRAP 得到的覆盖率
+是 44% / 56% / 50%——同一份代码差 12 个点，随机采样做不到，分母变化可以。
 
-代码一行没动，账面涨了 42%。同样的情况在 `components.experience.ExperienceActionDialog`
-（25.2 → 30.7）、`server.http-route-support#runActionHttpError`（12.4 → 12.6）、
-`strategies.catalog.StrategyBlueprintCatalog#load`（11.1 → 11.5）都出现过。
+**已修复**：#143 把 `target/**` 从覆盖率源集合里排掉。修复后实测：
 
-原因是覆盖率分母随「本轮实际加载了哪些文件 / 哪些测试被并发挤掉」变化：crapper 会在
-同一次运行里跑全量 vitest，任何一个测试文件超时、被跳过或互相踩 `target/coverage`，
-都会让某个函数的命中行数变化。**这不是代码质量变化。**
+- 重构后的 `processLiveness`（CC 3）三次独立测量（每次先清 `target/coverage`）全部是
+  `3.0 / CC 3 / 100%`，零漂移；
+- 连续两次全仓 `--all --update-baseline` 得到**完全相同的 184 个键**，逐键分数漂移 0
+  （对比脚本容差 0.05）。
+
+因此判据调整如下。
 
 ### 判据
 
-用三步，而不是看单个数字：
-
-1. **先看 CC**。CC 没变而 CRAP 上升 = 覆盖率噪声，不是回归。
-2. **重测两次，取中位数**。三次测量（含原来那次）排序后取中间值作为该函数的记账值。
-3. **三次里最低的那次仍 > 阈值，才算回归**。三次采样都超，说明是结构或真实覆盖缺口；
-   只有个别采样超，按中位数记账并在 PR 正文里写明。
+1. **先看 CC**。这条不变：CC 决定 CRAP 的地板值，CC 没变说明结构没恶化。
+2. **先查分母，再谈结论**。测量前 `rm -rf target/coverage` 并确认没有第二个 crapper
+   （`ps -eo command | grep -c '[c]rapper'` 为 0）。同一 sha 连跑两次 `--all`，键集合与
+   分数应当完全一致；不一致就不是代码问题，先查分母与并发。
+3. **再谈回归**。分母确认干净后，若 CC 未变而 CRAP 仍上升，说明是**真实覆盖缺口**
+   （某个测试被跳过/超时），按回归处理并补测；若 CC 也上升，才是结构恶化，按 CRAP 拆。
+4. **兜底手段（降级）**：分母已确认干净、两次 `--all` 仍给出不同数字时，才用「重测两次取
+   中位数」，并在 PR 正文里写明哪几次不一致。不再把它当作常规判据。
 
 ### 操作要求
 
 - 覆盖率相关验证必须在**独立 worktree** 里跑（`git worktree add /tmp/wt-x -b debt/x`），
-  每个 worktree 有独立的 `target/coverage`，不会互相删报告。
-- 跑门禁前确认 `ps -eo command | grep -c '[c]rapper'` 为 0；并发跑会让覆盖率静默降级成 0%
-  （曾出现整轮 3185 条覆盖率全 0，以及并发时一方直接 `No source files to analyze`）。
+  每个 worktree 有独立的 `target/coverage`，跑前先删。
+- 不要和别人的门禁并行跑：并发会踩同一个报告目录，轻则覆盖率归零，重则一方直接
+  `No source files to analyze`。
 - 刷新 baseline 时逐键对比旧基线，而不是只看条数：条数下降不代表没有单点上升，
-  单点上升也不代表回归——按上面的三步判。
+  单点上升也不代表回归——按上面四步判。
 
 ## 10. 已知且刻意的例外
 
