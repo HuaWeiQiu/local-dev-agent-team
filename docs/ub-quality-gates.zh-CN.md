@@ -333,6 +333,35 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 - 刷新 baseline 时逐键对比旧基线，而不是只看条数：条数下降不代表没有单点上升，
   单点上升也不代表回归——按上面四步判。
 
+## 10. 基线的两种保证：碰巧一致 vs 可复算
+
+刷新基线的方式决定这份文件值不值得信。
+
+**第一代（弱保证）：双扫 + 逐键比对。** 两次各自重新生成覆盖率的全量扫描，分数一致才写。
+它确实检验了「覆盖率稳不稳」，但结论是**运气型**的——两次碰巧一致，不代表第三次也一致。
+2026-11 之前就吃过这个：`getInventory` 冻结在 20.24，而在它自己的刷新提交上只能测出
+23.90，谁也复现不了那份数。
+
+**第二代（强保证）：一份可哈希的覆盖率 + 记录出处。** 外部显式跑一次
+
+```bash
+npx vitest run --coverage --coverage.reporter=lcov
+node scripts/ub-quality-gate.mjs --all --update-baseline -- --use-existing-coverage
+```
+
+gate 读这份 lcov 打分，并在 `generation` 里记下 `lcov.sha256`、`headSha`、`toolCommit`、
+`coverageSource`、`platform`、`nodeVersion`、`scans: 2`。双扫仍然保留，但职责变成两件事：
+
+1. **lcov 未被篡改**：每轮开扫前记一次摘要，两轮之间不一致就拒写（比数值抖动检查更硬）；
+2. **crapper 输出确定性**：同一份输入两次解析必须逐键一致。
+
+为什么不全改成读现成 lcov：self 模式的两轮**各自重新生成覆盖率**，那是唯一能发现
+「覆盖率本身不稳」的视野——`#168` 那批抖动、`StallWatchdog#check`、`invokeLive` 都是
+它抓出来的。所以 self 模式继续用于**摸排**，existing 模式用于**定版**：
+摸排要宽视野，定版要可复算。
+
+判断口诀：**同一份输入、同一次运行能复算出同一个数 → 强保证；两次跑恰好一样 → 弱保证。**
+
 ## 10. 已知且刻意的例外
 
 ### `web/src/main.tsx#bootstrap`（当前 CRAP 20.0）

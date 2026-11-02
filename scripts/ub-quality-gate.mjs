@@ -385,13 +385,31 @@ function jitter(key, before, after, tolerance) {
  * how two scans of one commit disagreed (JevPanel#Row 6.0 -> 2.09), and how a
  * baseline once froze a number its own commit could not reproduce.
  */
+export function usesExistingCoverage(options) {
+  return (options.extra ?? []).includes("--use-existing-coverage");
+}
+
+function coveragePath(cwd) {
+  return path.join(cwd, "target", "coverage", "typescript", "lcov.info");
+}
+
+/**
+ * One full scan. In self mode the coverage report is regenerated each time, so the two
+ * scans really do test whether coverage is stable. In existing mode the report is an
+ * input: it is hashed before each scan and must not change between them — a report
+ * edited mid-measurement is worse than a wobbling one, because it looks authoritative.
+ */
 function scanOnce(ub, options, cwd) {
+  const existing = usesExistingCoverage(options);
   clearMetrics(cwd);
-  rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
+  if (!existing) rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
+  const before = lcovProvenance(coveragePath(cwd));
   runLayers(ub, { ...options, changed: false }, cwd);
   return {
     scores: readScores(path.join(cwd, ".metrics", "crap.edn")),
-    lcov: lcovProvenance(path.join(cwd, "target", "coverage", "typescript", "lcov.info")),
+    lcov: lcovProvenance(coveragePath(cwd)),
+    before,
+    existing,
   };
 }
 
@@ -400,9 +418,24 @@ function scanOnce(ub, options, cwd) {
  * document ("two `--all` runs must agree key by key"); a note gets forgotten, so the
  * gate now refuses to write when the two scans disagree.
  */
-export function stableBaseline(ub, options, cwd = process.cwd()) {
+export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
   const first = scanOnce(ub, options, cwd);
+  // Tests only: a tamper between the scans has no other seam, because in production
+  // nothing in this process can be told to act there.
+  hooks.betweenScans?.();
+  if (first.existing && !first.before) {
+    return refuseWithoutCoverage(coveragePath(cwd));
+  }
   const second = scanOnce(ub, options, cwd);
+  if (second.existing && !second.before) {
+    return refuseWithoutCoverage(coveragePath(cwd));
+  }
+  // Compare what the first scan ended with to what the second scan started with: a
+  // report edited between them means the two scans measured different inputs.
+  const tampered = first.existing
+    ? coverageChanged(first.lcov, second.before)
+    : coverageChanged(first.before, second.before);
+  if (tampered) return refuseTamperedCoverage(tampered);
   const drift = unstableKeys(first.scores, second.scores);
   if (drift.length > 0) return refuseBaseline(drift);
   return writeBaseline(
@@ -411,6 +444,29 @@ export function stableBaseline(ub, options, cwd = process.cwd()) {
     options.baseline,
     baselineGeneration({ ub, cwd, first, second }),
   );
+}
+
+/** A missing report is not an empty ledger: it is no measurement at all. */
+function refuseWithoutCoverage(file) {
+  process.stderr.write(
+    `baseline: refusing to write — no coverage report at ${path.relative(process.cwd(), file)}; ` +
+      "run the test suite with --coverage --coverage.reporter=lcov first\n",
+  );
+  return 3;
+}
+
+/** The report is an input in existing mode; changing it mid-run invalidates both scans. */
+function coverageChanged(first, second) {
+  if (!first || !second) return undefined;
+  return first.sha256 === second.sha256 ? undefined : { first, second };
+}
+
+function refuseTamperedCoverage({ first, second }) {
+  process.stderr.write(
+    "baseline: refusing to write — the coverage report changed between the two scans " +
+      `(${first.sha256.slice(0, 12)}… -> ${second.sha256.slice(0, 12)}…)\n`,
+  );
+  return 2;
 }
 
 /** Say exactly which functions moved, then leave the file alone. */
@@ -426,17 +482,34 @@ export function describeDrift(entry) {
 }
 
 /** How this generation was produced, in the shape the baseline file records. */
+/**
+ * In existing mode the frozen numbers describe an input report, so that is the one
+ * recorded; in self mode it is the report this scan produced.
+ */
+function frozenReport(existing, second) {
+  return existing ? second.before : second.lcov;
+}
+
+/** The pair that proves the measurement: the same input twice, or two live runs. */
+function agreedDigests(existing, first, second) {
+  return existing
+    ? [first.before?.sha256, second.before?.sha256]
+    : [first.lcov?.sha256, second.lcov?.sha256];
+}
+
 export function baselineGeneration({ ub, cwd = process.cwd(), first, second }) {
+  const existing = Boolean(first.existing);
+  const frozenLcov = frozenReport(existing, second);
+  const agreed = agreedDigests(existing, first, second);
   return {
     headSha: gitHeadSha(cwd),
     toolCommit: ub ? toolCommit(ub) : undefined,
     ...machineProvenance(process.env),
+    ...(existing ? { coverageSource: "existing" } : {}),
     scans: 2,
     generatedAt: new Date().toISOString(),
-    ...(second.lcov ? { lcov: second.lcov } : {}),
-    ...(first.lcov && second.lcov
-      ? { agreement: { scans: 2, sha256: [first.lcov.sha256, second.lcov.sha256] } }
-      : {}),
+    ...(frozenLcov ? { lcov: frozenLcov } : {}),
+    ...(agreed[0] && agreed[1] ? { agreement: { scans: 2, sha256: agreed } } : {}),
   };
 }
 
