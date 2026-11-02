@@ -433,6 +433,34 @@ function scanOnce(ub, options, cwd) {
  * report proves it was not edited; it does not prove it is not a lucky sample — that is
  * exactly how a 20.24 got frozen for a function that measured 23.90 everywhere else.
  */
+/**
+ * What CRAP actually consumes: which lines were executed, not how many times. Two runs
+ * of the same suite hit the same lines but with different counters, so raw file bytes
+ * differ on every run while the measurement is identical. Comparing bytes would refuse
+ * every refresh forever; comparing this signature refuses only real differences.
+ */
+export function coverageSignature(text) {
+  const covered = new Map();
+  let current;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("SF:")) {
+      current = line.slice(3);
+      covered.set(current, new Set());
+      continue;
+    }
+    if (current && line.startsWith("DA:")) {
+      const [number, hits] = line.slice(3).split(",");
+      if (Number(hits) > 0) covered.get(current).add(Number(number));
+    }
+  }
+  const digest = createHash("sha256");
+  for (const file of [...covered.keys()].sort()) {
+    digest.update(`${file}\n`);
+    digest.update(`${[...covered.get(file)].sort((left, right) => left - right).join(",")}\n`);
+  }
+  return digest.digest("hex");
+}
+
 export function requireReproducibleCoverage(options, cwd = process.cwd()) {
   const declared = [options.coverageA, options.coverageB];
   if (declared.some((file) => !file)) {
@@ -451,7 +479,11 @@ export function requireReproducibleCoverage(options, cwd = process.cwd()) {
     );
     return { status: 3 };
   }
-  if (a.sha256 !== b.sha256) return { status: preserveUnstableCoverage(paths, cwd, a, b) };
+  const signatureA = coverageSignature(readFileSync(paths[0], "utf8"));
+  const signatureB = coverageSignature(readFileSync(paths[1], "utf8"));
+  if (signatureA !== signatureB) {
+    return { status: preserveUnstableCoverage(paths, cwd, a, b, { signatureA, signatureB }) };
+  }
   // The pair agrees: score the first one, from the canonical path crapper reads.
   mkdirSync(path.dirname(coveragePath(cwd)), { recursive: true });
   writeFileSync(coveragePath(cwd), readFileSync(paths[0]));
@@ -459,7 +491,7 @@ export function requireReproducibleCoverage(options, cwd = process.cwd()) {
 }
 
 /** Keep both samples so the intermittent can be diagnosed offline, not re-caught live. */
-function preserveUnstableCoverage(paths, cwd, a, b) {
+function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
   const root = path.join(cwd, "target", "coverage", "unstable");
   mkdirSync(path.join(root, "a"), { recursive: true });
   mkdirSync(path.join(root, "b"), { recursive: true });
@@ -470,8 +502,9 @@ function preserveUnstableCoverage(paths, cwd, a, b) {
   writeFileSync(kept[0], readFileSync(paths[0]));
   writeFileSync(kept[1], readFileSync(paths[1]));
   process.stderr.write(
-    "baseline: refusing to write — the two coverage runs disagree " +
-      `(${a.sha256.slice(0, 12)}… vs ${b.sha256.slice(0, 12)}…); kept both samples:\n` +
+    "baseline: refusing to write — the two coverage runs covered different lines " +
+      `(${signatures.signatureA?.slice(0, 12)}… vs ${signatures.signatureB?.slice(0, 12)}…; ` +
+      `raw ${a.sha256.slice(0, 12)}… vs ${b.sha256.slice(0, 12)}…); kept both samples:\n` +
       `  ${path.relative(cwd, kept[0])}\n  ${path.relative(cwd, kept[1])}\n`,
   );
   return 2;

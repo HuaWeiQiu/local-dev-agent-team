@@ -826,7 +826,7 @@ describe("a refresh needs two coverage runs to agree", () => {
       ],
       {},
     );
-  const same = "SF:src/a.ts\nLF:1\nLH:1\n";
+  const same = "SF:src/a.ts\nDA:5,3\nLF:1\nLH:1\nend_of_record\n";
 
   it("writes when both runs produced the same report", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
@@ -842,9 +842,21 @@ describe("a refresh needs two coverage runs to agree", () => {
     expect(new Set(written.generation.agreement.sha256).size).toBe(1);
   });
 
-  it("keeps both samples when the runs disagree", async () => {
+  it("accepts two runs of the same lines with different hit counts", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
-    const differing = "SF:src/a.ts\nLF:2\nLH:1\n";
+    const dir = await root({ a: same, b: "SF:src/a.ts\nDA:5,9\nLF:1\nLH:1\nend_of_record\n" });
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(0);
+    stdout.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(true);
+  });
+
+  it("keeps both samples when the runs cover different lines", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const differing = "SF:src/a.ts\nDA:5,9\nDA:6,1\nLF:2\nLH:2\nend_of_record\n";
     const dir = await root({ a: same, b: differing });
     const tool = await stubTool("exit 0");
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
