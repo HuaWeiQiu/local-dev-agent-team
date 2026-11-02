@@ -331,20 +331,43 @@ export function baselineStep(options, cwd = process.cwd()) {
  * scores wobble freezes a number nobody can reproduce — that is how `getInventory`
  * ended up frozen at 20.24 while measuring 23.90 at its own commit.
  */
-export function unstableKeys(first, second) {
+/** Scores below this absolute move are rounding noise, whatever their ratio. */
+const NOISE_FLOOR = 0.5;
+
+export function unstableKeys(first, second, tolerance = 0.05) {
   const keys = new Set([...first.keys(), ...second.keys()]);
   const drift = [];
   for (const key of keys) {
     const before = first.get(key);
     const after = second.get(key);
-    if (before !== after) drift.push({ key, first: before, second: after });
+    if (before === undefined || after === undefined) {
+      if (before !== after) drift.push({ key, first: before, second: after });
+      continue;
+    }
+    // Coverage is not bit-for-bit reproducible: a branch hit count can move by a
+    // line between runs, which moves a score by a hundredth. The bar here is the
+    // same 5% used to judge the frozen baseline itself — real wobble (a function
+    // going 6.0 -> 2.09) is far outside it.
+    const deviation = Math.abs(after - before) / Math.max(before, after, 1);
+    const absolute = Math.abs(after - before);
+    // Relative-only would flag a 1.00 -> 1.13 wobble (noise on a trivial function).
+    // Absolute-only would miss a 100 -> 106 drift on an expensive one. Both bars.
+    if (deviation > tolerance && absolute > NOISE_FLOOR) {
+      drift.push({ key, first: before, second: after, deviation });
+    }
   }
   return drift.sort((left, right) => left.key.localeCompare(right.key));
 }
 
-/** One full scan in a clean state: no metrics from an earlier run may be read. */
+/**
+ * One full scan in a clean state. Both leftovers matter: a stale metrics file would
+ * be scored, and a stale coverage report would be *merged into* the new run — that is
+ * how two scans of one commit disagreed (JevPanel#Row 6.0 -> 2.09), and how a
+ * baseline once froze a number its own commit could not reproduce.
+ */
 function scanOnce(ub, options, cwd) {
   clearMetrics(cwd);
+  rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
   runLayers(ub, { ...options, changed: false }, cwd);
   return readScores(path.join(cwd, ".metrics", "crap.edn"));
 }
@@ -363,7 +386,10 @@ export function stableBaseline(ub, options, cwd = process.cwd()) {
       `baseline: refusing to write — two full scans disagree on ${drift.length} function(s)\n`,
     );
     for (const entry of drift.slice(0, 10)) {
-      process.stderr.write(`  ${entry.key}: ${entry.first ?? "absent"} -> ${entry.second ?? "absent"}\n`);
+      const percent = entry.deviation ? ` (${(entry.deviation * 100).toFixed(1)}%)` : "";
+      process.stderr.write(
+        `  ${entry.key}: ${entry.first ?? "absent"} -> ${entry.second ?? "absent"}${percent}\n`,
+      );
     }
     return 2;
   }

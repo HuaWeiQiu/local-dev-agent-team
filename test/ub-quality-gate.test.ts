@@ -568,10 +568,13 @@ describe("baseline stability guard", () => {
   it("reports keys two scans disagree about", async () => {
     const { unstableKeys } = await import("../scripts/ub-quality-gate.mjs");
     expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1]]))).toEqual([]);
-    expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 2], ["b", 3]]))).toEqual([
-      { key: "a", first: 1, second: 2 },
-      { key: "b", first: undefined, second: 3 },
-    ]);
+    const drift = unstableKeys(new Map([["a", 1]]), new Map([["a", 2], ["b", 3]]));
+    expect(drift.map((entry) => entry.key)).toEqual(["a", "b"]);
+    // Sub-5% jitter is measurement noise, not a reason to refuse a baseline.
+    expect(unstableKeys(new Map([["a", 40]]), new Map([["a", 41.5]]))).toEqual([]);
+    expect(unstableKeys(new Map([["a", 6]]), new Map([["a", 2.09]]))).toHaveLength(1);
+    // A trivial function moving 1.00 -> 1.13 is noise, not drift.
+    expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1.125]]))).toEqual([]);
   });
 
   it("refuses to write a baseline when the scans disagree", async () => {
@@ -582,7 +585,7 @@ describe("baseline stability guard", () => {
     // that froze 20.24 for a function that measures 23.90.
     const tool = await stubTool(
       `mkdir -p "${path.join(root, ".metrics")}"; n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
-        `echo "{:name \\"f\\", :namespace \\"a\\", :complexity 5, :coverage 0.0, :crap $((100+n))}" > "${path.join(root, ".metrics", "crap.edn")}"`,
+        `echo "{:name \\"f\\", :namespace \\"a\\", :complexity 5, :coverage 0.0, :crap $((100+n*60))}" > "${path.join(root, ".metrics", "crap.edn")}"`,
     );
     const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
