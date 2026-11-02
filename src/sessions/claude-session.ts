@@ -258,17 +258,15 @@ export class ClaudeStreamSession implements AgentSession {
   }
 
   private handleLine(line: string): void {
-    let message: Json;
-    try {
-      message = JSON.parse(line) as Json;
-    } catch {
-      return;
-    }
+    const message = parseLine(line);
+    if (message) this.dispatchLine(message);
+  }
+
+  /** One switch, one line type each; anything unknown is ignored by design. */
+  private dispatchLine(message: Json): void {
     switch (message.type) {
       case "system":
-        if (message.subtype === "init" && typeof message.session_id === "string") {
-          this.sessionId = message.session_id;
-        }
+        this.recordInitSession(message);
         return;
       case "stream_event":
         this.handleStreamEvent(message.event as Json | undefined);
@@ -290,34 +288,26 @@ export class ClaudeStreamSession implements AgentSession {
     }
   }
 
+  /** The init message is the only place the native session id is announced. */
+  private recordInitSession(message: Json): void {
+    if (message.subtype !== "init" || typeof message.session_id !== "string") return;
+    this.sessionId = message.session_id;
+  }
+
   private handleStreamEvent(event: Json | undefined): void {
     const active = this.active;
-    if (!active || event?.type !== "content_block_delta") return;
-    const delta = event.delta as Json | undefined;
-    if (delta?.type === "text_delta" && typeof delta.text === "string") {
-      active.streamed += delta.text;
-      this.hub.emit({ type: "text-delta", turnId: active.turnId, text: delta.text });
-    }
+    const text = active && streamDeltaText(event);
+    if (!active || text === undefined) return;
+    active.streamed += text;
+    this.hub.emit({ type: "text-delta", turnId: active.turnId, text });
   }
 
   private handleAssistant(message: Json | undefined): void {
     const active = this.active;
     if (!active || !Array.isArray(message?.content)) return;
     for (const block of message.content as Json[]) {
-      if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-        this.hub.emit({ type: "message", turnId: active.turnId, text: block.text, final: false });
-      } else if (block.type === "tool_use") {
-        const input = (block.input ?? {}) as Json;
-        const summary = toolSummary(input);
-        this.hub.emit({
-          type: "tool",
-          turnId: active.turnId,
-          toolId: String(block.id),
-          name: String(block.name),
-          status: "started",
-          ...(summary ? { summary } : {}),
-        });
-      }
+      const event = assistantBlockEvent(active.turnId, block);
+      if (event) this.hub.emit(event);
     }
   }
 
@@ -325,15 +315,8 @@ export class ClaudeStreamSession implements AgentSession {
     const active = this.active;
     if (!active || !Array.isArray(message?.content)) return;
     for (const block of message.content as Json[]) {
-      if (block.type === "tool_result") {
-        this.hub.emit({
-          type: "tool",
-          turnId: active.turnId,
-          toolId: String(block.tool_use_id),
-          name: "tool_result",
-          status: block.is_error === true ? "failed" : "completed",
-        });
-      }
+      const event = toolResultEvent(active.turnId, block);
+      if (event) this.hub.emit(event);
     }
   }
 
@@ -428,6 +411,54 @@ export class ClaudeStreamSession implements AgentSession {
       ...(error ? { error } : {}),
     };
   }
+}
+
+/** A line of the CLI stream, or nothing when the child printed something else. */
+function parseLine(line: string): Json | undefined {
+  try {
+    return JSON.parse(line) as Json;
+  } catch {
+    return undefined;
+  }
+}
+
+type SessionEvent = Parameters<SessionEventHub["emit"]>[0];
+
+/** The text of a streamed delta, or nothing when the event is another block kind. */
+function streamDeltaText(event: Json | undefined): string | undefined {
+  if (event?.type !== "content_block_delta") return undefined;
+  const delta = event.delta as Json | undefined;
+  if (delta?.type !== "text_delta" || typeof delta.text !== "string") return undefined;
+  return delta.text;
+}
+
+/** One assistant content block as the event the UI renders, if it renders at all. */
+function assistantBlockEvent(turnId: string, block: Json): SessionEvent | undefined {
+  if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+    return { type: "message", turnId, text: block.text, final: false };
+  }
+  if (block.type !== "tool_use") return undefined;
+  const summary = toolSummary((block.input ?? {}) as Json);
+  return {
+    type: "tool",
+    turnId,
+    toolId: String(block.id),
+    name: String(block.name),
+    status: "started",
+    ...(summary ? { summary } : {}),
+  };
+}
+
+/** One tool_result block as a completed or failed tool event. */
+function toolResultEvent(turnId: string, block: Json): SessionEvent | undefined {
+  if (block.type !== "tool_result") return undefined;
+  return {
+    type: "tool",
+    turnId,
+    toolId: String(block.tool_use_id),
+    name: "tool_result",
+    status: block.is_error === true ? "failed" : "completed",
+  };
 }
 
 /** The argv this CLI needs to speak stream-json; order is part of the contract. */
