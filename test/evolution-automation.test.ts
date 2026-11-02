@@ -122,6 +122,114 @@ describe("automatic evolution configuration", () => {
   });
 });
 
+describe("automatic evaluation runs", () => {
+  it("pauses the loop when an evaluation run reports a provider infrastructure failure", async () => {
+    const harness = await createHarness(() => 4, {
+      runWorkflow: async (request, context) => {
+        const state = evaluationState(
+          context.runId,
+          request.strategy ?? "balanced",
+          4,
+          true,
+          undefined,
+          request.goal,
+          context.purpose,
+        );
+        // The provider refused the call: the run is recorded as blocked with the
+        // classifier's own wording, which is what infrastructureFailureFromRun reads.
+        state.status = "blocked";
+        state.error = "You exceeded your current quota";
+        return state;
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "provider-failure-session",
+        proposeCandidate: async () => ({
+          rationale: "Recorded for the provider failure case",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "provider-failure-command", "session:owner");
+    const snapshot = await controller.wait();
+
+    expect(snapshot).toMatchObject({
+      status: "paused",
+      failureCode: "MODEL_QUOTA_EXHAUSTED",
+      completedCycles: 0,
+    });
+    expect(snapshot.stopReason).toContain("MODEL_QUOTA_EXHAUSTED");
+    await closeHarness(harness);
+  });
+
+  it("refuses an evaluation run that does not match the request it belongs to", async () => {
+    const harness = await createHarness(() => 4, {
+      runWorkflow: async (request, context) => {
+        const state = evaluationState(
+          context.runId,
+          request.strategy ?? "balanced",
+          4,
+          true,
+          undefined,
+          "some other goal",
+          context.purpose,
+        );
+        return state;
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      { createSessionId: () => "mismatch-session" },
+    );
+
+    controller.start(1, "mismatch-command", "session:owner");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.status).toBe("failed");
+    expect(snapshot.error).toContain("does not match its server-owned evaluation request");
+    await closeHarness(harness);
+  });
+
+  it("records the suite digest with the last evaluation", async () => {
+    const harness = await createHarness((strategy) => (strategy.startsWith("auto-eval-") ? 2 : 10));
+    const suite = requireEvaluationSuite(
+      await resolveEvaluationSuite(harness.loaded.config, harness.loaded.root),
+      "automatic evolution fixture",
+    );
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      {
+        createSessionId: () => "digest-session",
+        proposeCandidate: async () => ({
+          rationale: "Digest fixture",
+          definition: candidateDefinition,
+        }),
+      },
+    );
+
+    controller.start(1, "digest-command", "session:owner");
+    const snapshot = await controller.wait();
+
+    expect(snapshot.lastEvaluation).toMatchObject({
+      suiteName: suite.name,
+      suiteDigest: computeSuiteDigest(suite),
+    });
+    await closeHarness(harness);
+  });
+});
+
 describe("automatic evolution controller", () => {
   it("promotes an improved isolated candidate and makes it the runtime default", async () => {
     const harness = await createHarness((strategy) => strategy.startsWith("auto-eval-") ? 2 : 10);

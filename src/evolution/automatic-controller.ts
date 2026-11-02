@@ -13,6 +13,7 @@ import {
   type AutomaticEvolutionCycle,
   type AutomaticEvolutionSnapshot,
   type AutomaticOutcomeAggregate,
+  type AutomaticRunOutcome,
   type AutomaticStrategyCandidate,
 } from "./automation.js";
 import { type EvolutionApplicationCoordinator } from "./application.js";
@@ -40,6 +41,7 @@ import {
 import {
   computeSuiteDigest,
   scoreEvaluationSuite,
+  type EvaluationSuite,
 } from "../evaluation/domain.js";
 import {
   requireEvaluationSuite,
@@ -610,115 +612,86 @@ export class AutomaticEvolutionController {
     intentKey: string,
     signal: AbortSignal,
   ): Promise<AutomaticOutcomeAggregate> {
-    const suite = requireEvaluationSuite(
-      await resolveEvaluationSuite(this.loaded.config, this.loaded.root),
-      "Automatic evolution evaluation",
+    const { suite, digest } = await loadEvaluationSuite(this.loaded);
+    const bindings = evaluationRoleBindings(
+      this.loaded,
+      strategy,
+      await this.resolveLayeredRoleBindingsForEvaluation(),
     );
-    const suiteDigest = computeSuiteDigest(suite);
-    const pairings: Array<{ taskId: string; state: RunState }> = [];
-    const allBindings = await this.resolveLayeredRoleBindingsForEvaluation();
-    // Strategy roleProfiles 是被评测变量，必须赢过全局 / 项目 CLI 默认；默认只补未映射的角色。
-    const strategyRoleProfiles = resolveStrategy(this.loaded.config, strategy).roleProfiles;
-    const roleBindings = allBindings
-      ? Object.fromEntries(
-          Object.entries(allBindings).filter(([role]) => !(role in strategyRoleProfiles)),
-        )
-      : undefined;
-    const effectiveBindings =
-      roleBindings && Object.keys(roleBindings).length > 0 ? roleBindings : undefined;
-    this.state.roleBindingSource = effectiveBindings ? "layered-cli-defaults" : "project-yaml";
+    this.state.roleBindingSource = bindings.source;
     this.touch();
 
+    const pairings = await this.collectPairings(session, suite, strategy, bindings, intentKey, signal);
+    const { aggregate, outcomes } = suiteOutcomes(suite, pairings);
+    await this.recordLastEvaluation(suite.name, digest);
+
+    return {
+      runIds: outcomes.map((outcome) => outcome.runId),
+      passed: aggregate.passed,
+      score: aggregate.score,
+      outcomes,
+    };
+  }
+
+  /** Every task runs `repeats` times; the pairings keep the state for the suite score. */
+  private async collectPairings(
+    session: AutomaticEvolutionRunSession,
+    suite: EvaluationSuite,
+    strategy: string,
+    bindings: EvaluationRoleBindings,
+    intentKey: string,
+    signal: AbortSignal,
+  ): Promise<Array<{ taskId: string; state: RunState }>> {
+    const pairings: Array<{ taskId: string; state: RunState }> = [];
     for (const task of suite.tasks) {
       for (let repeat = 1; repeat <= suite.repeats; repeat += 1) {
         signal.throwIfAborted();
-        const result = session.start(
-          {
-            goal: task.goal,
-            strategy,
-            profileOverrides: {},
-            ...(effectiveBindings ? { roleBindings: effectiveBindings } : {}),
-          },
-          `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
-        );
-        this.state.activeRunId = result.runId;
-        this.touch();
-        const state =
-          (await this.host.wait(result.runId)) ??
-          (await this.host.get(result.runId));
-        this.state.activeRunId = null;
-        this.touch();
-        if (!state) {
-          throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
-        }
-        if (
-          state.id !== result.runId ||
-          state.goal !== task.goal ||
-          state.strategy.name !== strategy ||
-          state.purpose !== "evolution-evaluation"
-        ) {
-          throw new Error(
-            `Automatic evaluation run '${result.runId}' does not match its server-owned evaluation request`,
-          );
-        }
-        const infrastructure = infrastructureFailureFromRun(state);
-        if (infrastructure) {
-          throw new ProviderFailureError(
-            `Automatic evaluation run '${result.runId}' hit provider infrastructure failure ${infrastructure.code}`,
-            infrastructure,
-          );
-        }
+        const state = await this.evaluateOneRun(session, {
+          goal: task.goal,
+          strategy,
+          bindings,
+          intentKey: `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
+        });
         pairings.push({ taskId: task.id, state });
       }
     }
+    return pairings;
+  }
 
-    const suiteAggregate = scoreEvaluationSuite(suite, pairings);
-    // Preserve AutomaticOutcomeAggregate contract while ranking by suite worst-score.
-    const outcomes = suiteAggregate.scores.map((score) => {
-      const state = pairings.find(
-        (entry) => entry.taskId === score.taskId && entry.state.id === score.runId,
-      )?.state;
-      const projected = state ? projectRunOutcome(state) : undefined;
-      return {
-        runId: score.runId,
-        passed: score.passed,
-        score: score.score,
-        status: score.status,
-        qualityPassed: projected?.qualityPassed ?? score.passed,
-        finalDecision: projected?.finalDecision ?? null,
-        commandsPassed: projected?.commandsPassed ?? 0,
-        commandsTotal: projected?.commandsTotal ?? 0,
-        tasksMerged: score.tasksMerged,
-        tasksTotal: score.tasksTotal,
-        totalAttempts: score.totalAttempts,
-        agentInvocations: score.agentInvocations,
-      };
-    });
+  private async evaluateOneRun(
+    session: AutomaticEvolutionRunSession,
+    request: EvaluationRunRequest,
+  ): Promise<RunState> {
+    const result = session.start(evaluationRunInput(request), request.intentKey);
+    this.state.activeRunId = result.runId;
+    this.touch();
+    const state = (await this.host.wait(result.runId)) ?? (await this.host.get(result.runId));
+    this.state.activeRunId = null;
+    this.touch();
+    if (!state) {
+      throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
+    }
+    assertEvaluationRun(state, request, result.runId);
+    throwOnInfrastructureFailure(state, result.runId);
+    return state;
+  }
 
-    // Record suite identity so operators can bind experience promotions to the
-    // exact evaluation evidence that produced this aggregate.
-    this.state.lastEvaluation = {
-      suiteName: suite.name,
-      suiteDigest,
-      completedAt: this.timestamp(),
-    };
+  /**
+   * Suite identity is advisory: it lets operators bind promotions to the exact
+   * evidence, but a write failure must not abort the evaluation loop.
+   */
+  private async recordLastEvaluation(suiteName: string, suiteDigest: string): Promise<void> {
+    this.state.lastEvaluation = { suiteName, suiteDigest, completedAt: this.timestamp() };
     this.touch();
     try {
       await this.stateStore.saveLastEvaluation(this.state.lastEvaluation);
     } catch (error) {
-      // 提示性数据的落盘失败不应中止评测循环。
       console.warn(
         `[evolution-automation] failed to persist last evaluation record: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
     }
-    return {
-      runIds: outcomes.map((outcome) => outcome.runId),
-      passed: suiteAggregate.passed,
-      score: suiteAggregate.score,
-      outcomes,
-    };
   }
 
   /**
@@ -992,6 +965,139 @@ function proposerBudgetStrategy(
     executionTimeoutSeconds: Math.min(incumbent.executionTimeoutSeconds, 1_800),
     maxProcessOutputBytes: Math.min(incumbent.maxProcessOutputBytes, 1_048_576),
     maxArtifactBytes: Math.min(incumbent.maxArtifactBytes, 16_777_216),
+  };
+}
+
+interface EvaluationRoleBindings {
+  bindings: Record<string, RoleBinding> | undefined;
+  source: "layered-cli-defaults" | "project-yaml";
+}
+
+interface EvaluationRunRequest {
+  goal: string;
+  strategy: string;
+  bindings: EvaluationRoleBindings;
+  intentKey: string;
+}
+
+/** The suite and its digest, read once per strategy evaluation. */
+async function loadEvaluationSuite(
+  loaded: LoadedConfig,
+): Promise<{ suite: EvaluationSuite; digest: string }> {
+  const suite = requireEvaluationSuite(
+    await resolveEvaluationSuite(loaded.config, loaded.root),
+    "Automatic evolution evaluation",
+  );
+  return { suite, digest: computeSuiteDigest(suite) };
+}
+
+/**
+ * Strategy roleProfiles are the variable under test, so they must win over the
+ * global/CLI defaults; those only fill roles the strategy does not map.
+ */
+function evaluationRoleBindings(
+  loaded: LoadedConfig,
+  strategy: string,
+  allBindings: Record<string, RoleBinding> | undefined,
+): EvaluationRoleBindings {
+  const strategyRoleProfiles = resolveStrategy(loaded.config, strategy).roleProfiles;
+  const supplemented = allBindings
+    ? Object.fromEntries(
+        Object.entries(allBindings).filter(([role]) => !(role in strategyRoleProfiles)),
+      )
+    : undefined;
+  const bindings = supplemented && Object.keys(supplemented).length > 0 ? supplemented : undefined;
+  return { bindings, source: bindings ? "layered-cli-defaults" : "project-yaml" };
+}
+
+function evaluationRunInput(request: EvaluationRunRequest) {
+  return {
+    goal: request.goal,
+    strategy: request.strategy,
+    profileOverrides: {},
+    ...(request.bindings.bindings ? { roleBindings: request.bindings.bindings } : {}),
+  };
+}
+
+/** A run the server did not request for this suite never counts as evidence. */
+function assertEvaluationRun(
+  state: RunState,
+  request: EvaluationRunRequest,
+  expectedRunId: string,
+): void {
+  const matches =
+    state.id === expectedRunId &&
+    state.goal === request.goal &&
+    state.strategy.name === request.strategy &&
+    state.purpose === "evolution-evaluation";
+  if (matches) return;
+  throw new Error(
+    `Automatic evaluation run '${state.id}' does not match its server-owned evaluation request`,
+  );
+}
+
+function throwOnInfrastructureFailure(state: RunState, runId: string): void {
+  const infrastructure = infrastructureFailureFromRun(state);
+  if (!infrastructure) return;
+  throw new ProviderFailureError(
+    `Automatic evaluation run '${runId}' hit provider infrastructure failure ${infrastructure.code}`,
+    infrastructure,
+  );
+}
+
+function suiteOutcomes(
+  suite: EvaluationSuite,
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+): { aggregate: ReturnType<typeof scoreEvaluationSuite>; outcomes: AutomaticOutcomeAggregate["outcomes"] } {
+  const aggregate = scoreEvaluationSuite(suite, pairings as never);
+  return { aggregate, outcomes: aggregate.scores.map((score) => projectScore(score, pairings)) };
+}
+
+/** Preserves the AutomaticOutcomeAggregate contract while ranking by worst score. */
+function projectScore(
+  score: ReturnType<typeof scoreEvaluationSuite>["scores"][number],
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+): AutomaticOutcomeAggregate["outcomes"][number] {
+  const state = pairingStateFor(pairings, score);
+  const projected = state ? projectRunOutcome(state) : undefined;
+  return {
+    runId: score.runId,
+    passed: score.passed,
+    score: score.score,
+    status: score.status,
+    ...projectedQuality(projected, score),
+    tasksMerged: score.tasksMerged,
+    tasksTotal: score.tasksTotal,
+    totalAttempts: score.totalAttempts,
+    agentInvocations: score.agentInvocations,
+  };
+}
+
+function pairingStateFor(
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+  score: { taskId: string; runId: string },
+): RunState | undefined {
+  return pairings.find(
+    (entry) => entry.taskId === score.taskId && entry.state.id === score.runId,
+  )?.state;
+}
+
+/**
+ * The suite score is authoritative; the run projection only fills what the suite
+ * does not count (commands and the final decision).
+ */
+function projectedQuality(
+  projected: AutomaticRunOutcome | undefined,
+  score: { passed: boolean },
+): Pick<AutomaticRunOutcome, "qualityPassed" | "finalDecision" | "commandsPassed" | "commandsTotal"> {
+  if (projected === undefined) {
+    return { qualityPassed: score.passed, finalDecision: null, commandsPassed: 0, commandsTotal: 0 };
+  }
+  return {
+    qualityPassed: projected.qualityPassed,
+    finalDecision: projected.finalDecision,
+    commandsPassed: projected.commandsPassed,
+    commandsTotal: projected.commandsTotal,
   };
 }
 
