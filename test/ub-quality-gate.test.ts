@@ -563,3 +563,82 @@ describe("drift issue lifecycle", () => {
     expect(() => applyPlan(plan, { gh })).toThrow(/gh issue list failed/);
   });
 });
+
+describe("baseline stability guard", () => {
+  it("reports keys two scans disagree about", async () => {
+    const { unstableKeys } = await import("../scripts/ub-quality-gate.mjs");
+    expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1]]))).toEqual([]);
+    const drift = unstableKeys(new Map([["a", 1]]), new Map([["a", 2], ["b", 3]]));
+    expect(drift.map((entry) => entry.key)).toEqual(["a", "b"]);
+    // Sub-5% jitter is measurement noise, not a reason to refuse a baseline.
+    expect(unstableKeys(new Map([["a", 40]]), new Map([["a", 41.5]]))).toEqual([]);
+    expect(unstableKeys(new Map([["a", 6]]), new Map([["a", 2.09]]))).toHaveLength(1);
+    // A trivial function moving 1.00 -> 1.13 is noise, not drift.
+    expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1.125]]))).toEqual([]);
+  });
+
+  it("refuses to write a baseline when the scans disagree", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-stable-"));
+    const counter = path.join(root, "calls");
+    // A tool that returns a different score on each invocation: exactly the wobble
+    // that froze 20.24 for a function that measures 23.90.
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}"; n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
+        `echo "{:name \\"f\\", :namespace \\"a\\", :complexity 5, :coverage 0.0, :crap $((100+n*60))}" > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, root)).toBe(2);
+    stderr.mockRestore();
+    expect(existsSync(path.join(root, "base.json"))).toBe(false);
+  });
+
+  it("writes the baseline when two scans agree", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-stable-ok-"));
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, root)).toBe(0);
+    stdout.mockRestore();
+    const written = JSON.parse(await readFile(path.join(root, "base.json"), "utf8"));
+    expect(written.scores).toEqual({ "a#f": 120 });
+  });
+});
+
+describe("drift provenance", () => {
+  it("pins the coverage report the scores came from", async () => {
+    const { lcovProvenance } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-provenance-"));
+    const file = path.join(root, "lcov.info");
+    await writeFile(file, "SF:src/a.ts\nLF:1\nLH:1\n", "utf8");
+    const pinned = lcovProvenance(file);
+    expect(pinned?.bytes).toBe(Buffer.byteLength("SF:src/a.ts\nLF:1\nLH:1\n"));
+    expect(pinned?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(lcovProvenance(path.join(root, "missing.info"))).toBeUndefined();
+  });
+
+  it("carries head, tool, source and machine in the payload", async () => {
+    const { driftPayload } = await import("../scripts/ub-quality-gate.mjs");
+    const payload = driftPayload({
+      report: { new: [], worse: [], fixed: [] },
+      provenance: {
+        headSha: "abc",
+        toolCommit: "6fd92c4",
+        coverageSource: "self",
+        platform: "darwin/arm64",
+        nodeVersion: "v26.5.0",
+        lcov: { path: "x", bytes: 1, sha256: "d" },
+      },
+    });
+    expect(payload.provenance).toMatchObject({
+      headSha: "abc",
+      toolCommit: "6fd92c4",
+      coverageSource: "self",
+      lcov: { bytes: 1 },
+    });
+  });
+});
