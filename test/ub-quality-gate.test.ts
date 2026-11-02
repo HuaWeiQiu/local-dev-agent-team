@@ -567,12 +567,17 @@ describe("drift issue lifecycle", () => {
 describe("baseline stability guard", () => {
   it("reports keys two scans disagree about", async () => {
     const { unstableKeys } = await import("../scripts/ub-quality-gate.mjs");
-    expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1]]))).toEqual([]);
-    const drift = unstableKeys(new Map([["a", 1]]), new Map([["a", 2], ["b", 3]]));
+    expect(unstableKeys(new Map([["a", 40]]), new Map([["a", 40]]))).toEqual([]);
+    const drift = unstableKeys(new Map([["a", 40]]), new Map([["a", 80], ["b", 33]]));
     expect(drift.map((entry) => entry.key)).toEqual(["a", "b"]);
     // Sub-5% jitter is measurement noise, not a reason to refuse a baseline.
     expect(unstableKeys(new Map([["a", 40]]), new Map([["a", 41.5]]))).toEqual([]);
-    expect(unstableKeys(new Map([["a", 6]]), new Map([["a", 2.09]]))).toHaveLength(1);
+    expect(unstableKeys(new Map([["a", 40]]), new Map([["a", 12]]))).toHaveLength(1);
+    // Wobble below the ledger line produces no debt either way: it must not block.
+    expect(unstableKeys(new Map([["a", 5.9]]), new Map([["a", 5.07]]))).toEqual([]);
+    expect(unstableKeys(new Map([["a", 5.9]]), new Map([["a", 6.5]]))).toEqual([]);
+    // A function sitting on the line does: one scan freezes it, the other does not.
+    expect(unstableKeys(new Map([["a", 9.8]]), new Map([["a", 10.2]]))).toHaveLength(1);
     // A trivial function moving 1.00 -> 1.13 is noise, not drift.
     expect(unstableKeys(new Map([["a", 1]]), new Map([["a", 1.125]]))).toEqual([]);
   });
@@ -640,5 +645,87 @@ describe("drift provenance", () => {
       coverageSource: "self",
       lcov: { bytes: 1 },
     });
+  });
+});
+
+describe("baseline generation provenance", () => {
+  it("records how the frozen numbers were produced", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-generation-"));
+    const counter = path.join(root, "calls");
+    const lcov = path.join(root, "target", "coverage", "typescript", "lcov.info");
+    // Same scores both times, but each scan writes its own coverage report — the
+    // numbers agree, and the provenance says which two reports they agreed about.
+    const tool = await stubTool(
+      `mkdir -p "$(dirname "${lcov}")" "${path.join(root, ".metrics")}"; ` +
+        `n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
+        `printf 'SF:src/a.ts\\nLF:1\\nLH:1\\nscan %s\\n' "$n" > "${lcov}"; ` +
+        `echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, root)).toBe(0);
+    stdout.mockRestore();
+
+    const written = JSON.parse(await readFile(path.join(root, "base.json"), "utf8"));
+    expect(written.scores).toEqual({ "a#f": 120 });
+    expect(written.generation).toMatchObject({
+      scans: 2,
+      coverageSource: "self",
+      platform: expect.stringContaining("/"),
+      nodeVersion: expect.stringMatching(/^v\d+\./),
+    });
+    // The frozen report is recorded in the shape the baseline file already uses, and
+    // the second scan's digest keeps the "two scans agreed" claim checkable.
+    expect(written.generation.lcov).toMatchObject({ path: expect.stringContaining("lcov.info") });
+    expect(written.generation.lcov.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const digests = written.generation.agreement.sha256 as string[];
+    expect(digests).toHaveLength(2);
+    expect(digests.every((digest) => /^[0-9a-f]{64}$/.test(digest))).toBe(true);
+    expect(new Set(digests).size).toBe(2);
+  });
+});
+
+describe("stability guard tells noise from drift", () => {
+  it("keeps sub-threshold wobble out of the gate and blocks a threshold crossover", async () => {
+    const { unstableKeys } = await import("../scripts/ub-quality-gate.mjs");
+    // Below the line in both scans: cannot enter the ledger, must not block.
+    expect(unstableKeys(new Map([["a", 5.9]]), new Map([["a", 5.1]]))).toEqual([]);
+    // One scan freezes it, the other does not: this is what makes a ledger flaky.
+    expect(unstableKeys(new Map([["a", 9.8]]), new Map([["a", 10.2]]))).toHaveLength(1);
+    // A key that disappeared from one scan entirely.
+    expect(unstableKeys(new Map([["a", 40]]), new Map())).toHaveLength(1);
+  });
+
+  it("prints what moved when it refuses", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-refuse-"));
+    const counter = path.join(root, "calls");
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}"; n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
+        `echo "{:name \\"f\\", :namespace \\"a\\", :complexity 5, :coverage 0.0, :crap $((40+n*40))}" > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
+    const messages: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      messages.push(String(chunk));
+      return true;
+    });
+    expect(stableBaseline(tool, options, root)).toBe(2);
+    stderr.mockRestore();
+    const printed = messages.join("");
+    expect(printed).toContain("refusing to write");
+    expect(printed).toMatch(/a#f: \d+ -> \d+/);
+  });
+});
+
+describe("drift line rendering", () => {
+  it("says how far a score moved when the deviation is known", async () => {
+    const { describeDrift } = await import("../scripts/ub-quality-gate.mjs");
+    expect(describeDrift({ key: "a#f", first: 40, second: 55, deviation: 0.2727 })).toBe(
+      "a#f: 40 -> 55 (27.3%)",
+    );
+    expect(describeDrift({ key: "a#g", first: 12, second: 40 })).toBe("a#g: 12 -> 40");
+    expect(describeDrift({ key: "a#h", second: 40 })).toBe("a#h: absent -> 40");
   });
 });
