@@ -1,9 +1,19 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { Command } from "commander";
+import {
+  assertExclusiveConfigOptions,
+  collectOption,
+  confirmRepairPush,
+  parseNonNegativeSafeInteger,
+  parsePort,
+  parseProfileAssignments,
+  parseTail,
+  parseTemplateOption,
+  printChecks,
+} from "./cli/options.js";
 import { loadConfig } from "./config/load.js";
 import { resolveProfile } from "./profiles/resolve.js";
 import { AdapterRegistry } from "./adapters/registry.js";
@@ -14,7 +24,7 @@ import { SqliteEventStore } from "./events/store.js";
 import { filterRunEvents, renderLogLines } from "./logs/render.js";
 import type { RunLogFilter } from "./logs/render.js";
 import { GithubPublisher } from "./github/publish.js";
-import { GithubRepairRunner, type RepairPushSummary } from "./github/repair.js";
+import { GithubRepairRunner } from "./github/repair.js";
 import type { LoadedConfig } from "./config/load.js";
 import { startControlService } from "./server/start.js";
 import { resolveSessionToken } from "./server/session-token.js";
@@ -747,111 +757,13 @@ program.parseAsync().catch((error: unknown) => {
   process.exitCode = 1;
 });
 
-function parseProfileAssignments(assignments: string[]): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const assignment of assignments) {
-    const separator = assignment.indexOf("=");
-    if (separator <= 0 || separator === assignment.length - 1) {
-      throw new Error(`Invalid profile assignment '${assignment}'; expected role=profile`);
-    }
-    result[assignment.slice(0, separator)] = assignment.slice(separator + 1);
-  }
-  return result;
-}
-
-function parseTemplateOption(value: string): "auto" | "quick" | "standard" | "full" {
-  if (value === "auto" || value === "quick" || value === "standard" || value === "full") return value;
-  throw new Error(`Unknown workflow template '${value}'; use auto, quick, standard or full`);
-}
-
-function collectOption(value: string, previous: string[]): string[] {
-  return [...previous, value];
-}
-
 async function loadRunContext(configPath?: string): Promise<{
   loaded: LoadedConfig;
   store: RunStateStore;
 }> {
   const loaded = await loadValidatedConfig(configPath);
-  const runsDirectory = path.resolve(
-    loaded.root,
-    loaded.config.project.stateDirectory,
-    "runs",
-  );
+  const runsDirectory = path.resolve(loaded.root, loaded.config.project.stateDirectory, "runs");
   return { loaded, store: new RunStateStore(runsDirectory) };
-}
-
-function printChecks(checks: Array<{ bucket: string; name: string; state: string }>): void {
-  if (checks.length === 0) {
-    process.stdout.write("No GitHub checks reported.\n");
-    return;
-  }
-  for (const check of checks) {
-    process.stdout.write(`${check.bucket.toUpperCase().padEnd(8)} ${check.name}: ${check.state}\n`);
-  }
-}
-
-/**
- * Human gate before a repair commit is pushed. Interactive sessions review the
- * commit summary and confirm; non-interactive sessions must pass --yes.
- */
-async function confirmRepairPush(summary: RepairPushSummary, yes: boolean): Promise<boolean> {
-  process.stdout.write(
-    [
-      "GitHub repair is ready to push:",
-      `  remote: ${summary.remote}/${summary.branch}`,
-      `  commit: ${summary.commitMessage}`,
-      `  changes: ${summary.changedFiles.length} file(s), +${summary.additions} -${summary.deletions}`,
-      ...summary.changedFiles.map((file) => `    ${file}`),
-      "",
-    ].join("\n"),
-  );
-  if (yes) {
-    return true;
-  }
-  if (!process.stdin.isTTY) {
-    process.stderr.write(
-      "Refusing to push without confirmation in a non-interactive session; re-run with --yes.\n",
-    );
-    return false;
-  }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await rl.question("Push this repair commit? [y/N] ");
-    return ["y", "yes"].includes(answer.trim().toLowerCase());
-  } finally {
-    rl.close();
-  }
-}
-
-function parseTail(value: string): number {
-  const tail = Number(value);
-  if (!Number.isInteger(tail) || tail < 0) {
-    throw new Error(`Invalid --tail value '${value}'; expected a non-negative integer`);
-  }
-  return tail;
-}
-
-function parsePort(value: string): number {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
-    throw new Error(`Invalid port '${value}'`);
-  }
-  return port;
-}
-
-function parseNonNegativeSafeInteger(value: string, label: string): number {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new Error(`Invalid ${label} value '${value}'; expected a non-negative safe integer`);
-  }
-  return parsed;
-}
-
-function assertExclusiveConfigOptions(options: { config?: string; workspace?: string }): void {
-  if (options.config && options.workspace) {
-    throw new Error("Use either --config or --workspace, not both");
-  }
 }
 
 async function waitForShutdownSignal(): Promise<void> {
