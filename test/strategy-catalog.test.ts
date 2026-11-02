@@ -431,10 +431,15 @@ describe("strategy blueprint catalog", () => {
       releaseFirst = resolve;
     });
     let enteredSecond = false;
+    let announceGate!: () => void;
+    const atGate = new Promise<void>((resolve) => {
+      announceGate = resolve;
+    });
     const catalog = await StrategyBlueprintCatalog.open(await loadConfig(root), {
       io: {
         beforeAtomicStage: async (stage) => {
           if (stage === "write" && !enteredSecond) {
+            announceGate();
             await firstGate;
           }
         },
@@ -442,8 +447,11 @@ describe("strategy blueprint catalog", () => {
     });
 
     const first = catalog.save("queue-a", sampleDefinition);
-    // Allow the first mutation to reach the write gate.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Wait for the signal the gate itself emits. A fixed sleep is a bet that the
+    // first save got there in time; when it loses that bet the second mutation is
+    // queued while nothing is parked, and the case passes without ever exercising
+    // serialization (measured: at 0 ms the gate never engaged).
+    await atGate;
     enteredSecond = true;
     const second = catalog.save("queue-b", alternateDefinition);
     releaseFirst();
