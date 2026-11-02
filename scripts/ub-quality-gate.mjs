@@ -536,7 +536,7 @@ function coveragePairVerdict(options, cwd) {
 }
 
 /** Everything that makes two scans unusable as a baseline, or nothing. */
-function scanRefusal(first, second, cwd) {
+export function scanRefusal(first, second, cwd = process.cwd()) {
   const missing = missingCoverageRefusal(first, second, cwd);
   if (missing !== undefined) return missing;
   const tampered = tamperRefusal(first, second);
