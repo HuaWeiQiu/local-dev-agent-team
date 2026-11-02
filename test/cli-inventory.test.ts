@@ -94,6 +94,52 @@ describe("cli inventory and role bindings", () => {
     expect(grok?.defaultModel).toBe("grok-4.6");
   });
 
+  it("reads every probe's config and version from a fixed home and a scripted machine", async () => {
+    // The four probes are separate functions with separate config formats. This case
+    // walks the installed branch of all of them against one fixed home, so their
+    // coverage is a property of the tests, not of who ran them.
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-inv-all-"));
+    await mkdir(path.join(home, ".kimi-code"), { recursive: true });
+    await writeFile(
+      path.join(home, ".kimi-code", "config.toml"),
+      `default_model = "kimi-k2"\n[api]\nkey = "kimi-secret"\n`,
+      "utf8",
+    );
+    await mkdir(path.join(home, ".claude"), { recursive: true });
+    await writeFile(
+      path.join(home, ".claude", "settings.json"),
+      JSON.stringify({ model: "claude-sonnet-4", apiKey: "claude-secret" }),
+      "utf8",
+    );
+    await mkdir(path.join(home, ".codex"), { recursive: true });
+    await writeFile(path.join(home, ".codex", "config.toml"), `model = "gpt-5.6-sol"\n`, "utf8");
+    await mkdir(path.join(home, ".grok"), { recursive: true });
+    await writeFile(path.join(home, ".grok", "config.toml"), `[models]\ndefault = "grok-4.6"\n`, "utf8");
+
+    const { execution } = scriptedExecution({
+      "which codex": { stdout: "/usr/local/bin/codex\n" },
+      "codex --version": { stdout: "codex-cli 0.147.0\n" },
+      "which grok": { stdout: "/usr/local/bin/grok\n" },
+      "grok --version": { stdout: "grok 4.6.0\n" },
+      "which kimi": { stdout: "/usr/local/bin/kimi\n" },
+      "kimi --version": { stdout: "kimi 0.9.1\n" },
+      "which claude": { stdout: "/usr/local/bin/claude\n" },
+      "claude --version": { stdout: "claude 4.2.0\n" },
+    });
+    const inventory = await scanCliInventory(home, execution);
+    const byId = new Map(inventory.clis.map((cli) => [cli.id, cli]));
+
+    for (const id of ["codex", "grok", "kimi", "claude"]) {
+      expect(byId.get(id)?.installed, id).toBe(true);
+      expect(byId.get(id)?.version, id).toBeTruthy();
+      expect(byId.get(id)?.configPaths.length, id).toBeGreaterThan(0);
+    }
+    // Secrets on disk never reach the inventory payload.
+    const json = JSON.stringify(inventory);
+    expect(json).not.toContain("kimi-secret");
+    expect(json).not.toContain("claude-secret");
+  });
+
   it("reports a machine with nothing installed without consulting PATH", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "agent-team-inv-empty-"));
     const { execution, calls } = scriptedExecution({});
