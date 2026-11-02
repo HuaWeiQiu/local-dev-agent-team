@@ -342,6 +342,16 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 2026-11 之前就吃过这个：`getInventory` 冻结在 20.24，而在它自己的刷新提交上只能测出
 23.90，谁也复现不了那份数。
 
+**第二代的漏洞（2026-11 补）：可哈希 ≠ 可复现。** existing 模式下两轮读同一份文件，
+`unstableKeys` 必然相同——它只能抓「扫描期间文件被改」，抓不到「这份覆盖率本身是一次
+运气不好的采样」。`getInventory 20.24` 就是这种形态的高概率版本。
+
+**刷新现在要求两份独立生产的报告**：`vitest --coverage` 跑两次，`--coverage-a/--coverage-b`
+传入，sha256 相同才写。不同则拒写，并把两份样本留在
+`target/coverage/unstable/{a,b}/lcov.info`——digest 只能说明「不一样」，
+落盘才能回答「哪几行没跑到」。第一次实跑就用上了：两次全仓覆盖率只有一行不同
+（`web/src/ui/dialog.tsx:38`，233 vs 0）。
+
 **第二代（强保证）：一份可哈希的覆盖率 + 记录出处。** 外部显式跑一次
 
 ```bash

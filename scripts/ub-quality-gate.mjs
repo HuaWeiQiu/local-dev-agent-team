@@ -37,7 +37,13 @@ import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
-                                  [--all] [--ub PATH] [--drift-report PATH] [-- extra args]`;
+                                  [--all] [--ub PATH] [--drift-report PATH]
+                                  [--coverage-a PATH --coverage-b PATH] [-- extra args]
+
+  --coverage-a/--coverage-b  two independently produced coverage reports. They must be
+                             byte-identical for a baseline to be written; a mismatch is
+                             a non-reproducible measurement, and both reports are kept
+                             under target/coverage/unstable/ for offline comparison.`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
@@ -61,6 +67,8 @@ export function defaultOptions(env = process.env) {
     baseline: DEFAULT_BASELINE,
     updateBaseline: false,
     driftReport: "",
+    coverageA: "",
+    coverageB: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -82,6 +90,8 @@ const VALUE_FLAGS = {
   "--ub": "ub",
   "--baseline": "baseline",
   "--drift-report": "driftReport",
+  "--coverage-a": "coverageA",
+  "--coverage-b": "coverageB",
 };
 
 /** Flags that only flip a boolean. */
@@ -418,7 +428,60 @@ function scanOnce(ub, options, cwd) {
  * document ("two `--all` runs must agree key by key"); a note gets forgotten, so the
  * gate now refuses to write when the two scans disagree.
  */
+/**
+ * A refresh must rest on a coverage report two independent runs agree on. Hashing one
+ * report proves it was not edited; it does not prove it is not a lucky sample — that is
+ * exactly how a 20.24 got frozen for a function that measured 23.90 everywhere else.
+ */
+export function requireReproducibleCoverage(options, cwd = process.cwd()) {
+  const declared = [options.coverageA, options.coverageB];
+  if (declared.some((file) => !file)) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  const paths = declared.map((file) => path.resolve(cwd, file));
+  const [a, b] = paths.map((file) => lcovProvenance(file));
+  if (!a || !b) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  if (a.sha256 !== b.sha256) return { status: preserveUnstableCoverage(paths, cwd, a, b) };
+  // The pair agrees: score the first one, from the canonical path crapper reads.
+  mkdirSync(path.dirname(coveragePath(cwd)), { recursive: true });
+  writeFileSync(coveragePath(cwd), readFileSync(paths[0]));
+  return { status: undefined };
+}
+
+/** Keep both samples so the intermittent can be diagnosed offline, not re-caught live. */
+function preserveUnstableCoverage(paths, cwd, a, b) {
+  const root = path.join(cwd, "target", "coverage", "unstable");
+  mkdirSync(path.join(root, "a"), { recursive: true });
+  mkdirSync(path.join(root, "b"), { recursive: true });
+  const kept = [
+    path.join(root, "a", "lcov.info"),
+    path.join(root, "b", "lcov.info"),
+  ];
+  writeFileSync(kept[0], readFileSync(paths[0]));
+  writeFileSync(kept[1], readFileSync(paths[1]));
+  process.stderr.write(
+    "baseline: refusing to write — the two coverage runs disagree " +
+      `(${a.sha256.slice(0, 12)}… vs ${b.sha256.slice(0, 12)}…); kept both samples:\n` +
+      `  ${path.relative(cwd, kept[0])}\n  ${path.relative(cwd, kept[1])}\n`,
+  );
+  return 2;
+}
+
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
+  if (usesExistingCoverage(options)) {
+    const pair = requireReproducibleCoverage(options, cwd);
+    if (pair.status !== undefined) return pair.status;
+  }
   const first = scanOnce(ub, options, cwd);
   // Tests only: a tamper between the scans has no other seam, because in production
   // nothing in this process can be told to act there.

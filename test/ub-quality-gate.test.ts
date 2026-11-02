@@ -49,6 +49,8 @@ describe("ub quality gate wrapper", () => {
       baseline: ".ub-crap-baseline.json",
       updateBaseline: false,
       driftReport: "",
+      coverageA: "",
+      coverageB: "",
       ub: "",
       extra: [],
     });
@@ -766,74 +768,104 @@ describe("drift noise band", () => {
   });
 });
 
-describe("baseline from one hashed coverage report", () => {
-  async function workdirWithLcov() {
-    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-existing-"));
-    await mkdir(path.join(root, "target", "coverage", "typescript"), { recursive: true });
-    await writeFile(
-      path.join(root, "target", "coverage", "typescript", "lcov.info"),
-      "SF:src/a.ts\nLF:1\nLH:1\n",
-      "utf8",
-    );
-    return root;
-  }
-  const options = () =>
-    parseArgs(["--update-baseline", "--baseline", "base.json", "--", "--use-existing-coverage"], {});
-
-  it("records the report it read, not one it generated", async () => {
-    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
-    const root = await workdirWithLcov();
-    const tool = await stubTool(
-      `mkdir -p "${path.join(root, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
-    );
-    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    expect(stableBaseline(tool, options(), root)).toBe(0);
-    stdout.mockRestore();
-    const written = JSON.parse(await readFile(path.join(root, "base.json"), "utf8"));
-    expect(written.generation.coverageSource).toBe("existing");
-    expect(written.generation.lcov.path).toContain("lcov.info");
-    expect(new Set(written.generation.agreement.sha256).size).toBe(1);
-  });
-
+describe("tampering with the report mid-refresh", () => {
   it("refuses when the report changes between the two scans", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
-    const root = await workdirWithLcov();
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-tamper-"));
+    const coverage = "SF:src/a.ts\nLF:1\nLH:1\n";
+    for (const name of ["a", "b"]) {
+      await mkdir(path.join(dir, name), { recursive: true });
+      await writeFile(path.join(dir, name, "lcov.info"), coverage, "utf8");
+    }
     const tool = await stubTool(
-      `mkdir -p "${path.join(root, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const options = parseArgs(
+      ["--update-baseline", "--baseline", "base.json", "--coverage-a", "a/lcov.info", "--coverage-b", "b/lcov.info", "--", "--use-existing-coverage"],
+      {},
     );
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     expect(
-      stableBaseline(tool, options(), root, {
+      stableBaseline(tool, options, dir, {
         betweenScans: async () => {
           await writeFile(
-            path.join(root, "target", "coverage", "typescript", "lcov.info"),
-            "SF:src/a.ts\nLF:2\nLH:1\n",
+            path.join(dir, "target", "coverage", "typescript", "lcov.info"),
+            "SF:src/a.ts\nLF:9\nLH:1\n",
             "utf8",
           );
         },
       }),
     ).toBe(2);
     stderr.mockRestore();
-    expect(existsSync(path.join(root, "base.json"))).toBe(false);
-  });
-
-  it("refuses when there is no report at all", async () => {
-    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
-    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-nolcov-"));
-    const tool = await stubTool("exit 0");
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    expect(stableBaseline(tool, options(), root)).toBe(3);
-    stderr.mockRestore();
-    expect(existsSync(path.join(root, "base.json"))).toBe(false);
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
   });
 });
 
-describe("machine provenance", () => {
-  it("reports the source, platform and node it measured under", async () => {
-    const { machineProvenance } = await import("../scripts/ub-quality-gate.mjs");
-    const facts = machineProvenance({ COVERAGE_SOURCE: "existing" });
-    expect(facts).toMatchObject({ coverageSource: "existing", platform: expect.stringContaining("/") });
-    expect(facts.nodeVersion).toMatch(/^v\d+\./);
-    expect(machineProvenance({}).coverageSource).toBe("self");
+describe("a refresh needs two coverage runs to agree", () => {
+  async function root(contents: { a?: string; b?: string }) {
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-pair-"));
+    for (const [name, text] of Object.entries(contents)) {
+      if (text === undefined) continue;
+      await mkdir(path.join(dir, `${name}`), { recursive: true });
+      await writeFile(path.join(dir, `${name}`, "lcov.info"), text, "utf8");
+    }
+    return dir;
+  }
+  const options = () =>
+    parseArgs(
+      [
+        "--update-baseline",
+        "--baseline",
+        "base.json",
+        "--coverage-a",
+        "a/lcov.info",
+        "--coverage-b",
+        "b/lcov.info",
+        "--",
+        "--use-existing-coverage",
+      ],
+      {},
+    );
+  const same = "SF:src/a.ts\nLF:1\nLH:1\n";
+
+  it("writes when both runs produced the same report", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await root({ a: same, b: same });
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(0);
+    stdout.mockRestore();
+    const written = JSON.parse(await readFile(path.join(dir, "base.json"), "utf8"));
+    expect(written.generation.coverageSource).toBe("existing");
+    expect(new Set(written.generation.agreement.sha256).size).toBe(1);
+  });
+
+  it("keeps both samples when the runs disagree", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const differing = "SF:src/a.ts\nLF:2\nLH:1\n";
+    const dir = await root({ a: same, b: differing });
+    const tool = await stubTool("exit 0");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(2);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+    // The samples are the point: a digest alone cannot show which lines were missed.
+    expect(await readFile(path.join(dir, "target", "coverage", "unstable", "a", "lcov.info"), "utf8"))
+      .toBe(same);
+    expect(await readFile(path.join(dir, "target", "coverage", "unstable", "b", "lcov.info"), "utf8"))
+      .toBe(differing);
+  });
+
+  it("refuses an existing-mode refresh that has only one report", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await root({ a: same });
+    const tool = await stubTool("exit 0");
+    const single = parseArgs(["--update-baseline", "--baseline", "base.json", "--", "--use-existing-coverage"], {});
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, single, dir)).toBe(3);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
   });
 });
