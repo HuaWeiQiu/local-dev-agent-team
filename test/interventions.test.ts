@@ -301,12 +301,25 @@ describe("stall watchdog", () => {
   });
 
   it("stays quiet when the watchdog is disabled", async () => {
-    const { run, registry } = fixture({ stallSeconds: 0, maxStallRecoveries: 2 });
+    const { run, registry, emitted } = fixture({ stallSeconds: 0, maxStallRecoveries: 2 });
     const pending = run("no-stall-run", "slow");
     const agent = await until(() => registry.list("no-stall-run")[0]);
     await new Promise((resolve) => setTimeout(resolve, 400));
+    // "Quiet" has to mean "the stall event did not happen". Checking only that the
+    // agent is still registered stays green even when the watchdog is firing.
+    expect(emitted.filter((event) => event.type === "agent.stalled")).toHaveLength(0);
     expect(registry.list("no-stall-run")).toHaveLength(1);
     await retry(() => registry.steer("no-stall-run", agent.id, "go", "lead"));
     await expect(pending).resolves.toMatchObject({ text: "steered:go" });
+  });
+
+  it("sees a stall inside the same window when the watchdog is on", async () => {
+    // Positive control for the case above: same window, watchdog enabled. If this
+    // one stops firing, "stays quiet" would silently stop proving anything.
+    const { run, emitted } = fixture({ stallSeconds: 0.05, maxStallRecoveries: 2 });
+    const pending = run("stall-visible-run", "hangforever");
+    await until(() => emitted.some((event) => event.type === "agent.stalled"));
+    expect(emitted.filter((event) => event.type === "agent.stalled").length).toBeGreaterThan(0);
+    await pending.catch(() => undefined);
   });
 });
