@@ -51,6 +51,110 @@ export function AgentsPanel({ events, controls, runActive }: AgentsPanelProps) {
   );
 }
 
+function AgentHeader({ agent }: { agent: LiveAgent }) {
+  const { capabilities } = agent;
+  return (
+    <header className="flex flex-wrap items-center gap-2">
+      <Bot aria-hidden className="size-4 text-accent" />
+      <strong className="text-sm text-ink">{agentRoleLabel(agent.role)}</strong>
+      {agent.taskId ? <Badge tone="neutral">任务 {agent.taskId}</Badge> : null}
+      <Badge tone={agent.status === "awaiting-answer" ? "warning" : "active"}>
+        {agent.status === "awaiting-answer" ? "等待回答" : "执行中"}
+      </Badge>
+      <span className="text-xs text-muted">
+        {agent.adapter} · {agent.model} · {agent.profile}
+      </span>
+      <span className="ml-auto flex gap-1">
+        <Capability enabled={capabilities.steer} label="可引导" />
+        <Capability enabled={capabilities.interrupt} label="可中断" />
+        <Capability enabled={capabilities.askUser} label="可提问" />
+      </span>
+    </header>
+  );
+}
+
+/** Mid-turn steer: only offered when the agent's session supports it. */
+function SteerForm({
+  agent,
+  text,
+  pending,
+  onText,
+  onSubmit,
+}: {
+  agent: LiveAgent;
+  text: string;
+  pending: boolean;
+  onText(value: string): void;
+  onSubmit(event: FormEvent): void;
+}) {
+  return (
+    <form onSubmit={onSubmit} className="flex gap-2">
+      <Input
+        aria-label={`引导${agentRoleLabel(agent.role)}`}
+        value={text}
+        onChange={(event) => onText(event.target.value)}
+        placeholder="给它补充一条指令，立即注入当前轮次"
+        maxLength={8_000}
+      />
+      <Button type="submit" variant="primary" disabled={pending || !text.trim()}>
+        <Send />引导
+      </Button>
+    </form>
+  );
+}
+
+/** Interrupt either ends the attempt or redirects it with a note; the note decides which. */
+function InterruptControls({
+  agent,
+  note,
+  pending,
+  redirecting,
+  onNote,
+  onRedirecting,
+  onInterrupt,
+}: {
+  agent: LiveAgent;
+  note: string;
+  pending: boolean;
+  redirecting: boolean;
+  onNote(value: string): void;
+  onRedirecting(value: boolean): void;
+  onInterrupt(): void;
+}) {
+  if (!redirecting) {
+    return (
+      <div>
+        <Button variant="warning" size="sm" onClick={() => onRedirecting(true)}>
+          <Hand />中断…
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-warning-soft p-3">
+      <label className="text-xs font-medium text-warning-ink" htmlFor={`note-${agent.id}`}>
+        中断并改道（留空则直接结束本次尝试，任务进入返工）
+      </label>
+      <Input
+        id={`note-${agent.id}`}
+        value={note}
+        onChange={(event) => onNote(event.target.value)}
+        placeholder="新的指令（可选）"
+        maxLength={8_000}
+      />
+      <div className="flex gap-2">
+        <Button variant="warning" disabled={pending} onClick={onInterrupt}>
+          <Square />
+          {note.trim() ? "中断并改道" : "中断并结束尝试"}
+        </Button>
+        <Button variant="ghost" onClick={() => onRedirecting(false)}>
+          取消
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AgentCard({ agent, events, controls }: { agent: LiveAgent; events: RunEvent[]; controls: LiveAgentControls }) {
   const feed = useMemo(() => buildAgentFeed(events, agent), [events, agent]);
   const [steerText, setSteerText] = useState("");
@@ -72,20 +176,7 @@ function AgentCard({ agent, events, controls }: { agent: LiveAgent; events: RunE
 
   return (
     <Card className="flex min-w-0 flex-col gap-3 p-4" aria-label={`${agentRoleLabel(agent.role)}智能体`}>
-      <header className="flex flex-wrap items-center gap-2">
-        <Bot aria-hidden className="size-4 text-accent" />
-        <strong className="text-sm text-ink">{agentRoleLabel(agent.role)}</strong>
-        {agent.taskId ? <Badge tone="neutral">任务 {agent.taskId}</Badge> : null}
-        <Badge tone={agent.status === "awaiting-answer" ? "warning" : "active"}>
-          {agent.status === "awaiting-answer" ? "等待回答" : "执行中"}
-        </Badge>
-        <span className="text-xs text-muted">{agent.adapter} · {agent.model} · {agent.profile}</span>
-        <span className="ml-auto flex gap-1">
-          <Capability enabled={capabilities.steer} label="可引导" />
-          <Capability enabled={capabilities.interrupt} label="可中断" />
-          <Capability enabled={capabilities.askUser} label="可提问" />
-        </span>
-      </header>
+      <AgentHeader agent={agent} />
 
       <Conversation feed={feed} />
 
@@ -94,43 +185,27 @@ function AgentCard({ agent, events, controls }: { agent: LiveAgent; events: RunE
       ))}
 
       {capabilities.steer ? (
-        <form onSubmit={(event) => void submitSteer(event)} className="flex gap-2">
-          <Input
-            aria-label={`引导${agentRoleLabel(agent.role)}`}
-            value={steerText}
-            onChange={(event) => setSteerText(event.target.value)}
-            placeholder="给它补充一条指令，立即注入当前轮次"
-            maxLength={8_000}
-          />
-          <Button type="submit" variant="primary" disabled={controls.pending || !steerText.trim()}>
-            <Send />引导
-          </Button>
-        </form>
+        <SteerForm
+          agent={agent}
+          text={steerText}
+          pending={controls.pending}
+          onText={setSteerText}
+          onSubmit={(event) => void submitSteer(event)}
+        />
       ) : (
         <Callout tone="info">该智能体使用一次性调用，无法中途引导；如需干预请取消运行。</Callout>
       )}
 
       {capabilities.interrupt ? (
-        redirecting ? (
-          <div className="flex flex-col gap-2 rounded-md bg-warning-soft p-3">
-            <label className="text-xs font-medium text-warning-ink" htmlFor={`note-${agent.id}`}>
-              中断并改道（留空则直接结束本次尝试，任务进入返工）
-            </label>
-            <Input id={`note-${agent.id}`} value={note} onChange={(event) => setNote(event.target.value)} placeholder="新的指令（可选）" maxLength={8_000} />
-            <div className="flex gap-2">
-              <Button variant="warning" disabled={controls.pending} onClick={() => void submitInterrupt()}>
-                <Square />{note.trim() ? "中断并改道" : "中断并结束尝试"}
-              </Button>
-              <Button variant="ghost" onClick={() => setRedirecting(false)}>取消</Button>
-            </div>
-          </div>
-        ) : (
-          <div>
-            <Button variant="warning" size="sm" onClick={() => setRedirecting(true)}>
-              <Hand />中断…
-            </Button>
-          </div>
-        )
+        <InterruptControls
+          agent={agent}
+          note={note}
+          pending={controls.pending}
+          redirecting={redirecting}
+          onNote={setNote}
+          onRedirecting={setRedirecting}
+          onInterrupt={() => void submitInterrupt()}
+        />
       ) : null}
     </Card>
   );
