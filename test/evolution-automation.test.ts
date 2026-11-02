@@ -168,6 +168,55 @@ describe("automatic evaluation runs", () => {
     await closeHarness(harness);
   });
 
+  it("closes an idle controller without touching the loop", async () => {
+    const harness = await createHarness(() => 4);
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+    );
+
+    await expect(controller.close()).resolves.toBeUndefined();
+    expect(controller.snapshot().status).toBe("idle");
+    await closeHarness(harness);
+  });
+
+  it("aborts a running loop on close and records who ended it", async () => {
+    const harness = await createHarness(() => 4, {
+      runWorkflow: async (request, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return evaluationState(
+          context.runId,
+          request.strategy ?? "balanced",
+          4,
+          true,
+          undefined,
+          request.goal,
+          context.purpose,
+        );
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      { createSessionId: () => "close-session" },
+    );
+    controller.start(1, "close-command", "session:owner");
+
+    await controller.close();
+
+    expect(controller.snapshot()).toMatchObject({
+      status: "stopped",
+      stopReason: "Control service closed",
+    });
+    await closeHarness(harness);
+  });
+
   it("answers a replayed start with its session even while that session still runs", async () => {
     const harness = await createHarness(() => 4, {
       runWorkflow: async (request, context) => {

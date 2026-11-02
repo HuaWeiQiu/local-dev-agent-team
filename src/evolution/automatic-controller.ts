@@ -715,26 +715,33 @@ export class AutomaticEvolutionController {
    */
   private async resolveLayeredRoleBindingsForEvaluation(): Promise<Record<string, RoleBinding> | undefined> {
     if (!this.config.useGlobalCliDefaults) return undefined;
-    if (this.globalRoleBindings !== undefined) {
-      return this.globalRoleBindings ?? undefined;
-    }
+    if (this.globalRoleBindings !== undefined) return this.globalRoleBindings ?? undefined;
+    this.globalRoleBindings = await this.loadLayeredBindings();
+    return this.globalRoleBindings ?? undefined;
+  }
+
+  /** Read once per controller: undefined means unread, null means unavailable. */
+  private async loadLayeredBindings(): Promise<Record<string, RoleBinding> | null> {
     try {
-      const { inventory } = await getInventory({
-        refresh: false,
-        ...(this.desktopHome ? { home: this.desktopHome } : {}),
-      });
       const merged = await resolveLayeredRoleBindings({
         root: this.loaded.root,
         stateDirectory: this.loaded.config.project.stateDirectory,
         knownRoles: Object.keys(this.loaded.config.roles),
-        ...(this.desktopHome ? { home: this.desktopHome } : {}),
-        inventory,
+        ...this.desktopHomeOption(),
+        inventory: (await this.readCliInventory()).inventory,
       });
-      this.globalRoleBindings = merged && Object.keys(merged).length > 0 ? merged : null;
+      return nonEmptyBindings(merged);
     } catch {
-      this.globalRoleBindings = null;
+      return null;
     }
-    return this.globalRoleBindings ?? undefined;
+  }
+
+  private desktopHomeOption(): { home?: string } {
+    return this.desktopHome ? { home: this.desktopHome } : {};
+  }
+
+  private async readCliInventory() {
+    return await getInventory({ refresh: false, ...this.desktopHomeOption() });
   }
 
   private async generateCandidate(
@@ -993,6 +1000,13 @@ function proposerBudgetStrategy(
   };
 }
 
+/** Bindings with no roles are treated as unavailable, not as an empty map. */
+function nonEmptyBindings(
+  bindings: Record<string, RoleBinding> | undefined,
+): Record<string, RoleBinding> | null {
+  return bindings && Object.keys(bindings).length > 0 ? bindings : null;
+}
+
 /** A run that died because the operator aborted is cancelled, not blocked. */
 function failureStatus(signal: AbortSignal): "cancelled" | "blocked" {
   return signal.aborted ? "cancelled" : "blocked";
@@ -1230,9 +1244,19 @@ function projectedQuality(
   };
 }
 
+const MAX_ERROR_MESSAGE = 2_000;
+
 function boundedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.length <= 2_000 ? message : `${message.slice(0, 2_000)} [truncated]`;
+  const message = errorText(error);
+  return message.length <= MAX_ERROR_MESSAGE ? message : truncateMessage(message);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncateMessage(message: string): string {
+  return `${message.slice(0, MAX_ERROR_MESSAGE)} [truncated]`;
 }
 
 function infrastructureFailureFrom(
