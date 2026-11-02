@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteEventStore } from "../src/events/store.js";
 import { createExecutionDeadline, RunBudgetTracker } from "../src/observability/budget.js";
 import { buildOtlpTraceExport } from "../src/observability/otlp.js";
@@ -178,9 +178,16 @@ describe("run observability", () => {
     events.close();
   });
 
-  it("aborts an execution segment when its strategy deadline expires", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("aborts an execution segment when its strategy deadline expires", () => {
+    vi.useFakeTimers();
     const deadline = createExecutionDeadline(0.001);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Advance the clock the deadline waits on instead of sleeping past it: the
+    // expiry is a property of the timer, not of how slow this machine happens to be.
+    vi.advanceTimersByTime(5);
     expect(() => deadline.signal.throwIfAborted()).toThrow(
       "Execution timeout of 0.001 seconds exceeded",
     );
