@@ -25,13 +25,22 @@ export function buildOtlpTraceExport(
   };
 }
 
-function eventSpan(event: RunEvent): Record<string, unknown> {
+interface SpanTiming {
+  startMs: number;
+  endMs: number;
+}
+
+/** A span starts at the event timestamp widened back by its recorded duration. */
+function spanTiming(event: RunEvent): SpanTiming {
   const payload = isRecord(event.payload) ? event.payload : {};
   const durationMs = numberValue(payload.durationMs) ?? 0;
-  const endMs = Date.parse(event.occurredAt);
-  const safeEndMs = Number.isFinite(endMs) ? Math.max(0, Math.trunc(endMs)) : 0;
-  const safeStartMs = Math.max(0, Math.trunc(safeEndMs - durationMs));
-  const failed = payload.success === false || event.type.endsWith(".crashed");
+  const parsedEnd = Date.parse(event.occurredAt);
+  const endMs = Number.isFinite(parsedEnd) ? Math.max(0, Math.trunc(parsedEnd)) : 0;
+  return { startMs: Math.max(0, Math.trunc(endMs - durationMs)), endMs };
+}
+
+function spanAttributes(event: RunEvent): Array<Record<string, unknown>> {
+  const payload = isRecord(event.payload) ? event.payload : {};
   const attributes = [
     attribute("agent_team.run.id", event.runId),
     attribute("agent_team.event.id", event.id),
@@ -53,18 +62,31 @@ function eventSpan(event: RunEvent): Record<string, unknown> {
   const usage = isRecord(payload.usage) ? payload.usage : undefined;
   addPayloadAttribute(attributes, usage, "inputTokens", "gen_ai.usage.input_tokens");
   addPayloadAttribute(attributes, usage, "outputTokens", "gen_ai.usage.output_tokens");
+  return attributes;
+}
 
+function spanName(event: RunEvent): string {
+  return event.type.startsWith("agent.invocation.") ? "invoke_agent" : event.type;
+}
+
+/** A failed invocation or a crash is an error span; everything else is unset. */
+function spanStatus(event: RunEvent): Record<string, unknown> {
+  const payload = isRecord(event.payload) ? event.payload : {};
+  if (payload.success !== false && !event.type.endsWith(".crashed")) return { code: 1 };
+  return { code: 2, message: stringValue(payload.error) ?? "operation failed" };
+}
+
+function eventSpan(event: RunEvent): Record<string, unknown> {
+  const timing = spanTiming(event);
   return {
     traceId: event.traceId,
     spanId: event.spanId,
-    name: event.type.startsWith("agent.invocation.") ? "invoke_agent" : event.type,
+    name: spanName(event),
     kind: 1,
-    startTimeUnixNano: String(BigInt(safeStartMs) * 1_000_000n),
-    endTimeUnixNano: String(BigInt(safeEndMs) * 1_000_000n),
-    attributes,
-    status: failed
-      ? { code: 2, message: stringValue(payload.error) ?? "operation failed" }
-      : { code: 1 },
+    startTimeUnixNano: String(BigInt(timing.startMs) * 1_000_000n),
+    endTimeUnixNano: String(BigInt(timing.endMs) * 1_000_000n),
+    attributes: spanAttributes(event),
+    status: spanStatus(event),
   };
 }
 
