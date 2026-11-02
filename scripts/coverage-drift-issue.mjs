@@ -16,10 +16,24 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
+/**
+ * The baseline is measured on the developer machines, the nightly job runs on
+ * Linux, and the two disagree on functions that sit near the threshold. Until that
+ * is unified, a ledger count is a lead, not a verdict — and the title has to say so
+ * or a noisy issue just trains people to scroll past it.
+ */
+export const CALIBER_UNIFIED = false;
+
+const LEDGER_TITLE = "Coverage drift · 账本上涨";
+
 export const ISSUE_TITLE = {
   infrastructure: "Coverage drift · 基础设施失败",
-  ledger: "Coverage drift · 账本上涨",
+  ledger: CALIBER_UNIFIED ? LEDGER_TITLE : `【待分诊】${LEDGER_TITLE}`,
 };
+
+const CALIBER_NOTE = CALIBER_UNIFIED
+  ? ""
+  : "> 跨环境口径尚未统一（macOS 基线 vs Linux nightly）：数字仅供参考，先分诊再处理。\n\n";
 
 const SEARCH = "Coverage drift in:title";
 
@@ -71,7 +85,19 @@ export function issuePlan(report, options = {}) {
 }
 
 function renderBody(report, { kind, counts, raised, runUrl, generatedAt }) {
-  const lines = [
+  return [
+    ...(CALIBER_NOTE ? [CALIBER_NOTE.trim(), ""] : []),
+    ...renderHeader(report, counts, generatedAt, kind),
+    ...renderVerdict(report, kind, raised),
+    ...section("已还清", report.fixed ?? [], (entry) => `${entry.key}（基线 ${fmt(entry.frozen)}）`),
+    ...(runUrl ? ["", `运行记录：${runUrl}`] : []),
+    "",
+  ].join("\n") + "\n";
+}
+
+/** What the report is about: when it ran, against which baseline, and the counts. */
+function renderHeader(report, counts, generatedAt, kind) {
+  return [
     `- 生成时间：${report.generatedAt ?? generatedAt ?? "unknown"}`,
     `- 类型：**${kind === "infrastructure" ? "基础设施失败" : "账本上涨"}**`,
     `- 阈值：CRAP > ${report.threshold ?? 10}`,
@@ -82,30 +108,31 @@ function renderBody(report, { kind, counts, raised, runUrl, generatedAt }) {
     `| ${counts.new} | ${counts.worse} | ${counts.fixed} |`,
     "",
   ];
-  if (kind === "infrastructure") {
-    lines.push(
-      "扫描本身没跑完，**这不是账本结论**。先修基础设施再谈分数：",
-      "",
-      "```text",
-      String(report.error ?? "unknown error"),
-      "```",
-      "",
-    );
-  } else if (raised === 0) {
-    lines.push("账本没有上涨。`fixed` 是这一轮还清的债，供参考。", "");
-  } else {
-    lines.push(...section("新增债务", report.new ?? [], (entry) => `${entry.key} — ${fmt(entry.score)}`));
-    lines.push(
-      ...section(
-        "恶化",
-        report.worse ?? [],
-        (entry) => `${entry.key} — ${fmt(entry.score)}（基线 ${fmt(entry.frozen)}）`,
-      ),
-    );
-  }
-  lines.push(...section("已还清", report.fixed ?? [], (entry) => `${entry.key}（基线 ${fmt(entry.frozen)}）`));
-  if (runUrl) lines.push("", `运行记录：${runUrl}`);
-  return `${lines.join("\n")}\n`;
+}
+
+/** The one thing a reader must act on: broken scan, clean ledger, or new debt. */
+function renderVerdict(report, kind, raised) {
+  if (kind === "infrastructure") return renderInfrastructure(report);
+  if (raised === 0) return ["账本没有上涨。`fixed` 是这一轮还清的债，供参考。", ""];
+  return [
+    ...section("新增债务", report.new ?? [], (entry) => `${entry.key} — ${fmt(entry.score)}`),
+    ...section(
+      "恶化",
+      report.worse ?? [],
+      (entry) => `${entry.key} — ${fmt(entry.score)}（基线 ${fmt(entry.frozen)}）`,
+    ),
+  ];
+}
+
+function renderInfrastructure(report) {
+  return [
+    "扫描本身没跑完，**这不是账本结论**。先修基础设施再谈分数：",
+    "",
+    "```text",
+    String(report.error ?? "unknown error"),
+    "```",
+    "",
+  ];
 }
 
 function section(heading, entries, line) {
@@ -121,27 +148,49 @@ function fmt(value) {
 
 /** Apply the plan through `gh`. Only this part needs a token and a repository. */
 export function applyPlan(plan, options = {}) {
-  const gh = options.gh ?? ((args) => spawnSync("gh", args, { encoding: "utf8" }));
-  const open = gh(["issue", "list", "--state", "open", "--search", SEARCH, "--json", "number,title", "--limit", "20"]);
-  if (open.status !== 0) throw new Error(`gh issue list failed: ${open.stderr}`);
-  const issues = JSON.parse(open.stdout || "[]");
-  if (plan.shouldClose) {
-    for (const issue of issues) gh(["issue", "close", String(issue.number), "--comment", "账本已归零，自动关闭。"]);
-    return { action: issues.length > 0 ? "closed" : "noop", issues: issues.map((issue) => issue.number) };
-  }
+  const gh = options.gh ?? defaultGh;
+  const issues = listOpenIssues(gh);
+  if (plan.shouldClose) return closeLedgerIssues(gh, issues);
+  // A completed scan is the evidence that closes an older infrastructure verdict:
+  // not "a newer issue exists", but "the thing that was broken now produced a
+  // verdict". An infrastructure failure proves nothing about the ledger, so it
+  // never closes a ledger issue.
+  const superseded = plan.kind === "ledger" ? issues.filter((issue) => issue.title !== plan.title) : [];
+  for (const issue of superseded) closeIssue(gh, issue.number, `由「${plan.title}」接替：本轮扫描已完成，上一轮结论不再成立。`);
   const same = issues.find((issue) => issue.title === plan.title);
-  const stale = issues.filter((issue) => issue.title !== plan.title);
-  for (const issue of stale) {
-    gh(["issue", "close", String(issue.number), "--comment", `由「${plan.title}」接替。`]);
-  }
-  if (same) {
-    const edited = gh(["issue", "edit", String(same.number), "--body", plan.body]);
-    if (edited.status !== 0) throw new Error(`gh issue edit failed: ${edited.stderr}`);
-    return { action: "updated", issues: [same.number] };
-  }
-  const created = gh(["issue", "create", "--title", plan.title, "--body", plan.body]);
-  if (created.status !== 0) throw new Error(`gh issue create failed: ${created.stderr}`);
-  return { action: "created", issues: [], url: created.stdout.trim() };
+  if (same) return updateIssue(gh, same.number, plan);
+  return openIssue(gh, plan);
+}
+
+function defaultGh(args) {
+  return spawnSync("gh", args, { encoding: "utf8" });
+}
+
+function listOpenIssues(gh) {
+  const result = gh(["issue", "list", "--state", "open", "--search", SEARCH, "--json", "number,title", "--limit", "20"]);
+  if (result.status !== 0) throw new Error(`gh issue list failed: ${result.stderr}`);
+  return JSON.parse(result.stdout || "[]");
+}
+
+function closeIssue(gh, number, comment) {
+  gh(["issue", "close", String(number), "--comment", comment]);
+}
+
+function closeLedgerIssues(gh, issues) {
+  for (const issue of issues) closeIssue(gh, issue.number, "账本已归零，自动关闭。");
+  return { action: issues.length > 0 ? "closed" : "noop", issues: issues.map((issue) => issue.number) };
+}
+
+function updateIssue(gh, number, plan) {
+  const result = gh(["issue", "edit", String(number), "--body", plan.body]);
+  if (result.status !== 0) throw new Error(`gh issue edit failed: ${result.stderr}`);
+  return { action: "updated", issues: [number] };
+}
+
+function openIssue(gh, plan) {
+  const result = gh(["issue", "create", "--title", plan.title, "--body", plan.body]);
+  if (result.status !== 0) throw new Error(`gh issue create failed: ${result.stderr}`);
+  return { action: "created", issues: [], url: result.stdout.trim() };
 }
 
 function main(argv) {
