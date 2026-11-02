@@ -12,6 +12,22 @@ import type { TaskAttemptRunner } from "./task-attempt.js";
 import type { CheckpointService } from "./checkpoints.js";
 import type { AgentFactory } from "./agents.js";
 import { assertCapability } from "../runtime/roles.js";
+import {
+  sampleWaveEnvironment,
+  waveCompletionPayload,
+  waveRejectionFacts,
+  waveTaskProgress,
+  type WaveRejectionFacts,
+  type WaveTaskProgress,
+} from "./wave-failure.js";
+
+/** A wave task that threw, with the facts needed to name it afterwards. */
+interface FailedWaveTask {
+  taskId: string;
+  error: unknown;
+  progress: WaveTaskProgress;
+  durationMs: number;
+}
 
 export class TaskScheduler {
   constructor(
@@ -110,15 +126,33 @@ export class TaskScheduler {
     );
 
     const integrationCommit = await git.currentCommit(state.integrationWorktree, signal);
-    const results = await Promise.allSettled(
-      wave.map(async (task) => await this.runWaveTask(input, task, integrationCommit)),
+    // A task that throws keeps its identity: its failure is the only record of why
+    // the wave lost a sibling, and dropping it left the run unable to say.
+    const settled = await Promise.all(
+      wave.map(async (task) => {
+        const progress = waveTaskProgress();
+        const startedAt = Date.now();
+        try {
+          const taskState = await this.runWaveTask(input, task, integrationCommit, progress);
+          return { ok: true as const, taskId: task.id, taskState, progress, durationMs: Date.now() - startedAt };
+        } catch (error) {
+          return { ok: false as const, taskId: task.id, error, progress, durationMs: Date.now() - startedAt };
+        }
+      }),
     );
-    const taskStates = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-    const rejection = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    const taskStates = settled.flatMap((result) => (result.ok ? [result.taskState] : []));
+    const rejected = settled.flatMap((result) => (result.ok ? [] : [result]));
     const passedStates = taskStates.filter((task) => task.status === "passed");
     const blocked = taskStates.filter((task) => task.status === "blocked");
 
-    this.reportWaveOutcome(input, { wave, waveTaskIds, batchKeys, rejection, passedStates, blocked });
+    await this.reportWaveOutcome(input, {
+      wave,
+      waveTaskIds,
+      batchKeys,
+      rejected,
+      passedStates,
+      blocked,
+    });
 
     await store.transition(state, "integrating", "合并本波次通过的任务");
     for (const taskState of [...passedStates].sort(byTaskId)) {
@@ -138,29 +172,55 @@ export class TaskScheduler {
    * failed is the one case that stops the run: nothing was integrated, so there is
    * nothing to build on.
    */
-  private reportWaveOutcome(
+  private async reportWaveOutcome(
     input: { state: RunState; store: RunStateStore; blockedIds: Set<string> },
     outcome: {
       wave: ReadonlyArray<unknown>;
       waveTaskIds: string[];
       batchKeys: string[];
-      rejection: PromiseRejectedResult | undefined;
-      passedStates: ReadonlyArray<unknown>;
+      rejected: ReadonlyArray<FailedWaveTask>;
+      passedStates: ReadonlyArray<{ status: string; task: { id: string } }>;
       blocked: ReadonlyArray<{ task: { id: string } }>;
     },
-  ): void {
+  ): Promise<void> {
     const { state, store } = input;
-    const { rejection, passedStates, blocked } = outcome;
-    store.emit(state.id, "run.wave.completed", {
-      taskIds: outcome.waveTaskIds,
-      concurrency: outcome.wave.length,
-      status: waveStatus(rejection, passedStates.length, blocked.length),
-      ...(rejection ? { error: messageOf(rejection.reason) } : {}),
-      ...(blocked[0] ? { blockedTaskId: blocked[0].task.id } : {}),
-      batchKeys: outcome.batchKeys,
-    });
-    if (rejection && passedStates.length === 0 && blocked.length === 0) throw rejection.reason;
+    const { rejected, passedStates, blocked } = outcome;
+    const rejection = rejected[0];
+    const facts = await this.describeRejections(state, rejected);
+    store.emit(
+      state.id,
+      "run.wave.completed",
+      waveCompletionPayload({
+        taskIds: outcome.waveTaskIds,
+        concurrency: outcome.wave.length,
+        status: waveStatus(rejection ? { reason: rejection.error } : undefined, passedStates.length, blocked.length),
+        ...(rejection ? { error: messageOf(rejection.error) } : {}),
+        ...(blocked[0] ? { blockedTaskId: blocked[0].task.id } : {}),
+        batchKeys: outcome.batchKeys,
+        ...(facts.length ? { rejected: facts } : {}),
+        ...(facts.length
+          ? { environment: await sampleWaveEnvironment(state.integrationWorktree) }
+          : {}),
+      }) as Record<string, unknown> & { blockedTaskId?: string },
+    );
+    if (rejection && passedStates.length === 0 && blocked.length === 0) throw rejection.error;
     for (const task of blocked) input.blockedIds.add(task.task.id);
+  }
+
+  /** Turn the failures of one wave into the facts an event reader can act on. */
+  private async describeRejections(
+    state: RunState,
+    rejected: ReadonlyArray<FailedWaveTask>,
+  ): Promise<WaveRejectionFacts[]> {
+    return rejected.map((failed) =>
+      waveRejectionFacts({
+        taskId: failed.taskId,
+        progress: failed.progress,
+        task: findTaskState(state, failed.taskId),
+        durationMs: failed.durationMs,
+        error: failed.error,
+      }),
+    );
   }
 
   /** One task of a wave: give it a worktree if it needs one, then run it. */
@@ -175,6 +235,7 @@ export class TaskScheduler {
     },
     task: ReturnType<typeof selectTaskWave>[number],
     integrationCommit: string,
+    progress: WaveTaskProgress,
   ): Promise<TaskRunState> {
     const { state, store, git, signal } = input;
     const taskState = findTaskState(state, task.id);
@@ -188,10 +249,13 @@ export class TaskScheduler {
       taskState.branch = branch;
       taskState.worktree = worktree;
       taskState.status = "working";
+      progress.phase = "worktree";
       await git.createWorktree(branch, integrationCommit, worktree, signal);
+      progress.phase = "dependencies";
       await this.tasks.prepareWorktreeDependencies(worktree, signal, state.strategy.maxProcessOutputBytes);
       await store.save(state);
     }
+    progress.phase = "task";
     await this.tasks.executeOneTask(state, taskState, store, git, waveAgent, input.budget, signal);
     return taskState;
   }
@@ -327,7 +391,7 @@ export function plannedWave(
 }
 
 export function waveStatus(
-  rejection: PromiseRejectedResult | undefined,
+  rejection: { reason: unknown } | undefined,
   passed: number,
   blocked: number,
 ): "failed" | "blocked" | "passed" {
