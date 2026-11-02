@@ -642,3 +642,37 @@ describe("drift provenance", () => {
     });
   });
 });
+
+describe("baseline generation provenance", () => {
+  it("records how the frozen numbers were produced", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-generation-"));
+    const counter = path.join(root, "calls");
+    const lcov = path.join(root, "target", "coverage", "typescript", "lcov.info");
+    // Same scores both times, but each scan writes its own coverage report — the
+    // numbers agree, and the provenance says which two reports they agreed about.
+    const tool = await stubTool(
+      `mkdir -p "$(dirname "${lcov}")" "${path.join(root, ".metrics")}"; ` +
+        `n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
+        `printf 'SF:src/a.ts\\nLF:1\\nLH:1\\nscan %s\\n' "$n" > "${lcov}"; ` +
+        `echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
+    );
+    const options = { ...parseArgs(["--update-baseline", "--baseline", "base.json"], {}) };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, root)).toBe(0);
+    stdout.mockRestore();
+
+    const written = JSON.parse(await readFile(path.join(root, "base.json"), "utf8"));
+    expect(written.scores).toEqual({ "a#f": 120 });
+    expect(written.generation).toMatchObject({
+      scans: 2,
+      coverageSource: "self",
+      platform: expect.stringContaining("/"),
+      nodeVersion: expect.stringMatching(/^v\d+\./),
+    });
+    const digests = Object.values(written.generation.lcov) as string[];
+    expect(digests).toHaveLength(2);
+    expect(digests.every((digest) => /^[0-9a-f]{64}$/.test(digest))).toBe(true);
+    expect(new Set(digests).size).toBe(2);
+  });
+});

@@ -369,7 +369,10 @@ function scanOnce(ub, options, cwd) {
   clearMetrics(cwd);
   rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
   runLayers(ub, { ...options, changed: false }, cwd);
-  return readScores(path.join(cwd, ".metrics", "crap.edn"));
+  return {
+    scores: readScores(path.join(cwd, ".metrics", "crap.edn")),
+    lcov: lcovProvenance(path.join(cwd, "target", "coverage", "typescript", "lcov.info")),
+  };
 }
 
 /**
@@ -380,7 +383,7 @@ function scanOnce(ub, options, cwd) {
 export function stableBaseline(ub, options, cwd = process.cwd()) {
   const first = scanOnce(ub, options, cwd);
   const second = scanOnce(ub, options, cwd);
-  const drift = unstableKeys(first, second);
+  const drift = unstableKeys(first.scores, second.scores);
   if (drift.length > 0) {
     process.stderr.write(
       `baseline: refusing to write — two full scans disagree on ${drift.length} function(s)\n`,
@@ -393,12 +396,30 @@ export function stableBaseline(ub, options, cwd = process.cwd()) {
     }
     return 2;
   }
-  return writeBaseline(second, path.resolve(cwd, options.baseline), options.baseline);
+  return writeBaseline(second.scores, path.resolve(cwd, options.baseline), options.baseline, {
+    headSha: gitHeadSha(cwd),
+    toolCommit: toolCommit(ub),
+    coverageSource: "self",
+    platform: `${platform()}/${arch()}`,
+    nodeVersion: process.version,
+    scans: 2,
+    // Both digests: the two runs agreed on the numbers, and these say which reports
+    // they agreed about. One digest would leave the second run invisible.
+    ...(first.lcov || second.lcov
+      ? { lcov: { first: first.lcov?.sha256, second: second.lcov?.sha256 } }
+      : {}),
+  });
 }
 
-function writeBaseline(scores, baselinePath, label) {
+function writeBaseline(scores, baselinePath, label, generation) {
   const frozen = Object.fromEntries([...scores].filter(([, score]) => score > 10));
-  const payload = { updatedAt: new Date().toISOString(), scores: frozen };
+  // Who produced these numbers. Without it, "where did these 172 come from?" has the
+  // same answer it had for the previous generation: some run, some time.
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    ...(generation ? { generation: dropUndefined(generation) } : {}),
+    scores: frozen,
+  };
   writeFileSync(baselinePath, `${JSON.stringify(payload, null, 2)}\n`);
   process.stdout.write(`baseline: wrote ${Object.keys(frozen).length} functions to ${label}\n`);
   return 0;
