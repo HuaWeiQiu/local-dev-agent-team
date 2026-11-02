@@ -373,29 +373,44 @@ export class ClaudeStreamSession implements AgentSession {
   private handleResult(message: Json): void {
     const active = this.active;
     if (!active) return;
+    this.recordSessionId(message);
+    this.mergeTurnUsage(active, message);
+    if (this.consumeRedirect(active)) return;
+    this.finishTurn(active, message);
+  }
+
+  private recordSessionId(message: Json): void {
     if (typeof message.session_id === "string") this.sessionId = message.session_id;
+  }
+
+  private mergeTurnUsage(active: ActiveTurn, message: Json): void {
     const usage = extractUsage(message);
-    if (usage) {
-      active.usage = mergeUsage(active.usage, usage);
-      this.hub.emit({ type: "usage", turnId: active.turnId, usage: active.usage });
-    }
+    if (!usage) return;
+    active.usage = mergeUsage(active.usage, usage);
+    this.hub.emit({ type: "usage", turnId: active.turnId, usage: active.usage });
+  }
 
-    if (active.interruptRequested && active.redirect !== undefined) {
-      const guidance = active.redirect;
-      active.redirect = undefined;
-      active.interruptRequested = false;
-      this.hub.emit({ type: "notice", level: "info", message: "turn redirected by the operator" });
-      this.sendUser(`Operator guidance (take this into account and continue the task):\n${guidance}`);
-      return;
-    }
+  /**
+   * An operator redirect eats the interrupt: the guidance goes back as a fresh
+   * user turn and the CLI keeps the same conversation, so the turn has not ended.
+   */
+  private consumeRedirect(active: ActiveTurn): boolean {
+    if (!active.interruptRequested || active.redirect === undefined) return false;
+    const guidance = active.redirect;
+    active.redirect = undefined;
+    active.interruptRequested = false;
+    this.hub.emit({ type: "notice", level: "info", message: "turn redirected by the operator" });
+    this.sendUser(`Operator guidance (take this into account and continue the task):\n${guidance}`);
+    return true;
+  }
 
-    const isError = message.is_error === true;
-    const status: TurnStatus =
-      active.forced?.status ?? (active.interruptRequested ? "interrupted" : isError ? "failed" : "completed");
-    const text = typeof message.result === "string" && message.result.length > 0 ? message.result : active.streamed;
+  private finishTurn(active: ActiveTurn, message: Json): void {
+    const status = turnStatus(active, message);
+    const text = turnText(message, active);
+    const error = active.forced?.error ?? (status === "failed" ? errorText(message, text) : undefined);
     this.hub.emit({ type: "turn-completed", turnId: active.turnId, status });
     active.done.resolve(
-      this.result(active, status, active.forced?.error ?? (status === "failed" ? errorText(message, text) : undefined), text, message.structured_output),
+      this.result(active, status, error, text, message.structured_output),
     );
   }
 
@@ -453,6 +468,20 @@ function questionEvent(
     prompt: String(question.question ?? ""),
     ...(options && options.length > 0 ? { options } : {}),
   };
+}
+
+/** A forced status wins, then an operator interrupt, then the CLI's own verdict. */
+function turnStatus(active: ActiveTurn, message: Json): TurnStatus {
+  if (active.forced) return active.forced.status;
+  if (active.interruptRequested) return "interrupted";
+  return message.is_error === true ? "failed" : "completed";
+}
+
+/** The CLI's final result text wins over what streamed before it. */
+function turnText(message: Json, active: ActiveTurn): string {
+  return typeof message.result === "string" && message.result.length > 0
+    ? message.result
+    : active.streamed;
 }
 
 type SessionEvent = Parameters<SessionEventHub["emit"]>[0];
@@ -597,9 +626,14 @@ function promptWithSchema(prompt: string, schema: Record<string, unknown>): stri
   return `${prompt}\n\nRespond with a single JSON document and nothing else. It must satisfy this JSON Schema:\n${JSON.stringify(schema)}`;
 }
 
-function tryParseJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  for (const candidate of [text.trim(), fenced?.[1]?.trim()]) {
+/** The content of a ```json fenced block, when the answer wrapped its JSON. */
+function fencedJson(text: string): string | undefined {
+  return text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+}
+
+/** The first candidate that parses; an unparsable answer yields nothing. */
+function parseFirstJson(candidates: Array<string | undefined>): unknown {
+  for (const candidate of candidates) {
     if (!candidate) continue;
     try {
       return JSON.parse(candidate);
@@ -609,3 +643,8 @@ function tryParseJson(text: string): unknown {
   }
   return undefined;
 }
+
+function tryParseJson(text: string): unknown {
+  return parseFirstJson([text.trim(), fencedJson(text)]);
+}
+
