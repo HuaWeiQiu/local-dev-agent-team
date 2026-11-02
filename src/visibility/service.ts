@@ -22,6 +22,87 @@ export class RunNotFound extends Error {
   override readonly name = "RunNotFound";
 }
 
+const COMMIT_UNREADABLE = "记录的任务提交当前不可读取";
+const STAGED_EMPTY = "工作区暂无已暂存的改动";
+const NOTHING_TO_SHOW = "任务尚未产生可查看的改动";
+
+/** A task diff answer that carries no content, only the reason there is none. */
+function taskDiffAnswer(
+  taskId: string,
+  detail: string,
+  extra: { source?: "commit" | "worktree"; commit?: string } = {},
+): TaskDiffEvidence {
+  return {
+    taskId,
+    available: false,
+    ...extra,
+    changedFiles: [],
+    truncated: false,
+    detail,
+  };
+}
+
+/** The commit a task recorded, when git can still read it. */
+async function recordedCommitDiff(
+  git: GitManager,
+  taskId: string,
+  commit: string,
+): Promise<TaskDiffEvidence> {
+  try {
+    const diff = await git.commitDiff(commit);
+    return {
+      taskId,
+      available: true,
+      source: "commit",
+      commit,
+      changedFiles: diff.changedFiles,
+      content: diff.content,
+      truncated: diff.truncated,
+    };
+  } catch {
+    return taskDiffAnswer(taskId, COMMIT_UNREADABLE, { commit });
+  }
+}
+
+/** The staged worktree of a task that has not committed yet, if it holds any diff. */
+async function stagedWorktreeDiff(
+  git: GitManager,
+  taskId: string,
+  worktree: string,
+): Promise<TaskDiffEvidence | undefined> {
+  if (!(await directoryExists(worktree))) return undefined;
+  try {
+    const content = await git.stagedDiff(worktree);
+    return worktreeDiffAnswer(taskId, content, await git.changedFiles(worktree));
+  } catch {
+    return undefined;
+  }
+}
+
+function worktreeDiffAnswer(
+  taskId: string,
+  content: string,
+  changedFiles: string[],
+): TaskDiffEvidence {
+  const staged = content.length > 0;
+  return {
+    taskId,
+    available: staged,
+    source: "worktree",
+    changedFiles,
+    ...(staged ? { content } : {}),
+    truncated: content.includes("[diff truncated"),
+    ...(staged ? {} : { detail: STAGED_EMPTY }),
+  };
+}
+
+function directoryExists(directory: string): Promise<boolean> {
+  return stat(directory).then(
+    () => true,
+    () => false,
+  );
+}
+
 /**
  * Read-only views over one run: why it is in its state, what it cost, what
  * each agent said, what each task changed and how the run unfolded. Every view
@@ -65,56 +146,21 @@ export class RunInsights {
     const state = await this.require(runId);
     const task = state.tasks.find((item) => item.task.id === taskId);
     if (!task) throw new RunNotFound(`Task '${taskId}' was not found`);
-    const git = new GitManager(
+    const git = this.gitManager();
+    if (task.commit) return recordedCommitDiff(git, taskId, task.commit);
+    const staged = task.worktree
+      ? await stagedWorktreeDiff(git, taskId, task.worktree)
+      : undefined;
+    return staged ?? taskDiffAnswer(taskId, NOTHING_TO_SHOW);
+  }
+
+  private gitManager(): GitManager {
+    const worktrees = path.resolve(
       this.loaded.root,
-      path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
+      this.loaded.config.project.stateDirectory,
+      "worktrees",
     );
-    if (task.commit) {
-      try {
-        const diff = await git.commitDiff(task.commit);
-        return {
-          taskId,
-          available: true,
-          source: "commit",
-          commit: task.commit,
-          changedFiles: diff.changedFiles,
-          content: diff.content,
-          truncated: diff.truncated,
-        };
-      } catch {
-        return {
-          taskId,
-          available: false,
-          commit: task.commit,
-          changedFiles: [],
-          truncated: false,
-          detail: "记录的任务提交当前不可读取",
-        };
-      }
-    }
-    if (task.worktree && (await stat(task.worktree).then(() => true, () => false))) {
-      try {
-        const content = await git.stagedDiff(task.worktree);
-        return {
-          taskId,
-          available: content.length > 0,
-          source: "worktree",
-          changedFiles: await git.changedFiles(task.worktree),
-          ...(content ? { content } : {}),
-          truncated: content.includes("[diff truncated"),
-          ...(content ? {} : { detail: "工作区暂无已暂存的改动" }),
-        };
-      } catch {
-        // fall through to the unavailable answer
-      }
-    }
-    return {
-      taskId,
-      available: false,
-      changedFiles: [],
-      truncated: false,
-      detail: "任务尚未产生可查看的改动",
-    };
+    return new GitManager(this.loaded.root, worktrees);
   }
 
   private async require(runId: string): Promise<RunState> {
