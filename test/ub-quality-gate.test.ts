@@ -888,3 +888,28 @@ describe("tool commit", () => {
     expect(toolCommit("/nonexistent/ub", {})).toBeUndefined();
   });
 });
+
+describe("the coverage pair has a flag dependency", () => {
+  it("refuses a pair given without --use-existing-coverage", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-pair-flag-"));
+    await mkdir(path.join(dir, "a"), { recursive: true });
+    await mkdir(path.join(dir, "b"), { recursive: true });
+    await writeFile(path.join(dir, "a", "lcov.info"), "SF:src/a.ts\nDA:1,1\n", "utf8");
+    await writeFile(path.join(dir, "b", "lcov.info"), "SF:src/a.ts\nDA:1,1\n", "utf8");
+    const tool = await stubTool("exit 0");
+    // No `-- --use-existing-coverage`: the gate would silently regenerate coverage and
+    // ignore the pair, then call the result a reproducible refresh.
+    const options = parseArgs(
+      ["--update-baseline", "--baseline", "base.json", "--coverage-a", "a/lcov.info", "--coverage-b", "b/lcov.info"],
+      {},
+    );
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, dir)).toBe(1);
+    const printed = stderr.mock.calls.map((call) => String(call[0])).join("");
+    stderr.mockRestore();
+    expect(printed).toContain("--use-existing-coverage");
+    expect(printed).toContain("--coverage-a A --coverage-b B -- --use-existing-coverage");
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+});

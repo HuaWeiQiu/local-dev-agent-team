@@ -43,7 +43,13 @@ const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mut
   --coverage-a/--coverage-b  two independently produced coverage reports. They must cover
                              the same lines for a baseline to be written (hit counts may
                              differ); when they do not, both reports are kept under
-                             target/coverage/unstable/ for offline comparison.`;
+                             target/coverage/unstable/ for offline comparison.
+                             These two REQUIRE --use-existing-coverage (after the "--"),
+                             otherwise the gate regenerates its own coverage and ignores
+                             the pair:
+
+                               node scripts/ub-quality-gate.mjs --all --update-baseline \
+                                 --coverage-a A --coverage-b B -- --use-existing-coverage`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
@@ -511,6 +517,8 @@ function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
 }
 
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
+  const misuse = coveragePairMisuse(options);
+  if (misuse !== undefined) return misuse;
   const pairVerdict = coveragePairVerdict(options, cwd);
   if (pairVerdict !== undefined) return pairVerdict;
   const first = scanOnce(ub, options, cwd);
@@ -526,6 +534,24 @@ export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
     options.baseline,
     baselineGeneration({ ub, cwd, first, second }),
   );
+}
+
+/**
+ * A pair without the flag would silently be ignored: the gate would regenerate its own
+ * coverage (self mode), compare those two, and call the result a reproducible refresh.
+ * Defaults must not change meaning because one flag was left out.
+ */
+function coveragePairMisuse(options) {
+  const declared = Boolean(options.coverageA || options.coverageB);
+  if (!declared || usesExistingCoverage(options)) return undefined;
+  process.stderr.write(
+    "baseline: refusing to write — --coverage-a/--coverage-b only apply together with " +
+      "--use-existing-coverage; without it the gate regenerates its own coverage and " +
+      "ignores the pair.\n\n" +
+      "  node scripts/ub-quality-gate.mjs --all --update-baseline \\\n" +
+      "    --coverage-a A --coverage-b B -- --use-existing-coverage\n",
+  );
+  return 1;
 }
 
 /** Existing mode only: the two input reports must agree before anything is scored. */
