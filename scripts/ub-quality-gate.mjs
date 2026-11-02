@@ -40,10 +40,11 @@ const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mut
                                   [--all] [--ub PATH] [--drift-report PATH]
                                   [--coverage-a PATH --coverage-b PATH] [-- extra args]
 
-  --coverage-a/--coverage-b  two independently produced coverage reports. They must be
-                             byte-identical for a baseline to be written; a mismatch is
-                             a non-reproducible measurement, and both reports are kept
-                             under target/coverage/unstable/ for offline comparison.`;
+  --coverage-a/--coverage-b  two independently produced coverage reports. They must cover
+                             the same lines for a baseline to be written (hit counts may
+                             differ); a mismatch is a non-reproducible measurement, and
+                             both reports are kept under target/coverage/unstable/ for
+                             offline comparison.`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
