@@ -407,7 +407,11 @@ export function driftStep(options, ub, cwd = process.cwd()) {
   clearMetrics(cwd);
   const failed = runLayers(ub, full, cwd);
   const metricsPath = path.join(cwd, ".metrics", "crap.edn");
-  if (failed !== 0) return driftVerdict(options, cwd, { error: `gate: layer exited ${failed}` }, 1);
+  // Exit 2 means "scores are over the threshold" — that is the ledger's subject, not
+  // a broken run. A repo with a frozen baseline always exits 2 on a full scan, so
+  // reading the code here would report every nightly run as infrastructure.
+  const broke = failed !== 0 && failed !== 2;
+  if (broke) return driftVerdict(options, cwd, { error: `gate: layer exited ${failed}` }, 1);
   if (!existsSync(metricsPath)) {
     return driftVerdict(options, cwd, { error: "metrics file missing after a full scan" }, 1);
   }

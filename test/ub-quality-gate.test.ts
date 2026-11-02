@@ -399,6 +399,23 @@ EDN`,
     expect(written.fixed[0]).toMatchObject({ key: "a#paid", frozen: 60 });
   });
 
+  it("reads exit 2 as a ledger verdict, not as a broken scan", async () => {
+    // A full scan of a repo with a frozen baseline always exits 2 (scores over the
+    // threshold). Treating that as infrastructure reported every nightly run broken.
+    const root = await driftWorkdir([], { "a#grown": 50, "a#paid": 60 });
+    const metrics = path.join(root, ".metrics", "crap.edn");
+    const tool = await stubTool(
+      `mkdir -p "${path.join(root, ".metrics")}" && printf '%s\\n' '{:name "grown", :namespace "a", :complexity 5, :coverage 0.0, :crap 55.0}' > "${metrics}" && exit 2`,
+    );
+    const options = { ...parseArgs(["--drift-report", "drift.json", "--baseline", "base.json"], {}) };
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(driftStep(options, tool, root)).toBe(0);
+    vi.restoreAllMocks();
+    const written = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(written.kind).toBe("ledger");
+    expect(written.counts).toEqual({ new: 0, worse: 1, fixed: 1 });
+  });
+
   it("reports a crashed scan as infrastructure, never as a clean ledger", async () => {
     const root = await driftWorkdir([], { "a#big": 50 });
     const crashed = await stubTool("exit 1");
