@@ -224,57 +224,93 @@ export class AutomaticEvolutionController {
     commandId: string = randomUUID(),
     operator = "system:local-automation",
   ): AutomaticEvolutionSnapshot {
+    const maxCycles = this.startableMaxCycles(requestedMaxCycles);
+    const sessionId = this.createSessionId();
+    const claim = this.claimStart(commandId, sessionId, maxCycles, operator);
+    // A replay answers with the accepted session before the running check: the
+    // command was already accepted, so it is not a second start.
+    if (claim.replay) return claim.replay;
+    this.assertNotRunning(claim.key, claim.hash);
+    const session = this.beginSession(claim.key, claim.hash);
+    this.state = this.runningState(maxCycles, sessionId);
+    this.session = session;
+    this.abortController = new AbortController();
+    this.startLoop(session, { sessionId, commandId, operator, maxCycles });
+    return this.snapshot();
+  }
+
+  private startableMaxCycles(requested: number | undefined): number {
     if (!this.config.enabled) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_DISABLED",
         "Automatic evolution is disabled in agent-team.yaml",
       );
     }
-    const maxCycles = requestedMaxCycles ?? this.config.maxCycles;
+    const maxCycles = requested ?? this.config.maxCycles;
     if (!Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > this.config.maxCycles) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_CYCLE_LIMIT",
         `Automatic evolution cycles must be between 1 and configured maxCycles ${this.config.maxCycles}`,
       );
     }
-    const sessionId = this.createSessionId();
-    const idempotencyKey = `evolution-automation:start:${commandId}`;
-    const requestHash = automaticStartRequestHash(maxCycles, operator);
-    const claim = (() => {
-      try {
-        return this.host.events.claimCommand(idempotencyKey, requestHash, {
-          sessionId,
-          maxCycles,
-          operator,
-        });
-      } catch (error) {
-        throw new AutomaticEvolutionError(
-          "AUTOMATION_COMMAND_CONFLICT",
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    })();
-    if (!claim.claimed) {
-      const replay = automaticStartResponse(claim.response, commandId);
-      if (this.state.sessionId === replay.sessionId) return this.snapshot();
+    return maxCycles;
+  }
+
+  /** A command is accepted once; a replay returns the session it created. */
+  private claimStart(
+    commandId: string,
+    sessionId: string,
+    maxCycles: number,
+    operator: string,
+  ): { key: string; hash: string; replay?: undefined } | { key: string; hash: string; replay?: AutomaticEvolutionSnapshot } {
+    const key = `evolution-automation:start:${commandId}`;
+    const hash = automaticStartRequestHash(maxCycles, operator);
+    const claim = this.claimCommand(key, hash, { sessionId, maxCycles, operator });
+    if (claim.claimed) return { key, hash };
+    const replay = automaticStartResponse(claim.response, commandId);
+    if (this.state.sessionId === replay.sessionId) return { key, hash, replay: this.snapshot() };
+    throw new AutomaticEvolutionError(
+      "AUTOMATION_COMMAND_CONFLICT",
+      `Automatic evolution command '${commandId}' was already accepted by session '${replay.sessionId}'`,
+    );
+  }
+
+  private claimCommand(
+    key: string,
+    hash: string,
+    request: { sessionId: string; maxCycles: number; operator: string },
+  ) {
+    try {
+      return this.host.events.claimCommand(key, hash, request);
+    } catch (error) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_COMMAND_CONFLICT",
-        `Automatic evolution command '${commandId}' was already accepted by session '${replay.sessionId}'`,
+        error instanceof Error ? error.message : String(error),
       );
     }
-    if (this.loop) {
-      this.host.events.releaseCommand(idempotencyKey, requestHash);
-      throw new AutomaticEvolutionError("AUTOMATION_RUNNING", "Automatic evolution is already running");
-    }
-    let session: AutomaticEvolutionRunSession;
+  }
+
+  private assertNotRunning(key: string, hash: string): void {
+    if (!this.loop) return;
+    this.host.events.releaseCommand(key, hash);
+    throw new AutomaticEvolutionError(
+      "AUTOMATION_RUNNING",
+      "Automatic evolution is already running",
+    );
+  }
+
+  private beginSession(key: string, hash: string): AutomaticEvolutionRunSession {
     try {
-      session = this.host.beginAutomationSession();
+      return this.host.beginAutomationSession();
     } catch (error) {
-      this.host.events.releaseCommand(idempotencyKey, requestHash);
+      this.host.events.releaseCommand(key, hash);
       throw error;
     }
+  }
+
+  private runningState(maxCycles: number, sessionId: string): AutomaticEvolutionSnapshot {
     const now = this.timestamp();
-    this.state = {
+    return {
       ...this.initialState(),
       status: "running",
       phase: "baseline",
@@ -285,42 +321,43 @@ export class AutomaticEvolutionController {
       // 最近一次完成的评测在新一轮基线评测刷新前仍然有效。
       lastEvaluation: this.state.lastEvaluation,
     };
-    this.session = session;
-    this.abortController = new AbortController();
-    const loopSignal = this.abortController.signal;
-    const loop = this.runLoop(
-      session,
-      sessionId,
-      commandId,
-      operator,
-      maxCycles,
-      loopSignal,
-    )
-      .catch((error: unknown) => {
-        if (loopSignal.aborted && error === loopSignal.reason) {
-          this.finish("stopped", this.state.stopReason ?? "Automatic evolution was stopped");
-          return;
-        }
-        const infrastructure = infrastructureFailureFrom(error);
-        this.state.error = error instanceof Error ? error.message : String(error);
-        if (infrastructure) {
-          this.state.failureCode = infrastructure.code;
-          this.finish(
-            "paused",
-            `Paused for provider infrastructure failure ${infrastructure.code}: ${infrastructure.summary}`,
-          );
-          return;
-        }
-        this.finish("failed", "Automatic evolution failed closed");
-      })
-      .finally(() => {
-        if (this.loop === loop) this.loop = undefined;
-        this.abortController = undefined;
-        this.session = undefined;
-      });
+  }
+
+  private startLoop(
+    session: AutomaticEvolutionRunSession,
+    run: { sessionId: string; commandId: string; operator: string; maxCycles: number },
+  ): void {
+    const signal = this.abortController!.signal;
+    const loop = this.runLoop(session, run.sessionId, run.commandId, run.operator, run.maxCycles, signal)
+      .catch((error: unknown) => this.settleLoopFailure(error, signal))
+      .finally(() => this.clearLoop(loop));
     this.loop = loop;
     void loop.catch(() => undefined);
-    return this.snapshot();
+  }
+
+  /** Three ways a loop ends badly: stopped by the operator, paused by a provider, failed. */
+  private settleLoopFailure(error: unknown, signal: AbortSignal): void {
+    if (signal.aborted && error === signal.reason) {
+      this.finish("stopped", this.state.stopReason ?? "Automatic evolution was stopped");
+      return;
+    }
+    const infrastructure = infrastructureFailureFrom(error);
+    this.state.error = error instanceof Error ? error.message : String(error);
+    if (infrastructure) {
+      this.state.failureCode = infrastructure.code;
+      this.finish(
+        "paused",
+        `Paused for provider infrastructure failure ${infrastructure.code}: ${infrastructure.summary}`,
+      );
+      return;
+    }
+    this.finish("failed", "Automatic evolution failed closed");
+  }
+
+  private clearLoop(loop: Promise<void>): void {
+    if (this.loop === loop) this.loop = undefined;
+    this.abortController = undefined;
+    this.session = undefined;
   }
 
   async stop(reason = "Stopped by the local operator"): Promise<AutomaticEvolutionSnapshot> {

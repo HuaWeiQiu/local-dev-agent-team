@@ -168,6 +168,42 @@ describe("automatic evaluation runs", () => {
     await closeHarness(harness);
   });
 
+  it("answers a replayed start with its session even while that session still runs", async () => {
+    const harness = await createHarness(() => 4, {
+      runWorkflow: async (request, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return evaluationState(
+          context.runId,
+          request.strategy ?? "balanced",
+          4,
+          true,
+          undefined,
+          request.goal,
+          context.purpose,
+        );
+      },
+    });
+    const controller = new AutomaticEvolutionController(
+      harness.loaded,
+      harness.coordinator,
+      harness.strategies,
+      harness.supervisor,
+      { createSessionId: () => "replay-session" },
+    );
+
+    const first = controller.start(1, "replayed-command", "session:owner");
+    // The loop is still running here: the replay must win over the running check,
+    // otherwise a client retry would be told "already running" for its own command.
+    const second = controller.start(1, "replayed-command", "session:owner");
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.status).toBe("running");
+    await controller.stop("replay fixture done");
+    await closeHarness(harness);
+  });
+
   it("refuses an evaluation run that does not match the request it belongs to", async () => {
     const harness = await createHarness(() => 4, {
       runWorkflow: async (request, context) => {
