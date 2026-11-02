@@ -706,14 +706,31 @@ export class AutomaticEvolutionController {
   ): Promise<AutomaticStrategyCandidate> {
     if (this.proposeCandidate) return await this.proposeCandidate(context, signal);
     const runId = createRunId(`automatic evolution proposer cycle ${context.cycle}`);
-    const baseCommit = await new GitManager(
+    const baseCommit = await this.resolveProposerBaseCommit();
+    const state = this.proposerRunState(runId, baseCommit, context);
+    await this.artifactStore.save(state);
+    return await this.runProposer(state, context, runId, signal);
+  }
+
+  private async resolveProposerBaseCommit(): Promise<string> {
+    const git = new GitManager(
       this.loaded.root,
       path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
-    ).resolveCommit(this.loaded.config.project.defaultBranch);
+    );
+    return await git.resolveCommit(this.loaded.config.project.defaultBranch);
+  }
+
+  /** The proposer is an ordinary bounded run, so it carries a real run state. */
+  private proposerRunState(
+    runId: string,
+    baseCommit: string,
+    context: AutomaticProposalContext,
+  ): RunState {
     const now = this.timestamp();
-    const state: RunState = {
+    const cycle = context.cycle;
+    return {
       id: runId,
-      goal: `Generate automatic strategy candidate for cycle ${context.cycle}`,
+      goal: `Generate automatic strategy candidate for cycle ${cycle}`,
       root: this.loaded.root,
       configPath: this.loaded.path,
       baseBranch: this.loaded.config.project.defaultBranch,
@@ -726,7 +743,7 @@ export class AutomaticEvolutionController {
       profileOverrides: {},
       strategy: proposerBudgetStrategy(
         resolveStrategy(this.loaded.config, context.incumbentStrategy),
-        this.loaded.config.roles[this.config.proposerRole]?.fallbackProfiles.length ?? 0,
+        proposerFallbackCount(this.loaded.config.roles[this.config.proposerRole]),
       ),
       supervisorId: this.host.id,
       purpose: "evolution-proposer",
@@ -734,10 +751,17 @@ export class AutomaticEvolutionController {
       history: [{
         at: now,
         status: "orchestrating",
-        message: `Generating bounded automatic strategy candidate for cycle ${context.cycle}`,
+        message: `Generating bounded automatic strategy candidate for cycle ${cycle}`,
       }],
     };
-    await this.artifactStore.save(state);
+  }
+
+  private async runProposer(
+    state: RunState,
+    context: AutomaticProposalContext,
+    runId: string,
+    signal: AbortSignal,
+  ): Promise<AutomaticStrategyCandidate> {
     const deadline = createExecutionDeadline(state.strategy.executionTimeoutSeconds, signal);
     const budget = new RunBudgetTracker(state, this.artifactStore);
     const agent = new ProfiledAgentService(
@@ -749,16 +773,7 @@ export class AutomaticEvolutionController {
       budget,
     );
     try {
-      const response = await agent.runStructured({
-        role: this.config.proposerRole,
-        ...(this.config.proposerProfile ? { profileName: this.config.proposerProfile } : {}),
-        promptKey: "evolution-proposer",
-        runId,
-        artifactKey: "proposal",
-        context,
-        schema: automaticStrategyCandidateSchema,
-        jsonSchema: z.toJSONSchema(automaticStrategyCandidateSchema) as Record<string, unknown>,
-      });
+      const response = await agent.runStructured(proposerRequest(this.config, context, runId));
       await this.artifactStore.transition(
         state,
         "completed",
@@ -767,11 +782,7 @@ export class AutomaticEvolutionController {
       return response.value;
     } catch (error) {
       state.error = boundedErrorMessage(error);
-      await this.artifactStore.transition(
-        state,
-        signal.aborted ? "cancelled" : "blocked",
-        state.error,
-      );
+      await this.artifactStore.transition(state, failureStatus(signal), state.error);
       throw error;
     } finally {
       deadline.dispose();
@@ -942,6 +953,34 @@ function proposerBudgetStrategy(
     executionTimeoutSeconds: Math.min(incumbent.executionTimeoutSeconds, 1_800),
     maxProcessOutputBytes: Math.min(incumbent.maxProcessOutputBytes, 1_048_576),
     maxArtifactBytes: Math.min(incumbent.maxArtifactBytes, 16_777_216),
+  };
+}
+
+/** A run that died because the operator aborted is cancelled, not blocked. */
+function failureStatus(signal: AbortSignal): "cancelled" | "blocked" {
+  return signal.aborted ? "cancelled" : "blocked";
+}
+
+/** The proposer budget floor depends on how many fallbacks the role declares. */
+function proposerFallbackCount(role: { fallbackProfiles: string[] } | undefined): number {
+  return role ? role.fallbackProfiles.length : 0;
+}
+
+/** The structured request the proposer agent receives; kept together with its schema. */
+function proposerRequest(
+  config: AutomaticEvolutionConfig,
+  context: AutomaticProposalContext,
+  runId: string,
+) {
+  return {
+    role: config.proposerRole,
+    ...(config.proposerProfile ? { profileName: config.proposerProfile } : {}),
+    promptKey: "evolution-proposer" as const,
+    runId,
+    artifactKey: "proposal" as const,
+    context,
+    schema: automaticStrategyCandidateSchema,
+    jsonSchema: z.toJSONSchema(automaticStrategyCandidateSchema) as Record<string, unknown>,
   };
 }
 
@@ -1163,26 +1202,41 @@ function infrastructureFailureFrom(
   error: unknown,
 ): ProviderFailureClassification | undefined {
   if (error instanceof ProviderFailureError) {
-    return error.classification.pauseEvolution || error.classification.infrastructure
-      ? error.classification
+    const { classification } = error;
+    return classification.pauseEvolution || classification.infrastructure
+      ? classification
       : undefined;
   }
   if (error instanceof RoleProfileChainError) {
     return error.attempts.find((attempt) => attempt.classification.pauseEvolution)
       ?.classification;
   }
-  const classification = classifyError(error);
-  return classification.pauseEvolution ? classification : undefined;
+  return pauseOnly(classifyError(error));
 }
 
 function infrastructureFailureFromRun(
   state: RunState,
 ): ProviderFailureClassification | undefined {
+  return pauseOnly(classifyRunFailure(runFailureMessage(state)));
+}
+
+/** Only a run the system gave up on can carry an infrastructure verdict. */
+function runFailureMessage(state: RunState): string | undefined {
   if (state.status !== "blocked" && state.status !== "interrupted") return undefined;
-  const message = state.error ?? state.history.at(-1)?.message;
-  if (!message) return undefined;
-  const classification = classifyProviderFailureMessage(message);
-  return classification.pauseEvolution ? classification : undefined;
+  return state.error ?? state.history.at(-1)?.message;
+}
+
+function classifyRunFailure(
+  message: string | undefined,
+): ProviderFailureClassification | undefined {
+  return message ? classifyProviderFailureMessage(message) : undefined;
+}
+
+/** A classification only pauses the loop when the provider says it is infrastructure. */
+function pauseOnly(
+  classification: ProviderFailureClassification | undefined,
+): ProviderFailureClassification | undefined {
+  return classification?.pauseEvolution ? classification : undefined;
 }
 
 function classifyProviderFailureMessage(message: string): ProviderFailureClassification {
