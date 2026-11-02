@@ -17,12 +17,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
 /**
- * The baseline is measured on the developer machines, the nightly job runs on
- * Linux, and the two disagree on functions that sit near the threshold. Until that
- * is unified, a ledger count is a lead, not a verdict — and the title has to say so
- * or a noisy issue just trains people to scroll past it.
+ * Unified on 2026-11-02: the guard runs on macos-14 with Node 26 (the machine that
+ * produces the baseline), the coverage source matches the baseline refresh, and the
+ * probes that made coverage machine-dependent answer from a script in tests.
+ * Measured both sides: `new == 0` on the runner and locally. Flip this back to false
+ * the moment either side drifts for a measurement reason — a ledger nobody trusts
+ * is worse than no ledger.
  */
-export const CALIBER_UNIFIED = false;
+export const CALIBER_UNIFIED = true;
 
 const LEDGER_TITLE = "Coverage drift · 账本上涨";
 
