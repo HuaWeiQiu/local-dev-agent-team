@@ -240,3 +240,67 @@ node scripts/ub-quality-gate.mjs                     # 之后任何回退按 reg
 | 查表代替分支链 | `pickSituation` 把崩溃恢复的 2×2 矩阵变成四行 |
 | 先钉行为再改结构 | `planning.ts` 拆 `architectPlan` 时，「重试条件」和「放弃条件」曾被合并——5 个测试立刻挂掉 |
 
+## 9. 覆盖率噪声：分数上升不等于回归
+
+CRAP 里的覆盖率来自一次 `vitest --coverage` 采样，而采样本身会漂。同一份代码、
+同一个 `--all` 模式，`src/process/alive.ts#processLiveness`（CC 恒为 9）连续三次测出：
+
+| 次数 | 覆盖率 | CRAP |
+| --- | --- | --- |
+| 1 | 55% | 16.1 |
+| 2 | 50% | 19.1 |
+| 3 | 45% | 22.9 |
+
+代码一行没动，账面涨了 42%。同样的情况在 `components.experience.ExperienceActionDialog`
+（25.2 → 30.7）、`server.http-route-support#runActionHttpError`（12.4 → 12.6）、
+`strategies.catalog.StrategyBlueprintCatalog#load`（11.1 → 11.5）都出现过。
+
+原因是覆盖率分母随「本轮实际加载了哪些文件 / 哪些测试被并发挤掉」变化：crapper 会在
+同一次运行里跑全量 vitest，任何一个测试文件超时、被跳过或互相踩 `target/coverage`，
+都会让某个函数的命中行数变化。**这不是代码质量变化。**
+
+### 判据
+
+用三步，而不是看单个数字：
+
+1. **先看 CC**。CC 没变而 CRAP 上升 = 覆盖率噪声，不是回归。
+2. **重测两次，取中位数**。三次测量（含原来那次）排序后取中间值作为该函数的记账值。
+3. **三次里最低的那次仍 > 阈值，才算回归**。三次采样都超，说明是结构或真实覆盖缺口；
+   只有个别采样超，按中位数记账并在 PR 正文里写明。
+
+### 操作要求
+
+- 覆盖率相关验证必须在**独立 worktree** 里跑（`git worktree add /tmp/wt-x -b debt/x`），
+  每个 worktree 有独立的 `target/coverage`，不会互相删报告。
+- 跑门禁前确认 `ps -eo command | grep -c '[c]rapper'` 为 0；并发跑会让覆盖率静默降级成 0%
+  （曾出现整轮 3185 条覆盖率全 0，以及并发时一方直接 `No source files to analyze`）。
+- 刷新 baseline 时逐键对比旧基线，而不是只看条数：条数下降不代表没有单点上升，
+  单点上升也不代表回归——按上面的三步判。
+
+## 10. 已知且刻意的例外
+
+### `web/src/main.tsx#bootstrap`（当前 CRAP 20.0）
+
+这是 Vite 的入口模块：`applyTheme()`、`createRoot(...).render(...)` 都在**模块顶层**
+执行，`import` 它就会真的挂载 React 树。要覆盖 `bootstrap` 只有两条路，两条都不诚实：
+
+- 在测试里 `import` 入口 → 需要 jsdom + 假的 Tauri/`import.meta.env` + DOM 根节点，
+  测到的主要是「React 能挂载」，不是本仓的行为；
+- 为可测性把 `createRoot` 抽成注入参数 → 为了让测试能调用，往生产入口加一层只为测试
+  存在的接缝，违反「不为测试改生产接口」。
+
+同时，同文件的 `desktopPreviewState`、`isControlServiceOrigin` 是纯函数，可以抽出去测，
+但抽完 `bootstrap` 仍留在账上（20.0），所以单独为这两条动入口文件不划算。**结论：冻结，
+不拆也不补测。**
+
+**重新考虑的条件**（满足任意一条就重新评估）：
+
+1. 要做入口冒烟测试（例如 Playwright 已在跑 `web/` 的首屏），届时 `bootstrap` 由 e2e 覆盖，
+   可以把它从 CRAP 记账里剔除或按 e2e 结果记账；
+2. 入口开始承载需要单测的决策（例如按 URL 决定加载哪套 App、feature flag 分支），
+   那就把决策抽成纯函数，`bootstrap` 只留装配；
+3. 项目的 App 挂载方式换成可注入的 root（例如 SSR/测试共享的 `mount()`），接缝本来就存在，
+   不需要为测试额外加。
+
+在此之前，任何人碰到 `web/src/main.tsx` 只需保证 `bootstrap` **不变得更差**（CC 不变、
+覆盖率不下降），不要求清到 10 以下。
