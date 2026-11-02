@@ -79,16 +79,24 @@ export class ClaudeStreamSession implements AgentSession {
     return this.hub.subscribe(listener);
   }
 
-  async runTurn(input: TurnInput): Promise<TurnResult> {
+  /** Refuses a turn the session cannot take, and starts the child if needed. */
+  private assertCanRunTurn(signal: AbortSignal | undefined): void {
     if (this.closed) throw new SessionError("session is closed", "closed");
     if (this.dead) throw this.dead;
     if (this.active) throw new SessionError("a turn is already running", "protocol");
-    input.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     this.ensureStarted();
+  }
 
-    const schemaMatches =
-      input.outputSchema === undefined ||
-      JSON.stringify(input.outputSchema) === JSON.stringify(this.options.sessionSchema);
+  private schemaMatchesTurn(outputSchema: Record<string, unknown> | undefined): boolean {
+    if (outputSchema === undefined) return true;
+    return JSON.stringify(outputSchema) === JSON.stringify(this.options.sessionSchema);
+  }
+
+  private beginTurn(
+    input: TurnInput,
+    schemaMatches: boolean,
+  ): { active: ActiveTurn; release: () => void } {
     const active: ActiveTurn = {
       turnId: `turn-${++this.turnCounter}`,
       done: new Deferred<TurnResult>(),
@@ -101,24 +109,43 @@ export class ClaudeStreamSession implements AgentSession {
       structuredSchema: input.outputSchema !== undefined,
     };
     this.active = active;
-
     const onAbort = (): void => {
       void this.forceInterrupt(active, "interrupted");
     };
     input.signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = input.timeoutMs
-      ? setTimeout(() => {
-          void this.forceInterrupt(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
-        }, input.timeoutMs)
-      : undefined;
-
+    const timer = this.turnTimeout(input, active);
     this.hub.emit({ type: "turn-started", turnId: active.turnId });
     this.sendUser(schemaMatches ? input.prompt : promptWithSchema(input.prompt, input.outputSchema!));
+    return {
+      active,
+      release: () => {
+        if (timer) clearTimeout(timer);
+        input.signal?.removeEventListener("abort", onAbort);
+      },
+    };
+  }
+
+  /** The turn-level deadline, if the caller asked for one. */
+  private turnTimeout(
+    input: TurnInput,
+    active: ActiveTurn,
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (!input.timeoutMs) return undefined;
+    return setTimeout(() => {
+      void this.forceInterrupt(active, "failed", `turn exceeded ${input.timeoutMs}ms`);
+    }, input.timeoutMs);
+  }
+
+  async runTurn(input: TurnInput): Promise<TurnResult> {
+    this.assertCanRunTurn(input.signal);
+    const { active, release } = this.beginTurn(
+      input,
+      this.schemaMatchesTurn(input.outputSchema),
+    );
     try {
       return await active.done.promise;
     } finally {
-      if (timer) clearTimeout(timer);
-      input.signal?.removeEventListener("abort", onAbort);
+      release();
       if (this.active === active) this.active = undefined;
     }
   }
