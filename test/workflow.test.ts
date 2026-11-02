@@ -452,16 +452,64 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("named-paths");
+    const events: PendingRunEvent[] = [];
+    const eventSink: RunEventSink = {
+      append(event) {
+        events.push(event);
+        return { ...event, sequence: events.length, traceId: "trace", spanId: "span" };
+      },
+    };
     const state = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FailIfArchitectService(),
+      eventSink,
     }).run({
       goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
     });
-    expect(state.status).toBe("awaiting-human");
-    expect(state.plan?.summary).toContain("Deterministic DAG");
-    expect(state.tasks.map((task) => task.task.id)).toEqual(["T1", "T2", "T3"]);
-    expect(state.tasks.map((task) => task.status)).toEqual(["merged", "merged", "merged"]);
-    expect(state.history.some((entry) => entry.message.includes("不调用架构模型"))).toBe(true);
+    // This case once failed under full-suite load with only a status array to go on.
+    // The message now carries what a reader needs: where each task ended, what the wave
+    // said about the ones it lost, and the last things the run did.
+    const observed = describeDagRun(state, events);
+
+    expect(state.status, observed).toBe("awaiting-human");
+    expect(state.plan?.summary, observed).toContain("Deterministic DAG");
+    expect(state.tasks.map((task) => task.task.id), observed).toEqual(["T1", "T2", "T3"]);
+    expect(state.tasks.map((task) => task.status), observed).toEqual(["merged", "merged", "merged"]);
+    expect(state.history.some((entry) => entry.message.includes("不调用架构模型")), observed).toBe(true);
+  }, 30_000);
+
+  it("closes a task its wave lost instead of leaving it working", async () => {
+    // The observed flake: the run parked for approval with T3 still marked "working",
+    // because a task that throws before its first attempt keeps the status the wave set
+    // on it. This fixture makes that throw deterministic.
+    const { loaded } = await createFixture("named-paths-lost-task");
+    const events: PendingRunEvent[] = [];
+    const eventSink: RunEventSink = {
+      append(event) {
+        events.push(event);
+        return { ...event, sequence: events.length, traceId: "trace", spanId: "span" };
+      },
+    };
+    let factoryCalls = 0;
+    const state = await new LocalWorkflowRunner(loaded, {
+      createAgentService: () => {
+        factoryCalls += 1;
+        // Planning asks first; the waves then ask once per task. T3 shares its wave with
+        // T1, so the wave still has a success to integrate — exactly the shape the flake
+        // produced (two merged, one left "working").
+        if (factoryCalls === 3) throw new Error("agent factory is down");
+        return new FakeAgentService();
+      },
+      eventSink,
+    }).run({
+      goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
+    });
+
+    const observed = describeDagRun(state, events);
+    const lost = state.tasks.find((task) => task.task.id === "T3");
+    expect(rejectedTaskIds(events), observed).toContain("T3");
+    expect(lost?.status, observed).toBe("blocked");
+    expect(lost?.error, observed).toContain("agent factory is down");
+    expect(state.tasks.some((task) => task.status === "working"), observed).toBe(false);
   }, 30_000);
 
   it("applies the plan gate to controller-produced DAGs and resumes after approval", async () => {
@@ -1507,6 +1555,41 @@ async function createFixture(
   await git(root, ["add", "."]);
   await git(root, ["commit", "-m", "initial"]);
   return { root, loaded: await loadConfig(root) };
+}
+
+/** Tasks the wave reported as lost before they could run. */
+function rejectedTaskIds(events: PendingRunEvent[]): string[] {
+  return events.flatMap(
+    (event) =>
+      (event.payload as { rejected?: Array<{ taskId: string }> }).rejected?.map((entry) => entry.taskId) ?? [],
+  );
+}
+
+/**
+ * What a failed status array needs to say: per-task outcome with attempts and error,
+ * the wave's own record of any task it lost, and the tail of the run history.
+ */
+function describeDagRun(
+  state: {
+    status: string;
+    error?: string;
+    tasks: { task: { id: string }; status: string; attempts?: number; error?: string }[];
+    history: { status: string; message: string }[];
+  },
+  events: PendingRunEvent[],
+): string {
+  const tasks = state.tasks
+    .map((task) => `${task.task.id}=${task.status}/${task.attempts ?? 0}${task.error ? `(${task.error.slice(0, 60)})` : ""}`)
+    .join(", ");
+  const rejected = events
+    .flatMap((event) => (event.payload as { rejected?: Array<{ taskId: string; phase?: string; error?: string }> }).rejected ?? [])
+    .map((entry) => `${entry.taskId}@${entry.phase}:${(entry.error ?? "").slice(0, 40)}`)
+    .join(" ");
+  const tail = state.history
+    .slice(-4)
+    .map((entry) => `${entry.status}: ${entry.message.slice(0, 60)}`)
+    .join(" | ");
+  return `status=${state.status} error=${state.error ?? "-"} tasks=[${tasks}] rejected=[${rejected || "none"}] last=[${tail}]`;
 }
 
 /** What a failed assertion needs to say: where the run ended and how it got there. */
