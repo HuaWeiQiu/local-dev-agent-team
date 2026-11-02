@@ -470,3 +470,14 @@ describe("coverage drift issue plan", () => {
     expect(plan.title).not.toBe("Coverage drift · 账本上涨");
   });
 });
+
+describe("drift report loading", () => {
+  it("treats a missing or unreadable report as infrastructure", async () => {
+    const { readReport, reportFromText } = await import("../scripts/coverage-drift-issue.mjs");
+    expect(readReport("/definitely/not/here.json")).toMatchObject({ kind: "infrastructure" });
+    expect(reportFromText("not json").kind).toBe("infrastructure");
+    expect(reportFromText("{}").kind).toBe("infrastructure");
+    expect(reportFromText(JSON.stringify({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 0 } })).kind)
+      .toBe("ledger");
+  });
+});
