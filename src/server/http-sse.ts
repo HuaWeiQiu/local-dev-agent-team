@@ -3,20 +3,18 @@ import type { RunEvent } from "../events/types.js";
 import { HttpError, singleHeader } from "./http-common.js";
 import type { RunSupervisor } from "./supervisor.js";
 
-export function streamEvents(
-  request: IncomingMessage,
-  response: ServerResponse,
-  supervisor: RunSupervisor,
-  runId?: string,
-): void {
+/** The `after` query parameter wins over `Last-Event-ID`; both default to 0. */
+function requestCursor(request: IncomingMessage): number {
   const headerCursor = singleHeader(request.headers["last-event-id"]);
   const url = new URL(request.url ?? "/", "http://localhost");
-  const cursorText = url.searchParams.get("after") ?? headerCursor ?? "0";
-  const cursor = Number(cursorText);
+  const cursor = Number(url.searchParams.get("after") ?? headerCursor ?? "0");
   if (!Number.isSafeInteger(cursor) || cursor < 0) {
     throw new HttpError(400, "Event cursor must be a non-negative integer");
   }
+  return cursor;
+}
 
+function openEventStream(response: ServerResponse): void {
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -24,56 +22,84 @@ export function streamEvents(
     "X-Accel-Buffering": "no",
   });
   response.write("retry: 2000\n\n");
-  const write = (event: RunEvent): void => {
-    if (!runId || event.runId === runId) {
-      response.write(`id: ${event.sequence}\n`);
-      response.write(`data: ${JSON.stringify(event)}\n\n`);
-    }
+}
+
+/** Writes the SSE frames of one event, skipping runs the subscriber did not ask for. */
+function eventWriter(response: ServerResponse, runId: string | undefined) {
+  return (event: RunEvent): void => {
+    if (runId && event.runId !== runId) return;
+    response.write(`id: ${event.sequence}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
   };
-  // Subscribe before replaying so events appended while the replay yields to
-  // the event loop are buffered instead of lost; they are flushed afterwards,
-  // skipping anything the replay already delivered.
+}
+
+/**
+ * Replays everything after the cursor, then flushes what the live subscription
+ * buffered meanwhile. The subscription starts before the replay so nothing is
+ * lost while the replay yields to the event loop.
+ */
+async function replayThenFlush(options: {
+  cursor: number;
+  runId: string | undefined;
+  supervisor: RunSupervisor;
+  write(event: RunEvent): void;
+  buffered: RunEvent[];
+  isClosed(): boolean;
+  markLive(): void;
+}): Promise<void> {
+  let replayCursor = options.cursor;
+  while (!options.isClosed()) {
+    const events = options.supervisor.events.listAfter(replayCursor, options.runId, replayBatchSize);
+    for (const event of events) {
+      options.write(event);
+      replayCursor = event.sequence;
+    }
+    if (events.length < replayBatchSize) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  options.markLive();
+  for (const event of options.buffered.splice(0)) {
+    if (event.sequence > replayCursor) options.write(event);
+  }
+}
+
+export function streamEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  supervisor: RunSupervisor,
+  runId?: string,
+): void {
+  const cursor = requestCursor(request);
+  openEventStream(response);
+  const write = eventWriter(response, runId);
   let replaying = true;
   let closed = false;
   const buffered: RunEvent[] = [];
   const unsubscribe = supervisor.events.subscribe((event) => {
-    if (replaying) {
-      buffered.push(event);
-    } else {
-      write(event);
-    }
+    if (replaying) buffered.push(event);
+    else write(event);
   });
   const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
   heartbeat.unref();
-  request.once("close", () => {
+  const stop = (): void => {
     closed = true;
     clearInterval(heartbeat);
     unsubscribe();
-  });
+  };
+  request.once("close", stop);
 
-  void (async () => {
-    let replayCursor = cursor;
-    while (!closed) {
-      const events = supervisor.events.listAfter(replayCursor, runId, replayBatchSize);
-      for (const event of events) {
-        write(event);
-        replayCursor = event.sequence;
-      }
-      if (events.length < replayBatchSize) {
-        break;
-      }
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    replaying = false;
-    for (const event of buffered.splice(0)) {
-      if (event.sequence > replayCursor) {
-        write(event);
-      }
-    }
-  })().catch(() => {
-    closed = true;
-    clearInterval(heartbeat);
-    unsubscribe();
+  void replayThenFlush({
+    cursor,
+    runId,
+    supervisor,
+    buffered,
+    write,
+    isClosed: () => closed,
+    markLive: () => {
+      replaying = false;
+    },
+  }).catch(() => {
+    stop();
     response.end();
   });
 }
