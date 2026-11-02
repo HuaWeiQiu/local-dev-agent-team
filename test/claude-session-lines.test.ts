@@ -2,12 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StreamProcess, StreamProcessRequest } from "../src/process/stream.js";
 import type { AgentProfile } from "../src/config/schema.js";
 
-const { spawnCalls, resolveExit, deliver } = vi.hoisted(() => ({
+const { spawnCalls, resolveExit, deliver, writes } = vi.hoisted(() => ({
   spawnCalls: [] as StreamProcessRequest[],
   resolveExit: [] as Array<
     (value: { exitCode: number | null; signal: NodeJS.Signals | null }) => void
   >,
   deliver: [] as Array<(line: string) => void>,
+  writes: [] as string[],
 }));
 
 vi.mock("../src/process/stream.js", () => ({
@@ -24,7 +25,10 @@ vi.mock("../src/process/stream.js", () => ({
     resolveExit.push(exitNow);
     return {
       pid: 4242,
-      write: () => true,
+      write: (line: string) => {
+        writes.push(line);
+        return true;
+      },
       closeStdin: () => undefined,
       terminate: () => undefined,
       exited,
@@ -70,7 +74,14 @@ beforeEach(() => {
   spawnCalls.length = 0;
   resolveExit.length = 0;
   deliver.length = 0;
+  writes.length = 0;
 });
+
+function controlWrites(): Array<Record<string, unknown>> {
+  return writes
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((message) => message.type === "control_response");
+}
 
 describe("streamed text deltas", () => {
   it("appends the delta and emits it", async () => {
@@ -171,6 +182,107 @@ describe("line dispatch", () => {
 
     // The turn-start event is the only thing this session announced.
     expect(events.map((event) => event.type)).toEqual(["turn-started"]);
+    await finish();
+  });
+});
+
+describe("control requests", () => {
+  function controlRequest(patch: Record<string, unknown>) {
+    return JSON.stringify({ type: "control_request", request_id: "req-1", request: patch });
+  }
+
+  it("answers an unsupported control subtype with an error response and no event", async () => {
+    const { events, line, finish } = await openTurn();
+
+    line(controlRequest({ subtype: "something_else" }));
+
+    expect(controlWrites()).toEqual([
+      {
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: "req-1",
+          error: "unsupported control request 'something_else'",
+        },
+      },
+    ]);
+    expect(events.some((event) => event.type === "question")).toBe(false);
+    await finish();
+  });
+
+  it("turns each question into an event with its options and no write", async () => {
+    const { events, line, finish } = await openTurn();
+
+    line(controlRequest({
+      subtype: "can_use_tool",
+      tool_name: "AskUserQuestion",
+      input: { questions: [
+        { question: "which one?", options: [{ label: "a" }, { label: "b" }] },
+        { question: "and why?" },
+      ] },
+    }));
+
+    const questions = events.filter((event) => event.type === "question");
+    expect(questions).toEqual([
+      { type: "question", turnId: questions[0]!.turnId, questionId: "req-1::0", prompt: "which one?", options: ["a", "b"] },
+      { type: "question", turnId: questions[1]!.turnId, questionId: "req-1::1", prompt: "and why?" },
+    ]);
+    expect(controlWrites()).toEqual([]);
+    await finish();
+  });
+
+  it("sends the collected answers back as one allow response", async () => {
+    const { built, line, finish } = await openTurn();
+    line(controlRequest({
+      subtype: "can_use_tool",
+      tool_name: "AskUserQuestion",
+      input: { questions: [{ question: "pick" }, { question: "why" }] },
+    }));
+
+    await built.answer("req-1::0", "first");
+    expect(controlWrites()).toEqual([]);
+    await built.answer("req-1::1", "second");
+
+    expect(controlWrites()[0]).toMatchObject({
+      type: "control_response",
+      response: { subtype: "success", request_id: "req-1", response: { behavior: "allow" } },
+    });
+    expect(JSON.stringify(controlWrites()[0])).toContain("first");
+    await finish();
+  });
+
+  it("denies a question tool without questions and warns the operator", async () => {
+    const { events, line, finish } = await openTurn();
+
+    line(controlRequest({ subtype: "can_use_tool", tool_name: "AskUserQuestion", input: {} }));
+
+    expect(controlWrites()[0]).toMatchObject({
+      response: {
+        subtype: "success",
+        request_id: "req-1",
+        response: { behavior: "deny", message: "AskUserQuestion is not permitted for this role" },
+      },
+    });
+    expect(events.find((event) => event.type === "notice")).toMatchObject({
+      level: "warning",
+      message: "denied AskUserQuestion: not allowed for this role",
+    });
+    await finish();
+  });
+
+  it("denies any other tool and warns the operator", async () => {
+    const { events, line, finish } = await openTurn();
+
+    line(controlRequest({ subtype: "can_use_tool", tool_name: "Bash", input: { command: "rm -rf /" } }));
+
+    expect(controlWrites()[0]).toMatchObject({
+      response: {
+        subtype: "success",
+        request_id: "req-1",
+        response: { behavior: "deny", message: "Bash is not permitted for this role" },
+      },
+    });
+    expect(events.some((event) => event.type === "notice")).toBe(true);
     await finish();
   });
 });

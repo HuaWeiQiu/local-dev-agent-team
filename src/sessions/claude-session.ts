@@ -324,40 +324,49 @@ export class ClaudeStreamSession implements AgentSession {
     const requestId = String(message.request_id);
     const request = (message.request ?? {}) as Json;
     if (request.subtype !== "can_use_tool") {
-      this.proc?.write(
-        JSON.stringify({
-          type: "control_response",
-          response: { subtype: "error", request_id: requestId, error: `unsupported control request '${String(request.subtype)}'` },
-        }),
-      );
+      this.rejectUnsupportedControl(requestId, request.subtype);
       return;
     }
     const toolInput = (request.input ?? {}) as Json;
-    if (request.tool_name === QUESTION_TOOL && Array.isArray(toolInput.questions)) {
-      const questions = toolInput.questions as Json[];
-      this.approvals.set(requestId, { requestId, toolInput, questions, answers: new Map() });
-      questions.forEach((question, index) => {
-        const options = (question.options as Json[] | undefined)?.map((option) => String(option.label));
-        this.hub.emit({
-          type: "question",
-          turnId: this.active?.turnId ?? "",
-          questionId: `${requestId}::${index}`,
-          prompt: String(question.question ?? ""),
-          ...(options && options.length > 0 ? { options } : {}),
-        });
-      });
+    if (isQuestionRequest(request, toolInput)) {
+      this.registerQuestions(requestId, toolInput, toolInput.questions as Json[]);
       return;
     }
     // Tools the permission mode would not allow on its own are never granted
     // automatically; the model sees the denial and adapts.
+    this.denyTool(requestId, request.tool_name);
+  }
+
+  private rejectUnsupportedControl(requestId: string, subtype: unknown): void {
+    this.proc?.write(
+      JSON.stringify({
+        type: "control_response",
+        response: {
+          subtype: "error",
+          request_id: requestId,
+          error: `unsupported control request '${String(subtype)}'`,
+        },
+      }),
+    );
+  }
+
+  /** Each question becomes its own approval prompt; the answers travel back together. */
+  private registerQuestions(requestId: string, toolInput: Json, questions: Json[]): void {
+    this.approvals.set(requestId, { requestId, toolInput, questions, answers: new Map() });
+    questions.forEach((question, index) => {
+      this.hub.emit(questionEvent(requestId, this.active?.turnId ?? "", index, question));
+    });
+  }
+
+  private denyTool(requestId: string, toolName: unknown): void {
     this.sendControlResponse(requestId, {
       behavior: "deny",
-      message: `${String(request.tool_name)} is not permitted for this role`,
+      message: `${String(toolName)} is not permitted for this role`,
     });
     this.hub.emit({
       type: "notice",
       level: "warning",
-      message: `denied ${String(request.tool_name)}: not allowed for this role`,
+      message: `denied ${String(toolName)}: not allowed for this role`,
     });
   }
 
@@ -420,6 +429,30 @@ function parseLine(line: string): Json | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Only the question tool carries questions the operator can answer. */
+function isQuestionRequest(request: Json, toolInput: Json): boolean {
+  return request.tool_name === QUESTION_TOOL && Array.isArray(toolInput.questions);
+}
+
+/** One question from a question tool call, with its options when it has any. */
+function questionEvent(
+  requestId: string,
+  turnId: string,
+  index: number,
+  question: Json,
+): SessionEvent {
+  const options = (question.options as Json[] | undefined)?.map((option) =>
+    String(option.label),
+  );
+  return {
+    type: "question",
+    turnId,
+    questionId: `${requestId}::${index}`,
+    prompt: String(question.question ?? ""),
+    ...(options && options.length > 0 ? { options } : {}),
+  };
 }
 
 type SessionEvent = Parameters<SessionEventHub["emit"]>[0];
