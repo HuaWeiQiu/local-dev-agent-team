@@ -204,6 +204,11 @@ export class TaskScheduler {
       }) as Record<string, unknown> & { blockedTaskId?: string },
     );
     if (rejection && passedStates.length === 0 && blocked.length === 0) throw rejection.error;
+    // A task the wave lost keeps whatever status the wave had set on it ("pending", or
+    // "working" if it died after claiming a worktree). Left alone, the run can park for
+    // approval with a phantom unfinished task — that is the shape a full-suite run
+    // produced once (`T1=merged, T2=merged, T3=working`, status awaiting-human).
+    for (const failed of rejected) this.markTaskLost(state, input.store, failed);
     for (const task of blocked) input.blockedIds.add(task.task.id);
   }
 
@@ -221,6 +226,22 @@ export class TaskScheduler {
         error: failed.error,
       }),
     );
+  }
+
+  /** Give a task its wave's failure, instead of leaving it looking unfinished. */
+  private markTaskLost(
+    state: RunState,
+    store: RunStateStore,
+    failed: FailedWaveTask,
+  ): void {
+    const taskState = findTaskState(state, failed.taskId);
+    taskState.status = "blocked";
+    taskState.error = `Task was lost before it ran: ${messageOf(failed.error)}`;
+    store.emit(state.id, "run.task.lost", {
+      taskId: failed.taskId,
+      phase: failed.progress.phase,
+      error: messageOf(failed.error).slice(0, 500),
+    });
   }
 
   /** One task of a wave: give it a worktree if it needs one, then run it. */
