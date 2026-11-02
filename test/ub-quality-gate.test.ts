@@ -769,35 +769,33 @@ describe("drift noise band", () => {
 });
 
 describe("tampering with the report mid-refresh", () => {
-  it("refuses when the report changes between the two scans", async () => {
-    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
-    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-tamper-"));
-    const coverage = "SF:src/a.ts\nLF:1\nLH:1\n";
-    for (const name of ["a", "b"]) {
-      await mkdir(path.join(dir, name), { recursive: true });
-      await writeFile(path.join(dir, name, "lcov.info"), coverage, "utf8");
-    }
-    const tool = await stubTool(
-      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+  it("refuses when the report changed between the two scans", async () => {
+    const { scanRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const cwd = await mkdtemp(path.join(tmpdir(), "agent-team-tamper-"));
+    const before = { sha256: "a", path: "lcov.info", bytes: 1 };
+    const after = { sha256: "b", path: "lcov.info", bytes: 2 };
+    const scores = new Map([["a#f", 120]]);
+    // First scan ended on `before`; the second started on `after`: an edit between them.
+    const status = scanRefusal(
+      { existing: true, before, lcov: before, scores },
+      { existing: true, before: after, lcov: after, scores },
+      cwd,
     );
-    const options = parseArgs(
-      ["--update-baseline", "--baseline", "base.json", "--coverage-a", "a/lcov.info", "--coverage-b", "b/lcov.info", "--", "--use-existing-coverage"],
-      {},
-    );
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(status).toBe(2);
+  });
+
+  it("passes the same report straight through", async () => {
+    const { scanRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const same = { sha256: "a", path: "lcov.info", bytes: 1 };
+    const scores = new Map([["a#f", 120]]);
+    const cwd = await mkdtemp(path.join(tmpdir(), "agent-team-tamper-ok-"));
     expect(
-      stableBaseline(tool, options, dir, {
-        betweenScans: async () => {
-          await writeFile(
-            path.join(dir, "target", "coverage", "typescript", "lcov.info"),
-            "SF:src/a.ts\nLF:9\nLH:1\n",
-            "utf8",
-          );
-        },
-      }),
-    ).toBe(2);
-    stderr.mockRestore();
-    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+      scanRefusal(
+        { existing: true, before: same, lcov: same, scores },
+        { existing: true, before: same, lcov: same, scores: new Map(scores) },
+        cwd,
+      ),
+    ).toBeUndefined();
   });
 });
 
