@@ -881,3 +881,12 @@ describe("a refresh needs two coverage runs to agree", () => {
     expect(existsSync(path.join(dir, "base.json"))).toBe(false);
   });
 });
+
+describe("tool commit", () => {
+  it("prefers a declared commit over reading the checkout", async () => {
+    const { toolCommit } = await import("../scripts/ub-quality-gate.mjs");
+    expect(toolCommit("/nonexistent/ub", { UB_TOOL_COMMIT: " 6fd92c4 " })).toBe("6fd92c4");
+    // No declaration and no checkout: undefined rather than a guess.
+    expect(toolCommit("/nonexistent/ub", {})).toBeUndefined();
+  });
+});

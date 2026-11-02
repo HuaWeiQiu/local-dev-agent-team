@@ -511,35 +511,51 @@ function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
 }
 
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
-  if (usesExistingCoverage(options)) {
-    const pair = requireReproducibleCoverage(options, cwd);
-    if (pair.status !== undefined) return pair.status;
-  }
+  const pairVerdict = coveragePairVerdict(options, cwd);
+  if (pairVerdict !== undefined) return pairVerdict;
   const first = scanOnce(ub, options, cwd);
   // Tests only: a tamper between the scans has no other seam, because in production
   // nothing in this process can be told to act there.
   hooks.betweenScans?.();
-  if (first.existing && !first.before) {
-    return refuseWithoutCoverage(coveragePath(cwd));
-  }
   const second = scanOnce(ub, options, cwd);
-  if (second.existing && !second.before) {
-    return refuseWithoutCoverage(coveragePath(cwd));
-  }
-  // Compare what the first scan ended with to what the second scan started with: a
-  // report edited between them means the two scans measured different inputs.
-  const tampered = first.existing
-    ? coverageChanged(first.lcov, second.before)
-    : coverageChanged(first.before, second.before);
-  if (tampered) return refuseTamperedCoverage(tampered);
-  const drift = unstableKeys(first.scores, second.scores);
-  if (drift.length > 0) return refuseBaseline(drift);
+  const refusal = scanRefusal(first, second, cwd);
+  if (refusal !== undefined) return refusal;
   return writeBaseline(
     second.scores,
     path.resolve(cwd, options.baseline),
     options.baseline,
     baselineGeneration({ ub, cwd, first, second }),
   );
+}
+
+/** Existing mode only: the two input reports must agree before anything is scored. */
+function coveragePairVerdict(options, cwd) {
+  if (!usesExistingCoverage(options)) return undefined;
+  const pair = requireReproducibleCoverage(options, cwd);
+  return pair.status;
+}
+
+/** Everything that makes two scans unusable as a baseline, or nothing. */
+function scanRefusal(first, second, cwd) {
+  const missing = missingCoverageRefusal(first, second, cwd);
+  if (missing !== undefined) return missing;
+  const tampered = tamperRefusal(first, second);
+  if (tampered !== undefined) return tampered;
+  const drift = unstableKeys(first.scores, second.scores);
+  return drift.length > 0 ? refuseBaseline(drift) : undefined;
+}
+
+function missingCoverageRefusal(first, second, cwd) {
+  const gone = [first, second].some((scan) => scan.existing && !scan.before);
+  return gone ? refuseWithoutCoverage(coveragePath(cwd)) : undefined;
+}
+
+/** A report edited between the scans means the two scans measured different inputs. */
+function tamperRefusal(first, second) {
+  const changed = first.existing
+    ? coverageChanged(first.lcov, second.before)
+    : coverageChanged(first.before, second.before);
+  return changed ? refuseTamperedCoverage(changed) : undefined;
 }
 
 /** A missing report is not an empty ledger: it is no measurement at all. */
