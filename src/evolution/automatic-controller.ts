@@ -25,6 +25,7 @@ import {
   type EvolutionPolicy,
   type EvolutionProposal,
 } from "./domain.js";
+import { type ApplicationRecord } from "./application-shared.js";
 import { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { createExecutionDeadline, RunBudgetTracker } from "../observability/budget.js";
@@ -199,25 +200,9 @@ export class AutomaticEvolutionController {
   async restoreRuntimeDefault(): Promise<void> {
     const control = await this.coordinator.readControlSnapshot();
     await this.cleanupAutomaticShadows(control.catalog.proposals);
-    const pointer = control.catalog.activeProposals.find(
-      (entry) =>
-        entry.target.kind === "strategy-blueprint" &&
-        entry.target.name === this.config.targetStrategy,
-    );
-    const proposal = pointer
-      ? control.catalog.proposals.find((entry) => entry.id === pointer.proposalId)
-      : undefined;
-    const application = proposal
-      ? control.application.applications.find((entry) => entry.proposalId === proposal.id)
-      : undefined;
+    const evidence = automaticTargetEvidence(control, this.config.targetStrategy);
     const target = this.strategies.customDefinition(this.config.targetStrategy);
-    if (
-      proposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
-      proposal.candidate.kind === "strategy-blueprint" &&
-      application?.afterTargetDigest &&
-      target &&
-      isDeepStrictEqual(target, proposal.candidate.definition)
-    ) {
+    if (isRestorableEvidence(evidence, target)) {
       this.strategies.setRuntimeDefault(this.config.targetStrategy);
     }
   }
@@ -550,38 +535,30 @@ export class AutomaticEvolutionController {
 
   private async resolveIncumbent(): Promise<{ strategy: string; definition: NamedStrategy }> {
     const control = await this.coordinator.readControlSnapshot();
-    const active = control.catalog.activeProposals.find(
-      (entry) =>
-        entry.target.kind === "strategy-blueprint" &&
-        entry.target.name === this.config.targetStrategy,
-    );
-    const activeProposal = active
-      ? control.catalog.proposals.find((proposal) => proposal.id === active.proposalId)
-      : undefined;
-    const application = activeProposal
-      ? control.application.applications.find((entry) => entry.proposalId === activeProposal.id)
-      : undefined;
+    const evidence = automaticTargetEvidence(control, this.config.targetStrategy);
     const evolved = this.strategies.customDefinition(this.config.targetStrategy);
-    if (
-      evolved &&
-      activeProposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
-      activeProposal.candidate.kind === "strategy-blueprint" &&
-      application?.afterTargetDigest &&
-      isDeepStrictEqual(evolved, activeProposal.candidate.definition)
-    ) {
-      this.strategies.setRuntimeDefault(this.config.targetStrategy);
-      return { strategy: this.config.targetStrategy, definition: evolved };
+    return this.applyIncumbentDecision(
+      decideIncumbent({
+        targetStrategy: this.config.targetStrategy,
+        evidence,
+        evolved,
+        configuredBaseline: this.config.baselineStrategy,
+        defaultStrategy: this.loaded.config.strategies!.default,
+        definitions: this.loaded.config.strategies!.definitions,
+      }),
+    );
+  }
+
+  /** The only place the incumbent decision is executed; the decision itself is pure. */
+  private applyIncumbentDecision(decision: IncumbentDecision): { strategy: string; definition: NamedStrategy } {
+    if (decision.kind === "conflict") {
+      throw new AutomaticEvolutionError("AUTOMATION_TARGET_CONFLICT", decision.message);
     }
-    if (evolved) {
-      throw new AutomaticEvolutionError(
-        "AUTOMATION_TARGET_CONFLICT",
-        `Automatic evolution target '${this.config.targetStrategy}' already exists without matching active application proof`,
-      );
+    if (decision.kind === "adopt") {
+      this.strategies.setRuntimeDefault(decision.strategy);
+      return { strategy: decision.strategy, definition: decision.definition };
     }
-    const baseline = this.config.baselineStrategy ?? this.loaded.config.strategies!.default;
-    const definition = this.loaded.config.strategies!.definitions[baseline];
-    if (!definition) throw new Error(`Automatic evolution baseline '${baseline}' is missing`);
-    return { strategy: baseline, definition: structuredClone(definition) };
+    return { strategy: decision.strategy, definition: decision.definition };
   }
 
   private async cleanupAutomaticShadows(proposals: readonly EvolutionProposal[]): Promise<void> {
@@ -966,6 +943,82 @@ function proposerBudgetStrategy(
     maxProcessOutputBytes: Math.min(incumbent.maxProcessOutputBytes, 1_048_576),
     maxArtifactBytes: Math.min(incumbent.maxArtifactBytes, 16_777_216),
   };
+}
+
+interface AutomaticTargetEvidence {
+  proposal: EvolutionProposal | undefined;
+  application: ApplicationRecord | undefined;
+}
+
+type IncumbentDecision =
+  | { kind: "adopt"; strategy: string; definition: NamedStrategy }
+  | { kind: "conflict"; message: string }
+  | { kind: "baseline"; strategy: string; definition: NamedStrategy };
+
+interface IncumbentInputs {
+  targetStrategy: string;
+  evidence: AutomaticTargetEvidence;
+  evolved: NamedStrategy | undefined;
+  configuredBaseline: string | undefined;
+  defaultStrategy: string;
+  definitions: Record<string, NamedStrategy>;
+}
+
+/** The active proposal for our target and the application that recorded it, if any. */
+function automaticTargetEvidence(
+  control: Awaited<ReturnType<EvolutionApplicationCoordinator["readControlSnapshot"]>>,
+  targetStrategy: string,
+): AutomaticTargetEvidence {
+  const pointer = control.catalog.activeProposals.find(
+    (entry) => entry.target.kind === "strategy-blueprint" && entry.target.name === targetStrategy,
+  );
+  const proposal = pointer
+    ? control.catalog.proposals.find((entry) => entry.id === pointer.proposalId)
+    : undefined;
+  const application = proposal
+    ? control.application.applications.find((entry) => entry.proposalId === proposal.id)
+    : undefined;
+  return { proposal, application };
+}
+
+/** An automatic proposal only counts as applied when the evidence chain is complete. */
+function hasAutomaticApplication(
+  evidence: AutomaticTargetEvidence,
+  definition: NamedStrategy | undefined,
+): boolean {
+  const { proposal, application } = evidence;
+  return Boolean(
+    definition &&
+      proposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
+      proposal.candidate.kind === "strategy-blueprint" &&
+      application?.afterTargetDigest &&
+      isDeepStrictEqual(definition, proposal.candidate.definition),
+  );
+}
+
+/** Pure decision: adopt the evolved target, refuse it, or fall back to the baseline. */
+function decideIncumbent(inputs: IncumbentInputs): IncumbentDecision {
+  if (inputs.evolved && hasAutomaticApplication(inputs.evidence, inputs.evolved)) {
+    return { kind: "adopt", strategy: inputs.targetStrategy, definition: inputs.evolved };
+  }
+  if (inputs.evolved) {
+    return {
+      kind: "conflict",
+      message: `Automatic evolution target '${inputs.targetStrategy}' already exists without matching active application proof`,
+    };
+  }
+  const baseline = inputs.configuredBaseline ?? inputs.defaultStrategy;
+  const definition = inputs.definitions[baseline];
+  if (!definition) throw new Error(`Automatic evolution baseline '${baseline}' is missing`);
+  return { kind: "baseline", strategy: baseline, definition: structuredClone(definition) };
+}
+
+/** Restoring the runtime default needs the same proof as adopting an incumbent. */
+function isRestorableEvidence(
+  evidence: AutomaticTargetEvidence,
+  definition: NamedStrategy | undefined,
+): boolean {
+  return hasAutomaticApplication(evidence, definition);
 }
 
 interface EvaluationRoleBindings {
