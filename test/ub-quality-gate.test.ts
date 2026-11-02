@@ -729,3 +729,39 @@ describe("drift line rendering", () => {
     expect(describeDrift({ key: "a#h", second: 40 })).toBe("a#h: absent -> 40");
   });
 });
+
+describe("drift noise band", () => {
+  const scores = (pairs: Array<[string, number]>) => new Map(pairs);
+
+  it("keeps a move inside the band out of the debt lists", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["a", 10.3]]), { "a": 10.2 }, 10);
+    expect(report.worse).toEqual([]);
+    expect(report.new).toEqual([]);
+    expect(report.withinNoise).toEqual([{ key: "a", score: 10.3, frozen: 10.2 }]);
+  });
+
+  it("reports a move beyond the band as worse", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["b", 16.2]]), { "b": 15.0 }, 10);
+    expect(report.worse).toEqual([{ key: "b", score: 16.2, frozen: 15 }]);
+    expect(report.withinNoise).toEqual([]);
+  });
+
+  it("reports a crossing of the ledger line as worse however small it looks", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["c", 10.4]]), { "c": 9.8 }, 10);
+    expect(report.worse).toEqual([{ key: "c", score: 10.4, frozen: 9.8 }]);
+    expect(report.withinNoise).toEqual([]);
+  });
+
+  it("does not count noise entries in the payload", async () => {
+    const { driftBetween, driftPayload } = await import("../scripts/ub-quality-gate.mjs");
+    const payload = driftPayload({
+      report: driftBetween(scores([["a", 10.3], ["b", 16.2]]), { "a": 10.2, "b": 15.0 }, 10),
+    });
+    expect(payload.counts).toEqual({ new: 0, worse: 1, fixed: 0 });
+    expect(payload.worse.map((entry) => entry.key)).toEqual(["b"]);
+    expect(payload.withinNoise.map((entry) => entry.key)).toEqual(["a"]);
+  });
+});

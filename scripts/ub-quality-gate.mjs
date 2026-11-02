@@ -334,6 +334,9 @@ export function baselineStep(options, cwd = process.cwd()) {
 /** Scores below this absolute move are rounding noise, whatever their ratio. */
 const NOISE_FLOOR = 0.5;
 
+/** Relative move that counts as jitter rather than debt. */
+const NOISE_TOLERANCE = 0.05;
+
 export function unstableKeys(first, second, tolerance = 0.05, threshold = 10) {
   const keys = new Set([...first.keys(), ...second.keys()]);
   const drift = [];
@@ -476,13 +479,33 @@ export function driftBetween(scores, baseline, threshold = 10) {
 function debtSince(scores, baseline, threshold) {
   const fresh = [];
   const worse = [];
+  const withinNoise = [];
   for (const [key, score] of scores) {
     if (score <= threshold) continue;
     const frozen = baseline[key];
-    if (frozen === undefined) fresh.push({ key, score });
-    else if (score > frozen) worse.push({ key, score, frozen });
+    if (frozen === undefined) {
+      fresh.push({ key, score });
+      continue;
+    }
+    if (score <= frozen) continue;
+    const entry = { key, score, frozen };
+    // Crossing the ledger line is debt whatever the size: the baseline did not carry
+    // this function, and now it does.
+    if (frozen <= threshold) worse.push(entry);
+    else if (withinNoiseBand(frozen, score)) withinNoise.push(entry);
+    else worse.push(entry);
   }
-  return { new: fresh, worse };
+  return { new: fresh, worse, withinNoise };
+}
+
+/**
+ * A move inside the band is measurement jitter, not new debt. Reporting it would make
+ * the nightly issue answer a 0.17 move, and an issue that answers noise trains people
+ * to scroll past it — the signal-to-noise ratio matters more than the sensitivity.
+ */
+function withinNoiseBand(before, after) {
+  const deviation = Math.abs(after - before) / Math.max(before, after, 1);
+  return deviation <= NOISE_TOLERANCE || Math.abs(after - before) <= NOISE_FLOOR;
 }
 
 /** Baseline entries that no longer cost anything: gone, or back under the line. */
@@ -499,6 +522,7 @@ function sortDrift(report) {
   const byScore = (left, right) => right.score - left.score || left.key.localeCompare(right.key);
   report.new.sort(byScore);
   report.worse.sort(byScore);
+  report.withinNoise.sort(byScore);
   report.fixed.sort((left, right) => right.frozen - left.frozen || left.key.localeCompare(right.key));
   return report;
 }
@@ -566,7 +590,7 @@ export function driftPayload({
   baseline = DEFAULT_BASELINE,
   provenance: origin,
 }) {
-  const empty = { new: [], worse: [], fixed: [] };
+  const empty = { new: [], worse: [], fixed: [], withinNoise: [] };
   const verdict = report ?? empty;
   return {
     kind: error ? "infrastructure" : "ledger",
@@ -583,6 +607,8 @@ export function driftPayload({
     new: verdict.new,
     worse: verdict.worse,
     fixed: verdict.fixed,
+    // Kept as evidence, never counted: these moves are inside the noise band.
+    withinNoise: verdict.withinNoise ?? [],
   };
 }
 
