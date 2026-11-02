@@ -49,6 +49,8 @@ describe("ub quality gate wrapper", () => {
       baseline: ".ub-crap-baseline.json",
       updateBaseline: false,
       driftReport: "",
+      coverageA: "",
+      coverageB: "",
       ub: "",
       extra: [],
     });
@@ -727,5 +729,164 @@ describe("drift line rendering", () => {
     );
     expect(describeDrift({ key: "a#g", first: 12, second: 40 })).toBe("a#g: 12 -> 40");
     expect(describeDrift({ key: "a#h", second: 40 })).toBe("a#h: absent -> 40");
+  });
+});
+
+describe("drift noise band", () => {
+  const scores = (pairs: Array<[string, number]>) => new Map(pairs);
+
+  it("keeps a move inside the band out of the debt lists", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["a", 10.3]]), { "a": 10.2 }, 10);
+    expect(report.worse).toEqual([]);
+    expect(report.new).toEqual([]);
+    expect(report.withinNoise).toEqual([{ key: "a", score: 10.3, frozen: 10.2 }]);
+  });
+
+  it("reports a move beyond the band as worse", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["b", 16.2]]), { "b": 15.0 }, 10);
+    expect(report.worse).toEqual([{ key: "b", score: 16.2, frozen: 15 }]);
+    expect(report.withinNoise).toEqual([]);
+  });
+
+  it("reports a crossing of the ledger line as worse however small it looks", async () => {
+    const { driftBetween } = await import("../scripts/ub-quality-gate.mjs");
+    const report = driftBetween(scores([["c", 10.4]]), { "c": 9.8 }, 10);
+    expect(report.worse).toEqual([{ key: "c", score: 10.4, frozen: 9.8 }]);
+    expect(report.withinNoise).toEqual([]);
+  });
+
+  it("does not count noise entries in the payload", async () => {
+    const { driftBetween, driftPayload } = await import("../scripts/ub-quality-gate.mjs");
+    const payload = driftPayload({
+      report: driftBetween(scores([["a", 10.3], ["b", 16.2]]), { "a": 10.2, "b": 15.0 }, 10),
+    });
+    expect(payload.counts).toEqual({ new: 0, worse: 1, fixed: 0 });
+    expect(payload.worse.map((entry) => entry.key)).toEqual(["b"]);
+    expect(payload.withinNoise.map((entry) => entry.key)).toEqual(["a"]);
+  });
+});
+
+describe("tampering with the report mid-refresh", () => {
+  it("refuses when the report changes between the two scans", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-tamper-"));
+    const coverage = "SF:src/a.ts\nLF:1\nLH:1\n";
+    for (const name of ["a", "b"]) {
+      await mkdir(path.join(dir, name), { recursive: true });
+      await writeFile(path.join(dir, name, "lcov.info"), coverage, "utf8");
+    }
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const options = parseArgs(
+      ["--update-baseline", "--baseline", "base.json", "--coverage-a", "a/lcov.info", "--coverage-b", "b/lcov.info", "--", "--use-existing-coverage"],
+      {},
+    );
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(
+      stableBaseline(tool, options, dir, {
+        betweenScans: async () => {
+          await writeFile(
+            path.join(dir, "target", "coverage", "typescript", "lcov.info"),
+            "SF:src/a.ts\nLF:9\nLH:1\n",
+            "utf8",
+          );
+        },
+      }),
+    ).toBe(2);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+});
+
+describe("a refresh needs two coverage runs to agree", () => {
+  async function root(contents: { a?: string; b?: string }) {
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-pair-"));
+    for (const [name, text] of Object.entries(contents)) {
+      if (text === undefined) continue;
+      await mkdir(path.join(dir, `${name}`), { recursive: true });
+      await writeFile(path.join(dir, `${name}`, "lcov.info"), text, "utf8");
+    }
+    return dir;
+  }
+  const options = () =>
+    parseArgs(
+      [
+        "--update-baseline",
+        "--baseline",
+        "base.json",
+        "--coverage-a",
+        "a/lcov.info",
+        "--coverage-b",
+        "b/lcov.info",
+        "--",
+        "--use-existing-coverage",
+      ],
+      {},
+    );
+  const same = "SF:src/a.ts\nDA:5,3\nLF:1\nLH:1\nend_of_record\n";
+
+  it("writes when both runs produced the same report", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await root({ a: same, b: same });
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(0);
+    stdout.mockRestore();
+    const written = JSON.parse(await readFile(path.join(dir, "base.json"), "utf8"));
+    expect(written.generation.coverageSource).toBe("existing");
+    expect(new Set(written.generation.agreement.sha256).size).toBe(1);
+  });
+
+  it("accepts two runs of the same lines with different hit counts", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await root({ a: same, b: "SF:src/a.ts\nDA:5,9\nLF:1\nLH:1\nend_of_record\n" });
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(0);
+    stdout.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(true);
+  });
+
+  it("keeps both samples when the runs cover different lines", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const differing = "SF:src/a.ts\nDA:5,9\nDA:6,1\nLF:2\nLH:2\nend_of_record\n";
+    const dir = await root({ a: same, b: differing });
+    const tool = await stubTool("exit 0");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options(), dir)).toBe(2);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+    // The samples are the point: a digest alone cannot show which lines were missed.
+    expect(await readFile(path.join(dir, "target", "coverage", "unstable", "a", "lcov.info"), "utf8"))
+      .toBe(same);
+    expect(await readFile(path.join(dir, "target", "coverage", "unstable", "b", "lcov.info"), "utf8"))
+      .toBe(differing);
+  });
+
+  it("refuses an existing-mode refresh that has only one report", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await root({ a: same });
+    const tool = await stubTool("exit 0");
+    const single = parseArgs(["--update-baseline", "--baseline", "base.json", "--", "--use-existing-coverage"], {});
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, single, dir)).toBe(3);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+});
+
+describe("tool commit", () => {
+  it("prefers a declared commit over reading the checkout", async () => {
+    const { toolCommit } = await import("../scripts/ub-quality-gate.mjs");
+    expect(toolCommit("/nonexistent/ub", { UB_TOOL_COMMIT: " 6fd92c4 " })).toBe("6fd92c4");
+    // No declaration and no checkout: undefined rather than a guess.
+    expect(toolCommit("/nonexistent/ub", {})).toBeUndefined();
   });
 });

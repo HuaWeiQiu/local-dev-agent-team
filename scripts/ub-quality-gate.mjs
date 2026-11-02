@@ -37,7 +37,13 @@ import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
-                                  [--all] [--ub PATH] [--drift-report PATH] [-- extra args]`;
+                                  [--all] [--ub PATH] [--drift-report PATH]
+                                  [--coverage-a PATH --coverage-b PATH] [-- extra args]
+
+  --coverage-a/--coverage-b  two independently produced coverage reports. They must be
+                             byte-identical for a baseline to be written; a mismatch is
+                             a non-reproducible measurement, and both reports are kept
+                             under target/coverage/unstable/ for offline comparison.`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
@@ -61,6 +67,8 @@ export function defaultOptions(env = process.env) {
     baseline: DEFAULT_BASELINE,
     updateBaseline: false,
     driftReport: "",
+    coverageA: "",
+    coverageB: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -82,6 +90,8 @@ const VALUE_FLAGS = {
   "--ub": "ub",
   "--baseline": "baseline",
   "--drift-report": "driftReport",
+  "--coverage-a": "coverageA",
+  "--coverage-b": "coverageB",
 };
 
 /** Flags that only flip a boolean. */
@@ -334,6 +344,9 @@ export function baselineStep(options, cwd = process.cwd()) {
 /** Scores below this absolute move are rounding noise, whatever their ratio. */
 const NOISE_FLOOR = 0.5;
 
+/** Relative move that counts as jitter rather than debt. */
+const NOISE_TOLERANCE = 0.05;
+
 export function unstableKeys(first, second, tolerance = 0.05, threshold = 10) {
   const keys = new Set([...first.keys(), ...second.keys()]);
   const drift = [];
@@ -382,13 +395,31 @@ function jitter(key, before, after, tolerance) {
  * how two scans of one commit disagreed (JevPanel#Row 6.0 -> 2.09), and how a
  * baseline once froze a number its own commit could not reproduce.
  */
+export function usesExistingCoverage(options) {
+  return (options.extra ?? []).includes("--use-existing-coverage");
+}
+
+function coveragePath(cwd) {
+  return path.join(cwd, "target", "coverage", "typescript", "lcov.info");
+}
+
+/**
+ * One full scan. In self mode the coverage report is regenerated each time, so the two
+ * scans really do test whether coverage is stable. In existing mode the report is an
+ * input: it is hashed before each scan and must not change between them — a report
+ * edited mid-measurement is worse than a wobbling one, because it looks authoritative.
+ */
 function scanOnce(ub, options, cwd) {
+  const existing = usesExistingCoverage(options);
   clearMetrics(cwd);
-  rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
+  if (!existing) rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
+  const before = lcovProvenance(coveragePath(cwd));
   runLayers(ub, { ...options, changed: false }, cwd);
   return {
     scores: readScores(path.join(cwd, ".metrics", "crap.edn")),
-    lcov: lcovProvenance(path.join(cwd, "target", "coverage", "typescript", "lcov.info")),
+    lcov: lcovProvenance(coveragePath(cwd)),
+    before,
+    existing,
   };
 }
 
@@ -397,17 +428,157 @@ function scanOnce(ub, options, cwd) {
  * document ("two `--all` runs must agree key by key"); a note gets forgotten, so the
  * gate now refuses to write when the two scans disagree.
  */
-export function stableBaseline(ub, options, cwd = process.cwd()) {
+/**
+ * A refresh must rest on a coverage report two independent runs agree on. Hashing one
+ * report proves it was not edited; it does not prove it is not a lucky sample — that is
+ * exactly how a 20.24 got frozen for a function that measured 23.90 everywhere else.
+ */
+/**
+ * What CRAP actually consumes: which lines were executed, not how many times. Two runs
+ * of the same suite hit the same lines but with different counters, so raw file bytes
+ * differ on every run while the measurement is identical. Comparing bytes would refuse
+ * every refresh forever; comparing this signature refuses only real differences.
+ */
+export function coverageSignature(text) {
+  const covered = new Map();
+  let current;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("SF:")) {
+      current = line.slice(3);
+      covered.set(current, new Set());
+      continue;
+    }
+    if (current && line.startsWith("DA:")) {
+      const [number, hits] = line.slice(3).split(",");
+      if (Number(hits) > 0) covered.get(current).add(Number(number));
+    }
+  }
+  const digest = createHash("sha256");
+  for (const file of [...covered.keys()].sort()) {
+    digest.update(`${file}\n`);
+    digest.update(`${[...covered.get(file)].sort((left, right) => left - right).join(",")}\n`);
+  }
+  return digest.digest("hex");
+}
+
+export function requireReproducibleCoverage(options, cwd = process.cwd()) {
+  const declared = [options.coverageA, options.coverageB];
+  if (declared.some((file) => !file)) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  const paths = declared.map((file) => path.resolve(cwd, file));
+  const [a, b] = paths.map((file) => lcovProvenance(file));
+  if (!a || !b) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  const signatureA = coverageSignature(readFileSync(paths[0], "utf8"));
+  const signatureB = coverageSignature(readFileSync(paths[1], "utf8"));
+  if (signatureA !== signatureB) {
+    return { status: preserveUnstableCoverage(paths, cwd, a, b, { signatureA, signatureB }) };
+  }
+  // The pair agrees: score the first one, from the canonical path crapper reads.
+  mkdirSync(path.dirname(coveragePath(cwd)), { recursive: true });
+  writeFileSync(coveragePath(cwd), readFileSync(paths[0]));
+  return { status: undefined };
+}
+
+/** Keep both samples so the intermittent can be diagnosed offline, not re-caught live. */
+function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
+  const root = path.join(cwd, "target", "coverage", "unstable");
+  mkdirSync(path.join(root, "a"), { recursive: true });
+  mkdirSync(path.join(root, "b"), { recursive: true });
+  const kept = [
+    path.join(root, "a", "lcov.info"),
+    path.join(root, "b", "lcov.info"),
+  ];
+  writeFileSync(kept[0], readFileSync(paths[0]));
+  writeFileSync(kept[1], readFileSync(paths[1]));
+  process.stderr.write(
+    "baseline: refusing to write — the two coverage runs covered different lines " +
+      `(${signatures.signatureA?.slice(0, 12)}… vs ${signatures.signatureB?.slice(0, 12)}…; ` +
+      `raw ${a.sha256.slice(0, 12)}… vs ${b.sha256.slice(0, 12)}…); kept both samples:\n` +
+      `  ${path.relative(cwd, kept[0])}\n  ${path.relative(cwd, kept[1])}\n`,
+  );
+  return 2;
+}
+
+export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
+  const pairVerdict = coveragePairVerdict(options, cwd);
+  if (pairVerdict !== undefined) return pairVerdict;
   const first = scanOnce(ub, options, cwd);
+  // Tests only: a tamper between the scans has no other seam, because in production
+  // nothing in this process can be told to act there.
+  hooks.betweenScans?.();
   const second = scanOnce(ub, options, cwd);
-  const drift = unstableKeys(first.scores, second.scores);
-  if (drift.length > 0) return refuseBaseline(drift);
+  const refusal = scanRefusal(first, second, cwd);
+  if (refusal !== undefined) return refusal;
   return writeBaseline(
     second.scores,
     path.resolve(cwd, options.baseline),
     options.baseline,
     baselineGeneration({ ub, cwd, first, second }),
   );
+}
+
+/** Existing mode only: the two input reports must agree before anything is scored. */
+function coveragePairVerdict(options, cwd) {
+  if (!usesExistingCoverage(options)) return undefined;
+  const pair = requireReproducibleCoverage(options, cwd);
+  return pair.status;
+}
+
+/** Everything that makes two scans unusable as a baseline, or nothing. */
+function scanRefusal(first, second, cwd) {
+  const missing = missingCoverageRefusal(first, second, cwd);
+  if (missing !== undefined) return missing;
+  const tampered = tamperRefusal(first, second);
+  if (tampered !== undefined) return tampered;
+  const drift = unstableKeys(first.scores, second.scores);
+  return drift.length > 0 ? refuseBaseline(drift) : undefined;
+}
+
+function missingCoverageRefusal(first, second, cwd) {
+  const gone = [first, second].some((scan) => scan.existing && !scan.before);
+  return gone ? refuseWithoutCoverage(coveragePath(cwd)) : undefined;
+}
+
+/** A report edited between the scans means the two scans measured different inputs. */
+function tamperRefusal(first, second) {
+  const changed = first.existing
+    ? coverageChanged(first.lcov, second.before)
+    : coverageChanged(first.before, second.before);
+  return changed ? refuseTamperedCoverage(changed) : undefined;
+}
+
+/** A missing report is not an empty ledger: it is no measurement at all. */
+function refuseWithoutCoverage(file) {
+  process.stderr.write(
+    `baseline: refusing to write — no coverage report at ${path.relative(process.cwd(), file)}; ` +
+      "run the test suite with --coverage --coverage.reporter=lcov first\n",
+  );
+  return 3;
+}
+
+/** The report is an input in existing mode; changing it mid-run invalidates both scans. */
+function coverageChanged(first, second) {
+  if (!first || !second) return undefined;
+  return first.sha256 === second.sha256 ? undefined : { first, second };
+}
+
+function refuseTamperedCoverage({ first, second }) {
+  process.stderr.write(
+    "baseline: refusing to write — the coverage report changed between the two scans " +
+      `(${first.sha256.slice(0, 12)}… -> ${second.sha256.slice(0, 12)}…)\n`,
+  );
+  return 2;
 }
 
 /** Say exactly which functions moved, then leave the file alone. */
@@ -423,17 +594,34 @@ export function describeDrift(entry) {
 }
 
 /** How this generation was produced, in the shape the baseline file records. */
+/**
+ * In existing mode the frozen numbers describe an input report, so that is the one
+ * recorded; in self mode it is the report this scan produced.
+ */
+function frozenReport(existing, second) {
+  return existing ? second.before : second.lcov;
+}
+
+/** The pair that proves the measurement: the same input twice, or two live runs. */
+function agreedDigests(existing, first, second) {
+  return existing
+    ? [first.before?.sha256, second.before?.sha256]
+    : [first.lcov?.sha256, second.lcov?.sha256];
+}
+
 export function baselineGeneration({ ub, cwd = process.cwd(), first, second }) {
+  const existing = Boolean(first.existing);
+  const frozenLcov = frozenReport(existing, second);
+  const agreed = agreedDigests(existing, first, second);
   return {
     headSha: gitHeadSha(cwd),
     toolCommit: ub ? toolCommit(ub) : undefined,
     ...machineProvenance(process.env),
+    ...(existing ? { coverageSource: "existing" } : {}),
     scans: 2,
     generatedAt: new Date().toISOString(),
-    ...(second.lcov ? { lcov: second.lcov } : {}),
-    ...(first.lcov && second.lcov
-      ? { agreement: { scans: 2, sha256: [first.lcov.sha256, second.lcov.sha256] } }
-      : {}),
+    ...(frozenLcov ? { lcov: frozenLcov } : {}),
+    ...(agreed[0] && agreed[1] ? { agreement: { scans: 2, sha256: agreed } } : {}),
   };
 }
 
@@ -476,13 +664,33 @@ export function driftBetween(scores, baseline, threshold = 10) {
 function debtSince(scores, baseline, threshold) {
   const fresh = [];
   const worse = [];
+  const withinNoise = [];
   for (const [key, score] of scores) {
     if (score <= threshold) continue;
     const frozen = baseline[key];
-    if (frozen === undefined) fresh.push({ key, score });
-    else if (score > frozen) worse.push({ key, score, frozen });
+    if (frozen === undefined) {
+      fresh.push({ key, score });
+      continue;
+    }
+    if (score <= frozen) continue;
+    const entry = { key, score, frozen };
+    // Crossing the ledger line is debt whatever the size: the baseline did not carry
+    // this function, and now it does.
+    if (frozen <= threshold) worse.push(entry);
+    else if (withinNoiseBand(frozen, score)) withinNoise.push(entry);
+    else worse.push(entry);
   }
-  return { new: fresh, worse };
+  return { new: fresh, worse, withinNoise };
+}
+
+/**
+ * A move inside the band is measurement jitter, not new debt. Reporting it would make
+ * the nightly issue answer a 0.17 move, and an issue that answers noise trains people
+ * to scroll past it — the signal-to-noise ratio matters more than the sensitivity.
+ */
+function withinNoiseBand(before, after) {
+  const deviation = Math.abs(after - before) / Math.max(before, after, 1);
+  return deviation <= NOISE_TOLERANCE || Math.abs(after - before) <= NOISE_FLOOR;
 }
 
 /** Baseline entries that no longer cost anything: gone, or back under the line. */
@@ -499,6 +707,7 @@ function sortDrift(report) {
   const byScore = (left, right) => right.score - left.score || left.key.localeCompare(right.key);
   report.new.sort(byScore);
   report.worse.sort(byScore);
+  report.withinNoise.sort(byScore);
   report.fixed.sort((left, right) => right.frozen - left.frozen || left.key.localeCompare(right.key));
   return report;
 }
@@ -566,7 +775,7 @@ export function driftPayload({
   baseline = DEFAULT_BASELINE,
   provenance: origin,
 }) {
-  const empty = { new: [], worse: [], fixed: [] };
+  const empty = { new: [], worse: [], fixed: [], withinNoise: [] };
   const verdict = report ?? empty;
   return {
     kind: error ? "infrastructure" : "ledger",
@@ -583,6 +792,8 @@ export function driftPayload({
     new: verdict.new,
     worse: verdict.worse,
     fixed: verdict.fixed,
+    // Kept as evidence, never counted: these moves are inside the noise band.
+    withinNoise: verdict.withinNoise ?? [],
   };
 }
 
