@@ -15,6 +15,8 @@ const api = vi.hoisted(() => ({
   saveDesktopSettings: vi.fn(),
   saveProjectRoleSettings: vi.fn(),
   scanCliInventory: vi.fn(),
+  getConfig: vi.fn(),
+  probeJev: vi.fn(),
 }));
 
 vi.mock("../../web/src/api", async () => {
@@ -92,6 +94,20 @@ beforeEach(() => {
   api.getDesktopSettings.mockResolvedValue(response());
   api.scanCliInventory.mockResolvedValue({ inventory: inventory(), reason: "refresh" });
   api.saveDesktopSettings.mockResolvedValue({ settings: settings() });
+  // The Jev panel loads its own config. Left unmocked it would issue a real request
+  // from jsdom, and whether its rows rendered before the test ended decided how much
+  // of JevPanel was covered — coverage by stopwatch.
+  api.getConfig.mockResolvedValue({
+    jev: {
+      enabled: true,
+      baseUrl: "http://127.0.0.1:8317/v1",
+      protocol: "openai",
+      model: "jev-local",
+      timeoutMs: 20_000,
+      minConfidence: 0.8,
+    },
+  });
+  api.probeJev.mockResolvedValue({ ok: true, latencyMs: 12, model: "jev-local", decision: "retry" });
   api.getProjectRoleSettings.mockResolvedValue({
     projectId: "p1",
     projectName: "demo",
@@ -141,6 +157,22 @@ describe("SettingsWorkbench", () => {
     });
     expect(await screen.findByText("全局默认已保存（仅本机，不写进项目仓库）")).toBeVisible();
     expect(onSaved).toHaveBeenCalled();
+  });
+
+  it("renders the Jev panel with the resolved advice settings", async () => {
+    render(
+      <SettingsWorkbench
+        pane="project"
+        scope={{ id: "p1", name: "demo", root: "/repo" }}
+        projectName="demo"
+      />,
+    );
+    // Wait for the panel's own content, not for a timer: the rows are the coverage.
+    expect(await screen.findByRole("heading", { name: "Jev 本地分流模型" })).toBeVisible();
+    expect(await screen.findByText("http://127.0.0.1:8317/v1")).toBeVisible();
+    expect(screen.getByText("jev-local")).toBeVisible();
+    expect(screen.getByText(/低于它按确定性规则处理/)).toBeVisible();
+    expect(screen.getByText(/不会改动任何运行/)).toBeVisible();
   });
 
   it("saves project overrides as a per-role payload", async () => {

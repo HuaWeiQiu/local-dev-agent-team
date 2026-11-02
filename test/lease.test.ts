@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -36,6 +36,52 @@ describe("project control lease", () => {
     await writeFile(lockPath, contents, "utf8");
     await expect(acquireControlLease(root)).rejects.toThrow("incomplete or invalid");
     await expect(readFile(lockPath, "utf8")).resolves.toBe(contents);
+  });
+
+  it("discards a take-over marker left behind by a dead reclaimer", async () => {
+    // The abandoned-marker branch used to be reached only when three claimants
+    // happened to collide, so whether it ran (and therefore its coverage) depended
+    // on timing. Here the marker is exactly what a crashed reclaim leaves: a dead
+    // owner and an age past the reclaim window.
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-marker-"));
+    const lockPath = path.join(root, "control.lock");
+    const markerPath = path.join(root, "control.lock.reclaim");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({ pid: Number.MAX_SAFE_INTEGER, token: "00000000-0000-4000-8000-000000000000" })}\n`,
+      "utf8",
+    );
+    await writeFile(
+      markerPath,
+      `${JSON.stringify({ pid: Number.MAX_SAFE_INTEGER, token: "11111111-1111-4111-8111-111111111111" })}\n`,
+      "utf8",
+    );
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(markerPath, longAgo, longAgo);
+
+    const lease = await acquireControlLease(root);
+
+    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid: number };
+    expect(owner.pid).toBe(process.pid);
+    await expect(access(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await lease.release();
+  });
+
+  it("keeps a take-over marker whose reclaimer is still alive", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-lease-marker-live-"));
+    const lockPath = path.join(root, "control.lock");
+    const markerPath = path.join(root, "control.lock.reclaim");
+    const stale = `${JSON.stringify({ pid: Number.MAX_SAFE_INTEGER, token: "00000000-0000-4000-8000-000000000000" })}\n`;
+    await writeFile(lockPath, stale, "utf8");
+    await writeFile(
+      markerPath,
+      `${JSON.stringify({ pid: process.pid, token: "22222222-2222-4222-8222-222222222222" })}\n`,
+      "utf8",
+    );
+
+    await expect(acquireControlLease(root)).rejects.toThrow("is held by PID");
+    // A live reclaimer's marker is untouched, and so is the stale lock it protects.
+    await expect(readFile(lockPath, "utf8")).resolves.toBe(stale);
   });
 
   it("reclaims a lock whose owner PID is a zombie", async () => {

@@ -36,24 +36,34 @@ describe("SSE replay", () => {
       }
 
       const response = await fetch(`${listening.url}/api/events?runId=run-big&after=0`);
-      const live = events.emit("run-big", "run.live", { marker: true });
-      events.emit("run-other", "run.updated", { ignored: true });
 
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       const ids: number[] = [];
       let pending = "";
-      while (!ids.includes(live.sequence)) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        pending += decoder.decode(value, { stream: true });
-        const frames = pending.split("\n\n");
-        pending = frames.pop() ?? "";
-        for (const frame of frames) {
-          const match = frame.match(/^id: (\d+)$/m);
-          if (match?.[1]) ids.push(Number(match[1]));
+      // Drain frames until `target` has been seen. No sleep and no snapshot of the
+      // wall clock: the stream itself says when a phase is over.
+      const drainUntil = async (target: number): Promise<void> => {
+        while (!ids.includes(target)) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          pending += decoder.decode(value, { stream: true });
+          const frames = pending.split("\n\n");
+          pending = frames.pop() ?? "";
+          for (const frame of frames) {
+            const match = frame.match(/^id: (\d+)$/m);
+            if (match?.[1]) ids.push(Number(match[1]));
+          }
         }
-      }
+      };
+
+      // Phase 1: the whole ledger replays. Finished when the last stored sequence
+      // arrives, so a live event can no longer land in the middle of a batch.
+      await drainUntil(total);
+      // Phase 2: only now is a live event guaranteed to take the live path.
+      const live = events.emit("run-big", "run.live", { marker: true });
+      events.emit("run-other", "run.updated", { ignored: true });
+      await drainUntil(live.sequence);
       await reader.cancel();
 
       expect(ids).toHaveLength(total + 1);
