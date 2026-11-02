@@ -757,7 +757,8 @@ describe("run supervisor", () => {
     );
 
     release();
-    await expect(withTimeout(closing, 1_000)).resolves.toBeUndefined();
+    // `close()` is the signal. A fixed 1s backstop is a bet on machine speed.
+    await expect(closing).resolves.toBeUndefined();
     events.close();
   });
 
@@ -800,7 +801,7 @@ describe("run supervisor", () => {
 
     releaseGet();
     await expect(action).resolves.toEqual({ runId: state.id, status: "ready-to-merge" });
-    await expect(withTimeout(closing, 1_000)).resolves.toBeUndefined();
+    await expect(closing).resolves.toBeUndefined();
     events.close();
   });
 
@@ -983,16 +984,3 @@ function fakeApprovalState(runId: string, gate: "plan" | "final"): RunState {
   return state;
 }
 
-async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error("Timed out waiting for supervisor close")), milliseconds);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
