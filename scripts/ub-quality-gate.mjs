@@ -37,7 +37,13 @@ import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
-                                  [--all] [--ub PATH] [--drift-report PATH] [-- extra args]`;
+                                  [--all] [--ub PATH] [--drift-report PATH]
+                                  [--coverage-a PATH --coverage-b PATH] [-- extra args]
+
+  --coverage-a/--coverage-b  two independently produced coverage reports. They must be
+                             byte-identical for a baseline to be written; a mismatch is
+                             a non-reproducible measurement, and both reports are kept
+                             under target/coverage/unstable/ for offline comparison.`;
 const TOOLS = ["crapper", "dryer", "mutator"];
 
 /**
@@ -61,6 +67,8 @@ export function defaultOptions(env = process.env) {
     baseline: DEFAULT_BASELINE,
     updateBaseline: false,
     driftReport: "",
+    coverageA: "",
+    coverageB: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -82,6 +90,8 @@ const VALUE_FLAGS = {
   "--ub": "ub",
   "--baseline": "baseline",
   "--drift-report": "driftReport",
+  "--coverage-a": "coverageA",
+  "--coverage-b": "coverageB",
 };
 
 /** Flags that only flip a boolean. */
@@ -418,32 +428,134 @@ function scanOnce(ub, options, cwd) {
  * document ("two `--all` runs must agree key by key"); a note gets forgotten, so the
  * gate now refuses to write when the two scans disagree.
  */
+/**
+ * A refresh must rest on a coverage report two independent runs agree on. Hashing one
+ * report proves it was not edited; it does not prove it is not a lucky sample — that is
+ * exactly how a 20.24 got frozen for a function that measured 23.90 everywhere else.
+ */
+/**
+ * What CRAP actually consumes: which lines were executed, not how many times. Two runs
+ * of the same suite hit the same lines but with different counters, so raw file bytes
+ * differ on every run while the measurement is identical. Comparing bytes would refuse
+ * every refresh forever; comparing this signature refuses only real differences.
+ */
+export function coverageSignature(text) {
+  const covered = new Map();
+  let current;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("SF:")) {
+      current = line.slice(3);
+      covered.set(current, new Set());
+      continue;
+    }
+    if (current && line.startsWith("DA:")) {
+      const [number, hits] = line.slice(3).split(",");
+      if (Number(hits) > 0) covered.get(current).add(Number(number));
+    }
+  }
+  const digest = createHash("sha256");
+  for (const file of [...covered.keys()].sort()) {
+    digest.update(`${file}\n`);
+    digest.update(`${[...covered.get(file)].sort((left, right) => left - right).join(",")}\n`);
+  }
+  return digest.digest("hex");
+}
+
+export function requireReproducibleCoverage(options, cwd = process.cwd()) {
+  const declared = [options.coverageA, options.coverageB];
+  if (declared.some((file) => !file)) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  const paths = declared.map((file) => path.resolve(cwd, file));
+  const [a, b] = paths.map((file) => lcovProvenance(file));
+  if (!a || !b) {
+    process.stderr.write(
+      "baseline: refusing to write — two coverage reports are required for a refresh " +
+        "(--coverage-a PATH --coverage-b PATH), produced by two separate test runs\n",
+    );
+    return { status: 3 };
+  }
+  const signatureA = coverageSignature(readFileSync(paths[0], "utf8"));
+  const signatureB = coverageSignature(readFileSync(paths[1], "utf8"));
+  if (signatureA !== signatureB) {
+    return { status: preserveUnstableCoverage(paths, cwd, a, b, { signatureA, signatureB }) };
+  }
+  // The pair agrees: score the first one, from the canonical path crapper reads.
+  mkdirSync(path.dirname(coveragePath(cwd)), { recursive: true });
+  writeFileSync(coveragePath(cwd), readFileSync(paths[0]));
+  return { status: undefined };
+}
+
+/** Keep both samples so the intermittent can be diagnosed offline, not re-caught live. */
+function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
+  const root = path.join(cwd, "target", "coverage", "unstable");
+  mkdirSync(path.join(root, "a"), { recursive: true });
+  mkdirSync(path.join(root, "b"), { recursive: true });
+  const kept = [
+    path.join(root, "a", "lcov.info"),
+    path.join(root, "b", "lcov.info"),
+  ];
+  writeFileSync(kept[0], readFileSync(paths[0]));
+  writeFileSync(kept[1], readFileSync(paths[1]));
+  process.stderr.write(
+    "baseline: refusing to write — the two coverage runs covered different lines " +
+      `(${signatures.signatureA?.slice(0, 12)}… vs ${signatures.signatureB?.slice(0, 12)}…; ` +
+      `raw ${a.sha256.slice(0, 12)}… vs ${b.sha256.slice(0, 12)}…); kept both samples:\n` +
+      `  ${path.relative(cwd, kept[0])}\n  ${path.relative(cwd, kept[1])}\n`,
+  );
+  return 2;
+}
+
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
+  const pairVerdict = coveragePairVerdict(options, cwd);
+  if (pairVerdict !== undefined) return pairVerdict;
   const first = scanOnce(ub, options, cwd);
   // Tests only: a tamper between the scans has no other seam, because in production
   // nothing in this process can be told to act there.
   hooks.betweenScans?.();
-  if (first.existing && !first.before) {
-    return refuseWithoutCoverage(coveragePath(cwd));
-  }
   const second = scanOnce(ub, options, cwd);
-  if (second.existing && !second.before) {
-    return refuseWithoutCoverage(coveragePath(cwd));
-  }
-  // Compare what the first scan ended with to what the second scan started with: a
-  // report edited between them means the two scans measured different inputs.
-  const tampered = first.existing
-    ? coverageChanged(first.lcov, second.before)
-    : coverageChanged(first.before, second.before);
-  if (tampered) return refuseTamperedCoverage(tampered);
-  const drift = unstableKeys(first.scores, second.scores);
-  if (drift.length > 0) return refuseBaseline(drift);
+  const refusal = scanRefusal(first, second, cwd);
+  if (refusal !== undefined) return refusal;
   return writeBaseline(
     second.scores,
     path.resolve(cwd, options.baseline),
     options.baseline,
     baselineGeneration({ ub, cwd, first, second }),
   );
+}
+
+/** Existing mode only: the two input reports must agree before anything is scored. */
+function coveragePairVerdict(options, cwd) {
+  if (!usesExistingCoverage(options)) return undefined;
+  const pair = requireReproducibleCoverage(options, cwd);
+  return pair.status;
+}
+
+/** Everything that makes two scans unusable as a baseline, or nothing. */
+function scanRefusal(first, second, cwd) {
+  const missing = missingCoverageRefusal(first, second, cwd);
+  if (missing !== undefined) return missing;
+  const tampered = tamperRefusal(first, second);
+  if (tampered !== undefined) return tampered;
+  const drift = unstableKeys(first.scores, second.scores);
+  return drift.length > 0 ? refuseBaseline(drift) : undefined;
+}
+
+function missingCoverageRefusal(first, second, cwd) {
+  const gone = [first, second].some((scan) => scan.existing && !scan.before);
+  return gone ? refuseWithoutCoverage(coveragePath(cwd)) : undefined;
+}
+
+/** A report edited between the scans means the two scans measured different inputs. */
+function tamperRefusal(first, second) {
+  const changed = first.existing
+    ? coverageChanged(first.lcov, second.before)
+    : coverageChanged(first.before, second.before);
+  return changed ? refuseTamperedCoverage(changed) : undefined;
 }
 
 /** A missing report is not an empty ledger: it is no measurement at all. */
