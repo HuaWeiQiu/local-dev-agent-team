@@ -52,57 +52,12 @@ export class GrokAdapter implements AgentAdapter {
     if (!request.promptFile) {
       throw new Error("Grok headless mode requires a managed prompt file");
     }
-
-    const args = [
-      "--cwd",
-      request.cwd,
-      "--output-format",
-      "json",
-      "--reasoning-effort",
-      profile.reasoning,
-      "--sandbox",
-      profile.permission === "read-only" ? "read-only" : "workspace",
-      "--no-memory",
-      "--no-subagents",
-      "--disable-web-search",
-      "--no-auto-update",
-      "--max-turns",
-      String(profile.maxTurns ?? 24),
-    ];
-
-    if (profile.permission === "read-only") {
-      args.push("--permission-mode", "plan", "--tools", readOnlyTools);
-    } else {
-      args.push("--always-approve", "--tools", workerTools);
-    }
-    if (profile.externalTools === "deny") {
-      args.push("--disallowed-tools", deniedTools, "--deny", "MCPTool(*)");
-    }
-    const model = resolveGrokModelId(profile.model);
-    if (model) {
-      args.push("--model", model);
-    }
-    if (request.outputSchema) {
-      args.push("--json-schema", JSON.stringify(request.outputSchema));
-    }
-    args.push(...profile.args, "--prompt-file", request.promptFile);
-
     return {
       command: profile.executable ?? "grok",
-      args,
+      args: grokArgs(profile, request, request.promptFile),
       cwd: request.cwd,
       promptFile: request.promptFile,
-      env:
-        profile.externalTools === "deny"
-          ? {
-              ...sanitizedChildEnv(),
-              HOME: path.dirname(request.promptFile),
-              USERPROFILE: path.dirname(request.promptFile),
-              GROK_HOME: process.env.GROK_HOME ?? path.join(homedir(), ".grok"),
-              GROK_CLAUDE_MCPS_ENABLED: "false",
-              GROK_CURSOR_MCPS_ENABLED: "false",
-            }
-          : sanitizedChildEnv(),
+      env: grokEnv(profile, request.promptFile),
       timeoutMs: profile.timeoutSeconds * 1_000,
     };
   }
@@ -117,6 +72,78 @@ export class GrokAdapter implements AgentAdapter {
   async doctor(options: AdapterDoctorOptions): Promise<DoctorCheck[]> {
     return await runAdapterDoctor(this, options, doctorSpec);
   }
+}
+
+function baseArgs(profile: AgentProfile, request: AgentInvocationRequest): string[] {
+  return [
+    "--cwd",
+    request.cwd,
+    "--output-format",
+    "json",
+    "--reasoning-effort",
+    profile.reasoning,
+    "--sandbox",
+    profile.permission === "read-only" ? "read-only" : "workspace",
+    "--no-memory",
+    "--no-subagents",
+    "--disable-web-search",
+    "--no-auto-update",
+    "--max-turns",
+    String(profile.maxTurns ?? 24),
+  ];
+}
+
+/** The tool policy the profile was granted, expressed as grok flags. */
+function toolArgs(profile: AgentProfile): string[] {
+  if (profile.permission === "read-only") {
+    return ["--permission-mode", "plan", "--tools", readOnlyTools];
+  }
+  return ["--always-approve", "--tools", workerTools];
+}
+
+function isolationArgs(profile: AgentProfile): string[] {
+  if (profile.externalTools !== "deny") return [];
+  return ["--disallowed-tools", deniedTools, "--deny", "MCPTool(*)"];
+}
+
+function modelArgs(profile: AgentProfile): string[] {
+  const model = resolveGrokModelId(profile.model);
+  return model ? ["--model", model] : [];
+}
+
+function schemaArgs(request: AgentInvocationRequest): string[] {
+  return request.outputSchema ? ["--json-schema", JSON.stringify(request.outputSchema)] : [];
+}
+
+function grokArgs(
+  profile: AgentProfile,
+  request: AgentInvocationRequest,
+  promptFile: string,
+): string[] {
+  return [
+    ...baseArgs(profile, request),
+    ...toolArgs(profile),
+    ...isolationArgs(profile),
+    ...modelArgs(profile),
+    ...schemaArgs(request),
+    ...profile.args,
+    "--prompt-file",
+    promptFile,
+  ];
+}
+
+/** A denied tool policy also fences the homes so the child cannot reach global MCP config. */
+function grokEnv(profile: AgentProfile, promptFile: string): NodeJS.ProcessEnv {
+  const sanitized = sanitizedChildEnv();
+  if (profile.externalTools !== "deny") return sanitized;
+  return {
+    ...sanitized,
+    HOME: path.dirname(promptFile),
+    USERPROFILE: path.dirname(promptFile),
+    GROK_HOME: process.env.GROK_HOME ?? path.join(homedir(), ".grok"),
+    GROK_CLAUDE_MCPS_ENABLED: "false",
+    GROK_CURSOR_MCPS_ENABLED: "false",
+  };
 }
 
 /**
