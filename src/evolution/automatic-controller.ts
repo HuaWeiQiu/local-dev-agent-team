@@ -13,6 +13,7 @@ import {
   type AutomaticEvolutionCycle,
   type AutomaticEvolutionSnapshot,
   type AutomaticOutcomeAggregate,
+  type AutomaticRunOutcome,
   type AutomaticStrategyCandidate,
 } from "./automation.js";
 import { type EvolutionApplicationCoordinator } from "./application.js";
@@ -24,6 +25,7 @@ import {
   type EvolutionPolicy,
   type EvolutionProposal,
 } from "./domain.js";
+import { type ApplicationRecord } from "./application-shared.js";
 import { RunStateStore } from "../state/store.js";
 import type { RunState } from "../state/types.js";
 import { createExecutionDeadline, RunBudgetTracker } from "../observability/budget.js";
@@ -40,6 +42,7 @@ import {
 import {
   computeSuiteDigest,
   scoreEvaluationSuite,
+  type EvaluationSuite,
 } from "../evaluation/domain.js";
 import {
   requireEvaluationSuite,
@@ -197,25 +200,9 @@ export class AutomaticEvolutionController {
   async restoreRuntimeDefault(): Promise<void> {
     const control = await this.coordinator.readControlSnapshot();
     await this.cleanupAutomaticShadows(control.catalog.proposals);
-    const pointer = control.catalog.activeProposals.find(
-      (entry) =>
-        entry.target.kind === "strategy-blueprint" &&
-        entry.target.name === this.config.targetStrategy,
-    );
-    const proposal = pointer
-      ? control.catalog.proposals.find((entry) => entry.id === pointer.proposalId)
-      : undefined;
-    const application = proposal
-      ? control.application.applications.find((entry) => entry.proposalId === proposal.id)
-      : undefined;
+    const evidence = automaticTargetEvidence(control, this.config.targetStrategy);
     const target = this.strategies.customDefinition(this.config.targetStrategy);
-    if (
-      proposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
-      proposal.candidate.kind === "strategy-blueprint" &&
-      application?.afterTargetDigest &&
-      target &&
-      isDeepStrictEqual(target, proposal.candidate.definition)
-    ) {
+    if (isRestorableEvidence(evidence, target)) {
       this.strategies.setRuntimeDefault(this.config.targetStrategy);
     }
   }
@@ -237,57 +224,93 @@ export class AutomaticEvolutionController {
     commandId: string = randomUUID(),
     operator = "system:local-automation",
   ): AutomaticEvolutionSnapshot {
+    const maxCycles = this.startableMaxCycles(requestedMaxCycles);
+    const sessionId = this.createSessionId();
+    const claim = this.claimStart(commandId, sessionId, maxCycles, operator);
+    // A replay answers with the accepted session before the running check: the
+    // command was already accepted, so it is not a second start.
+    if (claim.replay) return claim.replay;
+    this.assertNotRunning(claim.key, claim.hash);
+    const session = this.beginSession(claim.key, claim.hash);
+    this.state = this.runningState(maxCycles, sessionId);
+    this.session = session;
+    this.abortController = new AbortController();
+    this.startLoop(session, { sessionId, commandId, operator, maxCycles });
+    return this.snapshot();
+  }
+
+  private startableMaxCycles(requested: number | undefined): number {
     if (!this.config.enabled) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_DISABLED",
         "Automatic evolution is disabled in agent-team.yaml",
       );
     }
-    const maxCycles = requestedMaxCycles ?? this.config.maxCycles;
+    const maxCycles = requested ?? this.config.maxCycles;
     if (!Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > this.config.maxCycles) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_CYCLE_LIMIT",
         `Automatic evolution cycles must be between 1 and configured maxCycles ${this.config.maxCycles}`,
       );
     }
-    const sessionId = this.createSessionId();
-    const idempotencyKey = `evolution-automation:start:${commandId}`;
-    const requestHash = automaticStartRequestHash(maxCycles, operator);
-    const claim = (() => {
-      try {
-        return this.host.events.claimCommand(idempotencyKey, requestHash, {
-          sessionId,
-          maxCycles,
-          operator,
-        });
-      } catch (error) {
-        throw new AutomaticEvolutionError(
-          "AUTOMATION_COMMAND_CONFLICT",
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    })();
-    if (!claim.claimed) {
-      const replay = automaticStartResponse(claim.response, commandId);
-      if (this.state.sessionId === replay.sessionId) return this.snapshot();
+    return maxCycles;
+  }
+
+  /** A command is accepted once; a replay returns the session it created. */
+  private claimStart(
+    commandId: string,
+    sessionId: string,
+    maxCycles: number,
+    operator: string,
+  ): { key: string; hash: string; replay?: undefined } | { key: string; hash: string; replay?: AutomaticEvolutionSnapshot } {
+    const key = `evolution-automation:start:${commandId}`;
+    const hash = automaticStartRequestHash(maxCycles, operator);
+    const claim = this.claimCommand(key, hash, { sessionId, maxCycles, operator });
+    if (claim.claimed) return { key, hash };
+    const replay = automaticStartResponse(claim.response, commandId);
+    if (this.state.sessionId === replay.sessionId) return { key, hash, replay: this.snapshot() };
+    throw new AutomaticEvolutionError(
+      "AUTOMATION_COMMAND_CONFLICT",
+      `Automatic evolution command '${commandId}' was already accepted by session '${replay.sessionId}'`,
+    );
+  }
+
+  private claimCommand(
+    key: string,
+    hash: string,
+    request: { sessionId: string; maxCycles: number; operator: string },
+  ) {
+    try {
+      return this.host.events.claimCommand(key, hash, request);
+    } catch (error) {
       throw new AutomaticEvolutionError(
         "AUTOMATION_COMMAND_CONFLICT",
-        `Automatic evolution command '${commandId}' was already accepted by session '${replay.sessionId}'`,
+        error instanceof Error ? error.message : String(error),
       );
     }
-    if (this.loop) {
-      this.host.events.releaseCommand(idempotencyKey, requestHash);
-      throw new AutomaticEvolutionError("AUTOMATION_RUNNING", "Automatic evolution is already running");
-    }
-    let session: AutomaticEvolutionRunSession;
+  }
+
+  private assertNotRunning(key: string, hash: string): void {
+    if (!this.loop) return;
+    this.host.events.releaseCommand(key, hash);
+    throw new AutomaticEvolutionError(
+      "AUTOMATION_RUNNING",
+      "Automatic evolution is already running",
+    );
+  }
+
+  private beginSession(key: string, hash: string): AutomaticEvolutionRunSession {
     try {
-      session = this.host.beginAutomationSession();
+      return this.host.beginAutomationSession();
     } catch (error) {
-      this.host.events.releaseCommand(idempotencyKey, requestHash);
+      this.host.events.releaseCommand(key, hash);
       throw error;
     }
+  }
+
+  private runningState(maxCycles: number, sessionId: string): AutomaticEvolutionSnapshot {
     const now = this.timestamp();
-    this.state = {
+    return {
       ...this.initialState(),
       status: "running",
       phase: "baseline",
@@ -298,42 +321,43 @@ export class AutomaticEvolutionController {
       // 最近一次完成的评测在新一轮基线评测刷新前仍然有效。
       lastEvaluation: this.state.lastEvaluation,
     };
-    this.session = session;
-    this.abortController = new AbortController();
-    const loopSignal = this.abortController.signal;
-    const loop = this.runLoop(
-      session,
-      sessionId,
-      commandId,
-      operator,
-      maxCycles,
-      loopSignal,
-    )
-      .catch((error: unknown) => {
-        if (loopSignal.aborted && error === loopSignal.reason) {
-          this.finish("stopped", this.state.stopReason ?? "Automatic evolution was stopped");
-          return;
-        }
-        const infrastructure = infrastructureFailureFrom(error);
-        this.state.error = error instanceof Error ? error.message : String(error);
-        if (infrastructure) {
-          this.state.failureCode = infrastructure.code;
-          this.finish(
-            "paused",
-            `Paused for provider infrastructure failure ${infrastructure.code}: ${infrastructure.summary}`,
-          );
-          return;
-        }
-        this.finish("failed", "Automatic evolution failed closed");
-      })
-      .finally(() => {
-        if (this.loop === loop) this.loop = undefined;
-        this.abortController = undefined;
-        this.session = undefined;
-      });
+  }
+
+  private startLoop(
+    session: AutomaticEvolutionRunSession,
+    run: { sessionId: string; commandId: string; operator: string; maxCycles: number },
+  ): void {
+    const signal = this.abortController!.signal;
+    const loop = this.runLoop(session, run.sessionId, run.commandId, run.operator, run.maxCycles, signal)
+      .catch((error: unknown) => this.settleLoopFailure(error, signal))
+      .finally(() => this.clearLoop(loop));
     this.loop = loop;
     void loop.catch(() => undefined);
-    return this.snapshot();
+  }
+
+  /** Three ways a loop ends badly: stopped by the operator, paused by a provider, failed. */
+  private settleLoopFailure(error: unknown, signal: AbortSignal): void {
+    if (signal.aborted && error === signal.reason) {
+      this.finish("stopped", this.state.stopReason ?? "Automatic evolution was stopped");
+      return;
+    }
+    const infrastructure = infrastructureFailureFrom(error);
+    this.state.error = error instanceof Error ? error.message : String(error);
+    if (infrastructure) {
+      this.state.failureCode = infrastructure.code;
+      this.finish(
+        "paused",
+        `Paused for provider infrastructure failure ${infrastructure.code}: ${infrastructure.summary}`,
+      );
+      return;
+    }
+    this.finish("failed", "Automatic evolution failed closed");
+  }
+
+  private clearLoop(loop: Promise<void>): void {
+    if (this.loop === loop) this.loop = undefined;
+    this.abortController = undefined;
+    this.session = undefined;
   }
 
   async stop(reason = "Stopped by the local operator"): Promise<AutomaticEvolutionSnapshot> {
@@ -548,38 +572,30 @@ export class AutomaticEvolutionController {
 
   private async resolveIncumbent(): Promise<{ strategy: string; definition: NamedStrategy }> {
     const control = await this.coordinator.readControlSnapshot();
-    const active = control.catalog.activeProposals.find(
-      (entry) =>
-        entry.target.kind === "strategy-blueprint" &&
-        entry.target.name === this.config.targetStrategy,
-    );
-    const activeProposal = active
-      ? control.catalog.proposals.find((proposal) => proposal.id === active.proposalId)
-      : undefined;
-    const application = activeProposal
-      ? control.application.applications.find((entry) => entry.proposalId === activeProposal.id)
-      : undefined;
+    const evidence = automaticTargetEvidence(control, this.config.targetStrategy);
     const evolved = this.strategies.customDefinition(this.config.targetStrategy);
-    if (
-      evolved &&
-      activeProposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
-      activeProposal.candidate.kind === "strategy-blueprint" &&
-      application?.afterTargetDigest &&
-      isDeepStrictEqual(evolved, activeProposal.candidate.definition)
-    ) {
-      this.strategies.setRuntimeDefault(this.config.targetStrategy);
-      return { strategy: this.config.targetStrategy, definition: evolved };
+    return this.applyIncumbentDecision(
+      decideIncumbent({
+        targetStrategy: this.config.targetStrategy,
+        evidence,
+        evolved,
+        configuredBaseline: this.config.baselineStrategy,
+        defaultStrategy: this.loaded.config.strategies!.default,
+        definitions: this.loaded.config.strategies!.definitions,
+      }),
+    );
+  }
+
+  /** The only place the incumbent decision is executed; the decision itself is pure. */
+  private applyIncumbentDecision(decision: IncumbentDecision): { strategy: string; definition: NamedStrategy } {
+    if (decision.kind === "conflict") {
+      throw new AutomaticEvolutionError("AUTOMATION_TARGET_CONFLICT", decision.message);
     }
-    if (evolved) {
-      throw new AutomaticEvolutionError(
-        "AUTOMATION_TARGET_CONFLICT",
-        `Automatic evolution target '${this.config.targetStrategy}' already exists without matching active application proof`,
-      );
+    if (decision.kind === "adopt") {
+      this.strategies.setRuntimeDefault(decision.strategy);
+      return { strategy: decision.strategy, definition: decision.definition };
     }
-    const baseline = this.config.baselineStrategy ?? this.loaded.config.strategies!.default;
-    const definition = this.loaded.config.strategies!.definitions[baseline];
-    if (!definition) throw new Error(`Automatic evolution baseline '${baseline}' is missing`);
-    return { strategy: baseline, definition: structuredClone(definition) };
+    return { strategy: decision.strategy, definition: decision.definition };
   }
 
   private async cleanupAutomaticShadows(proposals: readonly EvolutionProposal[]): Promise<void> {
@@ -610,115 +626,86 @@ export class AutomaticEvolutionController {
     intentKey: string,
     signal: AbortSignal,
   ): Promise<AutomaticOutcomeAggregate> {
-    const suite = requireEvaluationSuite(
-      await resolveEvaluationSuite(this.loaded.config, this.loaded.root),
-      "Automatic evolution evaluation",
+    const { suite, digest } = await loadEvaluationSuite(this.loaded);
+    const bindings = evaluationRoleBindings(
+      this.loaded,
+      strategy,
+      await this.resolveLayeredRoleBindingsForEvaluation(),
     );
-    const suiteDigest = computeSuiteDigest(suite);
-    const pairings: Array<{ taskId: string; state: RunState }> = [];
-    const allBindings = await this.resolveLayeredRoleBindingsForEvaluation();
-    // Strategy roleProfiles 是被评测变量，必须赢过全局 / 项目 CLI 默认；默认只补未映射的角色。
-    const strategyRoleProfiles = resolveStrategy(this.loaded.config, strategy).roleProfiles;
-    const roleBindings = allBindings
-      ? Object.fromEntries(
-          Object.entries(allBindings).filter(([role]) => !(role in strategyRoleProfiles)),
-        )
-      : undefined;
-    const effectiveBindings =
-      roleBindings && Object.keys(roleBindings).length > 0 ? roleBindings : undefined;
-    this.state.roleBindingSource = effectiveBindings ? "layered-cli-defaults" : "project-yaml";
+    this.state.roleBindingSource = bindings.source;
     this.touch();
 
+    const pairings = await this.collectPairings(session, suite, strategy, bindings, intentKey, signal);
+    const { aggregate, outcomes } = suiteOutcomes(suite, pairings);
+    await this.recordLastEvaluation(suite.name, digest);
+
+    return {
+      runIds: outcomes.map((outcome) => outcome.runId),
+      passed: aggregate.passed,
+      score: aggregate.score,
+      outcomes,
+    };
+  }
+
+  /** Every task runs `repeats` times; the pairings keep the state for the suite score. */
+  private async collectPairings(
+    session: AutomaticEvolutionRunSession,
+    suite: EvaluationSuite,
+    strategy: string,
+    bindings: EvaluationRoleBindings,
+    intentKey: string,
+    signal: AbortSignal,
+  ): Promise<Array<{ taskId: string; state: RunState }>> {
+    const pairings: Array<{ taskId: string; state: RunState }> = [];
     for (const task of suite.tasks) {
       for (let repeat = 1; repeat <= suite.repeats; repeat += 1) {
         signal.throwIfAborted();
-        const result = session.start(
-          {
-            goal: task.goal,
-            strategy,
-            profileOverrides: {},
-            ...(effectiveBindings ? { roleBindings: effectiveBindings } : {}),
-          },
-          `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
-        );
-        this.state.activeRunId = result.runId;
-        this.touch();
-        const state =
-          (await this.host.wait(result.runId)) ??
-          (await this.host.get(result.runId));
-        this.state.activeRunId = null;
-        this.touch();
-        if (!state) {
-          throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
-        }
-        if (
-          state.id !== result.runId ||
-          state.goal !== task.goal ||
-          state.strategy.name !== strategy ||
-          state.purpose !== "evolution-evaluation"
-        ) {
-          throw new Error(
-            `Automatic evaluation run '${result.runId}' does not match its server-owned evaluation request`,
-          );
-        }
-        const infrastructure = infrastructureFailureFromRun(state);
-        if (infrastructure) {
-          throw new ProviderFailureError(
-            `Automatic evaluation run '${result.runId}' hit provider infrastructure failure ${infrastructure.code}`,
-            infrastructure,
-          );
-        }
+        const state = await this.evaluateOneRun(session, {
+          goal: task.goal,
+          strategy,
+          bindings,
+          intentKey: `automatic-evolution:${intentKey}:${task.id}:${repeat}`,
+        });
         pairings.push({ taskId: task.id, state });
       }
     }
+    return pairings;
+  }
 
-    const suiteAggregate = scoreEvaluationSuite(suite, pairings);
-    // Preserve AutomaticOutcomeAggregate contract while ranking by suite worst-score.
-    const outcomes = suiteAggregate.scores.map((score) => {
-      const state = pairings.find(
-        (entry) => entry.taskId === score.taskId && entry.state.id === score.runId,
-      )?.state;
-      const projected = state ? projectRunOutcome(state) : undefined;
-      return {
-        runId: score.runId,
-        passed: score.passed,
-        score: score.score,
-        status: score.status,
-        qualityPassed: projected?.qualityPassed ?? score.passed,
-        finalDecision: projected?.finalDecision ?? null,
-        commandsPassed: projected?.commandsPassed ?? 0,
-        commandsTotal: projected?.commandsTotal ?? 0,
-        tasksMerged: score.tasksMerged,
-        tasksTotal: score.tasksTotal,
-        totalAttempts: score.totalAttempts,
-        agentInvocations: score.agentInvocations,
-      };
-    });
+  private async evaluateOneRun(
+    session: AutomaticEvolutionRunSession,
+    request: EvaluationRunRequest,
+  ): Promise<RunState> {
+    const result = session.start(evaluationRunInput(request), request.intentKey);
+    this.state.activeRunId = result.runId;
+    this.touch();
+    const state = (await this.host.wait(result.runId)) ?? (await this.host.get(result.runId));
+    this.state.activeRunId = null;
+    this.touch();
+    if (!state) {
+      throw new Error(`Automatic evaluation run '${result.runId}' did not persist state`);
+    }
+    assertEvaluationRun(state, request, result.runId);
+    throwOnInfrastructureFailure(state, result.runId);
+    return state;
+  }
 
-    // Record suite identity so operators can bind experience promotions to the
-    // exact evaluation evidence that produced this aggregate.
-    this.state.lastEvaluation = {
-      suiteName: suite.name,
-      suiteDigest,
-      completedAt: this.timestamp(),
-    };
+  /**
+   * Suite identity is advisory: it lets operators bind promotions to the exact
+   * evidence, but a write failure must not abort the evaluation loop.
+   */
+  private async recordLastEvaluation(suiteName: string, suiteDigest: string): Promise<void> {
+    this.state.lastEvaluation = { suiteName, suiteDigest, completedAt: this.timestamp() };
     this.touch();
     try {
       await this.stateStore.saveLastEvaluation(this.state.lastEvaluation);
     } catch (error) {
-      // 提示性数据的落盘失败不应中止评测循环。
       console.warn(
         `[evolution-automation] failed to persist last evaluation record: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
     }
-    return {
-      runIds: outcomes.map((outcome) => outcome.runId),
-      passed: suiteAggregate.passed,
-      score: suiteAggregate.score,
-      outcomes,
-    };
   }
 
   /**
@@ -728,26 +715,33 @@ export class AutomaticEvolutionController {
    */
   private async resolveLayeredRoleBindingsForEvaluation(): Promise<Record<string, RoleBinding> | undefined> {
     if (!this.config.useGlobalCliDefaults) return undefined;
-    if (this.globalRoleBindings !== undefined) {
-      return this.globalRoleBindings ?? undefined;
-    }
+    if (this.globalRoleBindings !== undefined) return this.globalRoleBindings ?? undefined;
+    this.globalRoleBindings = await this.loadLayeredBindings();
+    return this.globalRoleBindings ?? undefined;
+  }
+
+  /** Read once per controller: undefined means unread, null means unavailable. */
+  private async loadLayeredBindings(): Promise<Record<string, RoleBinding> | null> {
     try {
-      const { inventory } = await getInventory({
-        refresh: false,
-        ...(this.desktopHome ? { home: this.desktopHome } : {}),
-      });
       const merged = await resolveLayeredRoleBindings({
         root: this.loaded.root,
         stateDirectory: this.loaded.config.project.stateDirectory,
         knownRoles: Object.keys(this.loaded.config.roles),
-        ...(this.desktopHome ? { home: this.desktopHome } : {}),
-        inventory,
+        ...this.desktopHomeOption(),
+        inventory: (await this.readCliInventory()).inventory,
       });
-      this.globalRoleBindings = merged && Object.keys(merged).length > 0 ? merged : null;
+      return nonEmptyBindings(merged);
     } catch {
-      this.globalRoleBindings = null;
+      return null;
     }
-    return this.globalRoleBindings ?? undefined;
+  }
+
+  private desktopHomeOption(): { home?: string } {
+    return this.desktopHome ? { home: this.desktopHome } : {};
+  }
+
+  private async readCliInventory() {
+    return await getInventory({ refresh: false, ...this.desktopHomeOption() });
   }
 
   private async generateCandidate(
@@ -756,14 +750,31 @@ export class AutomaticEvolutionController {
   ): Promise<AutomaticStrategyCandidate> {
     if (this.proposeCandidate) return await this.proposeCandidate(context, signal);
     const runId = createRunId(`automatic evolution proposer cycle ${context.cycle}`);
-    const baseCommit = await new GitManager(
+    const baseCommit = await this.resolveProposerBaseCommit();
+    const state = this.proposerRunState(runId, baseCommit, context);
+    await this.artifactStore.save(state);
+    return await this.runProposer(state, context, runId, signal);
+  }
+
+  private async resolveProposerBaseCommit(): Promise<string> {
+    const git = new GitManager(
       this.loaded.root,
       path.resolve(this.loaded.root, this.loaded.config.project.stateDirectory, "worktrees"),
-    ).resolveCommit(this.loaded.config.project.defaultBranch);
+    );
+    return await git.resolveCommit(this.loaded.config.project.defaultBranch);
+  }
+
+  /** The proposer is an ordinary bounded run, so it carries a real run state. */
+  private proposerRunState(
+    runId: string,
+    baseCommit: string,
+    context: AutomaticProposalContext,
+  ): RunState {
     const now = this.timestamp();
-    const state: RunState = {
+    const cycle = context.cycle;
+    return {
       id: runId,
-      goal: `Generate automatic strategy candidate for cycle ${context.cycle}`,
+      goal: `Generate automatic strategy candidate for cycle ${cycle}`,
       root: this.loaded.root,
       configPath: this.loaded.path,
       baseBranch: this.loaded.config.project.defaultBranch,
@@ -776,7 +787,7 @@ export class AutomaticEvolutionController {
       profileOverrides: {},
       strategy: proposerBudgetStrategy(
         resolveStrategy(this.loaded.config, context.incumbentStrategy),
-        this.loaded.config.roles[this.config.proposerRole]?.fallbackProfiles.length ?? 0,
+        proposerFallbackCount(this.loaded.config.roles[this.config.proposerRole]),
       ),
       supervisorId: this.host.id,
       purpose: "evolution-proposer",
@@ -784,10 +795,17 @@ export class AutomaticEvolutionController {
       history: [{
         at: now,
         status: "orchestrating",
-        message: `Generating bounded automatic strategy candidate for cycle ${context.cycle}`,
+        message: `Generating bounded automatic strategy candidate for cycle ${cycle}`,
       }],
     };
-    await this.artifactStore.save(state);
+  }
+
+  private async runProposer(
+    state: RunState,
+    context: AutomaticProposalContext,
+    runId: string,
+    signal: AbortSignal,
+  ): Promise<AutomaticStrategyCandidate> {
     const deadline = createExecutionDeadline(state.strategy.executionTimeoutSeconds, signal);
     const budget = new RunBudgetTracker(state, this.artifactStore);
     const agent = new ProfiledAgentService(
@@ -799,16 +817,7 @@ export class AutomaticEvolutionController {
       budget,
     );
     try {
-      const response = await agent.runStructured({
-        role: this.config.proposerRole,
-        ...(this.config.proposerProfile ? { profileName: this.config.proposerProfile } : {}),
-        promptKey: "evolution-proposer",
-        runId,
-        artifactKey: "proposal",
-        context,
-        schema: automaticStrategyCandidateSchema,
-        jsonSchema: z.toJSONSchema(automaticStrategyCandidateSchema) as Record<string, unknown>,
-      });
+      const response = await agent.runStructured(proposerRequest(this.config, context, runId));
       await this.artifactStore.transition(
         state,
         "completed",
@@ -817,11 +826,7 @@ export class AutomaticEvolutionController {
       return response.value;
     } catch (error) {
       state.error = boundedErrorMessage(error);
-      await this.artifactStore.transition(
-        state,
-        signal.aborted ? "cancelled" : "blocked",
-        state.error,
-      );
+      await this.artifactStore.transition(state, failureStatus(signal), state.error);
       throw error;
     } finally {
       deadline.dispose();
@@ -995,35 +1000,304 @@ function proposerBudgetStrategy(
   };
 }
 
+/** Bindings with no roles are treated as unavailable, not as an empty map. */
+function nonEmptyBindings(
+  bindings: Record<string, RoleBinding> | undefined,
+): Record<string, RoleBinding> | null {
+  return bindings && Object.keys(bindings).length > 0 ? bindings : null;
+}
+
+/** A run that died because the operator aborted is cancelled, not blocked. */
+function failureStatus(signal: AbortSignal): "cancelled" | "blocked" {
+  return signal.aborted ? "cancelled" : "blocked";
+}
+
+/** The proposer budget floor depends on how many fallbacks the role declares. */
+function proposerFallbackCount(role: { fallbackProfiles: string[] } | undefined): number {
+  return role ? role.fallbackProfiles.length : 0;
+}
+
+/** The structured request the proposer agent receives; kept together with its schema. */
+function proposerRequest(
+  config: AutomaticEvolutionConfig,
+  context: AutomaticProposalContext,
+  runId: string,
+) {
+  return {
+    role: config.proposerRole,
+    ...(config.proposerProfile ? { profileName: config.proposerProfile } : {}),
+    promptKey: "evolution-proposer" as const,
+    runId,
+    artifactKey: "proposal" as const,
+    context,
+    schema: automaticStrategyCandidateSchema,
+    jsonSchema: z.toJSONSchema(automaticStrategyCandidateSchema) as Record<string, unknown>,
+  };
+}
+
+interface AutomaticTargetEvidence {
+  proposal: EvolutionProposal | undefined;
+  application: ApplicationRecord | undefined;
+}
+
+type IncumbentDecision =
+  | { kind: "adopt"; strategy: string; definition: NamedStrategy }
+  | { kind: "conflict"; message: string }
+  | { kind: "baseline"; strategy: string; definition: NamedStrategy };
+
+interface IncumbentInputs {
+  targetStrategy: string;
+  evidence: AutomaticTargetEvidence;
+  evolved: NamedStrategy | undefined;
+  configuredBaseline: string | undefined;
+  defaultStrategy: string;
+  definitions: Record<string, NamedStrategy>;
+}
+
+/** The active proposal for our target and the application that recorded it, if any. */
+function automaticTargetEvidence(
+  control: Awaited<ReturnType<EvolutionApplicationCoordinator["readControlSnapshot"]>>,
+  targetStrategy: string,
+): AutomaticTargetEvidence {
+  const pointer = control.catalog.activeProposals.find(
+    (entry) => entry.target.kind === "strategy-blueprint" && entry.target.name === targetStrategy,
+  );
+  const proposal = pointer
+    ? control.catalog.proposals.find((entry) => entry.id === pointer.proposalId)
+    : undefined;
+  const application = proposal
+    ? control.application.applications.find((entry) => entry.proposalId === proposal.id)
+    : undefined;
+  return { proposal, application };
+}
+
+/** An automatic proposal only counts as applied when the evidence chain is complete. */
+function hasAutomaticApplication(
+  evidence: AutomaticTargetEvidence,
+  definition: NamedStrategy | undefined,
+): boolean {
+  const { proposal, application } = evidence;
+  return Boolean(
+    definition &&
+      proposal?.evaluation?.source === "server-automatic-run-evaluation-v1" &&
+      proposal.candidate.kind === "strategy-blueprint" &&
+      application?.afterTargetDigest &&
+      isDeepStrictEqual(definition, proposal.candidate.definition),
+  );
+}
+
+/** Pure decision: adopt the evolved target, refuse it, or fall back to the baseline. */
+function decideIncumbent(inputs: IncumbentInputs): IncumbentDecision {
+  if (inputs.evolved && hasAutomaticApplication(inputs.evidence, inputs.evolved)) {
+    return { kind: "adopt", strategy: inputs.targetStrategy, definition: inputs.evolved };
+  }
+  if (inputs.evolved) {
+    return {
+      kind: "conflict",
+      message: `Automatic evolution target '${inputs.targetStrategy}' already exists without matching active application proof`,
+    };
+  }
+  const baseline = inputs.configuredBaseline ?? inputs.defaultStrategy;
+  const definition = inputs.definitions[baseline];
+  if (!definition) throw new Error(`Automatic evolution baseline '${baseline}' is missing`);
+  return { kind: "baseline", strategy: baseline, definition: structuredClone(definition) };
+}
+
+/** Restoring the runtime default needs the same proof as adopting an incumbent. */
+function isRestorableEvidence(
+  evidence: AutomaticTargetEvidence,
+  definition: NamedStrategy | undefined,
+): boolean {
+  return hasAutomaticApplication(evidence, definition);
+}
+
+interface EvaluationRoleBindings {
+  bindings: Record<string, RoleBinding> | undefined;
+  source: "layered-cli-defaults" | "project-yaml";
+}
+
+interface EvaluationRunRequest {
+  goal: string;
+  strategy: string;
+  bindings: EvaluationRoleBindings;
+  intentKey: string;
+}
+
+/** The suite and its digest, read once per strategy evaluation. */
+async function loadEvaluationSuite(
+  loaded: LoadedConfig,
+): Promise<{ suite: EvaluationSuite; digest: string }> {
+  const suite = requireEvaluationSuite(
+    await resolveEvaluationSuite(loaded.config, loaded.root),
+    "Automatic evolution evaluation",
+  );
+  return { suite, digest: computeSuiteDigest(suite) };
+}
+
+/**
+ * Strategy roleProfiles are the variable under test, so they must win over the
+ * global/CLI defaults; those only fill roles the strategy does not map.
+ */
+function evaluationRoleBindings(
+  loaded: LoadedConfig,
+  strategy: string,
+  allBindings: Record<string, RoleBinding> | undefined,
+): EvaluationRoleBindings {
+  const strategyRoleProfiles = resolveStrategy(loaded.config, strategy).roleProfiles;
+  const supplemented = allBindings
+    ? Object.fromEntries(
+        Object.entries(allBindings).filter(([role]) => !(role in strategyRoleProfiles)),
+      )
+    : undefined;
+  const bindings = supplemented && Object.keys(supplemented).length > 0 ? supplemented : undefined;
+  return { bindings, source: bindings ? "layered-cli-defaults" : "project-yaml" };
+}
+
+function evaluationRunInput(request: EvaluationRunRequest) {
+  return {
+    goal: request.goal,
+    strategy: request.strategy,
+    profileOverrides: {},
+    ...(request.bindings.bindings ? { roleBindings: request.bindings.bindings } : {}),
+  };
+}
+
+/** A run the server did not request for this suite never counts as evidence. */
+function assertEvaluationRun(
+  state: RunState,
+  request: EvaluationRunRequest,
+  expectedRunId: string,
+): void {
+  const matches =
+    state.id === expectedRunId &&
+    state.goal === request.goal &&
+    state.strategy.name === request.strategy &&
+    state.purpose === "evolution-evaluation";
+  if (matches) return;
+  throw new Error(
+    `Automatic evaluation run '${state.id}' does not match its server-owned evaluation request`,
+  );
+}
+
+function throwOnInfrastructureFailure(state: RunState, runId: string): void {
+  const infrastructure = infrastructureFailureFromRun(state);
+  if (!infrastructure) return;
+  throw new ProviderFailureError(
+    `Automatic evaluation run '${runId}' hit provider infrastructure failure ${infrastructure.code}`,
+    infrastructure,
+  );
+}
+
+function suiteOutcomes(
+  suite: EvaluationSuite,
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+): { aggregate: ReturnType<typeof scoreEvaluationSuite>; outcomes: AutomaticOutcomeAggregate["outcomes"] } {
+  const aggregate = scoreEvaluationSuite(suite, pairings as never);
+  return { aggregate, outcomes: aggregate.scores.map((score) => projectScore(score, pairings)) };
+}
+
+/** Preserves the AutomaticOutcomeAggregate contract while ranking by worst score. */
+function projectScore(
+  score: ReturnType<typeof scoreEvaluationSuite>["scores"][number],
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+): AutomaticOutcomeAggregate["outcomes"][number] {
+  const state = pairingStateFor(pairings, score);
+  const projected = state ? projectRunOutcome(state) : undefined;
+  return {
+    runId: score.runId,
+    passed: score.passed,
+    score: score.score,
+    status: score.status,
+    ...projectedQuality(projected, score),
+    tasksMerged: score.tasksMerged,
+    tasksTotal: score.tasksTotal,
+    totalAttempts: score.totalAttempts,
+    agentInvocations: score.agentInvocations,
+  };
+}
+
+function pairingStateFor(
+  pairings: ReadonlyArray<{ taskId: string; state: RunState }>,
+  score: { taskId: string; runId: string },
+): RunState | undefined {
+  return pairings.find(
+    (entry) => entry.taskId === score.taskId && entry.state.id === score.runId,
+  )?.state;
+}
+
+/**
+ * The suite score is authoritative; the run projection only fills what the suite
+ * does not count (commands and the final decision).
+ */
+function projectedQuality(
+  projected: AutomaticRunOutcome | undefined,
+  score: { passed: boolean },
+): Pick<AutomaticRunOutcome, "qualityPassed" | "finalDecision" | "commandsPassed" | "commandsTotal"> {
+  if (projected === undefined) {
+    return { qualityPassed: score.passed, finalDecision: null, commandsPassed: 0, commandsTotal: 0 };
+  }
+  return {
+    qualityPassed: projected.qualityPassed,
+    finalDecision: projected.finalDecision,
+    commandsPassed: projected.commandsPassed,
+    commandsTotal: projected.commandsTotal,
+  };
+}
+
+const MAX_ERROR_MESSAGE = 2_000;
+
 function boundedErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.length <= 2_000 ? message : `${message.slice(0, 2_000)} [truncated]`;
+  const message = errorText(error);
+  return message.length <= MAX_ERROR_MESSAGE ? message : truncateMessage(message);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncateMessage(message: string): string {
+  return `${message.slice(0, MAX_ERROR_MESSAGE)} [truncated]`;
 }
 
 function infrastructureFailureFrom(
   error: unknown,
 ): ProviderFailureClassification | undefined {
   if (error instanceof ProviderFailureError) {
-    return error.classification.pauseEvolution || error.classification.infrastructure
-      ? error.classification
+    const { classification } = error;
+    return classification.pauseEvolution || classification.infrastructure
+      ? classification
       : undefined;
   }
   if (error instanceof RoleProfileChainError) {
     return error.attempts.find((attempt) => attempt.classification.pauseEvolution)
       ?.classification;
   }
-  const classification = classifyError(error);
-  return classification.pauseEvolution ? classification : undefined;
+  return pauseOnly(classifyError(error));
 }
 
 function infrastructureFailureFromRun(
   state: RunState,
 ): ProviderFailureClassification | undefined {
+  return pauseOnly(classifyRunFailure(runFailureMessage(state)));
+}
+
+/** Only a run the system gave up on can carry an infrastructure verdict. */
+function runFailureMessage(state: RunState): string | undefined {
   if (state.status !== "blocked" && state.status !== "interrupted") return undefined;
-  const message = state.error ?? state.history.at(-1)?.message;
-  if (!message) return undefined;
-  const classification = classifyProviderFailureMessage(message);
-  return classification.pauseEvolution ? classification : undefined;
+  return state.error ?? state.history.at(-1)?.message;
+}
+
+function classifyRunFailure(
+  message: string | undefined,
+): ProviderFailureClassification | undefined {
+  return message ? classifyProviderFailureMessage(message) : undefined;
+}
+
+/** A classification only pauses the loop when the provider says it is infrastructure. */
+function pauseOnly(
+  classification: ProviderFailureClassification | undefined,
+): ProviderFailureClassification | undefined {
+  return classification?.pauseEvolution ? classification : undefined;
 }
 
 function classifyProviderFailureMessage(message: string): ProviderFailureClassification {
