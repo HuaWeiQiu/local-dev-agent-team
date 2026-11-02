@@ -334,29 +334,46 @@ export function baselineStep(options, cwd = process.cwd()) {
 /** Scores below this absolute move are rounding noise, whatever their ratio. */
 const NOISE_FLOOR = 0.5;
 
-export function unstableKeys(first, second, tolerance = 0.05) {
+export function unstableKeys(first, second, tolerance = 0.05, threshold = 10) {
   const keys = new Set([...first.keys(), ...second.keys()]);
   const drift = [];
   for (const key of keys) {
-    const before = first.get(key);
-    const after = second.get(key);
-    if (before === undefined || after === undefined) {
-      if (before !== after) drift.push({ key, first: before, second: after });
-      continue;
-    }
-    // Coverage is not bit-for-bit reproducible: a branch hit count can move by a
-    // line between runs, which moves a score by a hundredth. The bar here is the
-    // same 5% used to judge the frozen baseline itself — real wobble (a function
-    // going 6.0 -> 2.09) is far outside it.
-    const deviation = Math.abs(after - before) / Math.max(before, after, 1);
-    const absolute = Math.abs(after - before);
-    // Relative-only would flag a 1.00 -> 1.13 wobble (noise on a trivial function).
-    // Absolute-only would miss a 100 -> 106 drift on an expensive one. Both bars.
-    if (deviation > tolerance && absolute > NOISE_FLOOR) {
-      drift.push({ key, first: before, second: after, deviation });
-    }
+    const entry = unstableEntry(key, first.get(key), second.get(key), tolerance, threshold);
+    if (entry) drift.push(entry);
   }
   return drift.sort((left, right) => left.key.localeCompare(right.key));
+}
+
+/** Why one key counts as unstable, or nothing when it does not. */
+function unstableEntry(key, before, after, tolerance, threshold) {
+  if (!reachesLedger(before, after, threshold)) return undefined;
+  if (before === undefined || after === undefined) return missingSide(key, before, after);
+  if (crossedLine(before, after, threshold)) return { key, first: before, second: after };
+  return jitter(key, before, after, tolerance);
+}
+
+/** A function the baseline could freeze: at least one scan is over the line. */
+function reachesLedger(before, after, threshold) {
+  return Math.max(before ?? 0, after ?? 0) > threshold;
+}
+
+function missingSide(key, before, after) {
+  return before === after ? undefined : { key, first: before, second: after };
+}
+
+/** One scan freezes it, the other does not — unstable however small the move. */
+function crossedLine(before, after, threshold) {
+  return before > threshold !== after > threshold;
+}
+
+/** Both scans are over the line: the judgement is about how far the number moved. */
+function jitter(key, before, after, tolerance) {
+  const deviation = Math.abs(after - before) / Math.max(before, after, 1);
+  const absolute = Math.abs(after - before);
+  // Relative-only would flag a 1.00 -> 1.13 wobble (noise on a trivial function).
+  // Absolute-only would miss a 100 -> 106 drift on an expensive one. Both bars.
+  if (deviation <= tolerance || absolute <= NOISE_FLOOR) return undefined;
+  return { key, first: before, second: after, deviation };
 }
 
 /**
@@ -384,31 +401,40 @@ export function stableBaseline(ub, options, cwd = process.cwd()) {
   const first = scanOnce(ub, options, cwd);
   const second = scanOnce(ub, options, cwd);
   const drift = unstableKeys(first.scores, second.scores);
-  if (drift.length > 0) {
-    process.stderr.write(
-      `baseline: refusing to write — two full scans disagree on ${drift.length} function(s)\n`,
-    );
-    for (const entry of drift.slice(0, 10)) {
-      const percent = entry.deviation ? ` (${(entry.deviation * 100).toFixed(1)}%)` : "";
-      process.stderr.write(
-        `  ${entry.key}: ${entry.first ?? "absent"} -> ${entry.second ?? "absent"}${percent}\n`,
-      );
-    }
-    return 2;
-  }
-  return writeBaseline(second.scores, path.resolve(cwd, options.baseline), options.baseline, {
+  if (drift.length > 0) return refuseBaseline(drift);
+  return writeBaseline(
+    second.scores,
+    path.resolve(cwd, options.baseline),
+    options.baseline,
+    baselineGeneration({ ub, cwd, first, second }),
+  );
+}
+
+/** Say exactly which functions moved, then leave the file alone. */
+function refuseBaseline(drift) {
+  process.stderr.write(`baseline: refusing to write — two full scans disagree on ${drift.length} function(s)\n`);
+  for (const entry of drift.slice(0, 10)) process.stderr.write(`  ${describeDrift(entry)}\n`);
+  return 2;
+}
+
+export function describeDrift(entry) {
+  const percent = entry.deviation ? ` (${(entry.deviation * 100).toFixed(1)}%)` : "";
+  return `${entry.key}: ${entry.first ?? "absent"} -> ${entry.second ?? "absent"}${percent}`;
+}
+
+/** How this generation was produced, in the shape the baseline file records. */
+export function baselineGeneration({ ub, cwd = process.cwd(), first, second }) {
+  return {
     headSha: gitHeadSha(cwd),
-    toolCommit: toolCommit(ub),
-    coverageSource: "self",
-    platform: `${platform()}/${arch()}`,
-    nodeVersion: process.version,
+    toolCommit: ub ? toolCommit(ub) : undefined,
+    ...machineProvenance(process.env),
     scans: 2,
-    // Both digests: the two runs agreed on the numbers, and these say which reports
-    // they agreed about. One digest would leave the second run invisible.
-    ...(first.lcov || second.lcov
-      ? { lcov: { first: first.lcov?.sha256, second: second.lcov?.sha256 } }
+    generatedAt: new Date().toISOString(),
+    ...(second.lcov ? { lcov: second.lcov } : {}),
+    ...(first.lcov && second.lcov
+      ? { agreement: { scans: 2, sha256: [first.lcov.sha256, second.lcov.sha256] } }
       : {}),
-  });
+  };
 }
 
 function writeBaseline(scores, baselinePath, label, generation) {
@@ -485,7 +511,11 @@ export function gitHeadSha(cwd = process.cwd()) {
 
 /** The tool that produced the scores; a moving tool silently changes every number. */
 export function toolCommit(ub, env = process.env) {
-  if (env.UB_TOOL_COMMIT?.trim()) return env.UB_TOOL_COMMIT.trim();
+  const declared = env.UB_TOOL_COMMIT?.trim();
+  return declared ? declared : commitOfToolCheckout(ub);
+}
+
+function commitOfToolCheckout(ub) {
   const toolDir = path.join(path.dirname(path.resolve(ub)), "crapper");
   const result = spawnSync("git", ["-C", toolDir, "rev-parse", "HEAD"], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : undefined;
@@ -505,14 +535,21 @@ export function lcovProvenance(file) {
   };
 }
 
-/** What produced a verdict: code, tool, coverage source, machine. */
+/** The machine that produced a verdict; nothing here depends on the repository. */
+export function machineProvenance(env = process.env) {
+  return {
+    coverageSource: env.COVERAGE_SOURCE?.trim() || "self",
+    platform: `${platform()}/${arch()}`,
+    nodeVersion: process.version,
+  };
+}
+
+/** What produced a verdict: code, tool, machine and the report behind the numbers. */
 export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPath } = {}) {
   return {
     headSha: gitHeadSha(cwd),
     toolCommit: ub ? toolCommit(ub, env) : undefined,
-    coverageSource: env.COVERAGE_SOURCE?.trim() || "self",
-    platform: `${platform()}/${arch()}`,
-    nodeVersion: process.version,
+    ...machineProvenance(env),
     lcov: lcovProvenance(lcovPath ?? path.join(cwd, "target", "coverage", "typescript", "lcov.info")),
   };
 }
