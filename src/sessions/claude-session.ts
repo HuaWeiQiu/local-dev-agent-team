@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { extractUsage, validateProfileArguments } from "../adapters/shared.js";
 import type { AgentUsage } from "../adapters/types.js";
+import type { AgentProfile } from "../config/schema.js";
 import { sanitizedChildEnv } from "../process/env.js";
 import { spawnStreamProcess, type StreamProcess } from "../process/stream.js";
 import { Deferred, SessionEventHub } from "./hub.js";
@@ -200,54 +201,27 @@ export class ClaudeStreamSession implements AgentSession {
 
   private ensureStarted(): void {
     if (this.proc) return;
-    const { profile, cwd } = this.options;
-    validateProfileArguments(profile, "claude");
-    const args = [
-      "--print",
-      "--input-format",
-      "stream-json",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-      "--permission-mode",
-      profile.permission === "read-only" ? "plan" : "acceptEdits",
-      "--permission-prompt-tool",
-      "stdio",
-      "--effort",
-      profile.reasoning,
-    ];
-    if (!this.capabilities.resume) args.push("--no-session-persistence");
-    if (this.options.resumeSessionId) args.push("--resume", this.options.resumeSessionId);
-    if (profile.permission === "read-only") {
-      args.push("--tools", "Read,Glob,Grep", "--disallowed-tools", "Edit,Write,NotebookEdit,Bash");
-    }
-    if (profile.model !== "inherit") args.push("--model", profile.model);
-    if (profile.externalTools === "deny") {
-      args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
-    }
-    if (this.options.sessionSchema) {
-      args.push("--json-schema", JSON.stringify(this.options.sessionSchema));
-    }
-    args.push(...profile.args);
-
+    validateProfileArguments(this.options.profile, "claude");
     const proc = spawnStreamProcess({
       command: this.command,
-      args,
-      cwd,
+      args: claudeArgs(this.options, this.capabilities),
+      cwd: this.options.cwd,
       env: this.options.env ?? sanitizedChildEnv(),
       onLine: (line) => this.handleLine(line),
       ...(this.options.liveChild ? { liveChild: this.options.liveChild } : {}),
     });
     this.proc = proc;
-    void proc.exited.then((exit) => {
-      if (this.closed) return;
-      const reason = exit.error
-        ? `could not start claude: ${exit.error.message}`
-        : `claude exited (code ${exit.exitCode ?? "none"}${exit.signal ? `, ${exit.signal}` : ""}): ${proc.stderrTail().slice(-400)}`;
-      this.dead = new SessionError(reason, "process-exit");
-      this.active?.done.reject(this.dead);
-    });
+    void proc.exited.then((exit) => this.handleProcessExit(proc, exit));
+  }
+
+  /** A child that died outside a turn is only remembered; a live turn is failed. */
+  private handleProcessExit(
+    proc: StreamProcess,
+    exit: { exitCode: number | null; signal: NodeJS.Signals | null; error?: Error },
+  ): void {
+    if (this.closed) return;
+    this.dead = new SessionError(exitReason(exit, proc.stderrTail()), "process-exit");
+    this.active?.done.reject(this.dead);
   }
 
   private sendUser(text: string): void {
@@ -454,6 +428,81 @@ export class ClaudeStreamSession implements AgentSession {
       ...(error ? { error } : {}),
     };
   }
+}
+
+/** The argv this CLI needs to speak stream-json; order is part of the contract. */
+function claudeArgs(
+  options: OpenSessionOptions & { sessionSchema?: Record<string, unknown> },
+  capabilities: SessionCapabilities,
+): string[] {
+  return [
+    ...baseArgs(options.profile),
+    ...persistenceArgs(options, capabilities),
+    ...permissionToolArgs(options.profile),
+    ...modelArgs(options.profile),
+    ...isolationArgs(options.profile, options.sessionSchema),
+    ...options.profile.args,
+  ];
+}
+
+function baseArgs(profile: AgentProfile): string[] {
+  return [
+    "--print",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--permission-mode",
+    profile.permission === "read-only" ? "plan" : "acceptEdits",
+    "--permission-prompt-tool",
+    "stdio",
+    "--effort",
+    profile.reasoning,
+  ];
+}
+
+/** Sessions that cannot resume must not persist state; a resume pins the old id. */
+function persistenceArgs(
+  options: { resumeSessionId?: string },
+  capabilities: SessionCapabilities,
+): string[] {
+  const args = capabilities.resume ? [] : ["--no-session-persistence"];
+  if (options.resumeSessionId) args.push("--resume", options.resumeSessionId);
+  return args;
+}
+
+function permissionToolArgs(profile: AgentProfile): string[] {
+  if (profile.permission !== "read-only") return [];
+  return ["--tools", "Read,Glob,Grep", "--disallowed-tools", "Edit,Write,NotebookEdit,Bash"];
+}
+
+function modelArgs(profile: AgentProfile): string[] {
+  return profile.model === "inherit" ? [] : ["--model", profile.model];
+}
+
+/** A denied tool policy also closes the MCP door; a schema pins the answer shape. */
+function isolationArgs(
+  profile: AgentProfile,
+  sessionSchema: Record<string, unknown> | undefined,
+): string[] {
+  const args =
+    profile.externalTools === "deny"
+      ? ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+      : [];
+  if (sessionSchema) args.push("--json-schema", JSON.stringify(sessionSchema));
+  return args;
+}
+
+function exitReason(
+  exit: { exitCode: number | null; signal: NodeJS.Signals | null; error?: Error },
+  stderrTail: string,
+): string {
+  if (exit.error) return `could not start claude: ${exit.error.message}`;
+  const code = exit.exitCode ?? "none";
+  const signal = exit.signal ? `, ${exit.signal}` : "";
+  return `claude exited (code ${code}${signal}): ${stderrTail.slice(-400)}`;
 }
 
 function mergeUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
