@@ -59,6 +59,7 @@ jobs:
       #     text/html/clover/json, so a lcov-only reader finds nothing.
       # The step stays non-fatal so a broken run is reported, not hidden.
       - name: Collect coverage
+        id: coverage
         continue-on-error: true
         run: >-
           pnpm exec vitest run --coverage
@@ -69,10 +70,16 @@ jobs:
       # which is a whole ledger of new debt invented by a failed measurement.
       - name: Refuse to score a run that produced no coverage
         id: coverage_gate
+        env:
+          COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
         run: |
           set -euo pipefail
           lcov="target/coverage/typescript/lcov.info"
-          if [ -s "$lcov" ]; then
+          # A report from a run that failed is a partial measurement: the functions
+          # behind the failing tests look uncovered, and 0% coverage turns every one
+          # of them into invented debt (measured: a failed run here reported 1545
+          # "new" functions). Only a completed run may be scored.
+          if [ -s "$lcov" ] && [ "${{ steps.coverage.outcome }}" = "success" ]; then
             echo "report=$(wc -c < "$lcov") bytes" >> "$GITHUB_OUTPUT"
             echo "coverage report: $(wc -c < "$lcov") bytes" >> "$GITHUB_STEP_SUMMARY"
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -80,12 +87,16 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
             node -e '
               const { writeFileSync } = require("node:fs");
+              const outcome = process.env.COVERAGE_OUTCOME;
+              const reason = outcome === "success"
+                ? "coverage report missing at target/coverage/typescript/lcov.info"
+                : `coverage run did not succeed (${outcome}); a partial report would invent debt`;
               writeFileSync("drift-report.json", JSON.stringify({
                 kind: "infrastructure",
                 generatedAt: new Date().toISOString(),
                 threshold: 10,
                 baseline: ".ub-crap-baseline.json",
-                error: "coverage report missing at target/coverage/typescript/lcov.info",
+                error: reason,
                 counts: { new: 0, worse: 0, fixed: 0 },
                 new: [], worse: [], fixed: [],
               }, null, 2) + "\n");
