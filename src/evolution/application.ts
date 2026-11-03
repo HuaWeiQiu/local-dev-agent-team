@@ -140,6 +140,20 @@ type ReconcileContext = {
   applicationBeforeTarget: TargetDigestState;
 };
 
+/** Create and verify the coordinator's storage before anything is read from it. */
+async function prepareApplicationDirectories(
+  io: EvolutionApplicationFileIo,
+  repositoryRoot: string,
+  evolutionDirectory: string,
+  applicationFilePath: string,
+  objectsDirectory: string,
+): Promise<void> {
+  await createDirectoryChain(io, repositoryRoot, evolutionDirectory, 0o700);
+  await createDirectoryChain(io, repositoryRoot, objectsDirectory, 0o700);
+  await assertSafeRegularFileOrMissing(io, repositoryRoot, applicationFilePath);
+  await cleanOrphanTemps(io, evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
+}
+
 /** What a legacy Phase-2 promotion left behind, when it left anything. */
 type LegacyPredecessorResolution = {
   application: ApplicationRecord | null;
@@ -263,6 +277,38 @@ export class EvolutionApplicationCoordinator {
   static async open(
     options: EvolutionApplicationCoordinatorOptions,
   ): Promise<EvolutionApplicationCoordinator> {
+    EvolutionApplicationCoordinator.assertOpenOptions(options);
+    const io: EvolutionApplicationFileIo = { ...defaultFileIo, ...options.io };
+    await EvolutionApplicationCoordinator.assertSharedRoots(options, io);
+    const evolutionDirectory = options.catalog.evolutionDirectory;
+    const applicationFilePath = path.join(evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
+    const objectsDirectory = path.join(evolutionDirectory, "objects", "sha256");
+    await prepareApplicationDirectories(
+      io,
+      options.catalog.root,
+      evolutionDirectory,
+      applicationFilePath,
+      objectsDirectory,
+    );
+    const coordinator = new EvolutionApplicationCoordinator({
+      catalog: options.catalog,
+      strategies: options.strategies,
+      git: options.git,
+      loaded: options.loaded,
+      evolutionDirectory,
+      applicationFilePath,
+      objectsDirectory,
+      io,
+      assertQuiescent: options.assertQuiescent,
+      now: options.now ?? Date.now,
+      previewTtlMs: options.previewTtlMs ?? EVOLUTION_PREVIEW_TTL_MS,
+    });
+    await coordinator.startFromOpen(options);
+    return coordinator;
+  }
+
+  /** Everything the coordinator needs to exist at all; a partial wiring is refused. */
+  private static assertOpenOptions(options: EvolutionApplicationCoordinatorOptions): void {
     if (!options.catalog || !options.strategies || !options.git || !options.loaded) {
       throw new EvolutionApplicationError(
         "POLICY_DENIED",
@@ -275,8 +321,17 @@ export class EvolutionApplicationCoordinator {
         "EvolutionApplicationCoordinator requires an injected assertQuiescent callback",
       );
     }
+  }
 
-    const io: EvolutionApplicationFileIo = { ...defaultFileIo, ...options.io };
+  /**
+   * One repository, one canonical root, one state directory. Compared on resolved paths:
+   * two spellings of the same directory are the same repository, two directories that only
+   * look alike are not.
+   */
+  private static async assertSharedRoots(
+    options: EvolutionApplicationCoordinatorOptions,
+    io: EvolutionApplicationFileIo,
+  ): Promise<void> {
     const [loadedRoot, gitRoot] = await Promise.all([
       io.realpath(path.resolve(options.loaded.root)),
       io.realpath(path.resolve(options.git.root)),
@@ -292,38 +347,23 @@ export class EvolutionApplicationCoordinator {
         "Catalog, strategy catalog, Git manager, and loaded config must share one canonical repository and state directory",
       );
     }
-    const evolutionDirectory = options.catalog.evolutionDirectory;
-    const applicationFilePath = path.join(evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
-    const objectsDirectory = path.join(evolutionDirectory, "objects", "sha256");
+  }
 
-    await createDirectoryChain(io, options.catalog.root, evolutionDirectory, 0o700);
-    await createDirectoryChain(io, options.catalog.root, objectsDirectory, 0o700);
-    await assertSafeRegularFileOrMissing(io, options.catalog.root, applicationFilePath);
-    await cleanOrphanTemps(io, evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
-
-    const coordinator = new EvolutionApplicationCoordinator({
-      catalog: options.catalog,
-      strategies: options.strategies,
-      git: options.git,
-      loaded: options.loaded,
-      evolutionDirectory,
-      applicationFilePath,
-      objectsDirectory,
-      io,
-      assertQuiescent: options.assertQuiescent,
-      now: options.now ?? Date.now,
-      previewTtlMs: options.previewTtlMs ?? EVOLUTION_PREVIEW_TTL_MS,
-    });
-    await coordinator.#journal.loadOrInit();
-    coordinator.#state.catalogWriter = options.catalog.claimExclusiveWriter();
+  /**
+   * Load the journal, take the exclusive catalog writer, and only then mark the coordinator
+   * open. A failure here has to give the writer back: a released writer is what lets the
+   * next attempt (or the next process) open at all.
+   */
+  private async startFromOpen(options: EvolutionApplicationCoordinatorOptions): Promise<void> {
+    await this.#journal.loadOrInit();
+    this.#state.catalogWriter = options.catalog.claimExclusiveWriter();
     try {
-      await coordinator.#journal.reconcilePendingOnOpen();
-      coordinator.#journal.publishCommittedState();
-      coordinator.#state.opened = true;
-      return coordinator;
+      await this.#journal.reconcilePendingOnOpen();
+      this.#journal.publishCommittedState();
+      this.#state.opened = true;
     } catch (error) {
-      options.catalog.releaseExclusiveWriter(coordinator.#state.catalogWriter);
-      coordinator.#state.catalogWriter = undefined;
+      options.catalog.releaseExclusiveWriter(this.#state.catalogWriter);
+      this.#state.catalogWriter = undefined;
       throw error;
     }
   }
@@ -2118,22 +2158,33 @@ function serverPreflightItem(
   return { kind: "deterministic", id, status, summary };
 }
 
+/** The errno code on a thrown value, when it has one. */
+export function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error
+    ? (error as NodeJS.ErrnoException).code
+    : undefined;
+}
+
+/**
+ * Windows cannot fsync a directory handle and reports it as one of these codes. Everywhere
+ * else, a failed sync is a real failure: the directory may not be durable.
+ *
+ * `platform` is a parameter rather than a read of `process.platform` so both branches can be
+ * exercised on one machine — this is the only place in the file whose behaviour depends on
+ * the operating system, and it was previously untestable off Windows.
+ */
+export function isIgnorableSyncFailure(code: string | undefined, platform: string): boolean {
+  if (platform !== "win32") return false;
+  return code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM";
+}
+
 async function defaultSyncDirectory(directoryPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
   try {
     handle = await openAsync(directoryPath, "r");
     await handle.sync();
   } catch (error) {
-    const code =
-      error instanceof Error && "code" in error
-        ? (error as NodeJS.ErrnoException).code
-        : undefined;
-    if (
-      process.platform === "win32" &&
-      (code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM")
-    ) {
-      return;
-    }
+    if (isIgnorableSyncFailure(errorCode(error), process.platform)) return;
     throw error;
   } finally {
     await handle?.close();
