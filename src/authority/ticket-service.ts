@@ -78,8 +78,8 @@ export class TicketService {
     addressed: boolean;
     scope?: readonly string[];
   }): Promise<Admission> {
-    return await this.#serial(async () => {
-      const direct = await this.#subscribedTicket(input.trigger);
+    return await this.serial(async () => {
+      const direct = await this.subscribedTicket(input.trigger);
       if (direct) {
         // The same event delivered twice is still one Trigger: a Subscription
         // decides where a follow-up goes, never whether a duplicate counts.
@@ -90,12 +90,12 @@ export class TicketService {
         await this.#store.save(joined);
         return { decision: directPassDecision(), ticket: joined };
       }
-      return await this.#admitThroughGate(input);
+      return await this.admitThroughGate(input);
     });
   }
 
   /** The open Ticket subscribed to this Trigger's Thread, if there is one. */
-  async #subscribedTicket(trigger: Trigger): Promise<Ticket | undefined> {
+  async subscribedTicket(trigger: Trigger): Promise<Ticket | undefined> {
     const thread = threadKeyOf(trigger);
     const tickets = await this.#store.list();
     return tickets.find((ticket) => isSubscribed(ticket, thread));
@@ -103,8 +103,8 @@ export class TicketService {
 
   /** Subscribe an open Ticket to another Thread it should keep following. */
   async subscribe(ticketId: string, threadKey: string): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(ticketId);
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(ticketId);
       const next = subscribeTicket(ticket, threadKey);
       await this.#store.save(next);
       return next;
@@ -113,8 +113,8 @@ export class TicketService {
 
   /** Stop following a Thread. A Ticket keeps its own Thread either way. */
   async unsubscribe(ticketId: string, threadKey: string): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(ticketId);
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(ticketId);
       const next = unsubscribeTicket(ticket, threadKey);
       await this.#store.save(next);
       return next;
@@ -125,7 +125,7 @@ export class TicketService {
    * Decide one Trigger through the gate. An accept opens a Ticket, or adds the
    * Trigger to the Ticket already open on that Thread; a refusal changes nothing.
    */
-  async #admitThroughGate(input: {
+  async admitThroughGate(input: {
     trigger: Trigger;
     addressed: boolean;
     scope?: readonly string[];
@@ -160,7 +160,7 @@ export class TicketService {
           actor: input.trigger.actor,
           sourceKind: input.trigger.sourceKind,
           reliedOn: [...this.#policy().rules],
-          grantedAt: this.#at(),
+          grantedAt: this.at(),
         },
         triggerId: input.trigger.id,
       });
@@ -174,7 +174,7 @@ export class TicketService {
    * the same id is left alone, so a retried start cannot overwrite history.
    */
   async ensure(ticket: Ticket): Promise<Ticket> {
-    return await this.#serial(async () => {
+    return await this.serial(async () => {
       const existing = await this.#store.get(ticket.id);
       if (existing) return existing;
       await this.#store.save(ticket);
@@ -184,12 +184,12 @@ export class TicketService {
 
   /** Bind a run to a Ticket. This is the Assignment the run executes as. */
   async attachRun(input: { ticketId: string; runId: string }): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(input.ticketId);
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(input.ticketId);
       const next = startAssignment(ticket, {
         id: this.#newId(),
         runId: input.runId,
-        at: this.#at(),
+        at: this.at(),
       });
       await this.#store.save(next);
       return next;
@@ -202,15 +202,15 @@ export class TicketService {
     runId: string;
     outcome: AssignmentOutcome;
   }): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(input.ticketId);
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(input.ticketId);
       const assignment = ticket.assignments.find(
         (entry) => entry.runId === input.runId && entry.state !== "ended",
       );
       if (!assignment) return ticket;
       const next = endAssignment(ticket, {
         id: assignment.id,
-        at: this.#at(),
+        at: this.at(),
         outcome: input.outcome,
       });
       await this.#store.save(next);
@@ -220,9 +220,9 @@ export class TicketService {
 
   /** End the Ticket itself, once nothing runs for it. */
   async close(input: { ticketId: string; outcome: TicketOutcome; by: string }): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(input.ticketId);
-      const next = endTicket(ticket, { at: this.#at(), outcome: input.outcome, by: input.by });
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(input.ticketId);
+      const next = endTicket(ticket, { at: this.at(), outcome: input.outcome, by: input.by });
       await this.#store.save(next);
       return next;
     });
@@ -230,12 +230,12 @@ export class TicketService {
 
   /** A person's message on a subscribed Thread reopens an ended Ticket. */
   async resume(input: { ticketId: string; trigger: Trigger }): Promise<Ticket> {
-    return await this.#serial(async () => {
-      const ticket = await this.#requireTicket(input.ticketId);
+    return await this.serial(async () => {
+      const ticket = await this.requireTicket(input.ticketId);
       const next = resumeTicket(ticket, {
         policy: this.#policy(),
         triggerId: input.trigger.id,
-        at: this.#at(),
+        at: this.at(),
       });
       await this.#store.save(next);
       return next;
@@ -256,17 +256,17 @@ export class TicketService {
     return ticket ? runningAssignment(ticket)?.runId : undefined;
   }
 
-  async #requireTicket(ticketId: string): Promise<Ticket> {
+  async requireTicket(ticketId: string): Promise<Ticket> {
     const ticket = await this.#store.get(ticketId);
     if (!ticket) throw new TicketError("no-assignment", `Ticket '${ticketId}' was not found`);
     return ticket;
   }
 
-  #at(): string {
+  at(): string {
     return this.#now().toISOString();
   }
 
-  #serial<T>(action: () => Promise<T>): Promise<T> {
+  serial<T>(action: () => Promise<T>): Promise<T> {
     const next = this.#queue.then(action, action);
     this.#queue = next.then(
       () => undefined,

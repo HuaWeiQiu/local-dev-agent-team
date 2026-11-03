@@ -217,7 +217,7 @@ export class EvolutionApplicationTargets {
           "Prompt mutation is missing its pre-mutation Git authorization",
         );
       }
-      await this.#applyPromptTarget(
+      await this.applyPromptTarget(
         proposal,
         before,
         after.digest!,
@@ -227,10 +227,10 @@ export class EvolutionApplicationTargets {
       );
       return;
     }
-    await this.#applyStrategyTarget(proposal, before, after, mode);
+    await this.applyStrategyTarget(proposal, before, after, mode);
   }
 
-  async #applyPromptTarget(
+  async applyPromptTarget(
     proposal: EvolutionProposal,
     expectedBefore: TargetDigestState,
     desiredDigest: string,
@@ -396,7 +396,7 @@ export class EvolutionApplicationTargets {
     clearPromptTemplateCache();
   }
 
-  async #applyStrategyTarget(
+  async applyStrategyTarget(
     proposal: EvolutionProposal,
     before: TargetDigestState,
     after: TargetDigestState,

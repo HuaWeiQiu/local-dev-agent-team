@@ -115,7 +115,7 @@ export class EvolutionCatalog {
     material: EvolutionCatalogRestoreMaterial,
   ): EvolutionCatalog {
     const catalog = new EvolutionCatalog(trust);
-    catalog.#restoreFromValidatedMaterial(validateRestoreMaterial(catalog.#trust, material));
+    catalog.restoreFromValidatedMaterial(validateRestoreMaterial(catalog.#trust, material));
     return catalog;
   }
 
@@ -130,7 +130,7 @@ export class EvolutionCatalog {
     candidate: unknown;
     origin?: "automatic-controller-v1";
   }): EvolutionProposal {
-    return this.#runMutation(() => {
+    return this.runMutation(() => {
       let proposal: EvolutionProposal;
       try {
         proposal = createEvolutionProposal({
@@ -170,7 +170,7 @@ export class EvolutionCatalog {
         );
       }
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         return isolate(proposal);
       });
@@ -179,10 +179,10 @@ export class EvolutionCatalog {
 
   /** Transition a stored proposal from `proposed` to `evaluating`. */
   beginEvaluation(proposalId: string, at: string): EvolutionProposal {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const next = transitionProposal(current, "evaluating", at);
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(next.id, next);
         return isolate(next);
       });
@@ -194,7 +194,7 @@ export class EvolutionCatalog {
    * Failed deterministic or advisory evidence is recorded; promotion remains gated.
    */
   evaluate(proposalId: string, evidence: unknown, at: string): EvolutionProposal {
-    return this.#evaluate(proposalId, evidence, at, "external");
+    return this.commitEvaluation(proposalId, evidence, at, "external");
   }
 
   /** Attach evidence produced by the fixed server-owned structural preflight. */
@@ -203,7 +203,7 @@ export class EvolutionCatalog {
     evidence: unknown,
     at: string,
   ): EvolutionProposal {
-    return this.#evaluate(proposalId, evidence, at, "server-structural-preflight-v1");
+    return this.commitEvaluation(proposalId, evidence, at, "server-structural-preflight-v1");
   }
 
   /** Attach deterministic evidence produced by the bounded automatic run loop. */
@@ -212,19 +212,20 @@ export class EvolutionCatalog {
     evidence: unknown,
     at: string,
   ): EvolutionProposal {
-    return this.#evaluate(proposalId, evidence, at, "server-automatic-run-evaluation-v1");
+    return this.commitEvaluation(proposalId, evidence, at, "server-automatic-run-evaluation-v1");
   }
 
-  #evaluate(
+  /** The shared implementation behind the three evaluation entry points. */
+  commitEvaluation(
     proposalId: string,
     evidence: unknown,
     at: string,
     source: EvolutionEvaluationSource,
   ): EvolutionProposal {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const next = evaluateProposal(current, evidence, at, source);
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(next.id, next);
         return isolate(next);
       });
@@ -241,10 +242,10 @@ export class EvolutionCatalog {
     decision: unknown,
     ...auditBinding: [applicationCommandId?: string]
   ): { proposal: EvolutionProposal; record: PromotionRecord } {
-    return this.#runMutation(() => {
+    return this.runMutation(() => {
       const [applicationCommandId] = auditBinding;
-      this.#assertApplicationCommandIdAvailable(applicationCommandId);
-      const current = this.#requireProposal(proposalId);
+      this.assertApplicationCommandIdAvailable(applicationCommandId);
+      const current = this.requireProposal(proposalId);
       const targetKey = candidateTargetKey(current.candidate);
       const previousActiveProposalId = this.#activeByTarget.get(targetKey) ?? null;
 
@@ -256,7 +257,7 @@ export class EvolutionCatalog {
         ...(applicationCommandId === undefined ? {} : { applicationCommandId }),
       });
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         state.auditRecords.push(record);
         state.promotionRecords.set(proposal.id, record);
@@ -274,14 +275,14 @@ export class EvolutionCatalog {
     proposalId: string,
     decision: unknown,
   ): { proposal: EvolutionProposal; record: RejectionRecord } {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const { proposal, record } = rejectProposal({
         proposal: current,
         decision,
       });
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         state.auditRecords.push(record);
         return {
@@ -302,10 +303,10 @@ export class EvolutionCatalog {
     decision: unknown,
     ...auditBinding: [applicationCommandId?: string]
   ): { proposal: EvolutionProposal; record: RollbackRecord } {
-    return this.#runMutation(() => {
+    return this.runMutation(() => {
       const [applicationCommandId] = auditBinding;
-      this.#assertApplicationCommandIdAvailable(applicationCommandId);
-      const current = this.#requireProposal(proposalId);
+      this.assertApplicationCommandIdAvailable(applicationCommandId);
+      const current = this.requireProposal(proposalId);
       const promotionRecord = this.#promotionRecords.get(proposalId);
       if (!promotionRecord && current.status === "promoted") {
         throw new EvolutionCatalogError(
@@ -330,7 +331,7 @@ export class EvolutionCatalog {
         );
       }
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         state.auditRecords.push(record);
 
@@ -356,14 +357,14 @@ export class EvolutionCatalog {
     proposalId: string,
     decision: unknown,
   ): { proposal: EvolutionProposal; record: ArchiveRecord } {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const { proposal, record } = archiveProposal({
         proposal: current,
         decision,
       });
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         state.auditRecords.push(record);
         return {
@@ -379,14 +380,14 @@ export class EvolutionCatalog {
     proposalId: string,
     decision: unknown,
   ): { proposal: EvolutionProposal; record: UnarchiveRecord } {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const { proposal, record } = unarchiveProposal({
         proposal: current,
         decision,
       });
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.set(proposal.id, proposal);
         state.auditRecords.push(record);
         return {
@@ -402,14 +403,14 @@ export class EvolutionCatalog {
    * is dropped; a tombstone audit record keeps its id, target key, and digest.
    */
   deleteProposal(proposalId: string, decision: unknown): { record: DeletionRecord } {
-    return this.#runMutation(() => {
-      const current = this.#requireProposal(proposalId);
+    return this.runMutation(() => {
+      const current = this.requireProposal(proposalId);
       const { record } = deleteProposal({
         proposal: current,
         decision,
       });
 
-      return this.#commit((state) => {
+      return this.commit((state) => {
         state.proposals.delete(current.id);
         state.auditRecords.push(record);
         return { record: isolate(record) };
@@ -500,7 +501,7 @@ export class EvolutionCatalog {
   /**
    * Install material already validated by {@link validateRestoreMaterial}.
    */
-  #restoreFromValidatedMaterial(material: EvolutionCatalogRestoreMaterial): void {
+  restoreFromValidatedMaterial(material: EvolutionCatalogRestoreMaterial): void {
     if (this.#proposals.size > 0 || this.#auditRecords.length > 0) {
       throw new EvolutionCatalogError("Cannot restore into a non-empty catalog");
     }
@@ -600,7 +601,7 @@ export class EvolutionCatalog {
     this.#promotionRecords = promotionRecords;
   }
 
-  #requireProposal(proposalId: string): EvolutionProposal {
+  requireProposal(proposalId: string): EvolutionProposal {
     const proposal = this.#proposals.get(proposalId);
     if (!proposal) {
       throw new EvolutionCatalogNotFoundError(
@@ -610,7 +611,7 @@ export class EvolutionCatalog {
     return proposal;
   }
 
-  #assertApplicationCommandIdAvailable(applicationCommandId: string | undefined): void {
+  assertApplicationCommandIdAvailable(applicationCommandId: string | undefined): void {
     if (
       applicationCommandId !== undefined &&
       this.#auditRecords.some(
@@ -629,7 +630,7 @@ export class EvolutionCatalog {
    * Apply a mutation against a cloned working copy, then commit only after
    * the mutator returns successfully. Domain failures leave catalog state intact.
    */
-  #commit<T>(mutator: (state: MutableCatalogState) => T): T {
+  commit<T>(mutator: (state: MutableCatalogState) => T): T {
     const working: MutableCatalogState = {
       proposals: new Map(this.#proposals),
       auditRecords: [...this.#auditRecords],
@@ -647,7 +648,7 @@ export class EvolutionCatalog {
     return result;
   }
 
-  #runMutation<T>(operation: () => T): T {
+  runMutation<T>(operation: () => T): T {
     if (this.#mutating) {
       throw new EvolutionCatalogConflictError("A catalog mutation is already in progress");
     }
