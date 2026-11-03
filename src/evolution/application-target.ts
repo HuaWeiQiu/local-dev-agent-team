@@ -325,11 +325,18 @@ export class EvolutionApplicationTargets {
     expectedBefore: TargetDigestState,
   ): Promise<Buffer> {
     const currentBytes = await this.#io.readFile(absolute);
-    const modeDrifted = expectedBefore.mode !== undefined && target.mode !== expectedBefore.mode;
-    if (sha256Bytes(currentBytes) !== expectedBefore.digest || modeDrifted) {
+    // Two different things can move between preview and apply, and they are fixed by
+    // different people: content usually means someone is editing the prompt, mode usually
+    // means a deployment script changed the umask. Naming which one moved is the difference
+    // between "state invalid" and an operator knowing who to ask.
+    const mismatched = [
+      sha256Bytes(currentBytes) === expectedBefore.digest ? null : "content",
+      expectedBefore.mode !== undefined && target.mode !== expectedBefore.mode ? "mode" : null,
+    ].filter((field): field is string => field !== null);
+    if (mismatched.length > 0) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${target.relativePath}' changed after preview`,
+        `Prompt target '${target.relativePath}' changed after preview (${mismatched.join(", ")})`,
       );
     }
     try {

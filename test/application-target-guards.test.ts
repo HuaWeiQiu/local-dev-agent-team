@@ -25,7 +25,11 @@ import {
   type EvolutionApplicationFileIo,
   type TargetDigestState,
 } from "../src/evolution/application-shared.js";
-import { EvolutionApplicationTargets } from "../src/evolution/application-target.js";
+import {
+  EvolutionApplicationTargets,
+  cleanOrphanTemps,
+} from "../src/evolution/application-target.js";
+import { siblingTempName } from "../src/evolution/temp-names.js";
 import { GitManager } from "../src/git/manager.js";
 import { StrategyBlueprintCatalog } from "../src/strategies/catalog.js";
 
@@ -157,7 +161,7 @@ describe("prompt target concurrency guards", () => {
       targets.assertPromptTargetUnchanged(facts.absolute, facts, stalePreview),
     ).rejects.toMatchObject({
       code: "TARGET_DRIFTED",
-      message: `Prompt target '${promptPath}' changed after preview`,
+      message: `Prompt target '${promptPath}' changed after preview (content)`,
     });
   });
 
@@ -169,7 +173,7 @@ describe("prompt target concurrency guards", () => {
       targets.assertPromptTargetUnchanged(facts.absolute, facts, previewWithOtherMode),
     ).rejects.toMatchObject({
       code: "TARGET_DRIFTED",
-      message: `Prompt target '${promptPath}' changed after preview`,
+      message: `Prompt target '${promptPath}' changed after preview (mode)`,
     });
   });
 
@@ -204,5 +208,79 @@ describe("prompt target concurrency guards", () => {
     await expect(
       targets.assertPromptTargetUnchanged(facts.absolute, facts, previewOf(content, facts.mode)),
     ).resolves.toEqual(content);
+  });
+});
+
+describe("prompt write verification", () => {
+  it("reports recovery when the bytes on disk are not the bytes that were written", async () => {
+    const { root, targets } = await targetsFor();
+    const facts = await targets.describePromptTarget(promptPath);
+    // A digest the file cannot possibly have: the write "landed" but not as asked.
+    await expect(
+      targets.assertPromptWriteLanded(facts.absolute, sha256Bytes("some other bytes"), facts.mode),
+    ).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+      // The message names the file, not the path: it is built from the basename.
+      message: "Prompt target digest mismatch after write for 'worker.md'",
+    });
+    void root;
+  });
+
+  it("reports recovery when the target turned into a symlink during the write", async () => {
+    const { root, targets } = await targetsFor();
+    const facts = await targets.describePromptTarget(promptPath);
+    const outside = path.join(root, "outside.md");
+    const content = Buffer.from("original prompt\n");
+    await writeFile(outside, content);
+    await rm(path.join(root, promptPath));
+    await symlink(outside, path.join(root, promptPath));
+    await expect(
+      targets.assertPromptWriteLanded(facts.absolute, sha256Bytes(content), facts.mode),
+    ).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+      message: "Prompt target permissions changed unexpectedly for 'worker.md'",
+    });
+  });
+
+  it("accepts bytes that did land as written", async () => {
+    const { targets } = await targetsFor();
+    const facts = await targets.describePromptTarget(promptPath);
+    await expect(
+      targets.assertPromptWriteLanded(
+        facts.absolute,
+        sha256Bytes(Buffer.from("original prompt\n")),
+        facts.mode,
+      ),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("orphan temp cleanup", () => {
+  it("removes only the temp names that belong to the file, and never follows a link", async () => {
+    const { root } = await targetsFor();
+    const directory = path.join(root, "prompts");
+    const matching = siblingTempName(path.join(directory, "worker.md"));
+    const unrelated = path.join(directory, "notes.md");
+    const outside = path.join(root, "keep-me.md");
+    const linked = siblingTempName(path.join(directory, "worker.md"));
+    await writeFile(matching, "left behind\n");
+    await writeFile(unrelated, "notes\n");
+    await writeFile(outside, "must survive\n");
+    await symlink(outside, linked);
+
+    const io = fileIo();
+    await cleanOrphanTemps(io, directory, "worker.md");
+    await expect(readFile(matching, "utf8")).rejects.toThrow();
+    expect(await readFile(unrelated, "utf8")).toBe("notes\n");
+    // The symlink is not a file the cleaner may delete, and its target must be untouched.
+    expect(await readFile(outside, "utf8")).toBe("must survive\n");
+    expect(await lstat(linked)).toMatchObject({});
+  });
+
+  it("does nothing when the directory does not exist", async () => {
+    const { root } = await targetsFor();
+    await expect(
+      cleanOrphanTemps(fileIo(), path.join(root, "nowhere"), "worker.md"),
+    ).resolves.toBeUndefined();
   });
 });
