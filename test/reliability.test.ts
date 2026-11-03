@@ -51,6 +51,27 @@ describe("StallWatchdog", () => {
     expect(onStall).toHaveBeenCalledTimes(1);
     watchdog.stop();
   });
+
+  it("reschedules instead of reporting when its timer fires before the window elapsed", () => {
+    // Only the timers are faked here: `Date.now()` keeps running, so the callback fires
+    // while the wall clock has advanced by a few milliseconds and `idleMs < stallMs`. This
+    // branch used to be reached only by the real watchdog inside `invokeLive`, whose timer
+    // lands on the threshold — sometimes just under it, sometimes just over. That made
+    // `stall.ts:54-56` the last pair of runs to disagree on coverage (three single-worker
+    // runs, two signatures, the same three lines). Pinning the branch here makes the line
+    // set depend on a test that always runs rather than on which side of the threshold a
+    // real timer happened to land.
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onStall = vi.fn();
+    const watchdog = new StallWatchdog({ stallMs: 1_000, onStall });
+    watchdog.start();
+    vi.advanceTimersByTime(1_000);
+    expect(onStall).not.toHaveBeenCalled();
+    // It scheduled the remainder rather than giving up: the watchdog is still armed.
+    expect(vi.getTimerCount()).toBe(1);
+    watchdog.stop();
+  });
 });
 
 describe("runQualityWithRerun", () => {
