@@ -105,7 +105,7 @@ describe("caliber flow, driven through an injected io", () => {
     const cells = measureCells(options, io as never);
     expect(cells).toHaveLength(2);
     expect(cells[0]).toMatchObject({ commit: "HEAD", mode: "existing" });
-    expect(cells[0].scores.get("a#f")).toBe(5);
+    expect(cells[0]!.scores.get("a#f")).toBe(5);
     expect(files.has("/tmp/caliber-fake/target/coverage/caliber/HEAD/existing/run-2/lcov.info")).toBe(true);
   });
 

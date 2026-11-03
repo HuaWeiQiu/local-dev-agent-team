@@ -151,6 +151,17 @@ function withinNoise(before, after) {
  *   run-sensitive     repeats inside one mode disagree
  *   stable            everything agrees
  */
+/**
+ * `commitB` is optional: a single-commit key is classified from `modes` alone,
+ * which is what the `commitB !== undefined` branch below already assumes.
+ *
+ * @param {{
+ *   commitA: Record<string, number[]>,
+ *   commitB?: Record<string, number[]>,
+ *   modes: Record<string, number[]>,
+ * }} input
+ * @returns {"run-sensitive" | "code-changed" | "source-sensitive" | "stable"}
+ */
 export function classifyKey({ commitA, commitB, modes }) {
   const same = (values) => values.every((value) => withinNoise(values[0], value));
   const runSensitive = Object.values(modes).some((values) => values.length > 1 && !same(values));
