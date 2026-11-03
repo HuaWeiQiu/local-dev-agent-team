@@ -2944,6 +2944,72 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     });
   });
 
+  it("restores the prompt when the write landed but the Git commit did not", async () => {
+    // The crash point for a role prompt is between "bytes written" and "committed": the file
+    // on disk already shows the candidate while HEAD still points at the original. Reopening
+    // must put the original bytes back and record the command as aborted — leaving the
+    // candidate in the tree would ship a change that no commit ever sanctioned.
+    const harness = await createHarness({
+      gitFactory: (root) =>
+        new FailOnceExactCommitGitManager(root, path.join(root, ".agent-team", "worktrees")),
+    });
+    const promptFile = path.join(harness.root, promptPath);
+    const original = await readFile(promptFile);
+    const candidate = Buffer.from("Candidate prompt that never gets committed\n", "utf8");
+    await harness.coordinator.propose({
+      id: "interrupted-prompt",
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation("interrupted-prompt");
+    const evaluating = harness.coordinator.readProposal("interrupted-prompt");
+    if (!evaluating) throw new Error("prompt proposal disappeared");
+    await harness.coordinator.evaluateServerPreflight("interrupted-prompt");
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "interrupted-prompt",
+      operator,
+    });
+    const git = harness.git as FailOnceExactCommitGitManager;
+    git.failNextExactCommit = true;
+    const headBefore = await gitText(harness.root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "interrupted-prompt-command",
+        proposalId: "interrupted-prompt",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: candidate bytes on disk, HEAD unchanged, journal pending.
+    expect(await readFile(promptFile)).toEqual(candidate);
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).toBe(headBefore);
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    // Restored, not abandoned: the original bytes are back and the command is recorded aborted.
+    expect(await readFile(promptFile)).toEqual(original);
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).toBe(headBefore);
+    expect(reopened.catalog.getProposal("interrupted-prompt")).toMatchObject({
+      status: "evaluated",
+    });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "interrupted-prompt-command",
+          status: "aborted",
+        }),
+      ]),
+    );
+  });
+
   it("refuses to finish a promotion whose proposal left the evaluated state", async () => {
     // The world a half-written journal or an older version can leave behind: the target
     // write happened, the journal still holds the pending promotion, and the catalog has
