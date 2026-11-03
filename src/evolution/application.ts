@@ -130,6 +130,7 @@ type ReconcileContext = {
   target: ReturnType<typeof targetFromCandidate>;
   activeProposalId: string | null;
   revision: number;
+  expectedRevision: number;
   decidedAt: string;
   humanDecision: HumanDecision;
   candidateDigest: string;
@@ -949,16 +950,6 @@ export class EvolutionApplicationCoordinator {
         reason,
         mode: input.mode,
       });
-      // Still unpacked for the apply branch below; phase E gives it the context too.
-      const {
-        decidedAt,
-        humanDecision,
-        candidateDigest,
-        beforeTarget,
-        livePromptContent,
-        legacyPredecessor,
-        applicationBeforeTarget,
-      } = plan;
       const context: ReconcileContext = {
         commandId,
         operator,
@@ -971,6 +962,7 @@ export class EvolutionApplicationCoordinator {
         target,
         activeProposalId,
         revision,
+        expectedRevision: input.expectedRevision,
         ...plan,
       };
 
@@ -978,167 +970,219 @@ export class EvolutionApplicationCoordinator {
         return await this.#adoptLiveTarget(context);
       }
 
-      // mode === "apply": journaled apply without catalog promote (already promoted)
-      if (proposal.candidate.kind === "role-prompt") {
-        if (input.promptContent instanceof Uint8Array) {
-          await this.#targets.ingestPromptMaterial(
-            proposal.candidate.contentDigest,
-            input.promptContent,
-          );
-        } else {
-          await this.#targets.readPromptObject(proposal.candidate.contentDigest);
-        }
-      } else if (input.promptContent !== undefined) {
+      return await this.#applyThroughJournal(context);
+    });
+  }
+
+  /**
+   * Write the candidate through the journal: stage the material, take the Git authorization,
+   * persist a pending operation, apply, then verify what is actually live before recording
+   * it. This is the only reconcile path that can fail *after* changing something, so every
+   * failure below either proves the target is untouched (record it aborted) or marks the
+   * state as needing recovery.
+   *
+   * Two things here look redundant and are not:
+   *   - the completion is stamped from a second clock read, because it happens after the
+   *     target write and records when that finished, not when the command was decided;
+   *   - `persist(...).catch(() => undefined)` on the recovery path swallows a write error on
+   *     purpose: the command is about to fail with RECOVERY_REQUIRED, and a persistence
+   *     error thrown here would replace the reason the operator needs to see.
+   */
+  async #applyThroughJournal(input: ReconcileContext): Promise<ApplicationCommandResult> {
+    const proposal = input.proposal;
+    await this.#stageReconcileMaterial(input);
+    const afterTarget = await this.#targets.plannedAfterState(proposal, input.beforeTarget);
+    await this.#assertQuiescentSafe();
+    const gitAuthorization = await this.#authorizeReconcileCommit(input);
+    if (input.livePromptContent) {
+      await this.#targets.ingestPromptMaterial(input.beforeTarget.digest!, input.livePromptContent);
+    }
+    const pending: PendingApplicationOperation = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      humanDecision: input.humanDecision,
+      catalogRevisionBefore: input.revision,
+      expectedCatalogRevisionAfter: input.revision,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget,
+      previousActiveProposalId: input.activeProposalId,
+      previousApplication: input.legacyPredecessor.application,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      expectedAuditDigest: null,
+      gitBaseHead: gitAuthorization?.head ?? null,
+      gitPath: gitAuthorization?.repositoryRelativePath ?? null,
+      startedAt: input.decidedAt,
+    };
+    if (input.legacyPredecessor.completion) {
+      this.#state.completed.push(input.legacyPredecessor.completion);
+    }
+    this.#state.pending = pending;
+    await this.#journal.persist(this.#state.revision + 1);
+
+    await this.#applyOrRecover(input, afterTarget, gitAuthorization);
+
+    const liveAfter = await this.#targets.readTargetState(proposal.candidate);
+    if (!targetStatesEqual(liveAfter, afterTarget)) {
+      this.#state.recoveryRequired = true;
+      await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
+      throw new EvolutionApplicationError(
+        "RECOVERY_REQUIRED",
+        "Target apply completed with unexpected digest; manual recovery required",
+      );
+    }
+    return await this.#recordApplied(input, afterTarget);
+  }
+
+  /** Stage the bytes the candidate needs, or read back the object it already has. */
+  async #stageReconcileMaterial(input: ReconcileContext): Promise<void> {
+    const candidate = input.proposal.candidate;
+    if (candidate.kind !== "role-prompt") {
+      if (input.promptContent !== undefined) {
         throw new EvolutionApplicationError(
           "POLICY_DENIED",
           "Legacy prompt material is only accepted for role-prompt reconciliation",
         );
       }
-      const afterTarget = await this.#targets.plannedAfterState(proposal, beforeTarget);
-      await this.#assertQuiescentSafe();
-      let gitAuthorization: ExactTrackedFileCommitAuthorization | undefined;
-      if (proposal.candidate.kind === "role-prompt") {
-        try {
-          gitAuthorization = await this.#git.authorizeExactTrackedFileCommit(
-            proposal.candidate.path,
-          );
-        } catch (error) {
-          throw mapGitError(error);
-        }
-      }
-      if (livePromptContent) {
-        await this.#targets.ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
-      }
-      const previewTokenDigest = `reconcile:${input.mode}`;
-      const pending: PendingApplicationOperation = {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        operator,
-        reason,
-        humanDecision,
-        catalogRevisionBefore: revision,
-        expectedCatalogRevisionAfter: revision,
-        beforeTarget: applicationBeforeTarget,
+      return;
+    }
+    if (input.promptContent instanceof Uint8Array) {
+      await this.#targets.ingestPromptMaterial(candidate.contentDigest, input.promptContent);
+      return;
+    }
+    await this.#targets.readPromptObject(candidate.contentDigest);
+  }
+
+  /** The commit this apply is allowed to make, when the candidate is a tracked prompt. */
+  async #authorizeReconcileCommit(
+    input: ReconcileContext,
+  ): Promise<ExactTrackedFileCommitAuthorization | undefined> {
+    const candidate = input.proposal.candidate;
+    if (candidate.kind !== "role-prompt") return undefined;
+    try {
+      return await this.#git.authorizeExactTrackedFileCommit(candidate.path);
+    } catch (error) {
+      throw mapGitError(error);
+    }
+  }
+
+  /**
+   * Apply, and decide what the failure *means*: a target that provably did not move is an
+   * aborted command; anything else (including an error that already said recovery) leaves
+   * the pending operation in place and marks the state as needing recovery.
+   */
+  async #applyOrRecover(
+    input: ReconcileContext,
+    afterTarget: TargetDigestState,
+    gitAuthorization: ExactTrackedFileCommitAuthorization | undefined,
+  ): Promise<void> {
+    try {
+      await this.#targets.applyTarget(
+        input.proposal,
+        input.beforeTarget,
         afterTarget,
-        previousActiveProposalId: activeProposalId,
-        previousApplication: legacyPredecessor.application,
-        previewTokenDigest,
-        requestDigest,
-        materialDigest,
-        expectedAuditDigest: null,
-        gitBaseHead: gitAuthorization?.head ?? null,
-        gitPath: gitAuthorization?.repositoryRelativePath ?? null,
-        startedAt: decidedAt,
-      };
-      if (legacyPredecessor.completion) {
-        this.#state.completed.push(legacyPredecessor.completion);
-      }
-      this.#state.pending = pending;
-      await this.#journal.persist(this.#state.revision + 1);
+        input.humanDecision,
+        "apply",
+        gitAuthorization,
+      );
+    } catch (error) {
+      throw await this.#settleApplyFailure(error, input);
+    }
+  }
 
-      try {
-        await this.#targets.applyTarget(
-          proposal,
-          beforeTarget,
-          afterTarget,
-          humanDecision,
-          "apply",
-          gitAuthorization,
-        );
-      } catch (error) {
-        const mapped = mapToApplicationError(error);
-        // Target not applied (or indeterminate handled inside). Clear pending as aborted only if still old.
-        const live = await this.#targets.readTargetState(proposal.candidate);
-        if (mapped.code !== "RECOVERY_REQUIRED" && live.digest === beforeTarget.digest) {
-          await this.#journal.finalizePendingAs("aborted", revision, live.digest);
-        } else {
-          this.#state.recoveryRequired = true;
-          await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
-          throw mapToApplicationError(error, "RECOVERY_REQUIRED");
-        }
-        throw mapped;
-      }
+  async #settleApplyFailure(
+    error: unknown,
+    input: ReconcileContext,
+  ): Promise<EvolutionApplicationError> {
+    const mapped = mapToApplicationError(error);
+    const live = await this.#targets.readTargetState(input.proposal.candidate);
+    if (mapped.code !== "RECOVERY_REQUIRED" && live.digest === input.beforeTarget.digest) {
+      await this.#journal.finalizePendingAs("aborted", input.revision, live.digest);
+      return mapped;
+    }
+    this.#state.recoveryRequired = true;
+    await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
+    return mapToApplicationError(error, "RECOVERY_REQUIRED");
+  }
 
-      const liveAfter = await this.#targets.readTargetState(proposal.candidate);
-      if (!targetStatesEqual(liveAfter, afterTarget)) {
-        this.#state.recoveryRequired = true;
-        await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          "Target apply completed with unexpected digest; manual recovery required",
-        );
-      }
-
-      const application: ApplicationRecord = {
-        proposalId: proposal.id,
-        candidateDigest,
-        target,
-        status: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest!,
-        beforeTarget: applicationBeforeTarget,
-        afterTarget,
-        previousApplication: legacyPredecessor.application,
-        rollbackSafe: true,
-        catalogRevision: revision,
-        operator,
-        reason,
-        appliedAt: decidedAt,
-        commandId,
-      };
-      if (legacyPredecessor.application) {
-        this.#state.applications.delete(legacyPredecessor.application.proposalId);
-      }
-      this.#state.applications.set(proposal.id, application);
-      const completed: CompletedApplicationRecord = {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        status: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest,
-        catalogRevisionBefore: revision,
-        catalogRevisionAfter: revision,
-        operator,
-        reason,
-        completedAt: new Date(this.#now()).toISOString(),
-        humanDecision,
-      };
-      this.#state.completed.push(completed);
-      this.#state.pending = null;
-      const resultPayload: ApplicationCommandResultPayload = {
+  /** Record an applied target: the proof, the completion, and the idempotency binding. */
+  async #recordApplied(
+    input: ReconcileContext,
+    afterTarget: TargetDigestState,
+  ): Promise<ApplicationCommandResult> {
+    const proposal = input.proposal;
+    const application: ApplicationRecord = {
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      target: input.target,
+      status: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest!,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget,
+      previousApplication: input.legacyPredecessor.application,
+      rollbackSafe: true,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      appliedAt: input.decidedAt,
+      commandId: input.commandId,
+    };
+    if (input.legacyPredecessor.application) {
+      this.#state.applications.delete(input.legacyPredecessor.application.proposalId);
+    }
+    this.#state.applications.set(proposal.id, application);
+    const completed: CompletedApplicationRecord = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      status: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest,
+      catalogRevisionBefore: input.revision,
+      catalogRevisionAfter: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      // Deliberately the second clock read of this command: the apply finished here.
+      completedAt: new Date(this.#now()).toISOString(),
+      humanDecision: input.humanDecision,
+    };
+    this.#state.completed.push(completed);
+    this.#state.pending = null;
+    this.#state.commands.set(input.commandId, {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      expectedRevision: input.expectedRevision,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      result: {
         proposal,
-        committedCatalogRevision: revision,
+        committedCatalogRevision: input.revision,
         applicationStatus: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
+        beforeTargetDigest: input.applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest,
-      };
-      this.#state.commands.set(commandId, {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        operator,
-        reason,
-        expectedRevision: input.expectedRevision,
-        previewTokenDigest: `reconcile:${input.mode}`,
-        requestDigest,
-        materialDigest,
-        result: resultPayload,
-      });
-      await this.#journal.persist(this.#state.revision + 1);
-      return {
-        proposal,
-        committedCatalogRevision: revision,
-        applicationStatus: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest,
-        deduplicated: false,
-      };
+      },
     });
+    await this.#journal.persist(this.#state.revision + 1);
+    return {
+      proposal,
+      committedCatalogRevision: input.revision,
+      applicationStatus: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest,
+      deduplicated: false,
+    };
   }
 
   /**
@@ -1214,7 +1258,7 @@ export class EvolutionApplicationCoordinator {
       candidateDigest: input.candidateDigest,
       operator: input.operator,
       reason: input.reason,
-      expectedRevision: input.revision,
+      expectedRevision: input.expectedRevision,
       previewTokenDigest: `reconcile:${input.mode}`,
       requestDigest: input.requestDigest,
       materialDigest: input.materialDigest,
