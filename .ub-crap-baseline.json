@@ -1,34 +1,34 @@
 {
-  "updatedAt": "2026-11-03T17:07:01.132Z",
+  "updatedAt": "2026-11-03T17:41:53.572Z",
   "generation": {
-    "headSha": "8a18cca7a96fcc0ce710789e8651684ce353f3ab",
+    "headSha": "3ed37cde21ed0f2374327b4d4e2be9f21fb9a534",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T17:07:01.131Z",
+    "generatedAt": "2026-11-03T17:41:53.571Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 5,
+      "divergentLines": 0,
       "partialFiles": 0,
       "digests": [
-        "804f6d01299fd42e7a8f9dfa842955a2fa5fd06a039af234e698e1908a43b022",
-        "d59afb543c29a7fd3a5fdb31bcab19729e321330c25a40b081ca706159951f87",
-        "c2e3ac7de98c065bf789c3bdbe631af5f87a8f3d03a7cedb8b3d9ee534eba62c"
+        "2330c4d21f1fc583a169640e8836b9f688d7c9defb5cb9ae4e44cd9496c36a83",
+        "cc47c2b3b647cf0b40d398750e9cf7dfbc657d672c31884cec73dbd6f9908401",
+        "90cc9242851065bf0b5ed6806eeb8f151ce56c1c2e3633ef3c5d29badb8eb627"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 1020866,
-      "sha256": "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270"
+      "bytes": 1020876,
+      "sha256": "576824e607bd561c10ea6c9ebe58e002deecd2f92a03095e022901c731f82dd9"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270",
-        "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270"
+        "576824e607bd561c10ea6c9ebe58e002deecd2f92a03095e022901c731f82dd9",
+        "576824e607bd561c10ea6c9ebe58e002deecd2f92a03095e022901c731f82dd9"
       ]
     }
   },
