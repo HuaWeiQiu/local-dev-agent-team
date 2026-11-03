@@ -10,6 +10,143 @@ import { Tooltip } from "../../ui/tooltip";
 import { DrawerHeader, DrawerPanel } from "./DrawerPanel";
 import { topologyModeLabel } from "./draft";
 
+function StrategyEntry({
+  name,
+  definition,
+  selected,
+  submitting,
+  onSelect,
+}: {
+  name: string;
+  definition: StrategyDefinition;
+  selected: boolean;
+  submitting: boolean;
+  onSelect(name: string): void;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      onClick={() => onSelect(name)}
+      disabled={submitting}
+      title={name}
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "h-auto w-full flex-col items-start justify-center gap-1.5 whitespace-normal rounded-lg px-3 py-2.5 text-left",
+        selected && "bg-accent-soft text-ink shadow-[inset_0_0_0_1px_var(--accent-line)] hover:bg-accent-soft",
+      )}
+    >
+      <span className="flex w-full min-w-0 items-center gap-2">
+        <Network className={cn(selected ? "text-accent-ink" : "text-muted")} />
+        <strong className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{strategyDisplayName(name)}</strong>
+        {selected && <Check aria-hidden className="text-accent-ink" />}
+      </span>
+      <StrategyBadges definition={definition} selected={selected} />
+    </Button>
+  );
+}
+
+/** Topology and provenance, the two things that tell strategies apart at a glance. */
+function StrategyBadges({
+  definition,
+  selected,
+}: {
+  definition: StrategyDefinition;
+  selected: boolean;
+}) {
+  const custom = definition.source === "custom";
+  return (
+    <span className="flex flex-wrap items-center gap-1.5">
+      <Badge tone={selected ? "active" : "neutral"}>
+        {topologyModeLabel(definition.topology?.mode ?? definition.compiledTopology.mode)}
+      </Badge>
+      <Badge tone={custom ? "info" : "neutral"}>{custom ? "自定义蓝图" : "项目配置"}</Badge>
+    </span>
+  );
+}
+
+/** Names without a definition are skipped: the catalogue no longer carries them. */
+function StrategyList({
+  strategyNames,
+  definitions,
+  selectedName,
+  submitting,
+  onSelect,
+}: {
+  strategyNames: string[];
+  definitions: Record<string, StrategyDefinition>;
+  selectedName: string;
+  submitting: boolean;
+  onSelect(name: string): void;
+}) {
+  return (
+    <div className="bd-b flex flex-col gap-1 p-2">
+      {strategyNames.map((name) => {
+        const definition = definitions[name];
+        if (!definition) return null;
+        return (
+          <StrategyEntry
+            key={name}
+            name={name}
+            definition={definition}
+            selected={name === selectedName}
+            submitting={submitting}
+            onSelect={onSelect}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** The approval toggle is the only stage the operator can add or remove. */
+function PlanApprovalToggle({
+  planApproval,
+  submitting,
+  onToggle,
+}: {
+  planApproval: boolean;
+  submitting: boolean;
+  onToggle(): void;
+}) {
+  return (
+    <Button
+      variant="secondary"
+      onClick={onToggle}
+      aria-pressed={planApproval}
+      disabled={submitting}
+      className={cn(
+        "h-10 w-full justify-between px-3 text-xs",
+        planApproval && "bg-accent-soft text-accent-ink hover:bg-accent-soft",
+      )}
+    >
+      <span className="flex items-center gap-2"><Check />计划审批</span>
+      <small className={cn("text-2xs", planApproval ? "text-accent-ink" : "text-muted")}>{planApproval ? "已启用" : "可添加"}</small>
+    </Button>
+  );
+}
+
+function StageSection({
+  planApproval,
+  submitting,
+  onTogglePlanApproval,
+}: {
+  planApproval: boolean;
+  submitting: boolean;
+  onTogglePlanApproval(): void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5 p-3">
+      <SectionTitle>执行阶段</SectionTitle>
+      <p className="m-0 mb-1 text-xs leading-relaxed text-muted">固定阶段由编排器保证，可选阶段可按需加入策略图。</p>
+      <FixedStage icon={<Bot />} label="角色阶段" />
+      <FixedStage icon={<Users />} label="执行池" />
+      <FixedStage icon={<ShieldCheck />} label="质量门禁" />
+      <PlanApprovalToggle planApproval={planApproval} submitting={submitting} onToggle={onTogglePlanApproval} />
+      <FixedStage icon={<GitPullRequest />} label="发布边界" />
+    </div>
+  );
+}
+
 export function LibraryPanel({
   open,
   compact,
@@ -46,62 +183,18 @@ export function LibraryPanel({
         }
       />
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto text-xs">
-        <div className="bd-b flex flex-col gap-1 p-2">
-          {strategyNames.map((name) => {
-            const item = definitions[name];
-            if (!item) return null;
-            const selected = name === selectedName;
-            return (
-              <Button
-                key={name}
-                variant="ghost"
-                onClick={() => onSelect(name)}
-                disabled={submitting}
-                title={name}
-                aria-current={selected ? "true" : undefined}
-                className={cn(
-                  "h-auto w-full flex-col items-start justify-center gap-1.5 whitespace-normal rounded-lg px-3 py-2.5 text-left",
-                  selected && "bg-accent-soft text-ink shadow-[inset_0_0_0_1px_var(--accent-line)] hover:bg-accent-soft",
-                )}
-              >
-                <span className="flex w-full min-w-0 items-center gap-2">
-                  <Network className={cn(selected ? "text-accent-ink" : "text-muted")} />
-                  <strong className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{strategyDisplayName(name)}</strong>
-                  {selected && <Check aria-hidden className="text-accent-ink" />}
-                </span>
-                <span className="flex flex-wrap items-center gap-1.5">
-                  <Badge tone={selected ? "active" : "neutral"}>
-                    {topologyModeLabel(item.topology?.mode ?? item.compiledTopology.mode)}
-                  </Badge>
-                  <Badge tone={item.source === "custom" ? "info" : "neutral"}>
-                    {item.source === "custom" ? "自定义蓝图" : "项目配置"}
-                  </Badge>
-                </span>
-              </Button>
-            );
-          })}
-        </div>
-        <div className="flex flex-col gap-1.5 p-3">
-          <SectionTitle>执行阶段</SectionTitle>
-          <p className="m-0 mb-1 text-xs leading-relaxed text-muted">固定阶段由编排器保证，可选阶段可按需加入策略图。</p>
-          <FixedStage icon={<Bot />} label="角色阶段" />
-          <FixedStage icon={<Users />} label="执行池" />
-          <FixedStage icon={<ShieldCheck />} label="质量门禁" />
-          <Button
-            variant="secondary"
-            onClick={onTogglePlanApproval}
-            aria-pressed={planApproval}
-            disabled={submitting}
-            className={cn(
-              "h-10 w-full justify-between px-3 text-xs",
-              planApproval && "bg-accent-soft text-accent-ink hover:bg-accent-soft",
-            )}
-          >
-            <span className="flex items-center gap-2"><Check />计划审批</span>
-            <small className={cn("text-2xs", planApproval ? "text-accent-ink" : "text-muted")}>{planApproval ? "已启用" : "可添加"}</small>
-          </Button>
-          <FixedStage icon={<GitPullRequest />} label="发布边界" />
-        </div>
+        <StrategyList
+          strategyNames={strategyNames}
+          definitions={definitions}
+          selectedName={selectedName}
+          submitting={submitting}
+          onSelect={onSelect}
+        />
+        <StageSection
+          planApproval={planApproval}
+          submitting={submitting}
+          onTogglePlanApproval={onTogglePlanApproval}
+        />
       </div>
     </DrawerPanel>
   );
