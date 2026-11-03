@@ -2812,7 +2812,7 @@ describe("the restored state validator refuses states the catalog disagrees with
  * | target written, catalog not advanced (strategy)   | `finishPromotion` promote arm; `finishRollback` rollback arm |
  * | target written, catalog not advanced (prompt)     | `restoreInterruptedPrompt` success path; `verifyPromptGitOutcome` false arm |
  * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
- * | pending snapshot lost its digest                  | `restoreInterruptedPrompt` "no recoverable snapshot" arm |
+ * | pending snapshot lost its digest                  | **unreachable**: the journal schema refuses the document first ("prompt presence and digest disagree"), asserted below |
  * | target replaced by a symlink or a non-file        | `restoreInterruptedPrompt` "not a safe regular file" arm |
  * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
  * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
@@ -3010,6 +3010,40 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     return harness;
   }
+
+  it("rejects a pending prompt snapshot without a digest instead of guessing", async () => {
+    // The `restoreInterruptedPrompt` arm that throws on a missing BEFORE digest is
+    // unreachable from a durable file: the journal schema refuses the document first, with
+    // "prompt presence and digest disagree". Refusing there is right — restoring from
+    // nothing would mean guessing what the file used to say — and this case pins it, so
+    // nobody "simplifies" the schema and moves the guess into the recovery path.
+    const harness = await interruptedPromptWorld("snapshot-bad");
+    await harness.coordinator.close();
+
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        pending: { beforeTarget: { digest: string | null; present: boolean } } & Record<
+          string,
+          unknown
+        >;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    expect(document.payload.pending.beforeTarget.present).toBe(true);
+    document.payload.pending.beforeTarget.digest = null;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    await expect(createHarness({ root: harness.root, clock: harness.clock })).rejects.toThrow(
+      /pending\.beforeTarget: prompt presence and digest disagree/,
+    );
+  });
 
   it("cleans the temp files an interrupted prompt write left behind", async () => {
     // One world covers all three branches of the cleanup: a matching temp file is removed, an
