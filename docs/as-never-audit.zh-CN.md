@@ -4,6 +4,44 @@
 
 这份表先于任何修复。审计起点是 **309 处真实 cast / 267 条类型错误**；把断言全部删掉再跑，错误变成 **510 条**。**267 只是类型检查能看见的部分，其余藏在断言后面。**
 
+## 第三版计数：改用 AST
+
+前两版都是 `grep`。AST 枚举 `AsExpression` + `NeverKeyword` 之后：
+
+**288 处真实 cast。** 和 `grep` 的两个差都来自文本匹配：
+
+- `grep "as never"` 会命中 `"...was never promoted"`（6 处误报）；
+- `grep` 按行计数，同一行两处 cast 只算一次；
+- `grep` 的行号是 cast 关键字所在行，AST 的是表达式起始行 —— 多行 fixture 上差好几行，按行号对表会错位。
+
+父节点分布（AST 独有，`grep` 拿不到）：
+
+| 父节点 | 处数 | 含义 |
+|---|---|---|
+| `PropertyAssignment` | 102 | |
+| `CallExpression` | 74 | |
+| `VariableDeclaration` | 26 | |
+| `ReturnStatement` | 24 | |
+| `AsExpression` | 21 | |
+| `ArrayLiteralExpression` | 10 | |
+| `JsxExpression` | 9 | |
+| `NewExpression` | 8 | |
+| `ParenthesizedExpression` | 7 | |
+| `ArrowFunction` | 5 | |
+| `BinaryExpression` | 2 | |
+
+`AssignmentExpression` 一处都没有——那是 D 桶的形状（cast 在赋值右侧，永远不上路），上一批的 4 处已经删掉，所以这一版里不再出现。
+
+### 桶的判据按父节点收紧
+
+| 父节点 | 桶 | 理由 |
+|---|---|---|
+| `PropertyAssignment` / `VariableDeclaration` / `ReturnStatement` / `NewExpression` / `JsxExpression` / `ArrowFunction` / `ArrayLiteralExpression` | B | 值、返回值、属性位——都是 fixture 在描述形状 |
+| `AsExpression` | B（双重断言） | `as never as T` 是把一个不匹配的值硬掰成 T |
+| `CallExpression` | B 或 C | 要看到底传给谁：被测函数 → C；helper / mock → B |
+
+`CallExpression` 是唯一需要逐条读的类别，其余都能按父节点定桶。**这比上一版"按用例名猜"硬得多**：名字用什么词是作者的自由，父节点是语法事实。
+
 ## 四个桶与判据
 
 | 桶 | 判据 | 数量 |
