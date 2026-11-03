@@ -117,6 +117,28 @@ export type EvolutionApplicationCoordinatorOptions = {
   previewTtlMs?: number;
 };
 
+/** One reconciliation, after the identity, the preconditions and the plan are resolved. */
+type ReconcileContext = {
+  commandId: string;
+  operator: string;
+  reason: string;
+  mode: "adopt" | "apply";
+  promptContent?: Uint8Array;
+  requestDigest: string;
+  materialDigest: string | null;
+  proposal: EvolutionProposal;
+  target: ReturnType<typeof targetFromCandidate>;
+  activeProposalId: string | null;
+  revision: number;
+  decidedAt: string;
+  humanDecision: HumanDecision;
+  candidateDigest: string;
+  beforeTarget: TargetDigestState;
+  livePromptContent: Buffer | undefined;
+  legacyPredecessor: LegacyPredecessorResolution;
+  applicationBeforeTarget: TargetDigestState;
+};
+
 /** What a legacy Phase-2 promotion left behind, when it left anything. */
 type LegacyPredecessorResolution = {
   application: ApplicationRecord | null;
@@ -917,15 +939,7 @@ export class EvolutionApplicationCoordinator {
       }
       const { proposal, target, activeProposalId } = this.#assertReconcilable(input);
 
-      const {
-        decidedAt,
-        humanDecision,
-        candidateDigest,
-        beforeTarget,
-        livePromptContent,
-        legacyPredecessor,
-        applicationBeforeTarget,
-      } = await this.#planReconcile({
+      const plan = await this.#planReconcile({
         proposal,
         target,
         snapshot,
@@ -935,92 +949,33 @@ export class EvolutionApplicationCoordinator {
         reason,
         mode: input.mode,
       });
+      // Still unpacked for the apply branch below; phase E gives it the context too.
+      const {
+        decidedAt,
+        humanDecision,
+        candidateDigest,
+        beforeTarget,
+        livePromptContent,
+        legacyPredecessor,
+        applicationBeforeTarget,
+      } = plan;
+      const context: ReconcileContext = {
+        commandId,
+        operator,
+        reason,
+        mode: input.mode,
+        ...(input.promptContent === undefined ? {} : { promptContent: input.promptContent }),
+        requestDigest,
+        materialDigest,
+        proposal,
+        target,
+        activeProposalId,
+        revision,
+        ...plan,
+      };
 
       if (input.mode === "adopt") {
-        await this.#assertQuiescentSafe();
-        const expectedDigest =
-          proposal.candidate.kind === "role-prompt"
-            ? proposal.candidate.contentDigest
-            : sha256Canonical(proposal.candidate.definition);
-        if (beforeTarget.digest !== expectedDigest) {
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Cannot adopt proposal '${proposal.id}': live target digest does not match candidate`,
-          );
-        }
-        if (livePromptContent) {
-          await this.#targets.ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
-        }
-        const application: ApplicationRecord = {
-          proposalId: proposal.id,
-          candidateDigest,
-          target,
-          status: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest!,
-          beforeTarget: applicationBeforeTarget,
-          afterTarget: beforeTarget,
-          previousApplication: legacyPredecessor.application,
-          rollbackSafe: legacyPredecessor.application !== null,
-          catalogRevision: revision,
-          operator,
-          reason,
-          appliedAt: decidedAt,
-          commandId,
-        };
-        if (legacyPredecessor.completion) {
-          this.#state.completed.push(legacyPredecessor.completion);
-        }
-        if (legacyPredecessor.application) {
-          this.#state.applications.delete(legacyPredecessor.application.proposalId);
-        }
-        this.#state.applications.set(proposal.id, application);
-        const completed: CompletedApplicationRecord = {
-          commandId,
-          operation: "reconcile-promoted",
-          proposalId: proposal.id,
-          candidateDigest,
-          status: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-          catalogRevisionBefore: revision,
-          catalogRevisionAfter: revision,
-          operator,
-          reason,
-          completedAt: decidedAt,
-          humanDecision,
-        };
-        this.#state.completed.push(completed);
-        const resultPayload: ApplicationCommandResultPayload = {
-          proposal,
-          committedCatalogRevision: revision,
-          applicationStatus: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-        };
-        const binding: CommandIdempotencyBinding = {
-          commandId,
-          operation: "reconcile-promoted",
-          proposalId: proposal.id,
-          candidateDigest,
-          operator,
-          reason,
-          expectedRevision: input.expectedRevision,
-          previewTokenDigest: `reconcile:${input.mode}`,
-          requestDigest,
-          materialDigest,
-          result: resultPayload,
-        };
-        this.#state.commands.set(commandId, binding);
-        await this.#journal.persist(this.#state.revision + 1);
-        return {
-          proposal,
-          committedCatalogRevision: revision,
-          applicationStatus: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-          deduplicated: false,
-        };
+        return await this.#adoptLiveTarget(context);
       }
 
       // mode === "apply": journaled apply without catalog promote (already promoted)
@@ -1184,6 +1139,103 @@ export class EvolutionApplicationCoordinator {
         deduplicated: false,
       };
     });
+  }
+
+  /**
+   * Record a target that is already live as the outcome of this promotion. Nothing is
+   * written to the repository: adopt exists for Phase-2 promotions that applied before the
+   * journal did, so the only question is whether the live bytes really are the candidate's.
+   *
+   * It reads the clock once. Adoption finishes without a target write, so its completion
+   * carries the same instant as its decision — unlike apply, which stamps twice on purpose.
+   */
+  async #adoptLiveTarget(input: ReconcileContext): Promise<ApplicationCommandResult> {
+    await this.#assertQuiescentSafe();
+    const expectedDigest =
+      input.proposal.candidate.kind === "role-prompt"
+        ? input.proposal.candidate.contentDigest
+        : sha256Canonical(input.proposal.candidate.definition);
+    if (input.beforeTarget.digest !== expectedDigest) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Cannot adopt proposal '${input.proposal.id}': live target digest does not match candidate`,
+      );
+    }
+    if (input.livePromptContent) {
+      await this.#targets.ingestPromptMaterial(
+        input.beforeTarget.digest!,
+        input.livePromptContent,
+      );
+    }
+    const application: ApplicationRecord = {
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      target: input.target,
+      status: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest!,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget: input.beforeTarget,
+      previousApplication: input.legacyPredecessor.application,
+      rollbackSafe: input.legacyPredecessor.application !== null,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      appliedAt: input.decidedAt,
+      commandId: input.commandId,
+    };
+    if (input.legacyPredecessor.completion) {
+      this.#state.completed.push(input.legacyPredecessor.completion);
+    }
+    if (input.legacyPredecessor.application) {
+      this.#state.applications.delete(input.legacyPredecessor.application.proposalId);
+    }
+    this.#state.applications.set(input.proposal.id, application);
+    const completed: CompletedApplicationRecord = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      status: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest,
+      catalogRevisionBefore: input.revision,
+      catalogRevisionAfter: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      completedAt: input.decidedAt,
+      humanDecision: input.humanDecision,
+    };
+    this.#state.completed.push(completed);
+    const binding: CommandIdempotencyBinding = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      expectedRevision: input.revision,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      result: {
+        proposal: input.proposal,
+        committedCatalogRevision: input.revision,
+        applicationStatus: "adopted",
+        beforeTargetDigest: input.applicationBeforeTarget.digest,
+        afterTargetDigest: input.beforeTarget.digest,
+      },
+    };
+    this.#state.commands.set(input.commandId, binding);
+    await this.#journal.persist(this.#state.revision + 1);
+    return {
+      proposal: input.proposal,
+      committedCatalogRevision: input.revision,
+      applicationStatus: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest,
+      deduplicated: false,
+    };
   }
 
   /**
