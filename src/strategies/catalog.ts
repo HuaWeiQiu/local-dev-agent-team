@@ -476,17 +476,7 @@ export class StrategyBlueprintCatalog {
 
     try {
       await assertRepositoryOwnedStorage(this.io, this.root, this.stateDirectory, this.filePath);
-      await this.io.beforeAtomicStage?.("open");
-      const handle = await this.io.open(temporaryPath, "wx", 0o600);
-      try {
-        await this.io.beforeAtomicStage?.("write");
-        await handle.writeFile(serialized, "utf8");
-        await this.io.beforeAtomicStage?.("file-sync");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-
+      await atomicStage(this.io, temporaryPath, serialized);
       await assertRepositoryOwnedStorage(this.io, this.root, this.stateDirectory, this.filePath);
       await this.io.beforeAtomicStage?.("rename");
       renameAttempted = true;
@@ -495,27 +485,17 @@ export class StrategyBlueprintCatalog {
       await this.io.syncDirectory(this.stateDirectory);
       this.persistedContents = serialized;
     } catch (error) {
-      if (!renameAttempted) {
+      if (renameAttempted) {
+        // The rename may or may not be durable: refuse further writes until reopen.
+        this.indeterminate = true;
+      } else {
         await this.io.rm(temporaryPath, { force: true }).catch(() => undefined);
       }
-      if (renameAttempted) {
-        this.indeterminate = true;
-        throw new StrategyBlueprintIndeterminateError(
-          `Strategy blueprint catalog rename was attempted and its durability outcome is indeterminate; reopen before continuing: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-      if (error instanceof StrategyBlueprintError) {
-        throw error;
-      }
-      throw new StrategyBlueprintValidationError(
-        `Failed to persist strategy blueprint catalog at ${this.filePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      throw persistFailure(error, renameAttempted, this.filePath);
     }
   }
+
+
 
   private async assertDiskBaseline(): Promise<void> {
     let currentContents: string | null;
@@ -612,6 +592,48 @@ function sortObjectKeys(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+/** Write the temporary file and make its bytes durable before the rename. */
+async function atomicStage(
+  io: StrategyBlueprintFileIo,
+  temporaryPath: string,
+  serialized: string,
+): Promise<void> {
+  await io.beforeAtomicStage?.("open");
+  const handle = await io.open(temporaryPath, "wx", 0o600);
+  try {
+    await io.beforeAtomicStage?.("write");
+    await handle.writeFile(serialized, "utf8");
+    await io.beforeAtomicStage?.("file-sync");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * After a rename the durability outcome is unknown, so the catalog must be
+ * reopened; before it, the temporary file is gone and the error can be rethrown.
+ */
+function persistFailure(
+  error: unknown,
+  renameAttempted: boolean,
+  filePath: string,
+): Error {
+  if (renameAttempted) {
+    return new StrategyBlueprintIndeterminateError(
+      `Strategy blueprint catalog rename was attempted and its durability outcome is indeterminate; reopen before continuing: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (error instanceof StrategyBlueprintError) return error;
+  return new StrategyBlueprintValidationError(
+    `Failed to persist strategy blueprint catalog at ${filePath}: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
 }
 
 function parseCatalogDocument(contents: string, filePath: string) {
@@ -961,23 +983,24 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Windows refuses to fsync a directory with these codes; every other platform is strict. */
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]);
+
 async function defaultSyncDirectory(directoryPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
   try {
     handle = await openAsync(directoryPath, "r");
     await handle.sync();
   } catch (error) {
-    const code = errorCode(error);
-    if (
-      process.platform === "win32" &&
-      (code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM")
-    ) {
-      return;
-    }
+    if (isWindowsSyncUnsupported(error)) return;
     throw error;
   } finally {
     await handle?.close();
   }
+}
+
+function isWindowsSyncUnsupported(error: unknown): boolean {
+  return process.platform === "win32" && UNSUPPORTED_DIRECTORY_SYNC_CODES.has(String(errorCode(error)));
 }
 
 function isNotFound(error: unknown): boolean {
