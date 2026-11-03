@@ -1,3 +1,28 @@
+#!/usr/bin/env node
+/**
+ * Prepare the Node runtime and the production dependencies that ship inside the desktop
+ * app under `src-tauri/runtime`.
+ *
+ * The executable entry is guarded and the pipeline is split in the same move, on purpose.
+ * Importing this file used to start the whole pipeline: measure the Rust host, download
+ * Node, extract it, install production dependencies, and replace
+ * `src-tauri/runtime/app`. Nothing can test a file like that, so nothing did — every
+ * function here sat at 0% coverage.
+ *
+ * Guarding it alone would have been worse. The top level carries about fifteen decisions,
+ * and the moment they move inside a named function they enter the CRAP baseline at
+ * cc15 @ 0% coverage: a 225-point debt, three times the size of the debt this file already
+ * carried. Splitting the pipeline into the stages it really has keeps each stage small and
+ * reachable from `main()`, so the guard buys testability instead of a bigger debt.
+ *
+ * The exported surface is the reusable judgement — platform mapping, checksum verdict,
+ * portability invariant, staging cleanup, runtime assembly, the CLI projection — plus the
+ * guard's own pure logic. The internal stages stay unexported: a step being testable by
+ * going through `main()` is enough, and every extra export is an invitation to call it
+ * from somewhere it was never meant to be called.
+ */
+
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -13,196 +38,67 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const nodeVersion = "24.19.0";
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const rustc = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
-if (rustc.status !== 0) {
-  throw new Error(`Unable to inspect the Rust target: ${rustc.stderr || "rustc failed"}`);
+const NODE_VERSION = "24.19.0";
+const STAGING_PREFIX = ".app-staging-";
+
+/**
+ * Arguments the staging install must keep. `--prod` is the whole point: a dev dependency
+ * that slips into this directory ships to every user, and `--frozen-lockfile` is what keeps
+ * the shipped tree identical to the reviewed one.
+ */
+export const PNPM_INSTALL_ARGS = [
+  "install",
+  "--prod",
+  "--frozen-lockfile",
+  "--ignore-scripts",
+  "--config.node-linker=hoisted",
+];
+
+/** Build output copied next to the installed dependencies; paths are relative to the repo. */
+const APPLICATION_ARTIFACTS = [["dist"], ["web", "dist"], ["prompts"], ["schemas"]];
+
+/** Leftovers pnpm needs while installing and must not ship. */
+const STAGING_NOISE = [
+  ["pnpm-lock.yaml"],
+  ["node_modules", ".bin"],
+  ["node_modules", ".pnpm"],
+  ["node_modules", ".modules.yaml"],
+];
+
+const defaultRepositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+const DEFAULT_IO = {
+  spawn: spawnSync,
+  fetch: globalThis.fetch,
+  stdout: process.stdout,
+  run: runPnpm,
+};
+
+/**
+ * Turn an argv path into the file URL Node would use for the same file.
+ *
+ * Why not ``file://${argv[1]}``: on Windows `argv[1]` is `C:\...` while `import.meta.url` is
+ * `file:///C:/...`, so that comparison is silently false and a guarded entry never runs —
+ * the failure mode is a build that does nothing, which is far harder to diagnose than a
+ * crash. Normalising the drive prefix here keeps the rule platform independent, and that is
+ * also what lets a macOS test prove the Windows shape on a machine that has no `C:` drive.
+ */
+export function argvToModuleUrl(argvPath) {
+  const slashed = argvPath.replaceAll("\\", "/");
+  const absolute = /^[A-Za-z]:\//.test(slashed) ? `/${slashed}` : slashed;
+  return pathToFileURL(absolute).href;
 }
 
-const host = rustc.stdout.match(/^host:\s+(.+)$/m)?.[1]?.trim();
-if (!host) {
-  throw new Error("Unable to determine the Rust host target");
+/** Whether an argv path names the module being evaluated. */
+export function isMainModule(moduleUrl, argvPath) {
+  if (argvPath === undefined || argvPath === "") return false;
+  return moduleUrl === argvToModuleUrl(argvPath);
 }
 
-const target = process.env.AGENT_TEAM_TAURI_TARGET ?? process.env.TAURI_ENV_TARGET_TRIPLE ?? host;
-const distribution = distributionFor(target);
-const archiveName = `node-v${nodeVersion}-${distribution.name}.${distribution.extension}`;
-const downloadRoot = `https://nodejs.org/dist/v${nodeVersion}`;
-const cacheRoot = path.join(repositoryRoot, ".cache", "desktop-runtime", `node-v${nodeVersion}`);
-const archivePath = path.join(cacheRoot, archiveName);
-const extractedRoot = path.join(cacheRoot, `node-v${nodeVersion}-${distribution.name}`);
-const sourceBinary = path.join(extractedRoot, ...distribution.binaryPath);
-const binaryDirectory = path.join(repositoryRoot, "src-tauri", "binaries");
-const destinationName = `agent-team-node-${target}${distribution.platform === "windows" ? ".exe" : ""}`;
-const destination = path.join(binaryDirectory, destinationName);
-
-if (process.argv.includes("--describe-target")) {
-  process.stdout.write(`${JSON.stringify({
-    target,
-    archiveName,
-    binaryPath: distribution.binaryPath.join("/"),
-    destinationName,
-  })}\n`);
-  process.exit(0);
-}
-
-const hostDistribution = distributionFor(host);
-const supportsCrossArchitecture = distribution.platform === "darwin"
-  && hostDistribution.platform === "darwin";
-if (target !== host && !supportsCrossArchitecture) {
-  throw new Error(
-    `Desktop packaging target ${target} needs a matching native host; current host is ${host}`,
-  );
-}
-
-await mkdir(cacheRoot, { recursive: true });
-
-if (!(await exists(sourceBinary))) {
-  const checksums = await fetchText(`${downloadRoot}/SHASUMS256.txt`);
-  const expectedChecksum = checksums
-    .split("\n")
-    .find((line) => line.endsWith(`  ${archiveName}`))
-    ?.split(/\s+/, 1)[0];
-  if (!expectedChecksum) {
-    throw new Error(`Node checksum is unavailable for ${archiveName}`);
-  }
-  if (!(await hasChecksum(archivePath, expectedChecksum))) {
-    const partialPath = `${archivePath}.partial`;
-    await downloadFile(`${downloadRoot}/${archiveName}`, partialPath);
-    if (!(await hasChecksum(partialPath, expectedChecksum))) {
-      throw new Error(`Node archive checksum verification failed for ${archiveName}`);
-    }
-    await rename(partialPath, archivePath);
-  }
-  const extraction = spawnSync("tar", [...distribution.tarArguments, archivePath, "-C", cacheRoot], {
-    encoding: "utf8",
-  });
-  if (extraction.status !== 0) {
-    throw new Error(`Unable to extract Node runtime: ${extraction.stderr || "tar failed"}`);
-  }
-}
-
-await mkdir(binaryDirectory, { recursive: true });
-const [sourceInfo, destinationInfo] = await Promise.all([
-  stat(sourceBinary),
-  stat(destination).catch(() => undefined),
-]);
-const needsCopy = !destinationInfo || destinationInfo.size !== sourceInfo.size;
-if (needsCopy) {
-  await copyFile(sourceBinary, destination);
-}
-if (distribution.platform !== "windows" && (needsCopy || (destinationInfo.mode & 0o111) === 0)) {
-  await chmod(destination, 0o755);
-}
-
-const runtimeDirectory = path.join(repositoryRoot, "src-tauri", "runtime");
-await mkdir(runtimeDirectory, { recursive: true });
-const licenseSource = path.join(extractedRoot, "LICENSE");
-const licenseDestination = path.join(runtimeDirectory, "NODE-LICENSE");
-const [licenseSourceInfo, licenseDestinationInfo] = await Promise.all([
-  stat(licenseSource),
-  stat(licenseDestination).catch(() => undefined),
-]);
-if (!licenseDestinationInfo || licenseDestinationInfo.size !== licenseSourceInfo.size) {
-  await copyFile(licenseSource, licenseDestination);
-}
-await prepareApplicationRuntime(runtimeDirectory);
-process.stdout.write(`Prepared Node v${nodeVersion} desktop runtime and production dependencies for ${target}\n`);
-
-async function prepareApplicationRuntime(runtimeDirectory) {
-  const applicationDirectory = path.join(runtimeDirectory, "app");
-  await cleanupApplicationStagingDirectories(runtimeDirectory);
-  const stagingDirectory = await mkdtemp(path.join(runtimeDirectory, ".app-staging-"));
-  try {
-    await Promise.all([
-      copyFile(path.join(repositoryRoot, "package.json"), path.join(stagingDirectory, "package.json")),
-      copyFile(path.join(repositoryRoot, "pnpm-lock.yaml"), path.join(stagingDirectory, "pnpm-lock.yaml")),
-    ]);
-
-    const install = runPnpm([
-      "--dir",
-      stagingDirectory,
-      "install",
-      "--prod",
-      "--frozen-lockfile",
-      "--ignore-scripts",
-      "--config.node-linker=hoisted",
-    ]);
-    if (install.status !== 0) {
-      throw new Error(`Unable to install desktop production dependencies: ${install.stderr || install.stdout || "pnpm failed"}`);
-    }
-
-    await Promise.all([
-      cp(path.join(repositoryRoot, "dist"), path.join(stagingDirectory, "dist"), { recursive: true }),
-      cp(path.join(repositoryRoot, "web", "dist"), path.join(stagingDirectory, "web", "dist"), { recursive: true }),
-      cp(path.join(repositoryRoot, "prompts"), path.join(stagingDirectory, "prompts"), { recursive: true }),
-      cp(path.join(repositoryRoot, "schemas"), path.join(stagingDirectory, "schemas"), { recursive: true }),
-    ]);
-    await Promise.all([
-      rm(path.join(stagingDirectory, "pnpm-lock.yaml"), { force: true }),
-      rm(path.join(stagingDirectory, "node_modules", ".bin"), { recursive: true, force: true }),
-      rm(path.join(stagingDirectory, "node_modules", ".pnpm"), { recursive: true, force: true }),
-      rm(path.join(stagingDirectory, "node_modules", ".modules.yaml"), { force: true }),
-    ]);
-    await assertPortableRuntime(stagingDirectory);
-
-    const smoke = spawnSync(
-      process.execPath,
-      [path.join(stagingDirectory, "dist", "cli.js"), "--version"],
-      { cwd: stagingDirectory, encoding: "utf8" },
-    );
-    if (smoke.status !== 0) {
-      throw new Error(`Desktop production runtime smoke test failed: ${smoke.stderr || smoke.stdout || "CLI failed"}`);
-    }
-
-    await rm(applicationDirectory, { recursive: true, force: true });
-    await rename(stagingDirectory, applicationDirectory);
-  } catch (error) {
-    await rm(stagingDirectory, { recursive: true, force: true });
-    throw error;
-  }
-}
-
-async function cleanupApplicationStagingDirectories(runtimeDirectory) {
-  for (const entry of await readdir(runtimeDirectory, { withFileTypes: true })) {
-    if (entry.name.startsWith(".app-staging-")) {
-      await rm(path.join(runtimeDirectory, entry.name), { recursive: true, force: true });
-    }
-  }
-}
-
-function runPnpm(args) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath && /\.(?:c?js|mjs)$/i.test(npmExecPath)) {
-    return spawnSync(process.execPath, [npmExecPath, ...args], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    });
-  }
-  return spawnSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", args, {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  });
-}
-
-async function assertPortableRuntime(directory) {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const entryPath = path.join(directory, entry.name);
-    if (entry.isSymbolicLink()) {
-      throw new Error(`Desktop production runtime contains a non-portable symbolic link: ${entryPath}`);
-    }
-    if (entry.isFile() && entry.name.endsWith(".node")) {
-      throw new Error(`Desktop production runtime contains a target-specific native addon: ${entryPath}`);
-    }
-    if (entry.isDirectory()) await assertPortableRuntime(entryPath);
-  }
-}
-
-function distributionFor(targetTriple) {
+/** Map a Rust target triple onto the Node distribution built for it. */
+export function distributionFor(targetTriple) {
   const supported = {
     "aarch64-apple-darwin": {
       platform: "darwin",
@@ -247,19 +143,25 @@ function distributionFor(targetTriple) {
   return selected;
 }
 
-async function fetchText(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
-  return await response.text();
+/**
+ * How to start pnpm. When pnpm runs this script (`pnpm desktop:prepare`) it leaves its own
+ * entry point in `npm_execpath`; launching that through `process.execPath` works on every
+ * platform, while a bare `pnpm` would depend on PATH and on the `.cmd` shim on Windows.
+ */
+export function resolvePnpmInvocation({ npmExecPath, platform, execPath }) {
+  if (npmExecPath && /\.[cm]?js$/i.test(npmExecPath)) {
+    return { command: execPath, args: [npmExecPath] };
+  }
+  return { command: platform === "win32" ? "pnpm.cmd" : "pnpm", args: [] };
 }
 
-async function downloadFile(url, destinationPath) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
-  await writeFile(destinationPath, new Uint8Array(await response.arrayBuffer()));
-}
-
-async function hasChecksum(filePath, expected) {
+/**
+ * Whether a file already holds the expected digest. A missing file is not an error — it is
+ * the ordinary "nothing cached yet" case — while a read that fails for any other reason
+ * (a directory, a permission problem) is a real failure and must not be swallowed into
+ * "please download it", which would hide the cause behind a fresh download attempt.
+ */
+export async function hasChecksum(filePath, expected) {
   try {
     const contents = await readFile(filePath);
     return createHash("sha256").update(contents).digest("hex") === expected;
@@ -269,6 +171,323 @@ async function hasChecksum(filePath, expected) {
   }
 }
 
+/**
+ * Refuse a production tree that cannot be moved to another machine. A symbolic link or a
+ * target-specific native addon works on the machine that produced it and fails on the
+ * user's, and it fails at first use rather than at packaging time.
+ */
+export async function assertPortableRuntime(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Desktop production runtime contains a non-portable symbolic link: ${entryPath}`);
+    }
+    if (entry.isFile() && entry.name.endsWith(".node")) {
+      throw new Error(`Desktop production runtime contains a target-specific native addon: ${entryPath}`);
+    }
+    if (entry.isDirectory()) await assertPortableRuntime(entryPath);
+  }
+}
+
+/** Remove staging directories a previous interrupted run left behind. */
+export async function cleanupApplicationStagingDirectories(runtimeDirectory) {
+  for (const entry of await readdir(runtimeDirectory, { withFileTypes: true })) {
+    if (entry.name.startsWith(STAGING_PREFIX)) {
+      await rm(path.join(runtimeDirectory, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Assemble `runtimeDirectory/app` from a fresh staging copy.
+ *
+ * The staging directory exists so a failed install never replaces a working app: the old
+ * directory is removed only after the new tree passed the portability check and the smoke
+ * test, and every failure path removes the staging copy before it rethrows.
+ */
+export async function prepareApplicationRuntime(
+  runtimeDirectory,
+  { repositoryRoot = defaultRepositoryRoot, run = runPnpm, spawn = spawnSync } = {},
+) {
+  const applicationDirectory = path.join(runtimeDirectory, "app");
+  await cleanupApplicationStagingDirectories(runtimeDirectory);
+  const stagingDirectory = await mkdtemp(path.join(runtimeDirectory, STAGING_PREFIX));
+  try {
+    await copyStagingManifests(stagingDirectory, repositoryRoot);
+    await installProductionDependencies(stagingDirectory, run);
+    await copyApplicationArtifacts(stagingDirectory, repositoryRoot);
+    await removeStagingNoise(stagingDirectory);
+    await assertPortableRuntime(stagingDirectory);
+    await runRuntimeSmoke(stagingDirectory, spawn);
+    await rm(applicationDirectory, { recursive: true, force: true });
+    await rename(stagingDirectory, applicationDirectory);
+  } catch (error) {
+    await rm(stagingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** The projection `--describe-target` prints; it never touches the filesystem. */
+export function describeTarget(plan) {
+  return {
+    target: plan.target,
+    archiveName: plan.archiveName,
+    binaryPath: plan.distribution.binaryPath.join("/"),
+    destinationName: plan.destinationName,
+  };
+}
+
+/**
+ * The executable entry.
+ *
+ * Every argument is required, including `root` and `io`. A default here would be a loaded
+ * gun: the only reason to call `main` in a test is to drive it away from the real repository,
+ * and a forgotten `root` would then quietly package `src-tauri/runtime` in the checkout. The
+ * one place that knows the production values is the guard at the bottom of this file.
+ *
+ * `--describe-target` returns before the host check on purpose: describing a target is how a
+ * packaging matrix asks "which archive would Windows get" from whichever host happens to run
+ * the question, so requiring a matching native host would make the question unanswerable on
+ * every other platform.
+ */
+export async function main({ argv, env, root, io }) {
+  const host = readRustHost(io.spawn);
+  const plan = planDesktopRuntime({ env, host, root });
+  if (argv.includes("--describe-target")) {
+    io.stdout.write(`${JSON.stringify(describeTarget(plan))}\n`);
+    return;
+  }
+  assertNativeHost(plan, host);
+  await prepareNodeRuntime(plan, io);
+  io.stdout.write(
+    `Prepared Node v${NODE_VERSION} desktop runtime and production dependencies for ${plan.target}\n`,
+  );
+}
+
+function readRustHost(spawn) {
+  const rustc = spawn("rustc", ["-vV"], { encoding: "utf8" });
+  if (rustc.status !== 0) {
+    throw new Error(`Unable to inspect the Rust target: ${rustc.stderr || "rustc failed"}`);
+  }
+  const host = rustc.stdout.match(/^host:\s+(.+)$/m)?.[1]?.trim();
+  if (!host) {
+    throw new Error("Unable to determine the Rust host target");
+  }
+  return host;
+}
+
+function planDesktopRuntime({ env, host, root }) {
+  const target = env.AGENT_TEAM_TAURI_TARGET ?? env.TAURI_ENV_TARGET_TRIPLE ?? host;
+  const distribution = distributionFor(target);
+  const archiveName = `node-v${NODE_VERSION}-${distribution.name}.${distribution.extension}`;
+  const cacheRoot = path.join(root, ".cache", "desktop-runtime", `node-v${NODE_VERSION}`);
+  const extractedRoot = path.join(cacheRoot, `node-v${NODE_VERSION}-${distribution.name}`);
+  const destinationName = `agent-team-node-${target}${
+    distribution.platform === "windows" ? ".exe" : ""
+  }`;
+  const binaryDirectory = path.join(root, "src-tauri", "binaries");
+  return {
+    root,
+    host,
+    target,
+    distribution,
+    archiveName,
+    downloadRoot: `https://nodejs.org/dist/v${NODE_VERSION}`,
+    cacheRoot,
+    archivePath: path.join(cacheRoot, archiveName),
+    extractedRoot,
+    sourceBinary: path.join(extractedRoot, ...distribution.binaryPath),
+    binaryDirectory,
+    destinationName,
+    destination: path.join(binaryDirectory, destinationName),
+    runtimeDirectory: path.join(root, "src-tauri", "runtime"),
+  };
+}
+
+function assertNativeHost(plan, host) {
+  const hostDistribution = distributionFor(host);
+  const supportsCrossArchitecture =
+    plan.distribution.platform === "darwin" && hostDistribution.platform === "darwin";
+  if (plan.target !== host && !supportsCrossArchitecture) {
+    throw new Error(
+      `Desktop packaging target ${plan.target} needs a matching native host; current host is ${host}`,
+    );
+  }
+}
+
+/**
+ * The stages run in this order for a reason: the binary has to exist before the staging
+ * install copies `dist`, the licence has to be staged before the app directory is replaced,
+ * and nothing may be published before the smoke test passed. The order is observed by a
+ * test that asserts the prerequisites exist at the moment the install runs.
+ */
+async function prepareNodeRuntime(plan, io) {
+  await mkdir(plan.cacheRoot, { recursive: true });
+  await ensureNodeArchive(plan, io);
+  await installNodeBinary(plan);
+  await stageNodeLicense(plan);
+  await prepareApplicationRuntime(plan.runtimeDirectory, {
+    repositoryRoot: plan.root,
+    run: io.run,
+    spawn: io.spawn,
+  });
+}
+
+async function ensureNodeArchive(plan, io) {
+  if (await exists(plan.sourceBinary)) return;
+  const checksums = await fetchText(`${plan.downloadRoot}/SHASUMS256.txt`, io.fetch);
+  const expectedChecksum = resolveExpectedChecksum(checksums, plan.archiveName);
+  if (!expectedChecksum) {
+    throw new Error(`Node checksum is unavailable for ${plan.archiveName}`);
+  }
+  if (!(await hasChecksum(plan.archivePath, expectedChecksum))) {
+    const partialPath = `${plan.archivePath}.partial`;
+    await downloadFile(`${plan.downloadRoot}/${plan.archiveName}`, partialPath, io.fetch);
+    if (!(await hasChecksum(partialPath, expectedChecksum))) {
+      throw new Error(`Node archive checksum verification failed for ${plan.archiveName}`);
+    }
+    await rename(partialPath, plan.archivePath);
+  }
+  await extractArchive(plan, io.spawn);
+}
+
+function resolveExpectedChecksum(checksums, archiveName) {
+  return checksums
+    .split("\n")
+    .find((line) => line.endsWith(`  ${archiveName}`))
+    ?.split(/\s+/, 1)[0];
+}
+
+async function extractArchive(plan, spawn) {
+  const extraction = spawn(
+    "tar",
+    [...plan.distribution.tarArguments, plan.archivePath, "-C", plan.cacheRoot],
+    { encoding: "utf8" },
+  );
+  if (extraction.status !== 0) {
+    throw new Error(`Unable to extract Node runtime: ${failureDetail(extraction, "tar failed")}`);
+  }
+}
+
+async function installNodeBinary(plan) {
+  await mkdir(plan.binaryDirectory, { recursive: true });
+  const [sourceInfo, destinationInfo] = await Promise.all([
+    stat(plan.sourceBinary),
+    stat(plan.destination).catch(() => undefined),
+  ]);
+  const needsCopy = !destinationInfo || destinationInfo.size !== sourceInfo.size;
+  if (needsCopy) {
+    await copyFile(plan.sourceBinary, plan.destination);
+  }
+  if (plan.distribution.platform !== "windows" && (needsCopy || (destinationInfo.mode & 0o111) === 0)) {
+    await chmod(plan.destination, 0o755);
+  }
+}
+
+async function stageNodeLicense(plan) {
+  await mkdir(plan.runtimeDirectory, { recursive: true });
+  const licenseSource = path.join(plan.extractedRoot, "LICENSE");
+  const licenseDestination = path.join(plan.runtimeDirectory, "NODE-LICENSE");
+  const [licenseSourceInfo, licenseDestinationInfo] = await Promise.all([
+    stat(licenseSource),
+    stat(licenseDestination).catch(() => undefined),
+  ]);
+  if (!licenseDestinationInfo || licenseDestinationInfo.size !== licenseSourceInfo.size) {
+    await copyFile(licenseSource, licenseDestination);
+  }
+}
+
+async function copyStagingManifests(stagingDirectory, repositoryRoot) {
+  await Promise.all([
+    copyFile(path.join(repositoryRoot, "package.json"), path.join(stagingDirectory, "package.json")),
+    copyFile(
+      path.join(repositoryRoot, "pnpm-lock.yaml"),
+      path.join(stagingDirectory, "pnpm-lock.yaml"),
+    ),
+  ]);
+}
+
+async function installProductionDependencies(stagingDirectory, run) {
+  const install = run(["--dir", stagingDirectory, ...PNPM_INSTALL_ARGS]);
+  if (install.status !== 0) {
+    throw new Error(
+      `Unable to install desktop production dependencies: ${failureDetail(install, "pnpm failed")}`,
+    );
+  }
+}
+
+async function copyApplicationArtifacts(stagingDirectory, repositoryRoot) {
+  await Promise.all(
+    APPLICATION_ARTIFACTS.map((segments) =>
+      cp(path.join(repositoryRoot, ...segments), path.join(stagingDirectory, ...segments), {
+        recursive: true,
+      }),
+    ),
+  );
+}
+
+async function removeStagingNoise(stagingDirectory) {
+  await Promise.all(
+    STAGING_NOISE.map((segments) =>
+      rm(path.join(stagingDirectory, ...segments), { recursive: true, force: true }),
+    ),
+  );
+}
+
+async function runRuntimeSmoke(stagingDirectory, spawn) {
+  const smoke = spawn(
+    process.execPath,
+    [path.join(stagingDirectory, "dist", "cli.js"), "--version"],
+    { cwd: stagingDirectory, encoding: "utf8" },
+  );
+  if (smoke.status !== 0) {
+    throw new Error(
+      `Desktop production runtime smoke test failed: ${failureDetail(smoke, "CLI failed")}`,
+    );
+  }
+}
+
+function runPnpm(args) {
+  const invocation = resolvePnpmInvocation({
+    npmExecPath: process.env.npm_execpath,
+    platform: process.platform,
+    execPath: process.execPath,
+  });
+  return spawnSync(invocation.command, [...invocation.args, ...args], {
+    cwd: defaultRepositoryRoot,
+    encoding: "utf8",
+  });
+}
+
+/** A failed child process explains itself on either stream; keep whichever it wrote. */
+function failureDetail(result, fallback) {
+  return result.stderr || result.stdout || fallback;
+}
+
+async function fetchText(url, fetchImpl) {
+  const response = await fetchImpl(url);
+  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
+  return await response.text();
+}
+
+async function downloadFile(url, destinationPath, fetchImpl) {
+  const response = await fetchImpl(url);
+  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
+  await writeFile(destinationPath, new Uint8Array(await response.arrayBuffer()));
+}
+
 async function exists(filePath) {
-  return await stat(filePath).then(() => true, () => false);
+  return await stat(filePath).then(
+    () => true,
+    () => false,
+  );
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
+  await main({
+    argv: process.argv,
+    env: process.env,
+    root: defaultRepositoryRoot,
+    io: DEFAULT_IO,
+  });
 }
