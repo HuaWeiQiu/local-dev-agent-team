@@ -108,7 +108,7 @@ export function parseArgs(argv, env = process.env) {
   return options;
 }
 
-function resolveUb() {
+export function resolveUb() {
   const candidates = [".kimi-code", ".agents"].map((home) =>
     path.join(os.homedir(), home, "tools", "ub", "ub"),
   );
