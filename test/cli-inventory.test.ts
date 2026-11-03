@@ -49,7 +49,9 @@ import {
 import { createDefaultConfig } from "../src/config/defaults.js";
 import {
   getInventory,
+  loadDesktopSettings,
   sanitizeRoleBindings,
+  saveDesktopSettings,
   suggestDefaultsFromInventory,
 } from "../src/desktop/settings.js";
 
@@ -268,6 +270,29 @@ describe("cli inventory and role bindings", () => {
     expect(third.reason).toBe("fingerprint");
     expect(third.inventory.clis.find((cli) => cli.id === "codex")?.defaultModel).toBe("gpt-new");
     expect(third.inventory.clis.find((cli) => cli.id === "codex")?.defaultReasoning).toBe("high");
+  });
+
+  it("reports a stale cache from a home it prepared itself", async () => {
+    // `"stale"` used to be reachable only when an earlier file happened to leave an
+    // inventory cache on disk: the branch is "cache present, fingerprint unchanged,
+    // age expired". Building that state here makes the branch a property of this test.
+    const home = await mkdtemp(path.join(tmpdir(), "agent-team-inv-stale-"));
+    const { execution } = scriptedExecution({
+      "which codex": { stdout: "/usr/local/bin/codex\n" },
+      "codex --version": { stdout: "codex-cli 0.147.0\n" },
+    });
+
+    const first = await getInventory({ home, execution, maxAgeMs: 60 * 60 * 1000 });
+    expect(first.reason).toBe("miss");
+
+    const settings = await loadDesktopSettings(home);
+    await saveDesktopSettings(
+      { ...settings, inventoryCachedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
+      home,
+    );
+    const stale = await getInventory({ home, execution, maxAgeMs: 60_000 });
+    expect(stale.fromCache).toBe(false);
+    expect(stale.reason).toBe("stale");
   });
 
   it("sanitizes role bindings when model disappears from inventory", () => {

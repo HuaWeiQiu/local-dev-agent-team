@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
 import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EvolutionSnapshot } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
@@ -75,17 +75,26 @@ function snapshot(patch: Partial<EvolutionSnapshot> = {}): EvolutionSnapshot {
 }
 
 function viewport({ twoPane = false, wide = false }: { twoPane?: boolean; wide?: boolean }): void {
-  window.matchMedia = ((query: string) => ({
-    matches: query.includes("1180") ? wide : twoPane,
-    media: query,
-    onchange: null,
-    addListener: () => undefined,
-    removeListener: () => undefined,
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-    dispatchEvent: () => false,
-  })) as unknown as typeof window.matchMedia;
+  // `stubGlobal` so the override is undone after this file, instead of surviving into
+  // whatever runs next in the same worker.
+  vi.stubGlobal(
+    "matchMedia",
+    (query: string) => ({
+      matches: query.includes("1180") ? wide : twoPane,
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  );
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

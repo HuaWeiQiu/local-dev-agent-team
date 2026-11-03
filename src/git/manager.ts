@@ -55,6 +55,8 @@ export interface ExactTrackedFileCommitResult {
 
 export class GitManager {
   readonly #issuedExactFileAuthorizations = new WeakSet<object>();
+  /** Serializes worktree administration: the ledger has one writer, tasks do not wait. */
+  private worktreeAdminQueue: Promise<void> = Promise.resolve();
 
   constructor(
     readonly root: string,
@@ -79,6 +81,15 @@ export class GitManager {
     return (await this.git(["rev-parse", ref], this.root)).stdout.trim();
   }
 
+  /**
+   * Worktree administration is one shared ledger (`.git/worktrees/**`), and git's own
+   * commands read it while writing it: two tasks claiming worktrees at once made
+   * `git worktree add` fail with
+   * `fatal: failed to read .git/worktrees/alpha/commondir: Undefined error: 0`
+   * because it enumerated a sibling that was still being created. The wave runs tasks
+   * in parallel, so the mutation is serialized here — one writer, as the shared state
+   * requires — while the tasks themselves still run concurrently.
+   */
   async createWorktree(
     branch: string,
     startPoint: string,
@@ -86,19 +97,35 @@ export class GitManager {
     signal?: AbortSignal,
   ): Promise<WorktreeInfo> {
     this.assertManagedPath(directory);
-    await mkdir(path.dirname(directory), { recursive: true });
-    await this.git(["worktree", "add", "-b", branch, directory, startPoint], this.root, 120_000, undefined, signal);
-    return { path: directory, branch };
+    return await this.serializeWorktreeAdmin(async () => {
+      await mkdir(path.dirname(directory), { recursive: true });
+      await this.git(["worktree", "add", "-b", branch, directory, startPoint], this.root, 120_000, undefined, signal);
+      return { path: directory, branch };
+    });
   }
 
   async removeWorktree(directory: string, signal?: AbortSignal): Promise<void> {
     this.assertManagedPath(directory);
-    await this.git(["worktree", "remove", "--force", directory], this.root, 120_000, undefined, signal);
+    await this.serializeWorktreeAdmin(async () => {
+      await this.git(["worktree", "remove", "--force", directory], this.root, 120_000, undefined, signal);
+    });
   }
 
   /** Drop stale worktree registrations whose directories are already gone. */
   async pruneWorktrees(signal?: AbortSignal): Promise<void> {
-    await this.git(["worktree", "prune"], this.root, 120_000, undefined, signal);
+    await this.serializeWorktreeAdmin(async () => {
+      await this.git(["worktree", "prune"], this.root, 120_000, undefined, signal);
+    });
+  }
+
+  /** One writer for the worktree ledger; the tasks keep running concurrently. */
+  private async serializeWorktreeAdmin<T>(action: () => Promise<T>): Promise<T> {
+    const run = this.worktreeAdminQueue.then(action, action);
+    this.worktreeAdminQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await run;
   }
 
   async listBranches(pattern: string, signal?: AbortSignal): Promise<string[]> {
