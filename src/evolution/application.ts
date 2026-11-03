@@ -117,6 +117,12 @@ export type EvolutionApplicationCoordinatorOptions = {
   previewTtlMs?: number;
 };
 
+/** What a legacy Phase-2 promotion left behind, when it left anything. */
+type LegacyPredecessorResolution = {
+  application: ApplicationRecord | null;
+  completion: CompletedApplicationRecord | null;
+};
+
 const defaultFileIo: EvolutionApplicationFileIo = {
   mkdir,
   lstat,
@@ -911,53 +917,24 @@ export class EvolutionApplicationCoordinator {
       }
       const { proposal, target, activeProposalId } = this.#assertReconcilable(input);
 
-      const decidedAt = new Date(this.#now()).toISOString();
-      const humanDecision = parseHumanDecision({
-        actor: operator,
-        reason,
+      const {
         decidedAt,
-      });
-      const candidateDigest = computeCandidateDigest(proposal.candidate);
-      const beforeTarget = await this.#targets.readTargetState(proposal.candidate);
-      let livePromptContent: Buffer | undefined;
-      if (proposal.candidate.kind === "role-prompt") {
-        if (!beforeTarget.present || !beforeTarget.digest) {
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Prompt target '${proposal.candidate.path}' must already exist for reconciliation`,
-          );
-        }
-        livePromptContent = await this.#targets.readLivePromptBytes(
-          proposal.candidate.path,
-          beforeTarget.digest,
-        );
-      }
-      const rollbackPreflight = await this.#catalog.preflightRollback(
-        proposal.id,
         humanDecision,
-      );
-      const legacyPredecessor = await this.#resolveLegacyPredecessor({
+        candidateDigest,
+        beforeTarget,
+        livePromptContent,
+        legacyPredecessor,
+        applicationBeforeTarget,
+      } = await this.#planReconcile({
+        proposal,
+        target,
         snapshot,
-        restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
-        liveTarget: beforeTarget,
-        mode: input.mode,
-        catalogRevision: revision,
+        revision,
+        commandId,
         operator,
         reason,
-        decidedAt,
-        humanDecision,
-        commandId,
+        mode: input.mode,
       });
-      if (
-        legacyPredecessor.application &&
-        applicationHistoryDepth(legacyPredecessor.application) >= MAX_APPLICATION_HISTORY_DEPTH
-      ) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          `Application history for '${targetKey(target)}' reached the bounded depth of ${MAX_APPLICATION_HISTORY_DEPTH}`,
-        );
-      }
-      const applicationBeforeTarget = legacyPredecessor.application?.afterTarget ?? beforeTarget;
 
       if (input.mode === "adopt") {
         await this.#assertQuiescentSafe();
@@ -1207,6 +1184,110 @@ export class EvolutionApplicationCoordinator {
         deduplicated: false,
       };
     });
+  }
+
+  /**
+   * The facts a reconciliation is decided on: what the live target is now, what the
+   * promotion left behind, and whether the history has room. Reads only — nothing here
+   * mutates the target, the journal or the catalog, so an error thrown from this block
+   * leaves the project exactly as it was.
+   *
+   * `applicationBeforeTarget` is the *predecessor's* after-state when there is one, not the
+   * live state: a legacy predecessor's record is what a later rollback will restore, so
+   * recording the live state here would make the rollback of a chained promotion restore
+   * the wrong document.
+   */
+  async #planReconcile(input: {
+    proposal: EvolutionProposal;
+    target: ReturnType<typeof targetFromCandidate>;
+    snapshot: EvolutionCatalogSnapshot;
+    revision: number;
+    commandId: string;
+    operator: string;
+    reason: string;
+    mode: "adopt" | "apply";
+  }): Promise<{
+    decidedAt: string;
+    humanDecision: HumanDecision;
+    candidateDigest: string;
+    beforeTarget: TargetDigestState;
+    livePromptContent: Buffer | undefined;
+    legacyPredecessor: LegacyPredecessorResolution;
+    applicationBeforeTarget: TargetDigestState;
+  }> {
+    const decidedAt = new Date(this.#now()).toISOString();
+    const humanDecision = parseHumanDecision({
+      actor: input.operator,
+      reason: input.reason,
+      decidedAt,
+    });
+    const candidateDigest = computeCandidateDigest(input.proposal.candidate);
+    const beforeTarget = await this.#targets.readTargetState(input.proposal.candidate);
+    const livePromptContent = await this.#readLivePromptForReconcile(
+      input.proposal,
+      beforeTarget,
+    );
+    const rollbackPreflight = await this.#catalog.preflightRollback(
+      input.proposal.id,
+      humanDecision,
+    );
+    const legacyPredecessor = await this.#resolveLegacyPredecessor({
+      snapshot: input.snapshot,
+      restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
+      liveTarget: beforeTarget,
+      mode: input.mode,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      decidedAt,
+      humanDecision,
+      commandId: input.commandId,
+    });
+    this.#assertBoundedHistory(legacyPredecessor, input.target);
+    return {
+      decidedAt,
+      humanDecision,
+      candidateDigest,
+      beforeTarget,
+      livePromptContent,
+      legacyPredecessor,
+      applicationBeforeTarget: legacyPredecessor.application?.afterTarget ?? beforeTarget,
+    };
+  }
+
+  /**
+   * The bytes currently live for a prompt candidate, when there is a prompt candidate and a
+   * live document to read. A prompt target that does not exist yet cannot be reconciled:
+   * reconcile records an accomplished state, it does not create one.
+   */
+  async #readLivePromptForReconcile(
+    proposal: EvolutionProposal,
+    beforeTarget: TargetDigestState,
+  ): Promise<Buffer | undefined> {
+    if (proposal.candidate.kind !== "role-prompt") return undefined;
+    if (!beforeTarget.present || !beforeTarget.digest) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Prompt target '${proposal.candidate.path}' must already exist for reconciliation`,
+      );
+    }
+    return await this.#targets.readLivePromptBytes(proposal.candidate.path, beforeTarget.digest);
+  }
+
+  /** An unbounded history cannot be rolled back to a known state, so it is refused. */
+  #assertBoundedHistory(
+    legacyPredecessor: LegacyPredecessorResolution,
+    target: ReturnType<typeof targetFromCandidate>,
+  ): void {
+    if (
+      legacyPredecessor.application &&
+      applicationHistoryDepth(legacyPredecessor.application) >= MAX_APPLICATION_HISTORY_DEPTH
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Application history for '${targetKey(target)}' reached the bounded depth of ${MAX_APPLICATION_HISTORY_DEPTH}`,
+      );
+    }
   }
 
   /**
@@ -1833,10 +1914,7 @@ export class EvolutionApplicationCoordinator {
     decidedAt: string;
     humanDecision: HumanDecision;
     commandId: string;
-  }): Promise<{
-    application: ApplicationRecord | null;
-    completion: CompletedApplicationRecord | null;
-  }> {
+  }): Promise<LegacyPredecessorResolution> {
     if (input.restoredProposalId === null) {
       return { application: null, completion: null };
     }
