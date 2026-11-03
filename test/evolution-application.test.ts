@@ -2518,6 +2518,74 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
   });
 });
 
+describe("directory sync failure classification", () => {
+  it("ignores the four codes Windows reports for a directory handle", async () => {
+    const { isIgnorableSyncFailure } = await import("../src/evolution/application.js");
+    for (const code of ["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]) {
+      expect(isIgnorableSyncFailure(code, "win32")).toBe(true);
+    }
+    expect(isIgnorableSyncFailure("ENOENT", "win32")).toBe(false);
+    expect(isIgnorableSyncFailure(undefined, "win32")).toBe(false);
+  });
+
+  it("treats a failed directory sync as real everywhere else", async () => {
+    // On macOS and Linux the same code is a genuine failure: the directory may not be
+    // durable, and pretending otherwise is how a crash loses a committed command.
+    const { isIgnorableSyncFailure } = await import("../src/evolution/application.js");
+    for (const platform of ["darwin", "linux"]) {
+      expect(isIgnorableSyncFailure("EINVAL", platform)).toBe(false);
+    }
+  });
+
+  it("reads the errno code off a thrown value", async () => {
+    const { errorCode } = await import("../src/evolution/application.js");
+    expect(errorCode(Object.assign(new Error("boom"), { code: "EISDIR" }))).toBe("EISDIR");
+    expect(errorCode(new Error("no code"))).toBeUndefined();
+    expect(errorCode("not an error")).toBeUndefined();
+  });
+});
+
+describe("EvolutionApplicationCoordinator open guards", () => {
+  it("refuses a wiring that is missing a collaborator", async () => {
+    await expect(EvolutionApplicationCoordinator.open({} as never)).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: expect.stringContaining("requires catalog, strategies, git, and loaded config"),
+    });
+  });
+
+  it("refuses a wiring without the quiescence callback", async () => {
+    // The callback is what makes "no workflow is running" checkable, so a coordinator
+    // without it would apply changes blind. It is refused before anything is opened.
+    const harness = await createHarness();
+    await expect(
+      EvolutionApplicationCoordinator.open({
+        catalog: harness.catalog,
+        strategies: harness.strategies,
+        git: harness.git,
+        loaded: harness.loaded,
+        assertQuiescent: undefined as never,
+      }),
+    ).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: expect.stringContaining("assertQuiescent"),
+    });
+  });
+
+  it("refuses collaborators that do not share one canonical repository", async () => {
+    const harness = await createHarness();
+    const elsewhere = await mkdtemp(path.join(tmpdir(), "agent-team-other-root-"));
+    await expect(
+      EvolutionApplicationCoordinator.open({
+        catalog: harness.catalog,
+        strategies: harness.strategies,
+        git: new GitManager(elsewhere, path.join(elsewhere, ".agent-team", "worktrees")),
+        loaded: harness.loaded,
+        assertQuiescent: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "POLICY_DENIED", message: expect.stringContaining("canonical repository") });
+  });
+});
+
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;
