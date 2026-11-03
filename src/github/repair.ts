@@ -39,6 +39,59 @@ export interface GithubRepairOptions {
   confirmPush?: (summary: RepairPushSummary) => Promise<boolean>;
 }
 
+function assertRepairable(state: RunState): void {
+  if (state.status !== "ci-failed") {
+    throw new Error(`Run '${state.id}' is not in ci-failed status`);
+  }
+  if (!state.repository || !state.pullRequestUrl) {
+    throw new Error(`Run '${state.id}' has not been published`);
+  }
+}
+
+function nextRepairAttempt(state: RunState, maxAttempts: number): number {
+  const attempt = (state.githubRepairAttempts ?? 0) + 1;
+  if (attempt > maxAttempts) {
+    throw new Error(`GitHub repair limit of ${maxAttempts} exceeded`);
+  }
+  return attempt;
+}
+
+function assertRepairChangedSomething(changedFiles: string[]): void {
+  if (changedFiles.length > 0) return;
+  throw new Error("GitHub repair agent produced no changes");
+}
+
+function forbiddenRepairPaths(changedFiles: string[], patterns: string[]): string[] {
+  return changedFiles.filter((file) =>
+    patterns.some((pattern) => minimatch(file, pattern, { dot: true })),
+  );
+}
+
+function assertRepairPathsAllowed(changedFiles: string[], patterns: string[]): void {
+  const forbidden = forbiddenRepairPaths(changedFiles, patterns);
+  if (forbidden.length === 0) return;
+  throw new Error(`GitHub repair changed protected paths: ${forbidden.join(", ")}`);
+}
+
+/** Both reviewers must approve and the local gates must pass. */
+function assertRepairPassed(
+  quality: { passed: boolean },
+  verdicts: {
+    review: { verdict: string; findings: Array<{ required: boolean }>; summary: string };
+    test: { verdict: string; summary: string };
+  },
+): void {
+  const approved =
+    quality.passed &&
+    verdicts.review.verdict === "approve" &&
+    !verdicts.review.findings.some((finding) => finding.required) &&
+    verdicts.test.verdict === "approve";
+  if (approved) return;
+  throw new Error(
+    `GitHub repair failed local gates: ${verdicts.review.summary}; ${verdicts.test.summary}`,
+  );
+}
+
 export class GithubRepairRunner {
   constructor(
     private readonly loaded: LoadedConfig,
@@ -49,18 +102,8 @@ export class GithubRepairRunner {
   ) {}
 
   async repair(state: RunState): Promise<RunState> {
-    if (state.status !== "ci-failed") {
-      throw new Error(`Run '${state.id}' is not in ci-failed status`);
-    }
-    if (!state.repository || !state.pullRequestUrl) {
-      throw new Error(`Run '${state.id}' has not been published`);
-    }
-    const attempt = (state.githubRepairAttempts ?? 0) + 1;
-    if (attempt > this.loaded.config.github.maxRepairAttempts) {
-      throw new Error(
-        `GitHub repair limit of ${this.loaded.config.github.maxRepairAttempts} exceeded`,
-      );
-    }
+    assertRepairable(state);
+    const attempt = nextRepairAttempt(state, this.loaded.config.github.maxRepairAttempts);
     state.githubRepairAttempts = attempt;
     await this.store.transition(state, "repairing", `Repairing failed GitHub checks, attempt ${attempt}`);
 
@@ -72,120 +115,32 @@ export class GithubRepairRunner {
     const git = new GitManager(this.loaded.root, worktreesRoot);
     const checks = await this.client.checks(
       state.integrationWorktree,
-      state.repository,
-      state.pullRequestUrl,
+      state.repository!,
+      state.pullRequestUrl!,
     );
     const failedLogs = await this.client.failedLogs(
       state.integrationWorktree,
-      state.repository,
+      state.repository!,
       checks,
     );
     const budget = new RunBudgetTracker(state, this.store);
     const deadline = createExecutionDeadline(state.strategy.executionTimeoutSeconds);
-    const agent =
-      this.agent ??
-      new ProfiledAgentService(
-        this.loaded.config,
-        this.loaded.root,
-        this.store,
-        state.profileOverrides,
-        deadline.signal,
-        budget,
-      );
+    const agent = this.repairAgent(state, deadline, budget);
 
     try {
-      await agent.runText({
-        role: "worker",
-        cwd: state.integrationWorktree,
-        runId: state.id,
-        artifactKey: `github-repair/attempt-${attempt}/worker`,
-        context: {
-          goal: state.goal,
-          task: {
-            id: `github-repair-${attempt}`,
-            title: "Repair failed GitHub Actions checks",
-            description: "Reproduce and minimally fix the failed checks shown below.",
-            ownedPaths: ["**"],
-          },
-          checks,
-          failedLogs,
-          forbiddenPaths: this.loaded.config.github.repairForbiddenPaths,
-        },
+      const quality = await this.runRepairWorker({ state, agent, attempt, checks, failedLogs, deadline });
+      const { changedFiles, diff } = await this.stagedRepair(state, git);
+      const verdicts = await this.repairVerdicts({
+        state,
+        agent,
+        attempt,
+        changedFiles,
+        diff,
+        quality,
+        failedLogs,
       });
-
-      const quality = await runQualityCommands(
-        state.integrationWorktree,
-        this.loaded.config.quality.commands,
-        this.loaded.config.quality.commandTimeoutSeconds,
-        this.store.artifactDirectory(state.id, `github-repair/attempt-${attempt}/quality`),
-        deadline.signal,
-        { maxOutputBytes: state.strategy.maxProcessOutputBytes },
-      );
-      await budget.recordQuality(quality);
-      await git.stage(state.integrationWorktree);
-      const changedFiles = await git.changedFiles(state.integrationWorktree);
-      if (changedFiles.length === 0) {
-        throw new Error("GitHub repair agent produced no changes");
-      }
-      const forbidden = changedFiles.filter((file) =>
-        this.loaded.config.github.repairForbiddenPaths.some((pattern) =>
-          minimatch(file, pattern, { dot: true }),
-        ),
-      );
-      if (forbidden.length > 0) {
-        throw new Error(`GitHub repair changed protected paths: ${forbidden.join(", ")}`);
-      }
-      const diff = await git.stagedDiff(state.integrationWorktree);
-      const [review, test] = await Promise.all([
-        agent.runStructured({
-          role: "reviewer",
-          cwd: state.integrationWorktree,
-          runId: state.id,
-          artifactKey: `github-repair/attempt-${attempt}/review`,
-          context: { goal: state.goal, changedFiles, diff, failedLogs },
-          schema: reviewVerdictSchema,
-          jsonSchema: reviewVerdictJsonSchema,
-        }),
-        agent.runStructured({
-          role: "tester",
-          cwd: state.integrationWorktree,
-          runId: state.id,
-          artifactKey: `github-repair/attempt-${attempt}/test`,
-          context: { goal: state.goal, changedFiles, diff, quality, failedLogs },
-          schema: testVerdictSchema,
-          jsonSchema: testVerdictJsonSchema,
-        }),
-      ]);
-      const passed =
-        quality.passed &&
-        review.value.verdict === "approve" &&
-        !review.value.findings.some((finding) => finding.required) &&
-        test.value.verdict === "approve";
-      if (!passed) {
-        throw new Error(
-          `GitHub repair failed local gates: ${review.value.summary}; ${test.value.summary}`,
-        );
-      }
-      await git.stage(state.integrationWorktree);
-      const commitMessage = `fix: repair GitHub checks for ${state.id}`;
-      await git.commit(state.integrationWorktree, commitMessage);
-      if (this.options.confirmPush) {
-        const confirmed = await this.options.confirmPush({
-          commitMessage,
-          remote: this.loaded.config.github.remote,
-          branch: state.integrationBranch,
-          changedFiles,
-          ...diffStat(diff),
-        });
-        if (!confirmed) {
-          throw new Error("GitHub repair push declined by operator");
-        }
-      }
-      await git.push(
-        state.integrationWorktree,
-        this.loaded.config.github.remote,
-        state.integrationBranch,
-      );
+      assertRepairPassed(quality, verdicts);
+      await this.commitAndPush({ state, git, changedFiles, diff });
       delete state.error;
       await this.store.transition(state, "waiting-ci", "GitHub repair pushed; waiting for new checks");
       return state;
@@ -197,6 +152,134 @@ export class GithubRepairRunner {
       deadline.dispose();
     }
   }
+
+  private repairAgent(
+    state: RunState,
+    deadline: ReturnType<typeof createExecutionDeadline>,
+    budget: RunBudgetTracker,
+  ): RoleAgentService {
+    return this.agent ?? new ProfiledAgentService(
+      this.loaded.config,
+      this.loaded.root,
+      this.store,
+      state.profileOverrides,
+      deadline.signal,
+      budget,
+    );
+  }
+
+  /** One worker pass, then the local quality gates the repository already declares. */
+  private async runRepairWorker(input: {
+    state: RunState;
+    agent: RoleAgentService;
+    attempt: number;
+    checks: Awaited<ReturnType<GithubRepairRunner["client"]["checks"]>>;
+    failedLogs: string;
+    deadline: ReturnType<typeof createExecutionDeadline>;
+  }): Promise<Awaited<ReturnType<typeof runQualityCommands>>> {
+    const { state, agent, attempt, checks, failedLogs, deadline } = input;
+    await agent.runText({
+      role: "worker",
+      cwd: state.integrationWorktree,
+      runId: state.id,
+      artifactKey: `github-repair/attempt-${attempt}/worker`,
+      context: {
+        goal: state.goal,
+        task: {
+          id: `github-repair-${attempt}`,
+          title: "Repair failed GitHub Actions checks",
+          description: "Reproduce and minimally fix the failed checks shown below.",
+          ownedPaths: ["**"],
+        },
+        checks,
+        failedLogs,
+        forbiddenPaths: this.loaded.config.github.repairForbiddenPaths,
+      },
+    });
+    const quality = await runQualityCommands(
+      state.integrationWorktree,
+      this.loaded.config.quality.commands,
+      this.loaded.config.quality.commandTimeoutSeconds,
+      this.store.artifactDirectory(state.id, `github-repair/attempt-${attempt}/quality`),
+      deadline.signal,
+      { maxOutputBytes: state.strategy.maxProcessOutputBytes },
+    );
+    await new RunBudgetTracker(state, this.store).recordQuality(quality);
+    return quality;
+  }
+
+  /** Stage what the worker wrote, refuse an empty or forbidden change set, and capture the diff. */
+  private async stagedRepair(
+    state: RunState,
+    git: GitManager,
+  ): Promise<{ changedFiles: string[]; diff: string }> {
+    await git.stage(state.integrationWorktree);
+    const changedFiles = await git.changedFiles(state.integrationWorktree);
+    assertRepairChangedSomething(changedFiles);
+    assertRepairPathsAllowed(changedFiles, this.loaded.config.github.repairForbiddenPaths);
+    return { changedFiles, diff: await git.stagedDiff(state.integrationWorktree) };
+  }
+
+  private async repairVerdicts(input: {
+    state: RunState;
+    agent: RoleAgentService;
+    attempt: number;
+    changedFiles: string[];
+    diff: string;
+    quality: Awaited<ReturnType<typeof runQualityCommands>>;
+    failedLogs: string;
+  }) {
+    const { state, agent, attempt, changedFiles, diff, quality, failedLogs } = input;
+    const [review, test] = await Promise.all([
+      agent.runStructured({
+        role: "reviewer",
+        cwd: state.integrationWorktree,
+        runId: state.id,
+        artifactKey: `github-repair/attempt-${attempt}/review`,
+        context: { goal: state.goal, changedFiles, diff, failedLogs },
+        schema: reviewVerdictSchema,
+        jsonSchema: reviewVerdictJsonSchema,
+      }),
+      agent.runStructured({
+        role: "tester",
+        cwd: state.integrationWorktree,
+        runId: state.id,
+        artifactKey: `github-repair/attempt-${attempt}/test`,
+        context: { goal: state.goal, changedFiles, diff, quality, failedLogs },
+        schema: testVerdictSchema,
+        jsonSchema: testVerdictJsonSchema,
+      }),
+    ]);
+    return { review: review.value, test: test.value };
+  }
+
+  private async commitAndPush(input: {
+    state: RunState;
+    git: GitManager;
+    changedFiles: string[];
+    diff: string;
+  }): Promise<void> {
+    const { state, git, changedFiles, diff } = input;
+    await git.stage(state.integrationWorktree);
+    const commitMessage = `fix: repair GitHub checks for ${state.id}`;
+    await git.commit(state.integrationWorktree, commitMessage);
+    if (this.options.confirmPush) {
+      const confirmed = await this.options.confirmPush({
+        commitMessage,
+        remote: this.loaded.config.github.remote,
+        branch: state.integrationBranch,
+        changedFiles,
+        ...diffStat(diff),
+      });
+      if (!confirmed) throw new Error("GitHub repair push declined by operator");
+    }
+    await git.push(
+      state.integrationWorktree,
+      this.loaded.config.github.remote,
+      state.integrationBranch,
+    );
+  }
+
 }
 
 /** Approximate `git diff --stat` counters from a unified diff body. */
