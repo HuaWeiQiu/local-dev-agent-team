@@ -17,6 +17,10 @@
  *   1  could not measure (missing tool chain, a producer crashed)
  *   2  --self-check failed: the report itself is not trustworthy
  *
+ * Modes: `existing` reads the report the ledger would read (single worker, the refresh
+ * caliber); `self` lets crapper collect its own coverage in parallel, which is kept only
+ * to expose collection-caliber differences — it is diagnostic, not the daily path.
+ *
  * Usage:
  *   node scripts/coverage-caliber-report.mjs --self-check
  *   node scripts/coverage-caliber-report.mjs [--repeats 8] [--modes self,existing]
@@ -279,7 +283,14 @@ function measureCells(options) {
 function produceCoverage(mode, ub, dir) {
   const lcov = path.join(process.cwd(), "target", "coverage", "typescript", "lcov.info");
   if (mode === "existing") {
-    execFileSync("npx", ["vitest", "run", "--coverage", "--coverage.reporter=lcov"], { stdio: "ignore" });
+    // Same command the ledger uses: one worker on purpose, because that is what the
+    // baseline is measured with. Comparing calibers is only meaningful when one of them
+    // is the caliber the numbers come from.
+    execFileSync(
+      "npx",
+      ["vitest", "run", "--coverage", "--coverage.reporter=lcov", "--maxWorkers=1"],
+      { stdio: "ignore" },
+    );
     if (!existsSync(lcov)) throw new Error(`no coverage report after the run (${dir})`);
     return { lcov };
   }
