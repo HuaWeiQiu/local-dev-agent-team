@@ -381,6 +381,16 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 配对好的报告被忽略——两次自采若恰好一致，就会写出一份 `coverageSource: self` 的基线，
 而每个人都以为它按新口径刷的。现在这种组合直接报错退出，并把正确命令原样打出来。
 
+**并行采集会丢数据：测量用单 worker（2026-11 实测）。** 同一提交两次全量：
+
+- 默认并行：覆盖行集合**差 11 行**（`web/src/components/EvolutionWorkbench.tsx` 一次 8 次命中、一次 0 次；
+  `src/reliability/stall.ts:54-56` `0 vs 1`）；
+- `--maxWorkers=1` 两次：签名**逐位相同**（`bd97fec5…`）。
+
+所以：**测量口径和 CI 跑测口径允许不同**——CI 要快，测量要准。刷新与 nightly 的覆盖率
+一律用 `--maxWorkers=1` 采集；代价是慢 2–3 倍，但刷基线一天一次、nightly 一晚一次。
+单 worker 采集出的基线**必须重冻一次**（同一份 lcov 下文件集合可能更大，条目数会变）。
+
 **判等用「覆盖行集合」，不是文件字节（2026-11 实测）。** `lcov` 里 `DA:` 的命中次数
 在并行跑测试时天生会抖——同一个文件 `241` 次 vs `1` 次都见过；但**覆盖行集合是稳定的**
 （4 次全量跑签名一致、覆盖 50,255 行）。所以：
@@ -414,6 +424,19 @@ gate 读这份 lcov 打分，并在 `generation` 里记下 `lcov.sha256`、`head
 摸排要宽视野，定版要可复算。
 
 判断口诀：**同一份输入、同一次运行能复算出同一个数 → 强保证；两次跑恰好一样 → 弱保证。**
+
+## 10. 负结论：`plan-gate` 抓不住「任务被波次丢掉」
+
+`applies the plan gate to controller-produced DAGs and resumes after approval` 断言了
+`["merged","merged","merged"]`，看起来覆盖了「任务会不会丢」——**实际抓不住**。
+
+实测：把 `markTaskLost` 的修复 revert 掉再跑，
+`builds a deterministic DAG …` 绿、`plan-gate` 绿，只有
+`leaves no task in a non-terminal state when its wave fails` **红**。
+
+原因：`plan-gate` 只走顺利路径，没有任何任务被丢弃，所以它永远看不到这个形态。
+**新增的那条终态用例是这类缺陷的唯一探测器。** 半年后看到 `plan-gate` 覆盖了 all-merged
+就以为"有人管这件事"，是错的。
 
 ## 10. 已知且刻意的例外
 
