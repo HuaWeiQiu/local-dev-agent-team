@@ -1,39 +1,38 @@
 {
-  "updatedAt": "2026-11-03T04:31:45.060Z",
+  "updatedAt": "2026-11-03T06:50:27.280Z",
   "generation": {
-    "headSha": "7ade4caa4c79d613b902dd601b9e261344e66bbd",
+    "headSha": "c11580a36fc235febe2d64d5192e633c3f7f6b49",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T04:31:45.059Z",
+    "generatedAt": "2026-11-03T06:50:27.279Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 0,
+      "divergentLines": 4,
       "partialFiles": 0,
       "digests": [
-        "faff1e6fb0cbefe7701b62a7fb6dc725523386838f3bbf745dfb07b70f91abbd",
-        "43bf6308051ac026b1928b818809e6b669377b91bf73bf7725d79a093a75dc7a",
-        "c1de292a338a5328f5380624898038834ff1138d03d66a19ca9d67148a6f5c38"
+        "8303dcfd44bb628f7f0cf7c2d9f43bdc05e885f8d1887c20db6809db1f7294b1",
+        "ba22636d793bd835e6de8a4fed6ed630c0b9d1241ed43663335568d4cbeed69f",
+        "3715502eda032349276232f0eadc4023a9b98610a92ad1058d363433d772b238"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 991433,
-      "sha256": "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8"
+      "bytes": 999047,
+      "sha256": "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8",
-        "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8"
+        "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d",
+        "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d"
       ]
     }
   },
   "scores": {
-    "strategies.catalog.StrategyBlueprintCatalog#open": 72.0742,
     "scripts.laya-jev-server.Handler#do_POST": 72,
     "scripts.prepare-desktop-runtime#prepareApplicationRuntime": 72,
     "evidence.local#evidenceChecks": 56.45,
@@ -68,7 +67,6 @@
     "components.EventConsole#formatOutput": 30,
     "components.run.inspector-parts#describeRunFailure": 30,
     "server.http-routes-experience#experienceHttpError": 30,
-    "strategies.catalog#resolveRepositoryOwnedDirectory": 29.6153,
     "quality.install#ensureWorktreeNodeModules": 28.4811,
     "components.architecture.SequenceDiagram#SequenceDiagram": 26.963,
     "graph#buildTaskGraph": 26.963,
@@ -99,6 +97,7 @@
     "domain.plan#assessPlanCompleteness": 21.0497,
     "workflow.cleanup.RunArtifactCleaner#cleanup": 20.6986,
     "evidence.local#buildRunEvidence": 20.5248,
+    "scripts.coverage-caliber-attribution#renderAttribution": 20.5248,
     "desktop.settings#getInventory": 20.2391,
     "evolution.automation#projectRunOutcome": 20.2184,
     "components.UsagePanel#UsageCard": 20,
@@ -108,7 +107,7 @@
     "server.run-retention#usageDetail": 20,
     "web.e2e.fixture-server#fixtureTask": 20,
     "git.manager.GitManager#assertTrackedRegularFile": 19.5938,
-    "quality.run#runQualityCommands": 19.444,
+    "quality.run#runQualityCommands": 19.2712,
     "visibility.explain#headlineFor": 19.2592,
     "workflow.state-helpers#truncateExploreSummary": 19.125,
     "server.run-recovery.RunRecovery#rebuildMissingCheckpoint": 18.7791,
@@ -123,7 +122,6 @@
     "providers.failure#classifyError": 16.5532,
     "profiles.role-bindings#materializeRoleBindings": 16.2048,
     "evolution.application-preview.EvolutionApplicationPreviewStore#createRollbackPreview": 16,
-    "strategies.catalog#defaultSyncDirectory": 16,
     "desktop.settings#suggestDefaultsFromInventory": 15.888,
     "experience.catalog.ExperienceCatalog#importVerified": 15.5469,
     "process.run#utf8Prefix": 15.5469,
@@ -138,8 +136,8 @@
     "server.project-runtime#startProjectRuntime": 12.8948,
     "evidence.local#directoryBytes": 12.4074,
     "providers.failure#errorChainText": 12.4074,
+    "scripts.coverage-caliber-attribution#settledScore": 12.4074,
     "server.run-retention.RunRetention#integrationDiff": 12.4074,
-    "strategies.catalog.StrategyBlueprintCatalog#persist": 12.3196,
     "domain.plan#extractNamedDeliverables": 12.144,
     "process.live-children#reapOrphanAgentProcesses": 12.144,
     "server.run-retention.RunRetention#cleanup": 12.0247,
@@ -154,21 +152,17 @@
     "logs.render#renderLogLines": 11.4406,
     "jev.client.JevClient#requestChat": 11.2868,
     "evidence.local#artifactKind": 11.187,
-    "strategies.catalog.StrategyBlueprintCatalog#load": 11.0609,
+    "scripts.coverage-caliber-attribution#parseArgs": 11.0551,
     "experience.catalog.ExperienceCatalog#retrieveVerified": 11.0441,
-    "scripts.coverage-merge#mergeReports": 11.0359,
     "github.client.GithubClient#findPullRequest": 11.001,
     "workflow.checkpoints.CheckpointService#isOnlyPostCheckpointMerges": 11,
-    "workflow.scheduler.TaskScheduler#reportWaveOutcome": 11,
     "experience.reasoning-bank#readStatus": 10.5,
     "shell.Sidebar#ProjectSwitcher": 10.5,
     "components.evolution.TargetNotes#ScopeNote": 10.4,
     "components.evolution.TargetNotes#TargetMetadata": 10.4,
-    "strategies.catalog#cleanOrphanTemporaryFiles": 10.3704,
     "evolution.application-preview.EvolutionApplicationPreviewStore#createPromotionPreview": 10.2656,
     "providers.failure#summaryFor": 10.1,
     "workflow.checkpoints.CheckpointService#reconcilePostCheckpointMerges": 10.0579,
-    "jev.client#parseLayaDecision": 10.0455,
-    "scripts.coverage-merge#parseLcov": 10.0244
+    "jev.client#parseLayaDecision": 10.0455
   }
 }
