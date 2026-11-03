@@ -2703,6 +2703,96 @@ describe("EvolutionApplicationCoordinator open guards", () => {
   });
 });
 
+describe("the restored state validator refuses states the catalog disagrees with", () => {
+  /** Read the durable document, let the caller change its payload, and write it back. */
+  async function patchDocument(
+    root: string,
+    mutate: (payload: Record<string, unknown[]>) => void,
+  ): Promise<void> {
+    const applicationPath = path.join(root, ".agent-team", "evolution", EVOLUTION_APPLICATION_FILENAME);
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: Record<string, unknown[]>;
+      payloadDigest: string;
+    };
+    mutate(document.payload);
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+  }
+
+  async function reopen(root: string) {
+    const loaded = createLoadedConfig(root);
+    return await EvolutionApplicationCoordinator.open({
+      catalog: await DurableEvolutionCatalog.open(loaded),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+    });
+  }
+
+  it("rejects an application proof for a proposal the catalog no longer lists as active", async () => {
+    // One of the two refusals that had never run. The whole point of restoring the state is
+    // to notice when the durable proof and the catalog disagree about *which* promotion is
+    // in effect; without this line a rolled-back proof could be reinstated silently.
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(harness, "proof-not-active", "proof-not-active", strategyA);
+    await promoteStrategy(
+      harness,
+      "proof-not-active",
+      "proof-not-active-command",
+      "Apply the promotion once",
+    );
+    const proof = harness.coordinator.getApplication("proof-not-active");
+    if (!proof) throw new Error("application proof disappeared before the rollback");
+    const preview = await harness.coordinator.previewRollback({
+      proposalId: "proof-not-active",
+      operator,
+    });
+    await harness.coordinator.rollbackAppliedPromotion({
+      commandId: "proof-not-active-rollback",
+      proposalId: "proof-not-active",
+      expectedRevision: preview.catalogRevision,
+      token: preview.token,
+      operator,
+      reason: "Undo the only promotion for this target",
+    });
+    // Put the proof back: the catalog now has no active proposal for the target, so the
+    // restored proof claims an authority the catalog no longer grants.
+    await patchDocument(harness.root, (payload) => {
+      (payload.applications as unknown[]).push(proof);
+    });
+    await expect(reopen(harness.root)).rejects.toThrow(
+      new EvolutionPersistenceValidationError(
+        "Invalid application state: 'proof-not-active' is not the catalog active proposal",
+      ),
+    );
+  });
+
+  it("rejects a catalog audit whose command has no successful application result", async () => {
+    // The other refusal. A promotion audit carrying an application command id, with no
+    // application, completion or binding behind it, is the catalog claiming work the
+    // journal never finished — exactly the shape a partial write would leave behind.
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(harness, "audit-without-result", "audit-without-result", strategyA);
+    await promoteStrategy(
+      harness,
+      "audit-without-result",
+      "audit-without-result-command",
+      "Apply the promotion once",
+    );
+    await patchDocument(harness.root, (payload) => {
+      payload.applications = [];
+      payload.completed = [];
+      payload.commands = [];
+    });
+    await expect(reopen(harness.root)).rejects.toThrow(
+      new EvolutionPersistenceValidationError(
+        "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result",
+      ),
+    );
+  });
+});
+
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;
