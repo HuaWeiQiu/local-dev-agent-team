@@ -1,5 +1,6 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { runProcess, type ProcessRequest, type ProcessResult } from "../process/run.js";
 
@@ -78,15 +79,24 @@ export function watchedCliConfigPaths(home = homedir()): string[] {
 }
 
 /**
- * Build a cheap fingerprint from watched config files.
- * Does not read file contents (no secrets); only path + mtimeMs + size, or "missing".
+ * Fingerprint the watched config files by *content*, not by timestamp.
+ *
+ * It used to be `path + trunc(mtimeMs) + size`, which is not a function of the logical
+ * state: touching a file, or a write landing on the next millisecond, changed the
+ * fingerprint without the configuration changing. The cache then reported "fingerprint"
+ * instead of "stale" — and the coverage of that branch depended on when an unrelated
+ * test happened to rewrite a watched file. Hashing the bytes makes equal content equal,
+ * so the branch is decided by configuration instead of clock boundaries. The digest is
+ * of the whole file, so it reveals nothing the size already did not.
  */
 export async function inventorySourceFingerprint(home = homedir()): Promise<string> {
+  // Fix the set before reading anything: a file appearing mid-walk must not reorder it.
+  const watched = [...watchedCliConfigPaths(home)].sort();
   const parts: string[] = [];
-  for (const filePath of watchedCliConfigPaths(home)) {
+  for (const filePath of watched) {
     try {
-      const info = await stat(filePath);
-      parts.push(`${filePath}:${Math.trunc(info.mtimeMs)}:${info.size}`);
+      const content = await readFile(filePath);
+      parts.push(`${filePath}:${createHash("sha256").update(content).digest("hex")}`);
     } catch {
       parts.push(`${filePath}:missing`);
     }

@@ -46,7 +46,8 @@
     "desktop:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "dev": "tsx src/cli.ts",
     "dev:web": "vite --config web/vite.config.ts",
-    "prepack": "pnpm check && pnpm test && pnpm build"
+    "prepack": "pnpm check && pnpm test && pnpm build",
+    "test:shuffle": "vitest run --sequence.shuffle --sequence.seed=20261102"
   },
   "engines": {
     "node": ">=24"
