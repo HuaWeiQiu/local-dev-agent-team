@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { PNPM_INSTALL_ARGS } from "../scripts/prepare-desktop-runtime.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 
@@ -11,16 +12,18 @@ describe("desktop PR release", () => {
     const config = JSON.parse(
       await readFile(path.join(repositoryRoot, "src-tauri", "tauri.conf.json"), "utf8"),
     ) as { bundle: { resources: Record<string, string> } };
-    const preparation = await readFile(
-      path.join(repositoryRoot, "scripts", "prepare-desktop-runtime.mjs"),
-      "utf8",
-    );
 
     expect(config.bundle.resources).toEqual({ "runtime/": "runtime/" });
-    expect(preparation).toContain('"--prod"');
-    expect(preparation).toContain('"--frozen-lockfile"');
-    expect(preparation).toContain('"--config.node-linker=hoisted"');
-    expect(preparation).toContain('"dist", "cli.js"), "--version"');
+    // Assert the arguments the install is given, not the text of the file that gives them: a
+    // source-text assertion fails on every refactor that keeps the behaviour, and passes on a
+    // rewrite that drops `--prod` while leaving the string somewhere else in the file.
+    expect(PNPM_INSTALL_ARGS).toEqual([
+      "install",
+      "--prod",
+      "--frozen-lockfile",
+      "--ignore-scripts",
+      "--config.node-linker=hoisted",
+    ]);
   });
 
   it("declares native installer icons for macOS and Windows", async () => {
