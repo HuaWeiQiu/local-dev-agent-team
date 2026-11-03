@@ -801,18 +801,7 @@ export class EvolutionApplicationCoordinator {
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
       const reason = requireNonEmpty(input.reason, "reason");
-      const materialDigest = input.promptContent
-        ? sha256Bytes(Buffer.from(input.promptContent))
-        : null;
-      const requestDigest = sha256Canonical({
-        operation: "reconcile-promoted",
-        proposalId: input.proposalId,
-        expectedRevision: input.expectedRevision,
-        operator,
-        reason,
-        mode: input.mode,
-        materialDigest,
-      });
+      const { materialDigest, requestDigest } = this.#reconcileDigest(input, operator, reason);
       const existing = this.#state.commands.get(commandId);
       if (!existing) return undefined;
       return this.#dedupeOrConflict(existing, {
@@ -892,35 +881,12 @@ export class EvolutionApplicationCoordinator {
   }): Promise<ApplicationCommandResult> {
     return await this.#enqueue(async () => {
       this.#assertOpen();
-      const commandId = requireCommandId(input.commandId);
-      const operator = requireNonEmpty(input.operator, "operator");
-      const reason = requireNonEmpty(input.reason, "reason");
-      if (
-        input.promptContent !== undefined &&
-        !(input.promptContent instanceof Uint8Array)
-      ) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          "Legacy prompt material must be bytes",
-        );
-      }
-      if (input.mode === "adopt" && input.promptContent !== undefined) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          "Legacy prompt material is not accepted when adopting the live target",
-        );
-      }
-      const materialDigest =
-        input.promptContent === undefined ? null : sha256Bytes(Buffer.from(input.promptContent));
-      const requestDigest = sha256Canonical({
-        operation: "reconcile-promoted",
-        proposalId: input.proposalId,
-        expectedRevision: input.expectedRevision,
-        operator,
-        reason,
-        mode: input.mode,
-        materialDigest,
-      });
+      const preface = this.#reconcilePreface(input);
+      const commandId = preface.commandId;
+      const operator = preface.operator;
+      const reason = preface.reason;
+      const materialDigest = preface.materialDigest;
+      const requestDigest = preface.requestDigest;
       const existing = this.#state.commands.get(commandId);
       if (existing) {
         return this.#dedupeOrConflict(existing, {
@@ -1262,6 +1228,82 @@ export class EvolutionApplicationCoordinator {
         deduplicated: false,
       };
     });
+  }
+
+  /**
+   * The command's identity and idempotency key, resolved before anything is read from the
+   * catalog or the repository.
+   *
+   * Legacy Phase-2 material is accepted only for reconcile, and only as bytes: a string
+   * hashed as UTF-8 at one call site and as bytes at another would make two different
+   * commands share one command id. `adopt` refuses material outright — it records a target
+   * that is already live, so accepting bytes would turn "adopt what is there" into "write
+   * this instead".
+   */
+  #reconcilePreface(input: {
+    commandId: string;
+    proposalId: string;
+    expectedRevision: number;
+    operator: string;
+    reason: string;
+    mode: "adopt" | "apply";
+    promptContent?: Uint8Array;
+  }): {
+    commandId: string;
+    operator: string;
+    reason: string;
+    materialDigest: string | null;
+    requestDigest: string;
+  } {
+    const commandId = requireCommandId(input.commandId);
+    const operator = requireNonEmpty(input.operator, "operator");
+    const reason = requireNonEmpty(input.reason, "reason");
+    if (
+      input.promptContent !== undefined &&
+      !(input.promptContent instanceof Uint8Array)
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Legacy prompt material must be bytes",
+      );
+    }
+    if (input.mode === "adopt" && input.promptContent !== undefined) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Legacy prompt material is not accepted when adopting the live target",
+      );
+    }
+    return { commandId, operator, reason, ...this.#reconcileDigest(input, operator, reason) };
+  }
+
+  /**
+   * The digest both reconcile entry points must agree on, so a retried command is
+   * recognised as the same command. Shared with `replayReconcileCommand`; the policy checks
+   * above are deliberately not shared with it — that method is a lookup, and giving it new
+   * rejections would be a behaviour change nobody asked for.
+   */
+  #reconcileDigest(
+    input: {
+      proposalId: string;
+      expectedRevision: number;
+      mode: "adopt" | "apply";
+      promptContent?: Uint8Array;
+    },
+    operator: string,
+    reason: string,
+  ): { materialDigest: string | null; requestDigest: string } {
+    const materialDigest =
+      input.promptContent === undefined ? null : sha256Bytes(Buffer.from(input.promptContent));
+    const requestDigest = sha256Canonical({
+      operation: "reconcile-promoted",
+      proposalId: input.proposalId,
+      expectedRevision: input.expectedRevision,
+      operator,
+      reason,
+      mode: input.mode,
+      materialDigest,
+    });
+    return { materialDigest, requestDigest };
   }
 
   // ---------------------------------------------------------------------------
