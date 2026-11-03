@@ -22,19 +22,19 @@ async function fixtureRoot(stateDirectory?: string): Promise<string> {
 describe("StrategyBlueprintCatalog.open refusals", () => {
   it("refuses a missing loaded config", async () => {
     await expect(
-      StrategyBlueprintCatalog.open(undefined as never),
+      StrategyBlueprintCatalog.open(undefined),
     ).rejects.toThrow("LoadedConfig is required");
   });
 
   it("refuses a config without a root", async () => {
     await expect(
-      StrategyBlueprintCatalog.open({ config: {} } as never),
+      StrategyBlueprintCatalog.open({ config: {} }),
     ).rejects.toThrow("LoadedConfig.root is required");
   });
 
   it("refuses a config without a project config", async () => {
     await expect(
-      StrategyBlueprintCatalog.open({ root: "/tmp", config: undefined } as never),
+      StrategyBlueprintCatalog.open({ root: "/tmp", config: undefined }),
     ).rejects.toThrow("LoadedConfig.config is required");
   });
 
