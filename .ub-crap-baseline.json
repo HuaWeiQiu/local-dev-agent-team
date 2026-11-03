@@ -1,34 +1,34 @@
 {
-  "updatedAt": "2026-11-03T04:16:44.253Z",
+  "updatedAt": "2026-11-03T04:31:45.060Z",
   "generation": {
-    "headSha": "11c9d72f43b3a89aa46af66c9d90fc5e1a7a8cf3",
+    "headSha": "7ade4caa4c79d613b902dd601b9e261344e66bbd",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T04:16:44.252Z",
+    "generatedAt": "2026-11-03T04:31:45.059Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 1,
+      "divergentLines": 0,
       "partialFiles": 0,
       "digests": [
-        "a5410c32effdcadea097ec766494a2ee2111ef1f483a326547f5e26bddf9e8cd",
-        "4b4ce430351d7a0787253ee8a1aeec765957bec0f78e2ffa7e12e7c492cba23d",
-        "6ebe7005e45559f0a5293114ac058f8673ff835aeb1bbd7b99c2735e66cfe712"
+        "faff1e6fb0cbefe7701b62a7fb6dc725523386838f3bbf745dfb07b70f91abbd",
+        "43bf6308051ac026b1928b818809e6b669377b91bf73bf7725d79a093a75dc7a",
+        "c1de292a338a5328f5380624898038834ff1138d03d66a19ca9d67148a6f5c38"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 989232,
-      "sha256": "51146f0668124dd32a97a703759302835f1138536621a99f5915a87d44f3c40f"
+      "bytes": 991433,
+      "sha256": "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "51146f0668124dd32a97a703759302835f1138536621a99f5915a87d44f3c40f",
-        "51146f0668124dd32a97a703759302835f1138536621a99f5915a87d44f3c40f"
+        "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8",
+        "0c984bc8908914a2ec59811f13ce050542f4cbf929e3e7db2ee87d7e65e572c8"
       ]
     }
   },
@@ -37,9 +37,6 @@
     "scripts.laya-jev-server.Handler#do_POST": 72,
     "scripts.prepare-desktop-runtime#prepareApplicationRuntime": 72,
     "evidence.local#evidenceChecks": 56.45,
-    "scripts.coverage-caliber-report#parseArgs": 56.336,
-    "scripts.coverage-caliber-report#measureCells": 56,
-    "scripts.coverage-caliber-report#main": 55.8749,
     "evolution.application.EvolutionApplicationCoordinator#reconcilePromoted": 54.0581,
     "evolution.application.EvolutionApplicationCoordinator#evaluateServerPreflight": 53.9999,
     "workflow.runner.LocalWorkflowRunner#run": 50.1071,
@@ -106,7 +103,6 @@
     "evolution.automation#projectRunOutcome": 20.2184,
     "components.UsagePanel#UsageCard": 20,
     "main#bootstrap": 20,
-    "scripts.coverage-caliber-report#produceCoverage": 20,
     "scripts.prepare-desktop-runtime#hasChecksum": 20,
     "scripts.prepare-desktop-runtime#runPnpm": 20,
     "server.run-retention#usageDetail": 20,
@@ -115,7 +111,6 @@
     "quality.run#runQualityCommands": 19.444,
     "visibility.explain#headlineFor": 19.2592,
     "workflow.state-helpers#truncateExploreSummary": 19.125,
-    "scripts.coverage-caliber-report#selfCheck": 19.1195,
     "server.run-recovery.RunRecovery#rebuildMissingCheckpoint": 18.7791,
     "evolution.application-shared#mapToApplicationError": 17.8717,
     "components.RunPage#Inspector": 17.8,
@@ -153,8 +148,6 @@
     "main#desktopPreviewState": 12,
     "main#isControlServiceOrigin": 12,
     "profiles.role-bindings#roleBindingFromPersisted": 12,
-    "scripts.coverage-caliber-report#keepIfDivergent": 12,
-    "scripts.coverage-caliber-report#runTool": 12,
     "scripts.prepare-desktop-runtime#cleanupApplicationStagingDirectories": 12,
     "web.e2e.helpers#openNav": 12,
     "visibility.explain#explainTask": 11.5625,
