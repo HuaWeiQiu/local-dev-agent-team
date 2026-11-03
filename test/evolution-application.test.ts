@@ -2832,6 +2832,61 @@ describe("the restored state validator refuses states the catalog disagrees with
  * the existing `io.rename` / `catalogIo.beforeAtomicStage` / `FailOnceExactCommitGitManager`
  * seams. Each extra seam is a window the product does not have.
  */
+/**
+ * Worlds the prompt-apply path has to refuse. Each one is a state the repository can really
+ * be in between the preview an operator approved and the write that would act on it; every
+ * arm here used to be unexecuted, so "refuses" was an assumption rather than a tested fact.
+ */
+describe("prompt target apply refusals", () => {
+  async function promptApplyWorld(id: string, io?: Partial<EvolutionApplicationFileIo>) {
+    const harness = await createHarness({ io });
+    const content = Buffer.from(`Reviewed prompt ${id}\n`, "utf8");
+    await harness.coordinator.propose({
+      id,
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(content) },
+      promptContent: content,
+    });
+    await harness.coordinator.beginEvaluation(id);
+    await harness.coordinator.evaluateServerPreflight(id);
+    const preview = await harness.coordinator.previewPromotion({ proposalId: id, operator });
+    return {
+      harness,
+      content,
+      command: {
+        commandId: `${id}-command`,
+        proposalId: id,
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      },
+    };
+  }
+
+  it("refuses when the prompt target no longer exists", async () => {
+    const world = await promptApplyWorld("target-gone");
+    await rm(path.join(world.harness.root, promptPath));
+    await expect(world.harness.coordinator.promoteAndApply(world.command)).rejects.toThrow(
+      /Target digest changed since preview|does not exist/,
+    );
+  });
+
+  it("reports recovery, not drift, when the directory fsync fails after the rename", async () => {
+    // The rename already put the new bytes in place; only the directory entry may not be
+    // durable. Calling that "drift" would invite a retry that re-applies over a change that
+    // actually landed, so it must be recovery.
+    const world = await promptApplyWorld("fsync-after-rename", {
+      beforeAtomicStage: async (stage) => {
+        if (stage === "directory-sync") throw new Error("simulated fsync failure");
+      },
+    });
+    await expect(world.harness.coordinator.promoteAndApply(world.command)).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+    });
+  });
+});
+
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;

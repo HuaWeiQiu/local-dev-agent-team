@@ -359,42 +359,59 @@ export class EvolutionApplicationTargets {
     const temporaryPath = path.join(directory, promptTempName(path.basename(absolute)));
     let renamed = false;
     try {
-      await this.#io.beforeAtomicStage?.("open");
-      const handle = await this.#io.open(temporaryPath, "wx", mode);
-      try {
-        await this.#io.beforeAtomicStage?.("write");
-        await handle.writeFile(content);
-        await this.#io.chmod(temporaryPath, mode);
-        await this.#io.beforeAtomicStage?.("file-sync");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await this.writeTemporaryPrompt(temporaryPath, content, mode);
       await this.#io.beforeAtomicStage?.("rename");
-      if ((await this.#io.realpath(directory)) !== directory) {
-        throw new EvolutionApplicationError(
-          "TARGET_DRIFTED",
-          `Prompt parent directory changed before rename: ${path.basename(absolute)}`,
-        );
-      }
+      await this.assertPromptParentUnchanged(directory, absolute);
       await this.#io.rename(temporaryPath, absolute);
       renamed = true;
       await this.#io.beforeAtomicStage?.("directory-sync");
       await this.#io.syncDirectory(directory);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
-      const detail = error instanceof Error ? error.message : String(error);
-      if (renamed) {
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          `Prompt rename completed but directory fsync failed; recovery required: ${detail}`,
-        );
-      }
+      throw this.promptWriteFailure(error, renamed, absolute);
+    }
+  }
+
+  /** Create the temp file exclusively, fill it, and make its bytes durable. */
+  async writeTemporaryPrompt(temporaryPath: string, content: Buffer, mode: number): Promise<void> {
+    await this.#io.beforeAtomicStage?.("open");
+    const handle = await this.#io.open(temporaryPath, "wx", mode);
+    try {
+      await this.#io.beforeAtomicStage?.("write");
+      await handle.writeFile(content);
+      await this.#io.chmod(temporaryPath, mode);
+      await this.#io.beforeAtomicStage?.("file-sync");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** The directory must still be the one the path says it is, immediately before the rename. */
+  async assertPromptParentUnchanged(directory: string, absolute: string): Promise<void> {
+    if ((await this.#io.realpath(directory)) !== directory) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Failed to write prompt target '${path.basename(absolute)}': ${detail}`,
+        `Prompt parent directory changed before rename: ${path.basename(absolute)}`,
       );
     }
+  }
+
+  /**
+   * What a failed write means. Once the rename happened the new bytes are in place and only
+   * the directory entry may not be durable — that is recovery, not drift.
+   */
+  promptWriteFailure(error: unknown, renamed: boolean, absolute: string): EvolutionApplicationError {
+    const detail = error instanceof Error ? error.message : String(error);
+    return renamed
+      ? new EvolutionApplicationError(
+          "RECOVERY_REQUIRED",
+          `Prompt rename completed but directory fsync failed; recovery required: ${detail}`,
+        )
+      : new EvolutionApplicationError(
+          "TARGET_DRIFTED",
+          `Failed to write prompt target '${path.basename(absolute)}': ${detail}`,
+        );
   }
 
   /** The bytes on disk after the replace must be the bytes the object store holds. */
