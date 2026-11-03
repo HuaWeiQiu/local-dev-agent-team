@@ -649,63 +649,77 @@ export class EvolutionApplicationTargets {
   }
 
   async readPromptObject(digest: string): Promise<Buffer> {
+    this.assertPromptObjectDigest(digest);
+    try {
+      const objectPath = await this.describePromptObject(digest);
+      return this.verifyPromptObjectBytes(digest, await this.#io.readFile(objectPath));
+    } catch (error) {
+      throw this.promptObjectFailure(error, digest);
+    }
+  }
+
+  /** A digest is the whole address of an object: anything else is not one. */
+  assertPromptObjectDigest(digest: string): void {
     if (!/^[a-f0-9]{64}$/.test(digest)) {
       throw new EvolutionApplicationError("MATERIAL_MISSING", "Invalid prompt object digest");
     }
+  }
+
+  /**
+   * Where the object lives and whether that path is trustworthy: inside the repository, in a
+   * directory that is not a link, and a regular file with the permissions we wrote it with.
+   */
+  async describePromptObject(digest: string): Promise<string> {
     const objectPath = path.join(this.#objectsDirectory, digest);
     assertCanonicalInsideRoot(this.#root, objectPath, "Prompt object");
-    try {
-      if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          "Prompt object directory must not traverse symbolic links",
-        );
-      }
-      const info = await this.#io.lstat(objectPath);
-      if (info.isSymbolicLink() || !info.isFile()) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object must be a regular non-symlink file: ${digest}`,
-        );
-      }
-      if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object permissions must be 0600: ${digest}`,
-        );
-      }
-      const bytes = await this.#io.readFile(objectPath);
-      if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object exceeds size limit: ${digest}`,
-        );
-      }
-      if (sha256Bytes(bytes) !== digest) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Corrupted prompt object: ${digest}`,
-        );
-      }
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object is not valid UTF-8: ${digest}`,
-        );
-      }
-      return Buffer.from(bytes);
-    } catch (error) {
-      if (error instanceof EvolutionApplicationError) throw error;
-      if (isNotFound(error)) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object not found: ${digest}`,
-        );
-      }
-      throw error;
+    if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        "Prompt object directory must not traverse symbolic links",
+      );
     }
+    const info = await this.#io.lstat(objectPath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object must be a regular non-symlink file: ${digest}`,
+      );
+    }
+    if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object permissions must be 0600: ${digest}`,
+      );
+    }
+    return objectPath;
+  }
+
+  /** The bytes must still be the bytes the digest names, and still be usable as a prompt. */
+  verifyPromptObjectBytes(digest: string, bytes: Buffer): Buffer {
+    if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
+      throw new EvolutionApplicationError("MATERIAL_MISSING", `Prompt object exceeds size limit: ${digest}`);
+    }
+    if (sha256Bytes(bytes) !== digest) {
+      throw new EvolutionApplicationError("MATERIAL_MISSING", `Corrupted prompt object: ${digest}`);
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object is not valid UTF-8: ${digest}`,
+      );
+    }
+    return Buffer.from(bytes);
+  }
+
+  /** A read that failed for reasons other than our own guards, named for the operator. */
+  promptObjectFailure(error: unknown, digest: string): unknown {
+    if (error instanceof EvolutionApplicationError) return error;
+    if (isNotFound(error)) {
+      return new EvolutionApplicationError("MATERIAL_MISSING", `Prompt object not found: ${digest}`);
+    }
+    return error;
   }
 }
 
@@ -715,36 +729,68 @@ export async function createDirectoryChain(
   target: string,
   mode: number,
 ): Promise<void> {
-  const relative = path.relative(root, target);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new EvolutionPersistenceValidationError(
-      `Path must remain below repository root: ${target}`,
-    );
-  }
+  const relative = relativeInsideRoot(root, target);
   let current = root;
   for (const segment of relative.split(path.sep)) {
     current = path.join(current, segment);
-    try {
-      const info = await io.lstat(current);
-      if (info.isSymbolicLink() || !info.isDirectory()) {
-        throw new EvolutionPersistenceValidationError(
-          `Path component must be a real directory: ${current}`,
-        );
-      }
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-      try {
-        await io.mkdir(current, { mode });
-      } catch (mkdirError) {
-        if (!isAlreadyExists(mkdirError)) throw mkdirError;
-      }
-      const info = await io.lstat(current);
-      if (info.isSymbolicLink() || !info.isDirectory()) {
-        throw new EvolutionPersistenceValidationError(
-          `Path component must be a real directory: ${current}`,
-        );
-      }
-    }
+    await ensureRealDirectory(io, current, mode);
+  }
+}
+
+/** The part of `target` below `root`, or a refusal: a chain may never leave the repository. */
+function relativeInsideRoot(root: string, target: string): string {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new EvolutionPersistenceValidationError(`Path must remain below repository root: ${target}`);
+  }
+  return relative;
+}
+
+/**
+ * One component of the chain: either a real directory already, or created and then checked
+ * again. The second check is not redundant — `mkdir` on a path whose parent is a link creates
+ * through the link, so what the path resolved to before the call is not what it means after.
+ */
+async function ensureRealDirectory(
+  io: EvolutionApplicationFileIo,
+  current: string,
+  mode: number,
+): Promise<void> {
+  const existing = await inspectDirectoryComponent(io, current);
+  if (existing !== "missing") {
+    assertRealDirectory(existing, current);
+    return;
+  }
+  try {
+    await io.mkdir(current, { mode });
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+  }
+  // Straight `lstat`, not the tolerant helper: before this refactor a component that
+  // disappeared between mkdir and the check surfaced the raw ENOENT, and that stays true.
+  assertRealDirectory(await io.lstat(current), current);
+}
+
+async function inspectDirectoryComponent(
+  io: EvolutionApplicationFileIo,
+  current: string,
+): Promise<{ isSymbolicLink(): boolean; isDirectory(): boolean } | "missing"> {
+  try {
+    return await io.lstat(current);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    return "missing";
+  }
+}
+
+function assertRealDirectory(
+  info: { isSymbolicLink(): boolean; isDirectory(): boolean } | "missing",
+  current: string,
+): void {
+  if (info === "missing" || info.isSymbolicLink() || !info.isDirectory()) {
+    throw new EvolutionPersistenceValidationError(
+      `Path component must be a real directory: ${current}`,
+    );
   }
 }
 

@@ -280,3 +280,75 @@ describe("orphan temp cleanup", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("prompt object store guards", () => {
+  const digestOf = (content: Buffer) => sha256Bytes(content);
+
+  it("refuses something that is not a digest at all", async () => {
+    const { targets } = await targetsFor();
+    await expect(targets.readPromptObject("not-a-digest")).rejects.toMatchObject({
+      code: "MATERIAL_MISSING",
+      message: "Invalid prompt object digest",
+    });
+  });
+
+  it("reports a missing object by its digest", async () => {
+    const { targets } = await targetsFor();
+    const digest = digestOf(Buffer.from("never stored\n"));
+    await expect(targets.readPromptObject(digest)).rejects.toMatchObject({
+      code: "MATERIAL_MISSING",
+      message: `Prompt object not found: ${digest}`,
+    });
+  });
+
+  it("refuses an object that is a symlink", async () => {
+    const { root, targets } = await targetsFor();
+    const content = Buffer.from("stored prompt\n");
+    const digest = digestOf(content);
+    const objects = path.join(root, ".agent-team", "evolution", "objects", "sha256");
+    await mkdir(objects, { recursive: true });
+    const outside = path.join(root, "outside-object");
+    await writeFile(outside, content);
+    await symlink(outside, path.join(objects, digest));
+    await expect(targets.readPromptObject(digest)).rejects.toMatchObject({
+      code: "MATERIAL_MISSING",
+      message: `Prompt object must be a regular non-symlink file: ${digest}`,
+    });
+  });
+
+  it("refuses an object whose permissions are not 0600", async () => {
+    const { root, targets } = await targetsFor();
+    const content = Buffer.from("stored prompt\n");
+    const digest = digestOf(content);
+    const objects = path.join(root, ".agent-team", "evolution", "objects", "sha256");
+    await mkdir(objects, { recursive: true });
+    await writeFile(path.join(objects, digest), content);
+    await chmod(path.join(objects, digest), 0o644);
+    await expect(targets.readPromptObject(digest)).rejects.toMatchObject({
+      code: "MATERIAL_MISSING",
+      message: `Prompt object permissions must be 0600: ${digest}`,
+    });
+  });
+
+  it("refuses an object whose bytes no longer hash to its name", async () => {
+    const { root, targets } = await targetsFor();
+    const content = Buffer.from("stored prompt\n");
+    const digest = digestOf(content);
+    const objects = path.join(root, ".agent-team", "evolution", "objects", "sha256");
+    await mkdir(objects, { recursive: true });
+    await writeFile(path.join(objects, digest), content);
+    await chmod(path.join(objects, digest), 0o600);
+    await writeFile(path.join(objects, digest), Buffer.from("tampered\n"));
+    await expect(targets.readPromptObject(digest)).rejects.toMatchObject({
+      code: "MATERIAL_MISSING",
+      message: `Corrupted prompt object: ${digest}`,
+    });
+  });
+
+  it("returns the bytes of an object it stored itself", async () => {
+    const { targets } = await targetsFor();
+    const content = Buffer.from("stored prompt\n");
+    await targets.ingestPromptMaterial(digestOf(content), content);
+    await expect(targets.readPromptObject(digestOf(content))).resolves.toEqual(content);
+  });
+});
