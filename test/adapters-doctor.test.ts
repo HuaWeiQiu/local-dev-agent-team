@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentAdapter, AdapterDoctorSpec } from "../src/adapters/types.js";
+import type { AdapterDoctorSpec } from "../src/adapters/shared.js";
+import type { AgentAdapter } from "../src/adapters/types.js";
 import type { AgentProfile } from "../src/config/schema.js";
 
 const process = vi.hoisted(() => ({ runProcess: vi.fn() }));
@@ -39,7 +40,7 @@ function spec(patch: Partial<AdapterDoctorSpec> = {}): AdapterDoctorSpec {
     displayName: "Kimi",
     prepareProbeProfile: (input) => input,
     ...patch,
-  } as AdapterDoctorSpec;
+  };
 }
 
 function options(patch: Record<string, unknown> = {}) {
@@ -130,8 +131,9 @@ describe("runAdapterDoctor", () => {
       options({ probeModel: true }),
       spec(),
     );
-    expect(unparsable[3].status).toBe("fail");
-    expect(unparsable[3].detail).toContain("bad json");
+    expect(unparsable).toHaveLength(4);
+    expect(unparsable[3]!.status).toBe("fail");
+    expect(unparsable[3]!.detail).toContain("bad json");
   });
 
   it("writes a prompt file when the adapter transports prompts by file", async () => {
@@ -145,7 +147,8 @@ describe("runAdapterDoctor", () => {
       options({ probeModel: true }),
       spec(),
     );
-    expect(checks[3].status).toBe("pass");
+    expect(checks).toHaveLength(4);
+    expect(checks[3]!.status).toBe("pass");
     expect(buildInvocation).toHaveBeenCalledWith(
       expect.objectContaining({ permission: "read-only", externalTools: "deny", args: [] }),
       expect.objectContaining({ promptFile: expect.stringContaining("prompt.txt") }),
