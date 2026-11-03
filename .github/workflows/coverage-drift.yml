@@ -17,10 +17,10 @@ on:
   workflow_dispatch:
     inputs:
       coverage_source:
-        description: "覆盖率来源：self = crapper 自取（与基线刷新一致）；existing = 复用上一步的 lcov"
+        description: "覆盖率来源：existing = 复用上一步的单 worker lcov（推荐，可复现）；self = crapper 自取（并行采集，会抖）"
         type: choice
-        options: [self, existing]
-        default: self
+        options: [existing, self]
+        default: existing
 
 permissions:
   contents: read
@@ -58,6 +58,11 @@ jobs:
       #   - `--coverage` alone does not write lcov: the default reporters are
       #     text/html/clover/json, so a lcov-only reader finds nothing.
       # The step stays non-fatal so a broken run is reported, not hidden.
+      # One worker on purpose. With parallel workers the coverage collector loses a
+      # worker's data now and then: two full runs of the same commit differed on 11 lines
+      # (`EvolutionWorkbench` 8 hits vs 0, `stall.ts` 0 vs 1), while two single-worker
+      # runs produced byte-identical signatures (`bd97fec5…`). Measurement may be slower
+      # than CI; CI has to be fast, a ledger has to be right.
       - name: Collect coverage
         id: coverage
         continue-on-error: true
@@ -65,6 +70,7 @@ jobs:
           pnpm exec vitest run --coverage
           --coverage.reporter=lcov
           --coverage.reporter=text-summary
+          --maxWorkers=1
 
       # A missing coverage report must never be read as "every function is at 0%",
       # which is a whole ledger of new debt invented by a failed measurement.
@@ -134,7 +140,7 @@ jobs:
           # The baseline is refreshed with crapper collecting its own coverage, so the
           # nightly defaults to the same source: a guard that measures differently from
           # the thing it ratchets reports drift that is really just method.
-          COVERAGE_SOURCE: ${{ inputs.coverage_source || 'self' }}
+          COVERAGE_SOURCE: ${{ inputs.coverage_source || 'existing' }}
         run: |
           set -euo pipefail
           args=(--all --drift-report drift-report.json)

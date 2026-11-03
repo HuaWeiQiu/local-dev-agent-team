@@ -381,6 +381,27 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 配对好的报告被忽略——两次自采若恰好一致，就会写出一份 `coverageSource: self` 的基线，
 而每个人都以为它按新口径刷的。现在这种组合直接报错退出，并把正确命令原样打出来。
 
+**测量口径：并行与单 worker 各修好了一半，别把它当成「换 worker 数就稳」（2026-11 三组实测）。**
+
+同一提交、每次清空覆盖率，三组各跑两次，比覆盖行集合签名：
+
+| 组 | 两次签名 | 一致 | 差在哪 |
+| --- | --- | --- | --- |
+| 默认（vitest 3 的默认 pool 就是 `forks`） | `caccb270…` / `6e5377bd…` | 否 | `EvolutionWorkbench.tsx` 8 行 |
+| `--pool=threads` | `caccb270…` / `33abb9ce…` | 否 | — |
+| `--maxWorkers=1` | `6e5377bd…` / `d42cb499…` | 否 | `evolution/automation/sections.tsx` 6 行 |
+
+早期一组「单 worker 两次逐位相同（`bd97fec5…`）」曾经成立，但**不可复现**——那是 2/2 的运气。
+所以：**换 worker 数不是解**。真正剩下的不稳定来自**测试在异步渲染落定前就结束**：
+`EvolutionWorkbench` / `automation/sections` 是同一类（与 `JevPanel` 同病）——覆盖率取决于
+某个状态更新有没有在断言前发生，与 pool 无关。
+
+当前可用的结论只有两条：
+1. **CI 要快、测量要准**，两者口径允许不同；刷新用单 worker 采集仍是对的（更少并发干扰），
+   但它**不能**保证签名一致，所以**双份采集 + 覆盖行集合判等**（见上一节）仍然是必需的口径检查；
+2. 要让签名真正稳定，得把那两个组件（以及 `JevPanel` 这类）的测试改成**等状态落定再断言**，
+   而不是靠 pool 调参。
+
 **判等用「覆盖行集合」，不是文件字节（2026-11 实测）。** `lcov` 里 `DA:` 的命中次数
 在并行跑测试时天生会抖——同一个文件 `241` 次 vs `1` 次都见过；但**覆盖行集合是稳定的**
 （4 次全量跑签名一致、覆盖 50,255 行）。所以：
@@ -414,6 +435,23 @@ gate 读这份 lcov 打分，并在 `generation` 里记下 `lcov.sha256`、`head
 摸排要宽视野，定版要可复算。
 
 判断口诀：**同一份输入、同一次运行能复算出同一个数 → 强保证；两次跑恰好一样 → 弱保证。**
+
+## 10. 负结论：`plan-gate` 抓不住「任务被波次丢掉」
+
+`applies the plan gate to controller-produced DAGs and resumes after approval` 断言了
+`["merged","merged","merged"]`，看起来覆盖了「任务会不会丢」——**实际抓不住**。
+
+实测：把 `markTaskLost` 的修复 revert 掉再跑，
+`builds a deterministic DAG …` 绿、`plan-gate` 绿，只有
+`leaves no task in a non-terminal state when its wave fails` **红**。
+
+原因：`plan-gate` 只走顺利路径，没有任何任务被丢弃，所以它永远看不到这个形态。
+**新增的那条终态用例是这类缺陷的唯一探测器。** 半年后看到 `plan-gate` 覆盖了 all-merged
+就以为"有人管这件事"，是错的。
+
+**一般原则：顺利路径的断言不能证明异常路径有人管。** 「三个任务都 merged」这种断言
+只在没有任务被丢时成立，它天然看不见「任务被丢」——异常路径必须有一条**走异常路径**的
+用例来守。看到某条测试覆盖了汇总结果，先问：它有没有可能走到那条异常分支？
 
 ## 10. 已知且刻意的例外
 
