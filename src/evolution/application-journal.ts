@@ -939,6 +939,14 @@ export class EvolutionApplicationJournal {
     return false;
   }
 
+  /**
+   * Promote the pending command asked for, when the target write already happened.
+   *
+   * The first two returns are guards, not recovery steps: a recovery never arrives with the
+   * catalog already advanced (the situation check routes that case elsewhere), so they only
+   * matter for a repeated call. They are deliberately uncovered — see the branch-coverage
+   * note in docs/ub-quality-gates.zh-CN.md before "fixing" that.
+   */
   async finishPromotion(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
@@ -957,6 +965,7 @@ export class EvolutionApplicationJournal {
     return true;
   }
 
+  /** The mirror of `finishPromotion`, with the same two guard returns and the same reason. */
   async finishRollback(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,

@@ -313,6 +313,27 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 要么不碰。文件里条数多（`claude-session.ts` 9 条、`automatic-controller.ts` 8 条）时，
 把它当成一个「整文件批」，一次做完一次合。
 
+### CRAP 的覆盖率是**分支**覆盖，不是行覆盖（2026-11，查 crapper 源码确认）
+
+crapper 的判分口径是这样的（源码注释原文）：
+
+```python
+"""LCOV scores a function by its BRDA branch records when it has any,
+   and by line hits otherwise."""
+```
+
+也就是说：**函数只要有 `BRDA`（分支）记录，分数就按分支算；没有才回落到行命中。**
+
+这带来两条必须记住的事：
+
+1. **刷新时对比的 `LF/LH` 不是 CRAP 用的那个数。** `LF/LH` 是行覆盖，只用来确认"三次采集
+   是同一份覆盖率"；真正驱动每个函数分数的，是分支覆盖。写刷新报告时别把两者混在一起比。
+2. **"行全绿、CRAP 还高"是常态，不是异常。** `finishRollback` 的三行 `DA` 命中全是 1，
+   两个 `if` 的成立分支却从未走过，于是报 33.3%（分支）——**行只是被扫过，路径没走全。**
+
+判断一个函数"还差多少"时看 `BRH/BRF`（分支命中/分支总数），不要看 `LH/LF`。报告里写覆盖率
+时标明口径：`33.3% (branches)`。
+
 ### 度量看不见 `#` 私有方法（2026-11 实测）
 
 crapper 的 TypeScript 解析器**不认 ECMAScript 私有方法**。同一份 lcov、同一个文件：
