@@ -51,6 +51,7 @@ describe("ub quality gate wrapper", () => {
       driftReport: "",
       coverageA: "",
       coverageB: "",
+      coverageC: "",
       ub: "",
       extra: [],
     });
@@ -911,5 +912,62 @@ describe("the coverage pair has a flag dependency", () => {
     expect(printed).toContain("--use-existing-coverage");
     expect(printed).toContain("--coverage-a A --coverage-b B -- --use-existing-coverage");
     expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+});
+
+describe("refresh from three merged coverage runs", () => {
+  const sample = (hits: number) => `SF:src/a.ts\nDA:1,${hits}\nLF:1\nLH:${hits > 0 ? 1 : 0}\nend_of_record\n`;
+
+  async function fixture(hits: [number, number, number]) {
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-merge-"));
+    for (const [index, value] of hits.entries()) {
+      const name = ["a", "b", "c"][index];
+      await mkdir(path.join(dir, name), { recursive: true });
+      await writeFile(path.join(dir, name, "lcov.info"), sample(value), "utf8");
+    }
+    const options = parseArgs(
+      [
+        "--update-baseline",
+        "--baseline",
+        "base.json",
+        "--coverage-a",
+        "a/lcov.info",
+        "--coverage-b",
+        "b/lcov.info",
+        "--coverage-c",
+        "c/lcov.info",
+        "--",
+        "--use-existing-coverage",
+      ],
+      {},
+    );
+    const tool = await stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+    return { dir, options, tool };
+  }
+
+  it("writes a baseline from the merged lines and records how it was merged", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const { dir, options, tool } = await fixture([1, 1, 0]);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(stableBaseline(tool, options, dir)).toBe(0);
+    stdout.mockRestore();
+    stderr.mockRestore();
+    const written = JSON.parse(await readFile(path.join(dir, "base.json"), "utf8"));
+    expect(written.generation.merge).toMatchObject({ runs: 3, rule: "line-majority", divergentLines: 1 });
+    expect(written.generation.merge.digests).toHaveLength(3);
+  });
+
+  it("counts a line covered by one of three runs as uncovered", async () => {
+    const { stableBaseline, requireReproducibleCoverage } = await import("../scripts/ub-quality-gate.mjs");
+    const { dir, options } = await fixture([1, 0, 0]);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(requireReproducibleCoverage(options, dir).merge?.divergentLines).toBe(1);
+    stderr.mockRestore();
+    const merged = await readFile(path.join(dir, "target", "coverage", "typescript", "lcov.info"), "utf8");
+    expect(merged).toContain("DA:1,0");
+    void stableBaseline;
   });
 });

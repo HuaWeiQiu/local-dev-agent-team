@@ -381,6 +381,20 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 配对好的报告被忽略——两次自采若恰好一致，就会写出一份 `coverageSource: self` 的基线，
 而每个人都以为它按新口径刷的。现在这种组合直接报错退出，并把正确命令原样打出来。
 
+**刷新从「两份必须一致」改成「三份按行多数合并」（2026-11）。** 整份报告投票会把局部噪声
+放大成全局结论：一次 run 在文件 A 少五行、在文件 B 多一行时，多数派若恰好是「少行」那版，
+更高的 CRAP 就会被冻进基线。改成**按行**：
+
+- 采集 3 次独立 run；
+- 每一行在 **≥2 次**里被执行过 → 记已覆盖；否则未覆盖；
+- 合成结果交给 crapper 打分；
+- `generation.merge = { runs: 3, rule: "line-majority", divergentLines, digests }`——
+  `divergentLines` 是持续可看的健康指标：它变大，说明测试又开始不稳。
+
+`--coverage-a/-b` 仍保留「两份必须覆盖同样行」的严格模式；加 `--coverage-c` 才走合并。
+合并器是纯函数（`scripts/coverage-merge.mjs`），有单测覆盖 3 份一致 / 2-of-3 / 1-of-3 /
+文件只出现在部分报告里 / LF·LH 重算。
+
 **测量口径：并行与单 worker 各修好了一半，别把它当成「换 worker 数就稳」（2026-11 三组实测）。**
 
 同一提交、每次清空覆盖率，三组各跑两次，比覆盖行集合签名：
