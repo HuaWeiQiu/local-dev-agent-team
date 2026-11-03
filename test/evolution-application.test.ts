@@ -2944,6 +2944,58 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     });
   });
 
+  it("refuses to finish a promotion whose proposal left the evaluated state", async () => {
+    // The world a half-written journal or an older version can leave behind: the target
+    // write happened, the journal still holds the pending promotion, and the catalog has
+    // since rejected the proposal. Finishing it would promote something nobody approved, so
+    // the coordinator must stay in recovery instead of advancing the catalog.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(harness, "refusable", "refusable", strategyA);
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "refusable",
+      operator,
+    });
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "refusable-command",
+        proposalId: "refusable",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Promote the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await harness.coordinator.close();
+
+    const rawCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    await rawCatalog.reject("refusable", {
+      actor: operator,
+      reason: "Rejected while the journal still held the pending promotion",
+      decidedAt: new Date(harness.clock.now()).toISOString(),
+    });
+    expect(rawCatalog.getProposal("refusable")).toMatchObject({ status: "rejected" });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      recoveryRequired: true,
+    });
+    expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+    expect(reopened.catalog.getProposal("refusable")).toMatchObject({ status: "rejected" });
+    expect(
+      reopened.catalog.snapshot().auditRecords.filter((record) => record.kind === "promotion"),
+    ).toEqual([]);
+  });
+
   it("recovers when the target was promoted but the catalog never advanced", async () => {
     // The mirror of the rollback case above: same crash window (between the target write and
     // the catalog write), opposite direction. Kept deliberately symmetric so that changing
