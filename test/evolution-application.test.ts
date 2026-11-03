@@ -2787,7 +2787,7 @@ describe("the restored state validator refuses states the catalog disagrees with
     });
     await expect(reopen(harness.root)).rejects.toThrow(
       new EvolutionPersistenceValidationError(
-        "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result",
+        "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result (pendingOrCompletion)",
       ),
     );
   });

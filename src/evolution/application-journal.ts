@@ -111,6 +111,8 @@ function operationChecks(input: ProofInput): Array<{ field: string; holds: boole
     ];
   }
   if (completion.operation !== "reconcile-promoted") return [];
+  const withoutCommandAllowed =
+    input.syntheticLegacyBaseline && COMMAND_FALLBACK["reconcile-promoted"] !== null;
   return [
     { field: "completion.status", holds: completion.status === application.status },
     { field: "command.operation", holds: command === undefined || command.operation === "reconcile-promoted" },
@@ -119,7 +121,7 @@ function operationChecks(input: ProofInput): Array<{ field: string; holds: boole
       field: "application.rollbackSafe",
       holds: command === undefined || application.rollbackSafe === input.reconcileRollbackSafe,
     },
-    { field: "syntheticLegacyBaseline", holds: command !== undefined || input.syntheticLegacyBaseline },
+    { field: "syntheticLegacyBaseline", holds: command !== undefined || withoutCommandAllowed },
   ];
 }
 
@@ -137,9 +139,44 @@ export function mismatchedFields(
   });
 }
 
+/** The command an audit record claims, when it claims one at all. */
+function auditCommandId(audit: EvolutionCatalogSnapshot["auditRecords"][number]): string | undefined {
+  if (
+    audit.kind === "rejection" ||
+    audit.kind === "archive" ||
+    audit.kind === "unarchive" ||
+    audit.kind === "delete" ||
+    !("applicationCommandId" in audit)
+  ) {
+    return undefined;
+  }
+  return audit.applicationCommandId;
+}
+
+/** The fields whose check failed, in declaration order — every check is evaluated. */
+function settle(checks: Array<{ field: string; holds: boolean }>): string[] {
+  return checks.filter((check) => !check.holds).map((check) => check.field);
+}
+
 function prefixed(prefix: string, fields: string[]): string[] {
   return fields.map((field) => `${prefix}.${field}`);
 }
+
+/**
+ * Which operation may legitimately carry **no** idempotency binding, and what vouches for it
+ * instead. This is not an oversight to be tidied away: a legacy Phase-2 promotion was
+ * recorded in the catalog before the journal existed, so its proof has no command to point
+ * at. Whoever "unifies" the checks below must delete this table first — and this comment
+ * says why that would be wrong.
+ */
+const COMMAND_FALLBACK = {
+  // The journal always writes a binding for work it started.
+  "promote-and-apply": null,
+  // A captured legacy predecessor is proven by its own synthetic baseline, not by a command.
+  "reconcile-promoted": "syntheticLegacyBaseline",
+  // Any other operation proves itself through the catalog revision the completion recorded.
+  fallback: "completion.catalogRevisionBefore",
+} as const;
 
 /** What a proof check needs: the record, what the catalog says, and the derived flags. */
 type ProofInput = {
@@ -437,7 +474,7 @@ export class EvolutionApplicationJournal {
           targetKey(targetFromCandidate(input.proposal.candidate)) === targetKey(application.target),
       },
       {
-        field: "completion.catalogRevisionBefore",
+        field: COMMAND_FALLBACK.fallback,
         holds:
           command !== undefined ||
           completion === undefined ||
@@ -445,7 +482,7 @@ export class EvolutionApplicationJournal {
       },
       ...operationChecks(input),
     ];
-    mismatches.push(...checks.filter((check) => !check.holds).map((check) => check.field));
+    mismatches.push(...settle(checks));
     return [...new Set(mismatches)];
   }
 
@@ -543,26 +580,58 @@ export class EvolutionApplicationJournal {
           );
         }
       }
-      if (
-        !proposal ||
-        computeCandidateDigest(proposal.candidate) !== this.#state.pending.candidateDigest ||
-        !pendingTarget ||
-        !expectedPendingAfter ||
-        !targetStatesEqual(this.#state.pending.afterTarget, expectedPendingAfter) ||
-        (expectedPendingBefore !== null &&
-          !targetStatesEqual(this.#state.pending.beforeTarget, expectedPendingBefore)) ||
-        targetKey(pendingTarget) !== targetKeyFromState(this.#state.pending.beforeTarget) ||
-        targetKey(pendingTarget) !== targetKeyFromState(this.#state.pending.afterTarget) ||
-        (revision !== this.#state.pending.catalogRevisionBefore &&
-          revision !== this.#state.pending.expectedCatalogRevisionAfter) ||
-        (revision === this.#state.pending.catalogRevisionBefore && activeId !== expectedOldActive) ||
-        sha256Canonical(this.#state.pending.previousApplication) !==
-          sha256Canonical(expectedPreviousApplication) ||
-        (this.#state.pending.operation === "reconcile-promoted" &&
-          (this.#state.pending.previousApplication?.proposalId ?? null) !== reconcileRestoredId)
-      ) {
+      const pending = this.#state.pending;
+      const mismatches = settle([
+        { field: "proposal", holds: proposal !== undefined },
+        {
+          field: "catalog.candidateDigest",
+          holds:
+            proposal === undefined ||
+            computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
+        },
+        { field: "expectedAfterTarget", holds: expectedPendingAfter !== null },
+        {
+          field: "afterTarget",
+          holds:
+            expectedPendingAfter === null ||
+            targetStatesEqual(pending.afterTarget, expectedPendingAfter),
+        },
+        {
+          field: "beforeTarget",
+          holds:
+            expectedPendingBefore === null ||
+            targetStatesEqual(pending.beforeTarget, expectedPendingBefore),
+        },
+        {
+          field: "beforeTarget.key",
+          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
+        },
+        {
+          field: "afterTarget.key",
+          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
+        },
+        {
+          field: "catalogRevision",
+          holds: revision === pending.catalogRevisionBefore || revision === pending.expectedCatalogRevisionAfter,
+        },
+        {
+          field: "activeProposal",
+          holds: revision !== pending.catalogRevisionBefore || activeId === expectedOldActive,
+        },
+        {
+          field: "previousApplication",
+          holds: sha256Canonical(pending.previousApplication) === sha256Canonical(expectedPreviousApplication),
+        },
+        {
+          field: "previousApplication.proposalId",
+          holds:
+            pending.operation !== "reconcile-promoted" ||
+            (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: pending operation '${this.#state.pending.commandId}' does not match the catalog`,
+          `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
         );
       }
     }
@@ -590,59 +659,84 @@ export class EvolutionApplicationJournal {
       const catalogMutationSucceeded =
         completed.status === "applied" || completed.status === "rolled-back";
       const command = this.#state.commands.get(completed.commandId);
-      if (
-        !proposal ||
-        computeCandidateDigest(proposal.candidate) !== completed.candidateDigest ||
-        completed.catalogRevisionBefore > completed.catalogRevisionAfter ||
-        completed.catalogRevisionAfter > revision ||
-        (!command && !context.syntheticCompletionIds.has(completed.commandId)) ||
-        (expectedAuditKind !== null && catalogMutationSucceeded !== Boolean(matchingAudit))
-      ) {
+      const mismatches = settle([
+        { field: "proposal", holds: proposal !== undefined },
+        {
+          field: "catalog.candidateDigest",
+          holds:
+            proposal === undefined ||
+            computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
+        },
+        {
+          field: "catalogRevisionBefore",
+          holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
+        },
+        { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= revision },
+        {
+          field: "command",
+          holds: command !== undefined || context.syntheticCompletionIds.has(completed.commandId),
+        },
+        {
+          field: "audit",
+          holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: completed operation '${completed.commandId}' does not match the catalog`,
+          `Invalid application state: completed operation '${completed.commandId}' does not match the catalog (${mismatches.join(", ")})`,
         );
       }
     }
     for (const command of this.#state.commands.values()) {
       const completed = completedByCommand.get(command.commandId);
       const catalogProposal = proposals.get(command.proposalId);
-      if (
-        !completed ||
-        completed.operation !== command.operation ||
-        completed.proposalId !== command.proposalId ||
-        !catalogProposal ||
-        !proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal)
-      ) {
+      const mismatches = settle([
+        { field: "completion", holds: completed !== undefined },
+        {
+          field: "completion.operation",
+          holds: completed === undefined || completed.operation === command.operation,
+        },
+        {
+          field: "completion.proposalId",
+          holds: completed === undefined || completed.proposalId === command.proposalId,
+        },
+        { field: "proposal", holds: catalogProposal !== undefined },
+        {
+          field: "result.proposal",
+          holds:
+            catalogProposal === undefined ||
+            proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: command binding '${command.commandId}' has no matching completion`,
+          `Invalid application state: command binding '${command.commandId}' has no matching completion (${mismatches.join(", ")})`,
         );
       }
     }
     for (const audit of snapshot.auditRecords) {
-      if (
-        audit.kind === "rejection" ||
-        audit.kind === "archive" ||
-        audit.kind === "unarchive" ||
-        audit.kind === "delete" ||
-        !("applicationCommandId" in audit) ||
-        audit.applicationCommandId === undefined
-      ) {
-        continue;
-      }
-      const completed = completedByCommand.get(audit.applicationCommandId);
+      const applicationCommandId = auditCommandId(audit);
+      if (applicationCommandId === undefined) continue;
+      const completed = completedByCommand.get(applicationCommandId);
       const pending = this.#state.pending;
       const pendingOwnsAudit =
         pending !== null &&
-        pending.commandId === audit.applicationCommandId &&
+        pending.commandId === applicationCommandId &&
         this.catalogOutcomeMatchesPending(pending, snapshot, revision);
-      if (
-        !pendingOwnsAudit &&
-        (!completed ||
-          completed.proposalId !== audit.proposalId ||
-          !["applied", "rolled-back"].includes(completed.status))
-      ) {
+      const mismatches = settle([
+        { field: "pendingOrCompletion", holds: pendingOwnsAudit || completed !== undefined },
+        {
+          field: "completion.proposalId",
+          holds: completed === undefined || completed.proposalId === audit.proposalId,
+        },
+        {
+          field: "completion.status",
+          holds: completed === undefined || ["applied", "rolled-back"].includes(completed.status),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: catalog audit for command '${audit.applicationCommandId}' has no successful application result`,
+          `Invalid application state: catalog audit for command '${applicationCommandId}' has no successful application result (${mismatches.join(", ")})`,
         );
       }
     }
