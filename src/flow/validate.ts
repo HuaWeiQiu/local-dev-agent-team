@@ -18,12 +18,22 @@ export class FlowValidationError extends Error {
  * deterministic quality gates run before anything is committed, and final
  * checks and the final human approval are on every path to the end.
  */
-export function validateTemplate(template: FlowTemplate): void {
+/**
+ * `unknown` because a template arrives from a YAML file: the caller has not
+ * checked it, and this function's whole job is to decide whether it is valid.
+ * Declaring `FlowTemplate` made that guarantee before it was earned, and left
+ * callers testing the rejection paths casting their fixtures in.
+ */
+export function validateTemplate(template: unknown): void {
+  if (!template || typeof template !== "object") {
+    throw new FlowValidationError(["template: A flow template object is required"]);
+  }
+  const candidate = template as FlowTemplate;
   const issues: string[] = [];
-  issues.push(...structuralIssues("run", template.run, RUN_NODE_KINDS, false));
-  issues.push(...structuralIssues("task", template.task, TASK_NODE_KINDS, true));
-  issues.push(...runInvariantIssues(template));
-  issues.push(...taskInvariantIssues(template));
+  issues.push(...structuralIssues("run", candidate.run, RUN_NODE_KINDS, false));
+  issues.push(...structuralIssues("task", candidate.task, TASK_NODE_KINDS, true));
+  issues.push(...runInvariantIssues(candidate));
+  issues.push(...taskInvariantIssues(candidate));
   if (issues.length > 0) throw new FlowValidationError(issues);
 }
 

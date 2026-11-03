@@ -6,6 +6,29 @@ import { describe, expect, it } from "vitest";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import { findConfig, loadConfig } from "../src/config/load.js";
 
+/**
+ * The YAML a user could have written, not the object the type system approves.
+ *
+ * An invalid advisor block is exactly what this suite feeds the loader — the
+ * loader is what decides validity. Building the document as `unknown` keeps the
+ * illegal value legal at the construction site, so no cast is needed and the
+ * production types stay honest.
+ */
+function yamlWithAdvisor(advisor: unknown): unknown {
+  const base = createDefaultConfig("fixture");
+  const definitions = base.strategies?.definitions;
+  return {
+    ...base,
+    strategies: {
+      ...base.strategies,
+      definitions: {
+        ...definitions,
+        balanced: { ...definitions?.balanced, taskMorphology: { advisor } },
+      },
+    },
+  };
+}
+
 describe("configuration", () => {
   it("loads a valid config from a parent directory", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
@@ -210,10 +233,7 @@ describe("configuration", () => {
       ["codex-worker", "Advisor profile 'codex-worker' must be read-only"],
     ] as const) {
       const root = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
-      const config = createDefaultConfig("fixture");
-      config.strategies!.definitions.balanced!.taskMorphology = {
-        advisor: { enabled: true, profile } as never,
-      };
+      const config = yamlWithAdvisor({ enabled: true, profile });
       await writeFile(path.join(root, "agent-team.yaml"), stringifyYaml(config));
 
       await expect(loadConfig(root)).rejects.toThrow(message);
@@ -222,18 +242,12 @@ describe("configuration", () => {
 
   it("rejects duplicate advisor triggers and out-of-range consultation limits", async () => {
     const duplicateRoot = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
-    const duplicate = createDefaultConfig("fixture");
-    duplicate.strategies!.definitions.balanced!.taskMorphology = {
-      advisor: { enabled: true, triggers: ["pre-final", "pre-final"] } as never,
-    };
+    const duplicate = yamlWithAdvisor({ enabled: true, triggers: ["pre-final", "pre-final"] });
     await writeFile(path.join(duplicateRoot, "agent-team.yaml"), stringifyYaml(duplicate));
     await expect(loadConfig(duplicateRoot)).rejects.toThrow("Advisor triggers must be unique");
 
     const limitRoot = await mkdtemp(path.join(tmpdir(), "agent-team-config-"));
-    const limit = createDefaultConfig("fixture");
-    limit.strategies!.definitions.balanced!.taskMorphology = {
-      advisor: { enabled: true, maxConsultationsPerRun: 11 } as never,
-    };
+    const limit = yamlWithAdvisor({ enabled: true, maxConsultationsPerRun: 11 });
     await writeFile(path.join(limitRoot, "agent-team.yaml"), stringifyYaml(limit));
     await expect(loadConfig(limitRoot)).rejects.toThrow("Too big");
   });
