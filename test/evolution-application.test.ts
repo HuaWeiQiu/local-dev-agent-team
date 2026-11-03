@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -398,6 +399,118 @@ describe("EvolutionApplicationCoordinator server-owned preflight", () => {
         },
       },
     });
+  });
+
+  it("records a strategy candidate that carries prompt path capabilities as a trust failure", async () => {
+    // The strategy branch of the trust check. Without this case the branch is dead code on
+    // paper, and the evaluator is free to start accepting a strategy that could edit prompts.
+    const harness = await createHarness();
+    await harness.coordinator.propose({
+      id: "preflight-strategy-with-paths",
+      policy: { ...validPolicy(), allowedPromptPaths: [promptPath] },
+      candidate: strategyCandidate("preflight-paths", strategyA),
+    });
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-strategy-with-paths",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: [
+            "server-candidate-trust-v1",
+            "server-strategy-preflight-v1",
+          ],
+        },
+      },
+    });
+  });
+
+  it("records a prompt target that has gone missing as a target-trust failure", async () => {
+    const harness = await createHarness();
+    const content = Buffer.from("Candidate for a prompt that no longer exists\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-missing-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    await rm(path.join(harness.root, promptPath));
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-missing-target",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: ["server-prompt-target-trust-v1"],
+        },
+      },
+    });
+  });
+
+  it("records a prompt target that is no longer tracked by HEAD as a target-trust failure", async () => {
+    const harness = await createHarness();
+    const content = Buffer.from("Candidate for a prompt HEAD no longer tracks\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-untracked-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    // Untracked, not modified: the file is still there and still readable, which is exactly
+    // the case a "does it exist" check would wave through.
+    await git(harness.root, ["rm", "--cached", promptPath]);
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-untracked-target",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: ["server-prompt-target-trust-v1"],
+        },
+      },
+    });
+  });
+
+  it("refuses to read an I/O failure as a policy verdict", async () => {
+    // The target check absorbs POLICY_DENIED and TARGET_DRIFTED, because those describe the
+    // candidate. A broken disk describes nothing about the candidate: it must propagate
+    // instead of being recorded as "this prompt is untrusted", which would quietly pass an
+    // unreadable prompt off as a reviewed finding.
+    const harness = await createHarness({
+      io: {
+        readFile: async (file) => {
+          if (String(file).endsWith(promptPath)) {
+            throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          }
+          return await readFile(file);
+        },
+      },
+    });
+    const content = Buffer.from("Candidate whose target cannot be read\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-unreadable-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    await expect(
+      harness.coordinator.evaluateServerPreflight("preflight-unreadable-target"),
+    ).rejects.toThrow(/permission denied/);
   });
 
   it("verifies prompt object integrity and the live Git-tracked target", async () => {
