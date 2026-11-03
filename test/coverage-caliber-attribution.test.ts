@@ -10,6 +10,14 @@ import {
   renderAttribution,
 } from "../scripts/coverage-caliber-attribution.mjs";
 import { buildReport } from "../scripts/coverage-caliber-report.mjs";
+import type { defaultIO } from "../scripts/coverage-caliber-report.mjs";
+
+/**
+ * The IO contract, derived from the boundary itself. Deriving it means a field
+ * added to `defaultIO` or a return type changed there shows up here immediately;
+ * a hand-written copy would drift silently.
+ */
+type CaliberIO = ReturnType<typeof defaultIO>;
 
 const LCOV = "/repo/target/coverage/typescript/lcov.info";
 const METRICS = "/repo/.metrics/crap.edn";
@@ -24,7 +32,11 @@ function crapEdn(score: number, key = "a#k"): string {
  * The process boundary from #197, faked: a run "produces" coverage, scoring reads whatever
  * the next entry says. Enough to drive the whole flow without launching vitest once.
  */
-function memoryIO(scores: string[]) {
+function memoryIO(scores: string[]): {
+  files: Map<string, string>;
+  commands: string[][];
+  io: CaliberIO;
+} {
   const files = new Map<string, string>();
   const commands: string[][] = [];
   let scored = 0;
@@ -48,7 +60,9 @@ function memoryIO(scores: string[]) {
       },
       runTool: (command: string, args: string[]) => {
         commands.push([command, ...args]);
-        files.set(METRICS, scores[Math.min(scored, scores.length - 1)]);
+        // `scored` starts at 0 and `scores` is never empty in these cases; the
+        // clamp below is the invariant this `!` is taking responsibility for.
+        files.set(METRICS, scores[Math.min(scored, scores.length - 1)]!);
         scored += 1;
         return { status: 2 };
       },
@@ -72,6 +86,10 @@ describe("coverage caliber attribution", () => {
   it("stays quiet when the scan itself broke", () => {
     const plan = attributionPlan({ kind: "infrastructure", error: "no coverage report" });
     expect(plan.run).toBe(false);
+    // `reason` only exists on the skipped branch. Guarding narrows the union and
+    // fails loudly if the branch ever starts carrying `keys` instead — the read
+    // below is then a statement about the branch, not a guess.
+    if (plan.run) throw new Error("expected the plan to be skipped");
     expect(plan.reason).toContain("扫描本身没跑完");
   });
 
@@ -83,6 +101,7 @@ describe("coverage caliber attribution", () => {
   it("stays quiet when the report says new debt but lists no keys", () => {
     const plan = attributionPlan({ kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [] });
     expect(plan.run).toBe(false);
+    if (plan.run) throw new Error("expected the plan to be skipped");
     expect(plan.reason).toContain("没列出键");
   });
 
@@ -104,6 +123,7 @@ describe("coverage caliber attribution", () => {
     const { io, commands } = memoryIO([crapEdn(20), crapEdn(20), crapEdn(20.1)]);
     const model = buildAttribution(ledgerWithNew(), "/tmp/ub", io);
     expect(model.status).toBe("measured");
+    if (model.status !== "measured") throw new Error(`expected a measured model, got ${model.status}`);
     expect(model.rows).toEqual([
       { key: "a#k", ledger: 20, perCommit: { HEAD: { existing: [20, 20, 20.1] } }, verdict: "stable" },
     ]);
@@ -114,14 +134,16 @@ describe("coverage caliber attribution", () => {
   it("reports a score that moves between runs as run-sensitive", () => {
     const { io } = memoryIO([crapEdn(20), crapEdn(20), crapEdn(40)]);
     const model = buildAttribution(ledgerWithNew("a#k", 20), "/tmp/ub", io);
-    expect(model.rows[0].verdict).toBe("run-sensitive");
+    if (model.status !== "measured") throw new Error(`expected a measured model, got ${model.status}`);
+    expect(model.rows[0]!.verdict).toBe("run-sensitive");
     expect(renderAttribution(model).join("\n")).toContain("先别把它当债去补测试");
   });
 
   it("calls a score the repeats agree on but the ledger never saw not-reproduced", () => {
     const { io } = memoryIO([crapEdn(33), crapEdn(33), crapEdn(33.2)]);
     const model = buildAttribution(ledgerWithNew("a#k", 61.5), "/tmp/ub", io);
-    expect(model.rows[0].verdict).toBe("not-reproduced");
+    if (model.status !== "measured") throw new Error(`expected a measured model, got ${model.status}`);
+    expect(model.rows[0]!.verdict).toBe("not-reproduced");
     expect(model.summary).toMatchObject({ "not-reproduced": 1, stable: 0 });
     expect(renderAttribution(model).join("\n")).toContain("账本这条是采样噪声");
   });
@@ -188,8 +210,10 @@ describe("coverage caliber attribution", () => {
     expect(() => parseArgs(["--nope"], {})).toThrow("unknown argument");
     expect(() => parseArgs(["--ub"], {})).toThrow("--ub requires a value");
     expect(parseArgs([], {})).toMatchObject({ out: "caliber-attribution.json" });
-    expect(parseArgs(["--help"], {}).help).toBe(true);
-    expect(parseArgs(["-h"], {}).help).toBe(true);
+    // `help` lives only on the branch the flag produces; `toMatchObject` states
+    // "this result contains it" without claiming every result does.
+    expect(parseArgs(["--help"], {})).toMatchObject({ help: true });
+    expect(parseArgs(["-h"], {})).toMatchObject({ help: true });
     expect(main(["--help"], memoryIO([]).io)).toBe(0);
     expect(parseArgs(["a.json"], { UB_BIN: "/tmp/ub" })).toMatchObject({ report: "a.json", ub: "/tmp/ub" });
   });

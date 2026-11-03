@@ -85,6 +85,15 @@ function valueAt(argv, index) {
  * `worse`/`fixed` alone are not a reason to spend three suite runs (`fixed` means debt was
  * paid, `worse` moves inside the noise band are not debt yet).
  */
+/**
+ * Two outcomes, discriminated by `run`: skipped carries `reason`, runnable
+ * carries `keys`. Without the literal types on `run` an inferred `boolean`
+ * makes the discriminant useless — a consumer still cannot narrow, which is what
+ * `plan.run === false` followed by `plan.reason` was hitting.
+ *
+ * @param {any} report
+ * @returns {{ run: false, reason: string } | { run: true, keys: string[] }}
+ */
 export function attributionPlan(report) {
   if (report?.kind === "infrastructure") return skip("扫描本身没跑完，没有账本结论可以归因");
   if (!(report?.counts?.new > 0)) return skip("本轮没有新增债务，不归因");
@@ -92,6 +101,7 @@ export function attributionPlan(report) {
   return keys.length > 0 ? { run: true, keys } : skip("报告写着 new > 0，却没列出键，不归因");
 }
 
+/** @param {string} reason @returns {{ run: false, reason: string }} */
 function skip(reason) {
   return { run: false, reason };
 }
@@ -163,6 +173,21 @@ export function countVerdicts(rows) {
   return counts;
 }
 
+/**
+ * Three outcomes discriminated by `status`. Same reason as `attributionPlan`:
+ * without literal types the discriminant widens to `string` and no consumer can
+ * narrow — reading `rows` on a `skipped` result then looks legal and yields
+ * `undefined`.
+ *
+ * @param {any} report
+ * @param {string} ub
+ * @param {any} io
+ * @returns {
+ *   | { status: "skipped", reason: string }
+ *   | { status: "failed", reason: string }
+ *   | { status: "measured", repeats: number, modes: string[], keys: string[], summary: Record<string, number>, rows: Array<{ key: string, ledger: unknown, verdict: string, perCommit: unknown }> }
+ * }
+ */
 export function buildAttribution(report, ub, io) {
   const plan = attributionPlan(report);
   if (!plan.run) return { status: "skipped", reason: plan.reason };
