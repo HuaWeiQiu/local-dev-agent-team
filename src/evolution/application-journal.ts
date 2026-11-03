@@ -136,7 +136,7 @@ export class EvolutionApplicationJournal {
         restored.payload.commands.map((binding) => [binding.commandId, binding]),
       );
       this.#state.recoveryRequired = restored.payload.recoveryRequired;
-      await this.#validateRestoredState();
+      await this.validateRestoredState();
     } catch (error) {
       if (isNotFound(error)) {
         this.#state.revision = 0;
@@ -152,7 +152,7 @@ export class EvolutionApplicationJournal {
     }
   }
 
-  async #validateRestoredState(): Promise<void> {
+  async validateRestoredState(): Promise<void> {
     const { revision, snapshot } = await this.#catalog.readSnapshot();
     const proposals = new Map(snapshot.proposals.map((proposal) => [proposal.id, proposal]));
     const activeByTarget = new Map(
@@ -300,7 +300,7 @@ export class EvolutionApplicationJournal {
         this.#state.pending?.operation === "rollback-applied" &&
         this.#state.pending.proposalId === application.proposalId &&
         revision === this.#state.pending.expectedCatalogRevisionAfter &&
-        this.#catalogOutcomeMatchesPending(this.#state.pending, snapshot, revision);
+        this.catalogOutcomeMatchesPending(this.#state.pending, snapshot, revision);
       if (
         activeId !== application.proposalId &&
         (!activeId ||
@@ -454,7 +454,7 @@ export class EvolutionApplicationJournal {
       const pendingOwnsAudit =
         pending !== null &&
         pending.commandId === audit.applicationCommandId &&
-        this.#catalogOutcomeMatchesPending(pending, snapshot, revision);
+        this.catalogOutcomeMatchesPending(pending, snapshot, revision);
       if (
         !pendingOwnsAudit &&
         (!completed ||
@@ -472,26 +472,26 @@ export class EvolutionApplicationJournal {
     const pending = this.#state.pending;
     if (!pending) return;
     const proposal = this.#catalog.getProposal(pending.proposalId);
-    if (!proposal) return this.#requireRecovery();
+    if (!proposal) return this.requireRecovery();
     if (proposal.candidate.kind === "role-prompt") {
-      await this.#cleanPendingPromptTemps(proposal.candidate.path);
+      await this.cleanPendingPromptTemps(proposal.candidate.path);
     }
-    const state = await this.#situationFor(pending, proposal);
-    if (!state) return this.#requireRecovery();
-    await this.#settlePending(pending, proposal, state);
+    const state = await this.situationFor(pending, proposal);
+    if (!state) return this.requireRecovery();
+    await this.settlePending(pending, proposal, state);
   }
 
   /** Dispatch on where the crash left the target and the catalog. */
-  async #settlePending(
+  async settlePending(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     state: ReconcileState,
   ): Promise<void> {
     if (state.situation === "aborted") {
-      return await this.#abortPending(pending, proposal, state.revision, state.liveTarget);
+      return await this.abortPending(pending, proposal, state.revision, state.liveTarget);
     }
     if (state.situation === "finalize") {
-      return await this.#completePendingFromLive(
+      return await this.completePendingFromLive(
         pending,
         proposal,
         state.revision,
@@ -499,13 +499,13 @@ export class EvolutionApplicationJournal {
       );
     }
     if (state.situation === "finish") {
-      return await this.#finishCatalogMutation(pending, proposal, state.revision, state.liveTarget);
+      return await this.finishCatalogMutation(pending, proposal, state.revision, state.liveTarget);
     }
-    this.#requireRecovery();
+    this.requireRecovery();
   }
 
   /** Where the crash left the target and the catalog, or nothing when unsure. */
-  async #situationFor(
+  async situationFor(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
   ): Promise<ReconcileState | undefined> {
@@ -519,10 +519,10 @@ export class EvolutionApplicationJournal {
     const targetIsOld = targetStatesEqual(liveTarget, pending.beforeTarget);
     const targetIsNew = targetStatesEqual(liveTarget, pending.afterTarget);
     const catalogIsOld = revision === pending.catalogRevisionBefore;
-    const catalogIsNew = this.#catalogOutcomeMatchesPending(pending, snapshot, revision);
+    const catalogIsNew = this.catalogOutcomeMatchesPending(pending, snapshot, revision);
     const promptGitApplied =
       proposal.candidate.kind === "role-prompt"
-        ? await this.#verifyPromptGitOutcome(pending)
+        ? await this.verifyPromptGitOutcome(pending)
         : true;
     const situation = pickSituation({
       targetIsOld,
@@ -536,47 +536,47 @@ export class EvolutionApplicationJournal {
   }
 
   /** Used by the reconciliation steps: give up and demand operator recovery. */
-  #requireRecovery(): void {
+  requireRecovery(): void {
     this.#state.recoveryRequired = true;
   }
 
   /** New target, old catalog: finish the catalog mutation idempotently. */
-  async #finishCatalogMutation(
+  async finishCatalogMutation(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     revision: number,
     liveTarget: TargetDigestState,
   ): Promise<void> {
     try {
-      if (proposal.candidate.kind === "role-prompt" && !(await this.#verifyPromptGitOutcome(pending))) {
-        await this.#restoreInterruptedPrompt(proposal, pending.beforeTarget);
+      if (proposal.candidate.kind === "role-prompt" && !(await this.verifyPromptGitOutcome(pending))) {
+        await this.restoreInterruptedPrompt(proposal, pending.beforeTarget);
         await this.finalizePendingAs("aborted", revision, pending.beforeTarget.digest);
         return;
       }
-      if (!(await this.#applyCatalogForPending(pending, proposal))) return this.#requireRecovery();
+      if (!(await this.applyCatalogForPending(pending, proposal))) return this.requireRecovery();
       const finalProposal = this.#catalog.getProposal(pending.proposalId)!;
-      await this.#completePendingFromLive(pending, finalProposal, this.#catalog.revision, liveTarget);
+      await this.completePendingFromLive(pending, finalProposal, this.#catalog.revision, liveTarget);
     } catch {
-      this.#requireRecovery();
+      this.requireRecovery();
     }
   }
 
   /** Promote or roll back as the pending command asked, or report a conflict. */
-  async #applyCatalogForPending(
+  async applyCatalogForPending(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
   ): Promise<boolean> {
     if (pending.operation === "reconcile-promoted") return true;
     if (pending.operation === "promote-and-apply") {
-      return await this.#finishPromotion(pending, proposal);
+      return await this.finishPromotion(pending, proposal);
     }
     if (pending.operation === "rollback-applied") {
-      return await this.#finishRollback(pending, proposal);
+      return await this.finishRollback(pending, proposal);
     }
     return false;
   }
 
-  async #finishPromotion(
+  async finishPromotion(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
   ): Promise<boolean> {
@@ -594,7 +594,7 @@ export class EvolutionApplicationJournal {
     return true;
   }
 
-  async #finishRollback(
+  async finishRollback(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
   ): Promise<boolean> {
@@ -610,7 +610,7 @@ export class EvolutionApplicationJournal {
   }
 
   /** Old target, old catalog: nothing happened, so mark the command aborted. */
-  async #abortPending(
+  async abortPending(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     revision: number,
@@ -618,14 +618,14 @@ export class EvolutionApplicationJournal {
   ): Promise<void> {
     if (
       proposal.candidate.kind === "role-prompt" &&
-      !(await this.#verifyPromptAbortOutcome(pending))
+      !(await this.verifyPromptAbortOutcome(pending))
     ) {
-      return this.#requireRecovery();
+      return this.requireRecovery();
     }
     await this.finalizePendingAs("aborted", revision, liveTarget.digest);
   }
 
-  #catalogOutcomeMatchesPending(
+  catalogOutcomeMatchesPending(
     pending: PendingApplicationOperation,
     snapshot: EvolutionCatalogSnapshot,
     revision: number,
@@ -653,7 +653,7 @@ export class EvolutionApplicationJournal {
     );
   }
 
-  async #verifyPromptGitOutcome(pending: PendingApplicationOperation): Promise<boolean> {
+  async verifyPromptGitOutcome(pending: PendingApplicationOperation): Promise<boolean> {
     if (!pending.gitBaseHead || !pending.gitPath) return false;
     const current = await this.#git.currentCommit(this.#catalog.root);
     if (current === pending.gitBaseHead) return false;
@@ -670,7 +670,7 @@ export class EvolutionApplicationJournal {
     return diff.changedFiles.length === 1 && diff.changedFiles[0] === pending.gitPath;
   }
 
-  async #verifyPromptAbortOutcome(pending: PendingApplicationOperation): Promise<boolean> {
+  async verifyPromptAbortOutcome(pending: PendingApplicationOperation): Promise<boolean> {
     if (!pending.gitBaseHead || !pending.gitPath) return false;
     return (
       (await this.#git.currentCommit(this.#catalog.root)) === pending.gitBaseHead &&
@@ -678,7 +678,7 @@ export class EvolutionApplicationJournal {
     );
   }
 
-  async #restoreInterruptedPrompt(
+  async restoreInterruptedPrompt(
     proposal: EvolutionProposal,
     before: TargetDigestState,
   ): Promise<void> {
@@ -737,7 +737,7 @@ export class EvolutionApplicationJournal {
     }
   }
 
-  async #cleanPendingPromptTemps(relativePath: string): Promise<void> {
+  async cleanPendingPromptTemps(relativePath: string): Promise<void> {
     const absolute = path.resolve(this.#catalog.root, relativePath);
     const directory = path.dirname(absolute);
     if ((await this.#io.realpath(directory)) !== directory) {
@@ -760,7 +760,7 @@ export class EvolutionApplicationJournal {
     }
   }
 
-  async #completePendingFromLive(
+  async completePendingFromLive(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     catalogRevision: number,
@@ -868,7 +868,7 @@ export class EvolutionApplicationJournal {
   ): Promise<void> {
     const pending = this.#state.pending;
     if (!pending) return;
-    this.#dropSyntheticPredecessor(pending);
+    this.dropSyntheticPredecessor(pending);
     this.#state.completed.push({
       commandId: pending.commandId,
       operation: pending.operation,
@@ -884,14 +884,14 @@ export class EvolutionApplicationJournal {
       completedAt: new Date(this.#now()).toISOString(),
       humanDecision: pending.humanDecision,
     });
-    this.#rememberCommand(pending, catalogRevision, afterDigest);
+    this.rememberCommand(pending, catalogRevision, afterDigest);
     this.#state.pending = null;
     this.#state.recoveryRequired = false;
     await this.persist(this.#state.revision + 1);
   }
 
   /** A legacy synthetic predecessor leaves no trace once it is settled. */
-  #dropSyntheticPredecessor(pending: PendingApplicationOperation): void {
+  dropSyntheticPredecessor(pending: PendingApplicationOperation): void {
     const id = pending.previousApplication?.commandId;
     if (pending.operation !== "reconcile-promoted" || !id?.startsWith("legacy:")) return;
     if (this.#state.commands.has(id)) return;
@@ -903,7 +903,7 @@ export class EvolutionApplicationJournal {
   }
 
   /** Record the completed command so a replay binds it to its result. */
-  #rememberCommand(
+  rememberCommand(
     pending: PendingApplicationOperation,
     catalogRevision: number,
     afterDigest: string | null,
@@ -940,18 +940,18 @@ export class EvolutionApplicationJournal {
         "Application state revision must advance by exactly one",
       );
     }
-    const payload = this.#validatedPayload();
+    const payload = this.validatedPayload();
     const document: ApplicationDocument = {
       version: EVOLUTION_APPLICATION_DOCUMENT_VERSION,
       revision: nextRevision,
       payloadDigest: computePayloadDigest(payload),
       payload,
     };
-    await this.#writeDocument(`${JSON.stringify(document)}\n`, nextRevision);
+    await this.writeDocument(`${JSON.stringify(document)}\n`, nextRevision);
   }
 
   /** The in-memory state, validated: persisting an invalid state demands recovery. */
-  #validatedPayload(): ApplicationPayload {
+  validatedPayload(): ApplicationPayload {
     const candidatePayload: ApplicationPayload = {
       applications: [...this.#state.applications.values()].sort((a, b) =>
         a.proposalId < b.proposalId ? -1 : a.proposalId > b.proposalId ? 1 : 0,
@@ -977,21 +977,21 @@ export class EvolutionApplicationJournal {
   }
 
   /** Write through a temporary file, then rename and fsync the directory. */
-  async #writeDocument(serialized: string, nextRevision: number): Promise<void> {
+  async writeDocument(serialized: string, nextRevision: number): Promise<void> {
     const temporaryPath = `${this.#applicationFilePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
     try {
-      await this.#writeTemporary(serialized, temporaryPath);
+      await this.writeTemporary(serialized, temporaryPath);
       await this.#io.rename(temporaryPath, this.#applicationFilePath);
-      await this.#commitAfterRename(serialized, nextRevision);
+      await this.commitAfterRename(serialized, nextRevision);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       this.#state.recoveryRequired = true;
       this.#state.opened = false;
-      throw this.#persistError(error);
+      throw this.persistError(error);
     }
   }
 
-  async #writeTemporary(serialized: string, temporaryPath: string): Promise<void> {
+  async writeTemporary(serialized: string, temporaryPath: string): Promise<void> {
     await assertSafeRegularFileOrMissing(this.#io, this.#catalog.root, this.#applicationFilePath);
     const handle = await this.#io.open(temporaryPath, "wx", 0o600);
     try {
@@ -1003,7 +1003,7 @@ export class EvolutionApplicationJournal {
     }
   }
 
-  async #commitAfterRename(serialized: string, nextRevision: number): Promise<void> {
+  async commitAfterRename(serialized: string, nextRevision: number): Promise<void> {
     try {
       await this.#io.syncDirectory(this.#evolutionDirectory);
     } catch (error) {
@@ -1015,7 +1015,7 @@ export class EvolutionApplicationJournal {
     this.publishCommittedState();
   }
 
-  #persistError(error: unknown): EvolutionApplicationError {
+  persistError(error: unknown): EvolutionApplicationError {
     if (error instanceof RenameCompletedButSyncFailed) {
       return new EvolutionApplicationError(
         "RECOVERY_REQUIRED",

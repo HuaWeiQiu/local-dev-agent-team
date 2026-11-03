@@ -166,7 +166,7 @@ export class Watchdog {
     for (const runId of await this.source.liveRuns()) {
       const sample = await this.source.sample(runId);
       if (!sample) continue;
-      const history = this.#record(runId, sample);
+      const history = this.record(runId, sample);
       const verdict = progressVerdict(history, this.#options);
       // One message per stall: a run reported once stays reported until it moves
       // again, otherwise every tick would repeat the same alarm.
@@ -211,7 +211,7 @@ export class Watchdog {
     return timer;
   }
 
-  #record(runId: string, sample: WatchSample): WatchSample[] {
+  record(runId: string, sample: WatchSample): WatchSample[] {
     const history = [...(this.#history.get(runId) ?? []), sample].slice(-this.#options.historyLimit);
     this.#history.set(runId, history);
     return history;

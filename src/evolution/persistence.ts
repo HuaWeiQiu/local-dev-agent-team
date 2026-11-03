@@ -314,7 +314,7 @@ export class DurableEvolutionCatalog {
     revision: number;
     snapshot: EvolutionCatalogSnapshot;
   }> {
-    return await this.#enqueue(async () => ({
+    return await this.enqueue(async () => ({
       revision: this.#revision,
       snapshot: this.#catalog.snapshot(),
     }));
@@ -352,7 +352,7 @@ export class DurableEvolutionCatalog {
     candidate: unknown;
     origin?: "automatic-controller-v1";
   }): Promise<EvolutionProposal> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
       return working.propose(input);
     });
@@ -365,7 +365,7 @@ export class DurableEvolutionCatalog {
     decision: unknown,
     applicationCommandId?: string,
   ): Promise<{ proposal: EvolutionProposal; record: PromotionRecord }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
       return working.promote(proposalId, evidence, decision, applicationCommandId);
     });
@@ -377,7 +377,7 @@ export class DurableEvolutionCatalog {
     decision: unknown,
     applicationCommandId?: string,
   ): Promise<{ proposal: EvolutionProposal; record: RollbackRecord }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       const working = restoreEvolutionCatalog(this.#trust, this.#catalog.exportDurableMaterial());
       return working.rollback(proposalId, decision, applicationCommandId);
     });
@@ -393,8 +393,8 @@ export class DurableEvolutionCatalog {
     },
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) => working.propose(input));
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) => working.propose(input));
     return Object.freeze({ proposal: result, committedRevision });
   }
 
@@ -403,8 +403,8 @@ export class DurableEvolutionCatalog {
     at: string,
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.beginEvaluation(proposalId, at),
     );
     return Object.freeze({ proposal: result, committedRevision });
@@ -416,8 +416,8 @@ export class DurableEvolutionCatalog {
     at: string,
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.evaluate(proposalId, evidence, at),
     );
     return Object.freeze({ proposal: result, committedRevision });
@@ -429,8 +429,8 @@ export class DurableEvolutionCatalog {
     at: string,
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.evaluateServerPreflight(proposalId, evidence, at),
     );
     return Object.freeze({ proposal: result, committedRevision });
@@ -442,8 +442,8 @@ export class DurableEvolutionCatalog {
     at: string,
     writer?: object,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.evaluateAutomaticRun(proposalId, evidence, at),
     );
     return Object.freeze({ proposal: result, committedRevision });
@@ -460,8 +460,8 @@ export class DurableEvolutionCatalog {
     record: PromotionRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.promote(proposalId, evidence, decision, applicationCommandId),
     );
     return { ...result, committedRevision };
@@ -476,8 +476,8 @@ export class DurableEvolutionCatalog {
     record: RejectionRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.reject(proposalId, decision),
     );
     return { ...result, committedRevision };
@@ -492,8 +492,8 @@ export class DurableEvolutionCatalog {
     record: ArchiveRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.archive(proposalId, decision),
     );
     return { ...result, committedRevision };
@@ -508,8 +508,8 @@ export class DurableEvolutionCatalog {
     record: UnarchiveRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.unarchive(proposalId, decision),
     );
     return { ...result, committedRevision };
@@ -523,8 +523,8 @@ export class DurableEvolutionCatalog {
     record: DeletionRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.deleteProposal(proposalId, decision),
     );
     return { ...result, committedRevision };
@@ -540,14 +540,14 @@ export class DurableEvolutionCatalog {
     record: RollbackRecord;
     committedRevision: number;
   }> {
-    this.#assertWriter(writer);
-    const { result, committedRevision } = await this.#mutate((working) =>
+    this.assertWriter(writer);
+    const { result, committedRevision } = await this.mutate((working) =>
       working.rollback(proposalId, decision, applicationCommandId),
     );
     return { ...result, committedRevision };
   }
 
-  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.#mutationQueue.then(operation);
     this.#mutationQueue = result.then(
       () => undefined,
@@ -556,7 +556,7 @@ export class DurableEvolutionCatalog {
     return result;
   }
 
-  #assertWriter(writer: object | undefined): void {
+  assertWriter(writer: object | undefined): void {
     if (this.#exclusiveWriter && writer !== this.#exclusiveWriter) {
       throw new EvolutionPersistenceError(
         "Durable evolution catalog mutations are owned by its application coordinator",
@@ -564,10 +564,10 @@ export class DurableEvolutionCatalog {
     }
   }
 
-  #mutate<T>(
+  mutate<T>(
     operation: (working: EvolutionCatalog) => T,
   ): Promise<{ result: T; committedRevision: number }> {
-    return this.#enqueue(async () => await serializeCatalogFileMutation(this.filePath, async () => {
+    return this.enqueue(async () => await serializeCatalogFileMutation(this.filePath, async () => {
       if (this.#indeterminate) {
         throw new EvolutionPersistenceError(
           "Durable evolution catalog commit outcome is indeterminate; reopen the catalog before another mutation",
@@ -582,7 +582,7 @@ export class DurableEvolutionCatalog {
       const nextMaterial = working.exportDurableMaterial();
       const nextRevision = this.#revision + 1;
 
-      await this.#persist(nextMaterial, nextRevision, expectedRevision);
+      await this.persist(nextMaterial, nextRevision, expectedRevision);
 
       // Memory swap only after durable success.
       this.#catalog = working;
@@ -591,7 +591,7 @@ export class DurableEvolutionCatalog {
     }));
   }
 
-  async #persist(
+  async persist(
     material: EvolutionCatalogRestoreMaterial,
     nextRevision: number,
     expectedRevision: number,

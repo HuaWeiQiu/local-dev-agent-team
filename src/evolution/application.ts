@@ -377,7 +377,7 @@ export class EvolutionApplicationCoordinator {
   }
 
   async close(): Promise<void> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.#previewStore.clear();
       this.#state.opened = false;
       if (this.#state.catalogWriter) {
@@ -414,7 +414,7 @@ export class EvolutionApplicationCoordinator {
     catalog: EvolutionCatalogSnapshot;
     application: ApplicationStateSnapshot;
   }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertOpen();
       const { revision, snapshot } = await this.#catalog.readSnapshot();
       return isolate({
@@ -437,7 +437,7 @@ export class EvolutionApplicationCoordinator {
     promptContent?: Uint8Array;
     origin?: "automatic-controller-v1";
   }): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       const proposalInput = {
         id: input.id,
@@ -476,7 +476,7 @@ export class EvolutionApplicationCoordinator {
   async beginEvaluation(
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.beginEvaluation(
         proposalId,
@@ -490,7 +490,7 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.evaluate(
         proposalId,
@@ -505,7 +505,7 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.evaluateAutomaticRun(
         proposalId,
@@ -524,7 +524,7 @@ export class EvolutionApplicationCoordinator {
   async evaluateServerPreflight(
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       const transition = await this.preparePreflight(proposalId);
       if (transition.settled !== undefined) return transition.settled;
@@ -773,7 +773,7 @@ export class EvolutionApplicationCoordinator {
   }
 
   async assertServerPreflightEvaluation(proposalId: string): Promise<void> {
-    await this.#enqueue(async () => {
+    await this.enqueue(async () => {
       this.assertOpen();
       this.assertServerPreflightSource(this.requireProposal(proposalId));
     });
@@ -787,7 +787,7 @@ export class EvolutionApplicationCoordinator {
     record: RejectionRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.reject(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
@@ -809,7 +809,7 @@ export class EvolutionApplicationCoordinator {
     record: ArchiveRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.archive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
@@ -830,7 +830,7 @@ export class EvolutionApplicationCoordinator {
     record: UnarchiveRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.unarchive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
@@ -853,7 +853,7 @@ export class EvolutionApplicationCoordinator {
     record: DeletionRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertWritable();
       return await this.#catalog.deleteProposal(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
@@ -876,7 +876,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision?: number;
   }): Promise<ApplicationPreview> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.createPromotionPreview(input);
     });
   }
@@ -889,8 +889,8 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
-      return await this.#executeCommand({
+    return await this.enqueue(async () => {
+      return await this.executeCommand({
         commandId: input.commandId,
         operation: "promote-and-apply",
         proposalId: input.proposalId,
@@ -912,7 +912,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult | undefined> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
@@ -953,7 +953,7 @@ export class EvolutionApplicationCoordinator {
     mode: "adopt" | "apply";
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult | undefined> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
@@ -979,7 +979,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision?: number;
   }): Promise<ApplicationPreview> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.createRollbackPreview(input);
     });
   }
@@ -992,8 +992,8 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
-      return await this.#executeCommand({
+    return await this.enqueue(async () => {
+      return await this.executeCommand({
         commandId: input.commandId,
         operation: "rollback-applied",
         proposalId: input.proposalId,
@@ -1016,7 +1016,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision: number;
   }): Promise<ApplicationPreviewDescription> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.describe(input);
     });
   }
@@ -1036,7 +1036,7 @@ export class EvolutionApplicationCoordinator {
     /** Legacy Phase-2 prompt material; accepted only by reconcile/apply. */
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.assertOpen();
       const preface = this.reconcilePreface(input);
       const commandId = preface.commandId;
@@ -1068,7 +1068,7 @@ export class EvolutionApplicationCoordinator {
       }
       const { proposal, target, activeProposalId } = this.assertReconcilable(input);
 
-      const plan = await this.#planReconcile({
+      const plan = await this.planReconcile({
         proposal,
         target,
         snapshot,
@@ -1095,10 +1095,10 @@ export class EvolutionApplicationCoordinator {
       };
 
       if (input.mode === "adopt") {
-        return await this.#adoptLiveTarget(context);
+        return await this.adoptLiveTarget(context);
       }
 
-      return await this.#applyThroughJournal(context);
+      return await this.applyThroughJournal(context);
     });
   }
 
@@ -1116,12 +1116,12 @@ export class EvolutionApplicationCoordinator {
    *     purpose: the command is about to fail with RECOVERY_REQUIRED, and a persistence
    *     error thrown here would replace the reason the operator needs to see.
    */
-  async #applyThroughJournal(input: ReconcileContext): Promise<ApplicationCommandResult> {
+  async applyThroughJournal(input: ReconcileContext): Promise<ApplicationCommandResult> {
     const proposal = input.proposal;
-    await this.#stageReconcileMaterial(input);
+    await this.stageReconcileMaterial(input);
     const afterTarget = await this.#targets.plannedAfterState(proposal, input.beforeTarget);
-    await this.#assertQuiescentSafe();
-    const gitAuthorization = await this.#authorizeReconcileCommit(input);
+    await this.assertQuiescentSafe();
+    const gitAuthorization = await this.authorizeReconcileCommit(input);
     if (input.livePromptContent) {
       await this.#targets.ingestPromptMaterial(input.beforeTarget.digest!, input.livePromptContent);
     }
@@ -1153,7 +1153,7 @@ export class EvolutionApplicationCoordinator {
     this.#state.pending = pending;
     await this.#journal.persist(this.#state.revision + 1);
 
-    await this.#applyOrRecover(input, afterTarget, gitAuthorization);
+    await this.applyOrRecover(input, afterTarget, gitAuthorization);
 
     const liveAfter = await this.#targets.readTargetState(proposal.candidate);
     if (!targetStatesEqual(liveAfter, afterTarget)) {
@@ -1164,11 +1164,11 @@ export class EvolutionApplicationCoordinator {
         "Target apply completed with unexpected digest; manual recovery required",
       );
     }
-    return await this.#recordApplied(input, afterTarget);
+    return await this.recordApplied(input, afterTarget);
   }
 
   /** Stage the bytes the candidate needs, or read back the object it already has. */
-  async #stageReconcileMaterial(input: ReconcileContext): Promise<void> {
+  async stageReconcileMaterial(input: ReconcileContext): Promise<void> {
     const candidate = input.proposal.candidate;
     if (candidate.kind !== "role-prompt") {
       if (input.promptContent !== undefined) {
@@ -1187,7 +1187,7 @@ export class EvolutionApplicationCoordinator {
   }
 
   /** The commit this apply is allowed to make, when the candidate is a tracked prompt. */
-  async #authorizeReconcileCommit(
+  async authorizeReconcileCommit(
     input: ReconcileContext,
   ): Promise<ExactTrackedFileCommitAuthorization | undefined> {
     const candidate = input.proposal.candidate;
@@ -1204,7 +1204,7 @@ export class EvolutionApplicationCoordinator {
    * aborted command; anything else (including an error that already said recovery) leaves
    * the pending operation in place and marks the state as needing recovery.
    */
-  async #applyOrRecover(
+  async applyOrRecover(
     input: ReconcileContext,
     afterTarget: TargetDigestState,
     gitAuthorization: ExactTrackedFileCommitAuthorization | undefined,
@@ -1219,11 +1219,11 @@ export class EvolutionApplicationCoordinator {
         gitAuthorization,
       );
     } catch (error) {
-      throw await this.#settleApplyFailure(error, input);
+      throw await this.settleApplyFailure(error, input);
     }
   }
 
-  async #settleApplyFailure(
+  async settleApplyFailure(
     error: unknown,
     input: ReconcileContext,
   ): Promise<EvolutionApplicationError> {
@@ -1239,7 +1239,7 @@ export class EvolutionApplicationCoordinator {
   }
 
   /** Record an applied target: the proof, the completion, and the idempotency binding. */
-  async #recordApplied(
+  async recordApplied(
     input: ReconcileContext,
     afterTarget: TargetDigestState,
   ): Promise<ApplicationCommandResult> {
@@ -1321,8 +1321,8 @@ export class EvolutionApplicationCoordinator {
    * It reads the clock once. Adoption finishes without a target write, so its completion
    * carries the same instant as its decision — unlike apply, which stamps twice on purpose.
    */
-  async #adoptLiveTarget(input: ReconcileContext): Promise<ApplicationCommandResult> {
-    await this.#assertQuiescentSafe();
+  async adoptLiveTarget(input: ReconcileContext): Promise<ApplicationCommandResult> {
+    await this.assertQuiescentSafe();
     const expectedDigest =
       input.proposal.candidate.kind === "role-prompt"
         ? input.proposal.candidate.contentDigest
@@ -1421,7 +1421,7 @@ export class EvolutionApplicationCoordinator {
    * recording the live state here would make the rollback of a chained promotion restore
    * the wrong document.
    */
-  async #planReconcile(input: {
+  async planReconcile(input: {
     proposal: EvolutionProposal;
     target: ReturnType<typeof targetFromCandidate>;
     snapshot: EvolutionCatalogSnapshot;
@@ -1447,7 +1447,7 @@ export class EvolutionApplicationCoordinator {
     });
     const candidateDigest = computeCandidateDigest(input.proposal.candidate);
     const beforeTarget = await this.#targets.readTargetState(input.proposal.candidate);
-    const livePromptContent = await this.#readLivePromptForReconcile(
+    const livePromptContent = await this.readLivePromptForReconcile(
       input.proposal,
       beforeTarget,
     );
@@ -1455,7 +1455,7 @@ export class EvolutionApplicationCoordinator {
       input.proposal.id,
       humanDecision,
     );
-    const legacyPredecessor = await this.#resolveLegacyPredecessor({
+    const legacyPredecessor = await this.resolveLegacyPredecessor({
       snapshot: input.snapshot,
       restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
       liveTarget: beforeTarget,
@@ -1484,7 +1484,7 @@ export class EvolutionApplicationCoordinator {
    * live document to read. A prompt target that does not exist yet cannot be reconciled:
    * reconcile records an accomplished state, it does not create one.
    */
-  async #readLivePromptForReconcile(
+  async readLivePromptForReconcile(
     proposal: EvolutionProposal,
     beforeTarget: TargetDigestState,
   ): Promise<Buffer | undefined> {
@@ -1631,7 +1631,7 @@ export class EvolutionApplicationCoordinator {
   // Internal command execution
   // ---------------------------------------------------------------------------
 
-  async #executeCommand(input: {
+  async executeCommand(input: {
     commandId: string;
     operation: "promote-and-apply" | "rollback-applied";
     proposalId: string;
@@ -1748,7 +1748,7 @@ export class EvolutionApplicationCoordinator {
       );
     }
 
-    await this.#assertQuiescentSafe();
+    await this.assertQuiescentSafe();
 
     const preflight =
       input.operation === "promote-and-apply"
@@ -2091,7 +2091,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  async #assertQuiescentSafe(): Promise<void> {
+  async assertQuiescentSafe(): Promise<void> {
     try {
       await this.#assertQuiescent();
     } catch (error) {
@@ -2127,7 +2127,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  async #resolveLegacyPredecessor(input: {
+  async resolveLegacyPredecessor(input: {
     snapshot: EvolutionCatalogSnapshot;
     restoredProposalId: string | null;
     liveTarget: TargetDigestState;
@@ -2222,7 +2222,7 @@ export class EvolutionApplicationCoordinator {
     return { application: isolate(application), completion: isolate(completion) };
   }
 
-  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.#queue.then(operation).catch((error: unknown) => {
       throw mapToApplicationError(error);
     });
