@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { PlanningStage } from "../src/workflow/planning.js";
 import { assessPlanCompleteness } from "../src/domain/plan.js";
-import type { ExploreSummary, TaskPlan } from "../src/domain/contracts.js";
+import type { ArchitectureDesign, ExploreSummary, TaskPlan } from "../src/domain/contracts.js";
+import type { RoleAgentService } from "../src/agents/service.js";
+import type { RunStateStore } from "../src/state/store.js";
+import type { CheckpointService } from "../src/workflow/checkpoints.js";
+import type { RunContext, RunnerEnv } from "../src/workflow/types.js";
+import type { RunState } from "../src/state/types.js";
 
 function plan(patch: Partial<TaskPlan> = {}): TaskPlan {
   return {
@@ -18,11 +23,13 @@ function plan(patch: Partial<TaskPlan> = {}): TaskPlan {
       },
     ],
     ...patch,
-  } as TaskPlan;
+  };
 }
 
-function design(patch: Record<string, unknown> = {}) {
+function design(patch: Partial<ArchitectureDesign> = {}): ArchitectureDesign {
   return {
+    summary: "导出模块",
+    source: "architect",
     elements: [{ id: "export", name: "导出", kind: "module", responsibility: "导出", paths: ["src"] }],
     relations: [],
     sequence: [],
@@ -30,15 +37,63 @@ function design(patch: Record<string, unknown> = {}) {
   };
 }
 
-function stage(options: { roles?: Record<string, unknown>; plan?: unknown } = {}) {
+/** The two collaborators the stage needs; both are classes, so a stand-in has to be cast once, here. */
+function stage(options: { roles?: Record<string, unknown> } = {}) {
   const env = {
-    loaded: { config: { project: { name: "demo" }, roles: options.roles ?? { worker: { allowedProfiles: ["p"] } } } },
-  } as never;
-  const checkpoints = { save: vi.fn() } as never;
+    loaded: {
+      config: {
+        project: { name: "demo" },
+        roles: options.roles ?? { worker: { allowedProfiles: ["p"] } },
+      },
+    },
+  } as unknown as RunnerEnv;
+  const checkpoints = { save: vi.fn() } as unknown as CheckpointService;
   return new PlanningStage(env, checkpoints);
 }
 
-function context(plans: unknown[], overrides: Record<string, unknown> = {}) {
+/**
+ * A run state in the shape production actually holds, so call sites need no
+ * assertion to hand it to the stage.
+ */
+function runState(patch: Partial<RunState> = {}): RunState {
+  return {
+    id: "run-1",
+    goal: "实现导出功能",
+    root: "/tmp/run-1",
+    configPath: "/tmp/agent-team.yaml",
+    baseBranch: "main",
+    baseCommit: "abc",
+    integrationBranch: "agent-team/run-1/integration",
+    integrationWorktree: "/tmp/run-1",
+    status: "implementing",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    profileOverrides: {},
+    strategy: {
+      name: "balanced",
+      maxParallel: 2,
+      maxReworkAttempts: 2,
+      executionTimeoutSeconds: 14_400,
+      maxAgentInvocations: 64,
+      maxProcessOutputBytes: 1_048_576,
+      maxArtifactBytes: 1_073_741_824,
+      roleProfiles: {},
+      approvalGates: ["final"],
+      approvalTimeoutSeconds: 86_400,
+      topology: { version: 1, mode: "parallel-dag", stages: [], edges: [] },
+      swarmMaxConcurrency: 2,
+      explore: { enabled: false, maxInjectedChars: 400, failOpen: true },
+    },
+    tasks: [],
+    intake: { goalSummary: "g", instructionsForArchitect: "拆分", constraints: [], risk: "low" },
+    history: [],
+    ...patch,
+  };
+}
+
+type TestContext = RunContext & { agent: RoleAgentService & { runStructured: ReturnType<typeof vi.fn> } };
+
+function context(plans: unknown[], overrides: Partial<RunContext> = {}): TestContext {
   const runStructured = vi.fn(async () => ({
     value: plans.shift() ?? plan(),
     profileName: "fake",
@@ -46,39 +101,36 @@ function context(plans: unknown[], overrides: Record<string, unknown> = {}) {
     text: "{}",
   }));
   return {
-    state: {
-      id: "run-1",
-      goal: "实现导出功能",
-      baseCommit: "abc",
-      intake: { goalSummary: "g", instructionsForArchitect: "拆分" },
-      strategy: { roleProfiles: {}, explore: undefined },
-      history: [],
-    },
+    state: runState(),
     store: {
       transition: vi.fn(async () => undefined),
       emit: vi.fn(),
       artifactDirectory: vi.fn(() => "/tmp/agent-team-explore"),
-    },
-    agent: { runStructured },
+    } as unknown as RunStateStore,
+    git: {} as unknown as RunContext["git"],
+    budget: {} as unknown as RunContext["budget"],
     ...overrides,
-  } as never;
+    // Last, so the mock stays a mock: `overrides` would widen it back to the
+    // interface and every `mockRejectedValue` call below would lose its type.
+    agent: { runStructured } as unknown as TestContext["agent"],
+  };
 }
 
 describe("architectPlan", () => {
   it("accepts the first plan when it is complete", async () => {
-    const ctx = context([plan({ design: design() } as never)]);
+    const ctx = context([plan({ design: design() })]);
     const result = await stage().architectPlan(ctx);
     expect(result.summary).toBe("独立任务");
-    expect((ctx as never as { agent: { runStructured: ReturnType<typeof vi.fn> } }).agent.runStructured).toHaveBeenCalledTimes(1);
+    expect(ctx.agent.runStructured).toHaveBeenCalledTimes(1);
   });
 
   it("retries once when the first plan lacks a design", async () => {
     const first = plan();
-    const second = plan({ design: design() } as never);
+    const second = plan({ design: design() });
     const ctx = context([first, second]);
     const result = await stage().architectPlan(ctx);
     expect(result.summary).toBe("独立任务");
-    expect((ctx as never as { agent: { runStructured: ReturnType<typeof vi.fn> } }).agent.runStructured).toHaveBeenCalledTimes(2);
+    expect(ctx.agent.runStructured).toHaveBeenCalledTimes(2);
   });
 
   it("falls back to the named plan when both attempts are rejected", async () => {
@@ -91,21 +143,21 @@ describe("architectPlan", () => {
   });
 
   it("requires an intake", async () => {
-    const ctx = context([plan({ design: design() } as never)]);
-    (ctx as never as { state: { intake: unknown } }).state.intake = undefined;
+    const ctx = context([plan({ design: design() })]);
+    delete ctx.state.intake;
     await expect(stage().architectPlan(ctx)).rejects.toThrow(/goal intake/);
   });
 });
 
 describe("maybeExplore", () => {
-  const explore = { enabled: true, maxInjectedChars: 400, failOpen: true } as never;
+  const explore = { enabled: true, maxInjectedChars: 400, failOpen: true };
 
   it("does nothing when exploration is disabled", async () => {
     const ctx = context([]);
     const result = await stage().maybeExplore(
-      (ctx as never as { state: never }).state,
-      (ctx as never as { store: never }).store,
-      (ctx as never as { agent: never }).agent,
+      ctx.state,
+      ctx.store,
+      ctx.agent,
       "目标",
       "abc",
       undefined,
@@ -123,17 +175,17 @@ describe("maybeExplore", () => {
       notes: [],
     } as unknown as ExploreSummary;
     const ctx = context([summary]);
-    const state = { ...(ctx as never as { state: object }).state, strategy: { roleProfiles: {}, explore } };
+    const state = { ...ctx.state, strategy: { ...ctx.state.strategy, explore } };
     const result = await stage({ roles: { researcher: {}, worker: {} } }).maybeExplore(
-      state as never,
-      (ctx as never as { store: never }).store,
-      (ctx as never as { agent: never }).agent,
+      state,
+      ctx.store,
+      ctx.agent,
       "目标",
       "abc",
       undefined,
     );
     expect(result?.summary).toBe("找到 2 个模块");
-    expect((ctx as never as { store: { emit: ReturnType<typeof vi.fn> } }).store.emit).toHaveBeenCalledWith(
+    expect(ctx.store.emit).toHaveBeenCalledWith(
       "run-1",
       "run.explore.completed",
       expect.objectContaining({ success: true }),
@@ -142,14 +194,14 @@ describe("maybeExplore", () => {
 
   it("fails open when the researcher throws", async () => {
     const ctx = context([]);
-    (ctx as never as { agent: { runStructured: ReturnType<typeof vi.fn> } }).agent.runStructured.mockRejectedValue(
+    ctx.agent.runStructured.mockRejectedValue(
       new Error("boom"),
     );
-    const state = { ...(ctx as never as { state: object }).state, strategy: { roleProfiles: {}, explore } };
+    const state = { ...ctx.state, strategy: { ...ctx.state.strategy, explore } };
     const result = await stage().maybeExplore(
-      state as never,
-      (ctx as never as { store: never }).store,
-      (ctx as never as { agent: never }).agent,
+      state,
+      ctx.store,
+      ctx.agent,
       "目标",
       "abc",
       undefined,
@@ -159,18 +211,18 @@ describe("maybeExplore", () => {
 
   it("rethrows when failOpen is off", async () => {
     const ctx = context([]);
-    (ctx as never as { agent: { runStructured: ReturnType<typeof vi.fn> } }).agent.runStructured.mockRejectedValue(
+    ctx.agent.runStructured.mockRejectedValue(
       new Error("boom"),
     );
     const state = {
-      ...(ctx as never as { state: object }).state,
-      strategy: { roleProfiles: {}, explore: { ...explore, failOpen: false } },
+      ...ctx.state,
+      strategy: { ...ctx.state.strategy, explore: { ...explore, failOpen: false } },
     };
     await expect(
       stage().maybeExplore(
-        state as never,
-        (ctx as never as { store: never }).store,
-        (ctx as never as { agent: never }).agent,
+        state,
+        ctx.store,
+        ctx.agent,
         "目标",
         "abc",
         undefined,
@@ -189,6 +241,6 @@ describe("controller plan", () => {
 
 describe("plan completeness helper", () => {
   it("matches the exported rules", () => {
-    expect(assessPlanCompleteness({ tasks: [] }, "没有编号").status).toBe("complete");
+    expect(assessPlanCompleteness(plan({ tasks: [] }), "没有编号").status).toBe("complete");
   });
 });
