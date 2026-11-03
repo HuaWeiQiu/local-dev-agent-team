@@ -6,13 +6,25 @@ import {
   parseOutputFileResult,
 } from "../src/adapters/shared.js";
 import type { AgentInvocation } from "../src/adapters/types.js";
+import type { ProcessResult } from "../src/process/run.js";
 
-function result(stdout: string, patch: Record<string, unknown> = {}) {
-  return { command: "x", args: [], cwd: "/repo", exitCode: 0, stdout, stderr: "", durationMs: 1, ...patch };
+/** A process result in the shape `parseOutputFileResult` reads, timed-out fields included. */
+function result(stdout: string, patch: Partial<ProcessResult> = {}): ProcessResult {
+  return {
+    command: "x",
+    args: [],
+    exitCode: 0,
+    stdout,
+    stderr: "",
+    durationMs: 1,
+    timedOut: false,
+    signal: null,
+    ...patch,
+  };
 }
 
-function invocation(patch: Record<string, unknown> = {}) {
-  return { command: "x", args: [], cwd: "/repo", ...patch } as AgentInvocation;
+function invocation(patch: Partial<AgentInvocation> = {}): AgentInvocation {
+  return { command: "x", args: [], cwd: "/repo", timeoutMs: 1_000, ...patch };
 }
 
 describe("parseClaudeJson", () => {
