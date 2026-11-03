@@ -101,7 +101,10 @@ function renderHeader(report, counts, generatedAt, kind) {
 
 /** The one thing a reader must act on: broken scan, clean ledger, or new debt. */
 function renderVerdict(report, kind, raised) {
-  if (kind === "infrastructure") return renderInfrastructure(report);
+  // Narrow on the payload, not on a separate `kind` variable: the branch that
+  // reads `error` has to prove the payload is the infrastructure shape.
+  if (report?.kind === "infrastructure") return renderInfrastructure(report);
+  if (kind === "infrastructure") return renderInfrastructure(report ?? {});
   if (raised === 0) return ["账本没有上涨。`fixed` 是这一轮还清的债，供参考。", ""];
   return [
     ...section("新增债务", report.new ?? [], (entry) => `${entry.key} — ${fmt(entry.score)}`),
@@ -113,12 +116,15 @@ function renderVerdict(report, kind, raised) {
   ];
 }
 
+/**
+ * @param {{ error: string }} report
+ */
 function renderInfrastructure(report) {
   return [
     "扫描本身没跑完，**这不是账本结论**。先修基础设施再谈分数：",
     "",
     "```text",
-    String(report.error ?? "unknown error"),
+    String(report.error),
     "```",
     "",
   ];

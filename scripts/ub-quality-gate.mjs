@@ -904,9 +904,60 @@ export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPat
 }
 
 /**
+ * @typedef {Object} DriftCounts
+ * @property {number} new
+ * @property {number} worse
+ * @property {number} fixed
+ */
+
+/**
+ * The payload has two shapes and `kind` discriminates them. An infrastructure
+ * failure carries an `error`; a ledger result does not. Written as one flat
+ * object with an optional `error`, a consumer could read it on the ledger branch
+ * and get `undefined` from a field the type promised — which is how the nightly
+ * issue once reported "unknown error" as if the scan had run.
+ *
+ * @typedef {Object} InfrastructureDrift
+ * @property {"infrastructure"} kind
+ * @property {string} generatedAt
+ * @property {number} threshold
+ * @property {string} baseline
+ * @property {string} error
+ * @property {DriftCounts} counts
+ * @property {unknown[]} new
+ * @property {unknown[]} worse
+ * @property {unknown[]} fixed
+ * @property {unknown[]} withinNoise
+ * @property {Record<string, unknown>} [provenance]
+ */
+
+/**
+ * @typedef {Object} LedgerDrift
+ * @property {"ledger"} kind
+ * @property {string} generatedAt
+ * @property {number} threshold
+ * @property {string} baseline
+ * @property {DriftCounts} counts
+ * @property {unknown[]} new
+ * @property {unknown[]} worse
+ * @property {unknown[]} fixed
+ * @property {unknown[]} withinNoise
+ * @property {Record<string, unknown>} [provenance]
+ */
+
+/**
  * The file the nightly workflow reads. `kind` is the whole point: an infrastructure
  * failure (missing tool chain, crashed scan, absent baseline) is not a ledger with
  * three zero counters, and must never be reported as "clean".
+ *
+ * @param {{
+ *   report?: { new: unknown[], worse: unknown[], fixed: unknown[], withinNoise?: unknown[] },
+ *   error?: string,
+ *   threshold?: number,
+ *   baseline?: string,
+ *   provenance?: Record<string, unknown>,
+ * }} options
+ * @returns {InfrastructureDrift | LedgerDrift}
  */
 export function driftPayload({
   report,
