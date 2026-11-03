@@ -48,6 +48,39 @@ const USAGE = `usage: node scripts/coverage-caliber-report.mjs --self-check
 /** Relative and absolute bars for "this move is noise, not a difference". */
 export const NOISE = { relative: 0.05, absolute: 0.5 };
 
+const SETTERS = {
+  "--repeats": (options, value) => {
+    options.repeats = Number(value);
+  },
+  "--modes": (options, value) => {
+    options.modes = value.split(",");
+  },
+  "--keys": (options, value) => {
+    options.keys = value;
+  },
+  "--commits": (options, value) => {
+    options.commits = value.split(",");
+  },
+  "--format": (options, value) => {
+    options.format = value;
+  },
+  "--ub": (options, value) => {
+    options.ub = value;
+  },
+};
+
+const FLAGS = {
+  "--self-check": (options) => {
+    options.selfCheck = true;
+  },
+  "--help": (options) => {
+    options.help = true;
+  },
+  "-h": (options) => {
+    options.help = true;
+  },
+};
+
 export function parseArgs(argv, env = process.env) {
   const options = {
     repeats: 8,
@@ -60,21 +93,17 @@ export function parseArgs(argv, env = process.env) {
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    const value = () => {
-      const next = argv[index + 1];
-      if (!next) throw new Error(`${arg} requires a value`);
-      index += 1;
-      return next;
-    };
-    if (arg === "--help" || arg === "-h") return { ...options, help: true };
-    else if (arg === "--self-check") options.selfCheck = true;
-    else if (arg === "--repeats") options.repeats = Number(value());
-    else if (arg === "--modes") options.modes = value().split(",");
-    else if (arg === "--keys") options.keys = value();
-    else if (arg === "--commits") options.commits = value().split(",");
-    else if (arg === "--format") options.format = value();
-    else if (arg === "--ub") options.ub = value();
-    else throw new Error(`unknown argument '${arg}'\n${USAGE}`);
+    const flag = FLAGS[arg];
+    if (flag) {
+      flag(options);
+      continue;
+    }
+    const setter = SETTERS[arg];
+    if (!setter) throw new Error(`unknown argument '${arg}'\n${USAGE}`);
+    const next = argv[index + 1];
+    if (!next) throw new Error(`${arg} requires a value`);
+    setter(options, next);
+    index += 1;
   }
   return options;
 }
@@ -199,8 +228,9 @@ export function summarize(report) {
   return counts;
 }
 
-function selfCheck() {
-  const stable = [
+/** The fixture the self-check judges: one key per verdict it must get right. */
+export function selfCheckCells() {
+  return [
     { commit: "a", mode: "self", scores: new Map([["k#stable", 20]]) },
     { commit: "a", mode: "self", scores: new Map([["k#stable", 20.1]]) },
     { commit: "a", mode: "existing", scores: new Map([["k#stable", 20]]) },
@@ -209,15 +239,27 @@ function selfCheck() {
     { commit: "a", mode: "self", scores: new Map([["k#source", 20]]) },
     { commit: "a", mode: "existing", scores: new Map([["k#source", 30]]) },
   ];
-  const report = buildReport(stable);
+}
+
+/** What is wrong with a self-check report, or nothing when it is trustworthy. */
+export function selfCheckProblems(report, rendered, renderedAgain) {
   const verdicts = Object.fromEntries(report.rows.map((row) => [row.key, row.verdict]));
   const problems = [];
   if (verdicts["k#stable"] !== "stable") problems.push(`stable 判成 ${verdicts["k#stable"]}`);
   if (verdicts["k#noisy"] !== "run-sensitive") problems.push(`run-sensitive 判成 ${verdicts["k#noisy"]}`);
-  if (verdicts["k#source"] !== "source-sensitive") problems.push(`source-sensitive 判成 ${verdicts["k#source"]}`);
-  const once = renderMarkdown(report);
-  const twice = renderMarkdown(buildReport(stable));
-  if (once !== twice) problems.push("连跑两次报告不一致");
+  if (verdicts["k#source"] !== "source-sensitive") {
+    problems.push(`source-sensitive 判成 ${verdicts["k#source"]}`);
+  }
+  if (rendered !== renderedAgain) problems.push("连跑两次报告不一致");
+  return problems;
+}
+
+export function selfCheck() {
+  const problems = selfCheckProblems(
+    buildReport(selfCheckCells()),
+    renderMarkdown(buildReport(selfCheckCells())),
+    renderMarkdown(buildReport(selfCheckCells())),
+  );
   if (problems.length > 0) {
     process.stderr.write(`self-check FAILED:\n  ${problems.join("\n  ")}\n`);
     return 2;
@@ -226,31 +268,62 @@ function selfCheck() {
   return 0;
 }
 
-export function main(argv = process.argv.slice(2)) {
-  let options;
+/**
+ * The process boundary, behind one object. The tool's own flow (which cells it measures,
+ * what it writes when two runs disagree) is then ordinary code a test can drive, instead
+ * of something only a five-minute subprocess run can reach.
+ */
+export function defaultIO(cwd = process.cwd()) {
+  return {
+    cwd,
+    read: (file) => readFileSync(file, "utf8"),
+    write: (file, text) => {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, text);
+    },
+    copy: (from, to) => {
+      mkdirSync(path.dirname(to), { recursive: true });
+      copyFileSync(from, to);
+    },
+    exists: (file) => existsSync(file),
+    mkdirp: (dir) => mkdirSync(dir, { recursive: true }),
+    // Execution is part of the boundary too: without it a test would launch the real suite.
+    run: (command, args) => {
+      execFileSync(command, args, { stdio: "ignore" });
+    },
+    runTool: (command, args) => spawnSync(command, args, { stdio: "ignore" }),
+  };
+}
+
+export function main(argv = process.argv.slice(2), io = defaultIO()) {
+  const parsed = parseOrReport(argv);
+  if (typeof parsed === "number") return parsed;
+  if (parsed.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return 0;
+  }
+  if (parsed.selfCheck) return selfCheck();
+  if (!parsed.ub) {
+    process.stderr.write("ub-mode tool chain not found; pass --ub PATH\n");
+    return 1;
+  }
+  return writeReport(parsed, io);
+}
+
+/** Bad arguments are a usage problem, not a crash: print and hand back the exit code. */
+function parseOrReport(argv) {
   try {
-    options = parseArgs(argv);
+    return parseArgs(argv);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
-  if (options.help) {
-    process.stdout.write(`${USAGE}\n`);
-    return 0;
-  }
-  if (options.selfCheck) return selfCheck();
-  if (!options.ub) {
-    process.stderr.write("ub-mode tool chain not found; pass --ub PATH\n");
-    return 1;
-  }
+}
+
+function writeReport(options, io) {
   try {
-    const measurements = measureCells(options);
-    const report = buildReport(measurements, { keys: options.keys });
-    const body =
-      options.format === "json"
-        ? `${JSON.stringify({ summary: summarize(report), rows: report.rows }, null, 2)}\n`
-        : renderMarkdown(report);
-    process.stdout.write(body);
+    const report = buildReport(measureCells(options, io), { keys: options.keys });
+    process.stdout.write(options.format === "json" ? asJson(report) : renderMarkdown(report));
     return 0;
   } catch (error) {
     process.stderr.write(`could not measure: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -258,81 +331,86 @@ export function main(argv = process.argv.slice(2)) {
   }
 }
 
+function asJson(report) {
+  return `${JSON.stringify({ summary: summarize(report), rows: report.rows }, null, 2)}\n`;
+}
+
 /** Produce and score one cell per (commit, mode, repeat); keep the reports. */
-function measureCells(options) {
-  const artifactRoot = path.join(process.cwd(), "target", "coverage", "caliber");
+export function measureCells(options, io = defaultIO()) {
+  const artifactRoot = path.join(io.cwd, "target", "coverage", "caliber");
   const commits = options.commits.length > 0 ? options.commits : ["HEAD"];
-  const measurements = [];
+  const cells = [];
   for (const commit of commits) {
     for (const mode of options.modes) {
       for (let run = 1; run <= options.repeats; run += 1) {
         const dir = path.join(artifactRoot, commit, mode, `run-${run}`);
-        mkdirSync(dir, { recursive: true });
-        const produced = produceCoverage(mode, options.ub, dir);
-        copyFileSync(produced.lcov, path.join(dir, "lcov.info"));
-        if (run > 1) keepIfDivergent(artifactRoot, commit, mode, dir, run);
-        // Self mode already scored the run it just produced; re-scoring would double the
-        // cost without adding information.
-        measurements.push({ commit, mode, scores: produced.scores ?? scoreLcov(options.ub) });
+        io.mkdirp(dir);
+        const produced = produceCoverage(mode, options, io);
+        io.copy(produced.lcov, path.join(dir, "lcov.info"));
+        if (run > 1) keepIfDivergent(artifactRoot, commit, mode, dir, run, io);
+        // Self mode already scored the run it produced; re-scoring would double the cost.
+        cells.push({ commit, mode, scores: produced.scores ?? scoreLcov(options, io) });
       }
     }
   }
-  return measurements;
+  return cells;
 }
 
-function produceCoverage(mode, ub, dir) {
-  const lcov = path.join(process.cwd(), "target", "coverage", "typescript", "lcov.info");
-  if (mode === "existing") {
-    // Same command the ledger uses: one worker on purpose, because that is what the
-    // baseline is measured with. Comparing calibers is only meaningful when one of them
-    // is the caliber the numbers come from.
-    execFileSync(
-      "npx",
-      ["vitest", "run", "--coverage", "--coverage.reporter=lcov", "--maxWorkers=1"],
-      { stdio: "ignore" },
-    );
-    if (!existsSync(lcov)) throw new Error(`no coverage report after the run (${dir})`);
-    return { lcov };
+function canonicalLcov(io) {
+  return path.join(io.cwd, "target", "coverage", "typescript", "lcov.info");
+}
+
+export function produceCoverage(mode, options, io = defaultIO()) {
+  // Same command the ledger uses in existing mode: one worker, because that is what the
+  // baseline is measured with. `self` lets crapper collect in parallel on purpose — it is
+  // the mode kept to expose collection-caliber differences.
+  const command =
+    mode === "existing"
+      ? ["vitest", "run", "--coverage", "--coverage.reporter=lcov", "--maxWorkers=1"]
+      : undefined;
+  if (command) {
+    io.run("npx", command);
+    if (!io.exists(canonicalLcov(io))) throw new Error("no coverage report after the run");
+    return { lcov: canonicalLcov(io) };
   }
-  runTool(ub, ["crapper", "src", "web", "scripts", "--threshold", "10"]);
-  const produced = path.join(process.cwd(), "target", "coverage", "typescript", "lcov.info");
-  if (!existsSync(produced)) throw new Error("crapper produced no coverage report");
-  return { lcov: produced, scores: readMetricsScores() };
+  runTool(options.ub, ["crapper", "src", "web", "scripts", "--threshold", "10"], io);
+  if (!io.exists(canonicalLcov(io))) throw new Error("crapper produced no coverage report");
+  return { lcov: canonicalLcov(io), scores: readMetricsScores(io) };
 }
 
-/** Two runs that covered different lines are a finding: keep both for offline diff. */
-function keepIfDivergent(root, commit, mode, dir, run) {
+/** Two runs that covered different lines are the finding: keep both for offline diff. */
+export function keepIfDivergent(root, commit, mode, dir, run, io = defaultIO()) {
   const previous = path.join(root, commit, mode, `run-${run - 1}`, "lcov.info");
   const current = path.join(dir, "lcov.info");
-  if (!existsSync(previous)) return;
-  const a = coverageSignature(readFileSync(previous, "utf8"));
-  const b = coverageSignature(readFileSync(current, "utf8"));
-  if (a === b) return;
+  if (!io.exists(previous) || !io.exists(current)) return undefined;
+  const a = coverageSignature(io.read(previous));
+  const b = coverageSignature(io.read(current));
+  if (a === b) return undefined;
   const unstable = path.join(root, commit, mode, "unstable");
-  mkdirSync(unstable, { recursive: true });
-  writeFileSync(path.join(unstable, `run-${run - 1}.lcov.info`), readFileSync(previous));
-  writeFileSync(path.join(unstable, `run-${run}.lcov.info`), readFileSync(current));
-  process.stderr.write(`divergent coverage kept under ${path.relative(process.cwd(), unstable)}\n`);
+  io.copy(previous, path.join(unstable, `run-${run - 1}.lcov.info`));
+  io.copy(current, path.join(unstable, `run-${run}.lcov.info`));
+  process.stderr.write(`divergent coverage kept under ${path.relative(io.cwd, unstable)}\n`);
+  return unstable;
 }
 
 /**
  * Exit 2 means "scores are over the threshold" — the normal outcome on this repository,
  * not a failure. Only a missing metrics file means the measurement did not happen.
  */
-function runTool(ub, args) {
-  const result = spawnSync(ub, args, { stdio: "ignore" });
+export function runTool(ub, args, io = defaultIO()) {
+  const result = io.runTool(ub, args);
   if (result.status !== 0 && result.status !== 2) {
     throw new Error(`${path.basename(ub)} ${args[0]} exited ${result.status}`);
   }
 }
 
-function scoreLcov(ub) {
-  runTool(ub, ["crapper", "src", "web", "scripts", "--use-existing-coverage", "--threshold", "10"]);
-  return readMetricsScores();
+function scoreLcov(options, io) {
+  runTool(options.ub, ["crapper", "src", "web", "scripts", "--use-existing-coverage", "--threshold", "10"], io);
+  return readMetricsScores(io);
 }
 
-function readMetricsScores() {
-  const text = readFileSync(path.join(process.cwd(), ".metrics", "crap.edn"), "utf8");
+function readMetricsScores(io = defaultIO()) {
+  const text = io.read(path.join(io.cwd, ".metrics", "crap.edn"));
   const scores = new Map();
   for (const match of text.matchAll(/\{:name "([^"]*)", :namespace "([^"]*)", .*:crap ([\d.]+)\}/g)) {
     scores.set(`${match[2]}#${match[1]}`, Number(match[3]));
