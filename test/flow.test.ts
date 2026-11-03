@@ -83,11 +83,20 @@ describe("flow templates", () => {
     cyclic.run.edges.push({ from: "decide", to: "plan" });
     expect(() => validateTemplate(cyclic)).toThrow();
 
-    const unknown = cloneTemplate("standard");
-    unknown.run.nodes.find((node) => node.id === "explore")!.when = {
-      all: [{ fact: "madeUp" as never }],
+    // The template a user could have written: built as `unknown`, so the made-up
+    // fact is legal at the construction site and the validator is what rejects it.
+    const base = cloneTemplate("standard");
+    const unknown: unknown = {
+      ...base,
+      run: {
+        ...base.run,
+        nodes: base.run.nodes.map((node) =>
+          node.id === "explore" ? { ...node, when: { all: [{ fact: "madeUp" }] } } : node,
+        ),
+      },
     };
     expect(() => validateTemplate(unknown)).toThrow(/unknown fact/);
+    expect(() => validateTemplate(null)).toThrow(/A flow template object is required/);
   });
 
   it("keeps the quick flow free of model review and architect nodes", () => {
