@@ -247,13 +247,13 @@ export class EvolutionApplicationCoordinator {
       targets: this.#targets,
       state: this.#state,
       host: {
-        assertOpen: () => this.#assertOpen(),
-        assertWritable: () => this.#assertWritable(),
-        requireProposal: (proposalId) => this.#requireProposal(proposalId),
-        assertPolicyAllows: (proposal) => this.#assertPolicyAllows(proposal),
-        assertPromotable: (proposal) => this.#assertPromotable(proposal),
+        assertOpen: () => this.assertOpen(),
+        assertWritable: () => this.assertWritable(),
+        requireProposal: (proposalId) => this.requireProposal(proposalId),
+        assertPolicyAllows: (proposal) => this.assertPolicyAllows(proposal),
+        assertPromotable: (proposal) => this.assertPromotable(proposal),
         assertNoUnreconciledConflict: (proposal, op) =>
-          this.#assertNoUnreconciledConflict(proposal, op),
+          this.assertNoUnreconciledConflict(proposal, op),
       },
       now: options.now,
       previewTtlMs: options.previewTtlMs,
@@ -341,13 +341,13 @@ export class EvolutionApplicationCoordinator {
 
   /** Read a proposal from the durable catalog (no mutation). */
   readProposal(proposalId: string): EvolutionProposal | undefined {
-    this.#assertOpen();
+    this.assertOpen();
     return this.#catalog.getProposal(proposalId);
   }
 
   /** Return the durable application record for a proposal, if any. */
   getApplication(proposalId: string): ApplicationRecord | undefined {
-    this.#assertOpen();
+    this.assertOpen();
     const application = this.#state.publishedState.applications.find(
       (record) => record.proposalId === proposalId,
     );
@@ -356,7 +356,7 @@ export class EvolutionApplicationCoordinator {
 
   /** Snapshot application-state (not catalog). */
   getApplicationState(): ApplicationStateSnapshot {
-    this.#assertOpen();
+    this.assertOpen();
     return isolate(this.#state.publishedState);
   }
 
@@ -367,7 +367,7 @@ export class EvolutionApplicationCoordinator {
     application: ApplicationStateSnapshot;
   }> {
     return await this.#enqueue(async () => {
-      this.#assertOpen();
+      this.assertOpen();
       const { revision, snapshot } = await this.#catalog.readSnapshot();
       return isolate({
         catalogRevision: revision,
@@ -390,7 +390,7 @@ export class EvolutionApplicationCoordinator {
     origin?: "automatic-controller-v1";
   }): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       const proposalInput = {
         id: input.id,
         createdAt: new Date(this.#now()).toISOString(),
@@ -429,7 +429,7 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.beginEvaluation(
         proposalId,
         new Date(this.#now()).toISOString(),
@@ -443,7 +443,7 @@ export class EvolutionApplicationCoordinator {
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.evaluate(
         proposalId,
         evidence,
@@ -458,7 +458,7 @@ export class EvolutionApplicationCoordinator {
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.evaluateAutomaticRun(
         proposalId,
         evidence,
@@ -477,10 +477,10 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
-      let proposal = this.#requireProposal(proposalId);
+      this.assertWritable();
+      let proposal = this.requireProposal(proposalId);
       if (proposal.status === "evaluated") {
-        this.#assertServerPreflightEvaluation(proposal);
+        this.assertServerPreflightSource(proposal);
         return { proposal, committedRevision: this.#catalog.revision };
       }
       if (proposal.status === "proposed") {
@@ -506,7 +506,7 @@ export class EvolutionApplicationCoordinator {
       }> = [];
       let trusted = true;
       try {
-        this.#assertPolicyAllows(proposal);
+        this.assertPolicyAllows(proposal);
         if (proposal.candidate.kind === "strategy-blueprint") {
           if (proposal.policy.allowedPromptPaths.length !== 0) {
             throw new EvolutionApplicationError(
@@ -646,8 +646,8 @@ export class EvolutionApplicationCoordinator {
 
   async assertServerPreflightEvaluation(proposalId: string): Promise<void> {
     await this.#enqueue(async () => {
-      this.#assertOpen();
-      this.#assertServerPreflightEvaluation(this.#requireProposal(proposalId));
+      this.assertOpen();
+      this.assertServerPreflightSource(this.requireProposal(proposalId));
     });
   }
 
@@ -660,7 +660,7 @@ export class EvolutionApplicationCoordinator {
     committedRevision: number;
   }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.reject(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         reason: requireNonEmpty(input.reason, "reason"),
@@ -682,7 +682,7 @@ export class EvolutionApplicationCoordinator {
     committedRevision: number;
   }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.archive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         ...(input.reason === undefined
@@ -703,7 +703,7 @@ export class EvolutionApplicationCoordinator {
     committedRevision: number;
   }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.unarchive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         ...(input.reason === undefined
@@ -726,7 +726,7 @@ export class EvolutionApplicationCoordinator {
     committedRevision: number;
   }> {
     return await this.#enqueue(async () => {
-      this.#assertWritable();
+      this.assertWritable();
       return await this.#catalog.deleteProposal(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         reason: requireNonEmpty(input.reason, "reason"),
@@ -785,7 +785,7 @@ export class EvolutionApplicationCoordinator {
     reason: string;
   }): Promise<ApplicationCommandResult | undefined> {
     return await this.#enqueue(async () => {
-      this.#assertOpen();
+      this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
       const reason = requireNonEmpty(input.reason, "reason");
@@ -802,7 +802,7 @@ export class EvolutionApplicationCoordinator {
       });
       const existing = this.#state.commands.get(commandId);
       if (!existing) return undefined;
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: input.operation,
         proposalId: input.proposalId,
         operator,
@@ -826,14 +826,14 @@ export class EvolutionApplicationCoordinator {
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult | undefined> {
     return await this.#enqueue(async () => {
-      this.#assertOpen();
+      this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
       const reason = requireNonEmpty(input.reason, "reason");
-      const { materialDigest, requestDigest } = this.#reconcileDigest(input, operator, reason);
+      const { materialDigest, requestDigest } = this.reconcileDigest(input, operator, reason);
       const existing = this.#state.commands.get(commandId);
       if (!existing) return undefined;
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: "reconcile-promoted",
         proposalId: input.proposalId,
         operator,
@@ -909,8 +909,8 @@ export class EvolutionApplicationCoordinator {
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult> {
     return await this.#enqueue(async () => {
-      this.#assertOpen();
-      const preface = this.#reconcilePreface(input);
+      this.assertOpen();
+      const preface = this.reconcilePreface(input);
       const commandId = preface.commandId;
       const operator = preface.operator;
       const reason = preface.reason;
@@ -918,7 +918,7 @@ export class EvolutionApplicationCoordinator {
       const requestDigest = preface.requestDigest;
       const existing = this.#state.commands.get(commandId);
       if (existing) {
-        return this.#dedupeOrConflict(existing, {
+        return this.dedupeOrConflict(existing, {
           operation: "reconcile-promoted",
           proposalId: input.proposalId,
           operator,
@@ -929,7 +929,7 @@ export class EvolutionApplicationCoordinator {
           materialDigest,
         });
       }
-      this.#assertWritable();
+      this.assertWritable();
 
       const { revision, snapshot } = await this.#catalog.readSnapshot();
       if (input.expectedRevision !== revision) {
@@ -938,7 +938,7 @@ export class EvolutionApplicationCoordinator {
           `Catalog revision ${input.expectedRevision} is stale; current is ${revision}`,
         );
       }
-      const { proposal, target, activeProposalId } = this.#assertReconcilable(input);
+      const { proposal, target, activeProposalId } = this.assertReconcilable(input);
 
       const plan = await this.#planReconcile({
         proposal,
@@ -1339,7 +1339,7 @@ export class EvolutionApplicationCoordinator {
       humanDecision,
       commandId: input.commandId,
     });
-    this.#assertBoundedHistory(legacyPredecessor, input.target);
+    this.assertBoundedHistory(legacyPredecessor, input.target);
     return {
       decidedAt,
       humanDecision,
@@ -1371,7 +1371,7 @@ export class EvolutionApplicationCoordinator {
   }
 
   /** An unbounded history cannot be rolled back to a known state, so it is refused. */
-  #assertBoundedHistory(
+  assertBoundedHistory(
     legacyPredecessor: LegacyPredecessorResolution,
     target: ReturnType<typeof targetFromCandidate>,
   ): void {
@@ -1393,13 +1393,13 @@ export class EvolutionApplicationCoordinator {
    * The order matters — a proposal that is not promoted but already has proof reports the
    * proof, not the lifecycle — because each message tells an operator what to fix first.
    */
-  #assertReconcilable(input: { proposalId: string }): {
+  assertReconcilable(input: { proposalId: string }): {
     proposal: EvolutionProposal;
     target: ReturnType<typeof targetFromCandidate>;
     activeProposalId: string | null;
   } {
-    const proposal = this.#requireProposal(input.proposalId);
-    this.#assertPolicyAllows(proposal);
+    const proposal = this.requireProposal(input.proposalId);
+    this.assertPolicyAllows(proposal);
     if (proposal.status !== "promoted") {
       throw new EvolutionApplicationError(
         "INVALID_LIFECYCLE",
@@ -1433,7 +1433,7 @@ export class EvolutionApplicationCoordinator {
    * that is already live, so accepting bytes would turn "adopt what is there" into "write
    * this instead".
    */
-  #reconcilePreface(input: {
+  reconcilePreface(input: {
     commandId: string;
     proposalId: string;
     expectedRevision: number;
@@ -1466,7 +1466,7 @@ export class EvolutionApplicationCoordinator {
         "Legacy prompt material is not accepted when adopting the live target",
       );
     }
-    return { commandId, operator, reason, ...this.#reconcileDigest(input, operator, reason) };
+    return { commandId, operator, reason, ...this.reconcileDigest(input, operator, reason) };
   }
 
   /**
@@ -1475,7 +1475,7 @@ export class EvolutionApplicationCoordinator {
    * above are deliberately not shared with it — that method is a lookup, and giving it new
    * rejections would be a behaviour change nobody asked for.
    */
-  #reconcileDigest(
+  reconcileDigest(
     input: {
       proposalId: string;
       expectedRevision: number;
@@ -1512,7 +1512,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    this.#assertOpen();
+    this.assertOpen();
     const commandId = requireCommandId(input.commandId);
     const operator = requireNonEmpty(input.operator, "operator");
     const reason = requireNonEmpty(input.reason, "reason");
@@ -1529,7 +1529,7 @@ export class EvolutionApplicationCoordinator {
     });
     const existing = this.#state.commands.get(commandId);
     if (existing) {
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: input.operation,
         proposalId: input.proposalId,
         operator,
@@ -1540,7 +1540,7 @@ export class EvolutionApplicationCoordinator {
         materialDigest,
       });
     }
-    this.#assertWritable();
+    this.assertWritable();
 
     const preview = this.#previewStore.consume(input.token, {
       kind: input.operation,
@@ -1557,8 +1557,8 @@ export class EvolutionApplicationCoordinator {
       );
     }
 
-    const proposal = this.#requireProposal(input.proposalId);
-    this.#assertPolicyAllows(proposal);
+    const proposal = this.requireProposal(input.proposalId);
+    this.assertPolicyAllows(proposal);
     const candidateDigest = computeCandidateDigest(proposal.candidate);
     if (candidateDigest !== preview.candidateDigest) {
       throw new EvolutionApplicationError(
@@ -1575,8 +1575,8 @@ export class EvolutionApplicationCoordinator {
     });
 
     if (input.operation === "promote-and-apply") {
-      this.#assertPromotable(proposal);
-      this.#assertNoUnreconciledConflict(proposal, "promote");
+      this.assertPromotable(proposal);
+      this.assertNoUnreconciledConflict(proposal, "promote");
     } else {
       if (proposal.status !== "promoted") {
         throw new EvolutionApplicationError(
@@ -1857,7 +1857,7 @@ export class EvolutionApplicationCoordinator {
     };
   }
 
-  #dedupeOrConflict(
+  dedupeOrConflict(
     existing: CommandIdempotencyBinding,
     attempt: {
       operation: ApplicationCommandKind;
@@ -1899,7 +1899,7 @@ export class EvolutionApplicationCoordinator {
   // Gates
   // ---------------------------------------------------------------------------
 
-  #requireProposal(proposalId: string): EvolutionProposal {
+  requireProposal(proposalId: string): EvolutionProposal {
     const proposal = this.#catalog.getProposal(proposalId);
     if (!proposal) {
       throw new EvolutionApplicationError(
@@ -1910,7 +1910,7 @@ export class EvolutionApplicationCoordinator {
     return proposal;
   }
 
-  #assertPromotable(proposal: EvolutionProposal): void {
+  assertPromotable(proposal: EvolutionProposal): void {
     if (proposal.status !== "evaluated") {
       throw new EvolutionApplicationError(
         "INVALID_LIFECYCLE",
@@ -1925,7 +1925,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertServerPreflightEvaluation(proposal: EvolutionProposal): void {
+  assertServerPreflightSource(proposal: EvolutionProposal): void {
     if (proposal.evaluation?.source !== "server-structural-preflight-v1") {
       throw new EvolutionApplicationError(
         "EVALUATION_SOURCE_UNTRUSTED",
@@ -1934,7 +1934,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertPolicyAllows(proposal: EvolutionProposal): void {
+  assertPolicyAllows(proposal: EvolutionProposal): void {
     const caps = proposal.policy.capabilities;
     if (
       caps.automaticExecution ||
@@ -1949,7 +1949,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertNoUnreconciledConflict(
+  assertNoUnreconciledConflict(
     proposal: EvolutionProposal,
     _op: "promote" | "rollback",
   ): void {
@@ -1974,7 +1974,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertOpen(): void {
+  assertOpen(): void {
     if (!this.#state.opened) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
@@ -1983,8 +1983,8 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertWritable(): void {
-    this.#assertOpen();
+  assertWritable(): void {
+    this.assertOpen();
     if (this.#state.recoveryRequired) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
