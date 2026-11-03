@@ -199,7 +199,7 @@ export class StrategyBlueprintCatalog {
   }
 
   static async open(
-    loaded: LoadedConfig,
+    loaded: unknown,
     options: { io?: Partial<StrategyBlueprintFileIo> } = {},
   ): Promise<StrategyBlueprintCatalog> {
     assertLoadedConfig(loaded);
@@ -682,13 +682,21 @@ function effectiveConfig(input: {
   );
 }
 
-function assertLoadedConfig(loaded: LoadedConfig): void {
+/**
+ * The parameter is `unknown` because that is the real contract: whatever `open`
+ * is handed comes from a file on disk and has not been checked yet. Declaring it
+ * `LoadedConfig` made the type claim a guarantee nobody had established, and left
+ * callers that need to test the rejection paths with casts.
+ */
+function assertLoadedConfig(loaded: unknown): asserts loaded is LoadedConfig {
   assertConfigCarrier(loaded);
   assertConfigRoot(loaded.root);
   assertConfigProject(loaded.config);
 }
 
-function assertConfigCarrier(loaded: LoadedConfig): void {
+function assertConfigCarrier(
+  loaded: unknown,
+): asserts loaded is { root: unknown; config: unknown } {
   if (!loaded || typeof loaded !== "object") {
     throw new StrategyBlueprintValidationError("LoadedConfig is required");
   }

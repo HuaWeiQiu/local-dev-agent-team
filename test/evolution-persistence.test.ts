@@ -1208,12 +1208,12 @@ describe("durable deletion trails", () => {
 
 describe("loaded config gates", () => {
   it("rejects a missing config, root or state directory", async () => {
-    await expect(DurableEvolutionCatalog.open(null as never)).rejects.toThrow(/LoadedConfig is required/);
+    await expect(DurableEvolutionCatalog.open(null)).rejects.toThrow(/LoadedConfig is required/);
     await expect(
-      DurableEvolutionCatalog.open({ root: "", config: {} } as never),
+      DurableEvolutionCatalog.open({ root: "", config: {} }),
     ).rejects.toThrow(/root is required/);
     await expect(
-      DurableEvolutionCatalog.open({ root: "/tmp", config: undefined } as never),
+      DurableEvolutionCatalog.open({ root: "/tmp", config: undefined }),
     ).rejects.toThrow(/config is required/);
 
     const root = await createTempRoot();
@@ -1221,7 +1221,7 @@ describe("loaded config gates", () => {
       DurableEvolutionCatalog.open({
         root,
         config: { project: { stateDirectory: "   " } },
-      } as never),
+      }),
     ).rejects.toThrow(/stateDirectory must be a non-empty/);
   });
 
@@ -1231,7 +1231,7 @@ describe("loaded config gates", () => {
       DurableEvolutionCatalog.open({
         root: path.join(root, "missing"),
         config: { project: { stateDirectory: ".agent-team" } },
-      } as never),
+      }),
     ).rejects.toThrow(/Unable to resolve repository root/);
   });
 });

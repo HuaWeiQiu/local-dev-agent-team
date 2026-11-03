@@ -127,14 +127,16 @@ const catalogFileMutationQueues = new Map<string, Promise<void>>();
  * The payload SHA-256 digest detects corruption; it is not authentication
  * against an attacker with filesystem write access.
  */
-function assertLoadedConfig(loaded: LoadedConfig): void {
+/** `unknown` for the same reason as the strategies catalog: disk input, unchecked. */
+function assertLoadedConfig(loaded: unknown): asserts loaded is LoadedConfig {
   if (!loaded || typeof loaded !== "object") {
     throw new EvolutionPersistenceValidationError("LoadedConfig is required");
   }
-  if (typeof loaded.root !== "string" || !loaded.root.trim()) {
+  const candidate = loaded as { root?: unknown; config?: unknown };
+  if (typeof candidate.root !== "string" || !candidate.root.trim()) {
     throw new EvolutionPersistenceValidationError("LoadedConfig.root is required");
   }
-  if (!loaded.config || typeof loaded.config !== "object") {
+  if (!candidate.config || typeof candidate.config !== "object") {
     throw new EvolutionPersistenceValidationError("LoadedConfig.config is required");
   }
 }
@@ -257,7 +259,7 @@ export class DurableEvolutionCatalog {
    * Fail-closed on corrupt primary documents; empty only when the primary is absent.
    */
   static async open(
-    loaded: LoadedConfig,
+    loaded: unknown,
     options: { io?: Partial<DurableEvolutionFileIo> } = {},
   ): Promise<DurableEvolutionCatalog> {
     assertLoadedConfig(loaded);
