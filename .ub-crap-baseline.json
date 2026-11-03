@@ -1,40 +1,39 @@
 {
-  "updatedAt": "2026-11-03T07:20:04.245Z",
+  "updatedAt": "2026-11-03T08:13:49.644Z",
   "generation": {
-    "headSha": "221a3e4f7a76d7b63ea5e81e43aabcb5c2964bb9",
+    "headSha": "d375cef4e08fe233fe8191a8538e91490aa9d255",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T07:20:04.244Z",
+    "generatedAt": "2026-11-03T08:13:49.643Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 1,
+      "divergentLines": 0,
       "partialFiles": 0,
       "digests": [
-        "c90e1d606a20740f07f9ca5bb50233351dbdd8ca9ece6bfbd85ff28d659710d7",
-        "e784d09b83f14f7bdc8a4604aafe7e2d9d970020e9bb90e785fb216399246fb6",
-        "770da5608f6d6428172028152b5010ec5a3705ec4e7bbf000d9814d7e12aa0ab"
+        "59d79baf52ec6eaa995905aaa2c83fca66922a8aab67315709b567e077da27a4",
+        "3ec7be0ec6a16a8eb6322da8c2720283f1c38961e6cf6d9052df405d990f81cc",
+        "048e07c6706f069b6933e1e963109be0a4882624bebb2db0abcb8920c9cd4600"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 1000490,
-      "sha256": "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56"
+      "bytes": 1005570,
+      "sha256": "cb36a3e3b38432623712207256fad30e0a681d7902255cbe515bde623d78ca52"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56",
-        "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56"
+        "cb36a3e3b38432623712207256fad30e0a681d7902255cbe515bde623d78ca52",
+        "cb36a3e3b38432623712207256fad30e0a681d7902255cbe515bde623d78ca52"
       ]
     }
   },
   "scores": {
     "scripts.laya-jev-server.Handler#do_POST": 72,
-    "scripts.prepare-desktop-runtime#prepareApplicationRuntime": 72,
     "evidence.local#evidenceChecks": 56.45,
     "evolution.application.EvolutionApplicationCoordinator#reconcilePromoted": 54.0581,
     "evolution.application.EvolutionApplicationCoordinator#evaluateServerPreflight": 53.9999,
@@ -45,7 +44,6 @@
     "desktop.settings#sanitizeRoleBindings": 44.2032,
     "process.stream#spawnStreamProcess": 42.0749,
     "profiles.role-bindings#defaultModelForCli": 42,
-    "scripts.prepare-desktop-runtime#assertPortableRuntime": 42,
     "evolution.application-target#createDirectoryChain": 41.9781,
     "server.project-runtime#cleanupRuntime": 40.768,
     "workflow.checkpoints.CheckpointService#prepareRecovery": 39.6838,
@@ -101,8 +99,6 @@
     "evolution.automation#projectRunOutcome": 20.2184,
     "components.UsagePanel#UsageCard": 20,
     "main#bootstrap": 20,
-    "scripts.prepare-desktop-runtime#hasChecksum": 20,
-    "scripts.prepare-desktop-runtime#runPnpm": 20,
     "server.run-retention#usageDetail": 20,
     "web.e2e.fixture-server#fixtureTask": 20,
     "git.manager.GitManager#assertTrackedRegularFile": 19.5938,
@@ -144,7 +140,6 @@
     "main#desktopPreviewState": 12,
     "main#isControlServiceOrigin": 12,
     "profiles.role-bindings#roleBindingFromPersisted": 12,
-    "scripts.prepare-desktop-runtime#cleanupApplicationStagingDirectories": 12,
     "web.e2e.helpers#openNav": 12,
     "visibility.explain#explainTask": 11.5625,
     "logs.render#renderLogLines": 11.4406,
