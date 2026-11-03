@@ -34,6 +34,7 @@ import {
   type CompletedApplicationRecord,
   type ApplicationRecord,
   type ApplicationStatus,
+  type CommandIdempotencyBinding,
   type EvolutionApplicationFileIo,
   type EvolutionApplicationState,
   type PendingApplicationOperation,
@@ -43,6 +44,115 @@ import {
   assertSafeRegularFileOrMissing,
   type EvolutionApplicationTargets,
 } from "./application-target.js";
+
+/** One recorded proof against the application it claims to prove, field for field. */
+function completionView(completion: CompletedApplicationRecord): Record<string, unknown> {
+  return {
+    proposalId: completion.proposalId,
+    candidateDigest: completion.candidateDigest,
+    status: completion.status,
+    beforeTargetDigest: completion.beforeTargetDigest,
+    afterTargetDigest: completion.afterTargetDigest,
+    catalogRevisionAfter: completion.catalogRevisionAfter,
+    operator: completion.operator,
+    reason: completion.reason,
+    "humanDecision.actor": completion.humanDecision.actor,
+    "humanDecision.decidedAt": completion.humanDecision.decidedAt,
+  };
+}
+
+function applicationCompletionView(application: ApplicationRecord): Record<string, unknown> {
+  return {
+    proposalId: application.proposalId,
+    candidateDigest: application.candidateDigest,
+    status: application.status,
+    beforeTargetDigest: application.beforeTargetDigest,
+    afterTargetDigest: application.afterTargetDigest,
+    catalogRevisionAfter: application.catalogRevision,
+    operator: application.operator,
+    reason: application.reason,
+    "humanDecision.actor": application.operator,
+    "humanDecision.decidedAt": application.appliedAt,
+  };
+}
+
+function commandView(command: CommandIdempotencyBinding): Record<string, unknown> {
+  return {
+    operator: command.operator,
+    reason: command.reason,
+    "result.applicationStatus": command.result.applicationStatus,
+    "result.beforeTargetDigest": command.result.beforeTargetDigest,
+    "result.afterTargetDigest": command.result.afterTargetDigest,
+    "result.committedCatalogRevision": command.result.committedCatalogRevision,
+  };
+}
+
+function applicationCommandView(application: ApplicationRecord): Record<string, unknown> {
+  return {
+    operator: application.operator,
+    reason: application.reason,
+    "result.applicationStatus": application.status,
+    "result.beforeTargetDigest": application.beforeTargetDigest,
+    "result.afterTargetDigest": application.afterTargetDigest,
+    "result.committedCatalogRevision": application.catalogRevision,
+  };
+}
+
+/** The operation-specific half of the proof: each operation carries extra requirements. */
+function operationChecks(input: ProofInput): Array<{ field: string; holds: boolean }> {
+  const { application, completion, command } = input;
+  if (completion === undefined) return [];
+  if (completion.operation === "promote-and-apply") {
+    return [
+      { field: "command", holds: command !== undefined },
+      { field: "command.operation", holds: command === undefined || command.operation === "promote-and-apply" },
+      { field: "application.rollbackSafe", holds: application.rollbackSafe },
+      { field: "application.status", holds: application.status === "applied" },
+    ];
+  }
+  if (completion.operation !== "reconcile-promoted") return [];
+  return [
+    { field: "completion.status", holds: completion.status === application.status },
+    { field: "command.operation", holds: command === undefined || command.operation === "reconcile-promoted" },
+    { field: "application.status", holds: command === undefined || input.reconcileStatusMatches },
+    {
+      field: "application.rollbackSafe",
+      holds: command === undefined || application.rollbackSafe === input.reconcileRollbackSafe,
+    },
+    { field: "syntheticLegacyBaseline", holds: command !== undefined || input.syntheticLegacyBaseline },
+  ];
+}
+
+/** Dot-paths of the fields where `actual` disagrees with `expected`; empty means agreement. */
+export function mismatchedFields(
+  actual: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): string[] {
+  return Object.keys(expected).filter((field) => {
+    const wanted = expected[field];
+    const got = actual[field];
+    return wanted !== null && typeof wanted === "object"
+      ? sha256Canonical(got ?? null) !== sha256Canonical(wanted)
+      : got !== wanted;
+  });
+}
+
+function prefixed(prefix: string, fields: string[]): string[] {
+  return fields.map((field) => `${prefix}.${field}`);
+}
+
+/** What a proof check needs: the record, what the catalog says, and the derived flags. */
+type ProofInput = {
+  application: ApplicationRecord;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  completion: CompletedApplicationRecord | undefined;
+  command: CommandIdempotencyBinding | undefined;
+  expectedAfterTarget: TargetDigestState | null;
+  reconcileStatusMatches: boolean;
+  reconcileRollbackSafe: boolean;
+  syntheticLegacyBaseline: boolean;
+};
 
 /** Everything the restored-state checks read: one catalog snapshot and the journal state. */
 type RestoredStateContext = {
@@ -250,53 +360,93 @@ export class EvolutionApplicationJournal {
     if (syntheticLegacyBaseline) {
       input.syntheticCompletionIds.add(application.commandId);
     }
-    if (
-      !proposal ||
-      !completion ||
-      computeCandidateDigest(proposal.candidate) !== application.candidateDigest ||
-      targetKey(targetFromCandidate(proposal.candidate)) !== targetKey(application.target) ||
-      !expectedAfterTarget ||
-      !targetStatesEqual(application.afterTarget, expectedAfterTarget) ||
-      application.catalogRevision > input.revision ||
-      completion.proposalId !== application.proposalId ||
-      completion.candidateDigest !== application.candidateDigest ||
-      completion.status !== application.status ||
-      completion.beforeTargetDigest !== application.beforeTargetDigest ||
-      completion.afterTargetDigest !== application.afterTargetDigest ||
-      completion.catalogRevisionAfter !== application.catalogRevision ||
-      completion.operator !== application.operator ||
-      completion.reason !== application.reason ||
-      completion.humanDecision.actor !== application.operator ||
-      completion.humanDecision.decidedAt !== application.appliedAt ||
-      (command
-        ? command.operator !== application.operator ||
-          command.reason !== application.reason ||
-          command.result.applicationStatus !== application.status ||
-          command.result.beforeTargetDigest !== application.beforeTargetDigest ||
-          command.result.afterTargetDigest !== application.afterTargetDigest ||
-          command.result.committedCatalogRevision !== application.catalogRevision
-        : completion.catalogRevisionBefore !== application.catalogRevision) ||
-      (completion.operation === "promote-and-apply" &&
-        (!command ||
-          command.operation !== "promote-and-apply" ||
-          !application.rollbackSafe ||
-          application.status !== "applied")) ||
-      (completion.operation === "reconcile-promoted" &&
-        (completion.status !== application.status ||
-          (command
-            ? command.operation !== "reconcile-promoted" ||
-              !reconcileStatusMatches ||
-              application.rollbackSafe !== reconcileRollbackSafe
-            : !syntheticLegacyBaseline)))
-    ) {
+    const mismatches = this.proofMismatches({
+      application,
+      revision: input.revision,
+      proposal,
+      completion,
+      command,
+      expectedAfterTarget,
+      reconcileStatusMatches,
+      reconcileRollbackSafe,
+      syntheticLegacyBaseline,
+    });
+    if (mismatches.length > 0) {
       throw new EvolutionPersistenceValidationError(
-        `Invalid application state: application proof for '${application.proposalId}' does not match the catalog`,
+        `Invalid application state: application proof for '${application.proposalId}' does not match the catalog (${mismatches.join(", ")})`,
       );
     }
     if (application.previousApplication) {
       await this.validateApplicationProof(application.previousApplication, input, application.commandId);
     }
     
+  }
+
+  /**
+   * Which fields of a recorded proof disagree with the catalog, named by dot path.
+   *
+   * The comparisons used to be a single `&&` chain: every field added a clause, the whole
+   * thing counted as one enormous branch, and the refusal said only "does not match the
+   * catalog". Naming the fields keeps a new field from silently extending a chain and — the
+   * reason it matters — tells an operator *which* field disagreed, which is the difference
+   * between "state invalid" and "completion.status says 'applied' where the application
+   * says 'adopted'".
+   */
+  private proofMismatches(input: ProofInput): string[] {
+    const { application, completion, command } = input;
+    const pairs: Array<[string, Record<string, unknown> | undefined, Record<string, unknown>]> = [
+      [
+        "completion",
+        completion === undefined ? undefined : completionView(completion),
+        applicationCompletionView(application),
+      ],
+      [
+        "command",
+        command === undefined ? undefined : commandView(command),
+        applicationCommandView(application),
+      ],
+    ];
+    // A missing completion is always a mismatch. A missing command is not: it is the
+    // legacy Phase-2 shape, and each operation decides for itself whether that is allowed
+    // (`operationChecks`, plus the catalogRevisionBefore check below).
+    const mismatches: string[] = completion === undefined ? ["completion"] : [];
+    for (const [name, actual, expected] of pairs) {
+      if (actual === undefined) continue;
+      mismatches.push(...prefixed(name, mismatchedFields(actual, expected)));
+    }
+    const checks: Array<{ field: string; holds: boolean }> = [
+      { field: "proposal", holds: input.proposal !== undefined },
+      { field: "expectedAfterTarget", holds: input.expectedAfterTarget !== null },
+      { field: "application.catalogRevision", holds: application.catalogRevision <= input.revision },
+      {
+        field: "application.afterTarget",
+        holds:
+          input.expectedAfterTarget === null ||
+          targetStatesEqual(application.afterTarget, input.expectedAfterTarget),
+      },
+      {
+        field: "catalog.candidateDigest",
+        holds:
+          input.proposal === undefined ||
+          computeCandidateDigest(input.proposal.candidate) === application.candidateDigest,
+      },
+      {
+        field: "catalog.target",
+        holds:
+          input.proposal === undefined ||
+          targetKey(targetFromCandidate(input.proposal.candidate)) === targetKey(application.target),
+      },
+      {
+        field: "completion.catalogRevisionBefore",
+        holds:
+          command !== undefined ||
+          completion === undefined ||
+          completion.catalogRevisionBefore === application.catalogRevision,
+      },
+      ...operationChecks(input),
+    ];
+    mismatches.push(...checks.filter((check) => !check.holds).map((check) => check.field));
+    return [...new Set(mismatches)];
   }
 
   async validateRestoredState(): Promise<void> {
