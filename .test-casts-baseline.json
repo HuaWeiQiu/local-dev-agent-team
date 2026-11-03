@@ -1,8 +1,8 @@
 {
-  "total": 401,
+  "total": 390,
   "byForm": {
     "never": 256,
-    "unknown-as": 145
+    "unknown-as": 134
   },
   "counts": {
     "test/adapter-conformance.test.ts:never": 3,
@@ -22,7 +22,7 @@
     "test/claude-session-start.test.ts:never": 1,
     "test/claude-session-turn.test.ts:never": 1,
     "test/cli-inventory-toml.test.ts:never": 2,
-    "test/codex-session-protocol.test.ts:unknown-as": 20,
+    "test/codex-session-protocol.test.ts:unknown-as": 9,
     "test/codex-session-protocol.test.ts:never": 2,
     "test/config.test.ts:never": 1,
     "test/coverage-caliber-report.test.ts:never": 4,
