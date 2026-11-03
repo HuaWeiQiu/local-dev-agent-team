@@ -1,14 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { FlowValidationError, validateTemplate } from "../src/flow/validate.js";
 import { FLOW_TEMPLATES, flowTemplate } from "../src/flow/templates.js";
-import type { FlowGraph, FlowTemplate } from "../src/flow/types.js";
+import type { FlowTemplate, RunGraph } from "../src/flow/types.js";
 
 /** A template that validates, so each test can break exactly one thing. */
 function template(patch: Partial<FlowTemplate> = {}): FlowTemplate {
   return { ...structuredClone(flowTemplate("standard")), ...patch };
 }
 
-function issuesOf(candidate: FlowTemplate): string[] {
+/**
+ * The document a user could have written — including node names that are not in
+ * the shipped union, which is exactly what some of these cases must feed the
+ * validator. Building it as `unknown` keeps the illegal value legal at the
+ * construction site; the validator is what judges it.
+ */
+function document(patch: Record<string, unknown> = {}): unknown {
+  return { ...structuredClone(flowTemplate("standard")), ...patch };
+}
+
+function issuesOf(candidate: unknown): string[] {
   try {
     validateTemplate(candidate);
     return [];
@@ -18,7 +28,12 @@ function issuesOf(candidate: FlowTemplate): string[] {
   }
 }
 
-function graph(patch: Partial<FlowGraph>): FlowGraph {
+/**
+ * A run graph. The generic matters: an unannotated `FlowGraph` widens the node
+ * kind to `string`, and every caller then fails to hand it to `validateTemplate`,
+ * which wants the shipped union.
+ */
+function graph(patch: Partial<RunGraph>): RunGraph {
   return { ...structuredClone(template().run), ...patch };
 }
 
@@ -56,9 +71,9 @@ describe("structural checks", () => {
   });
 
   it("reports a start that is not a node", () => {
-    expect(issuesOf(template({ run: graph({ start: "ghost" }) })).join(" ")).toContain(
-      "is not a node",
-    );
+    expect(
+      issuesOf(document({ run: { ...graph({}), start: "ghost" } })).join(" "),
+    ).toContain("is not a node");
   });
 
   it("reports an edge that references a missing node", () => {
@@ -91,7 +106,9 @@ describe("run invariants", () => {
       nodes: base.nodes.filter((node) => node.id !== "final-checks"),
       edges: base.edges.filter((edge) => edge.from !== "final-checks" && edge.to !== "final-checks"),
     };
-    expect(issuesOf(template({ run })).join(" ")).toContain("required node 'final-checks' is missing");
+    expect(issuesOf(document({ run })).join(" ")).toContain(
+      "required node 'final-checks' is missing",
+    );
   });
 
   it("requires the chain in order", () => {
