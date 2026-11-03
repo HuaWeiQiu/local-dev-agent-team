@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
 import { type lstat } from "node:fs/promises";
 import path from "node:path";
+import { promptTempName, siblingTempName, siblingTempPattern } from "./temp-names.js";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import type { LoadedConfig } from "../config/load.js";
 import type { NamedStrategy } from "../config/schema.js";
@@ -27,7 +27,6 @@ import {
   EvolutionApplicationError,
   assertCanonicalInsideRoot,
   decodeUtf8,
-  escapeRegExp,
   isolate,
   isAlreadyExists,
   isNotFound,
@@ -40,6 +39,14 @@ import {
 } from "./application-shared.js";
 
 /** Dependencies shared by every repository-local evolution target mutation. */
+/** What a prompt target looks like on disk, once it has been vetted. */
+export type PromptTargetFacts = {
+  readonly relativePath: string;
+  readonly absolute: string;
+  /** The permission bits to preserve across the replace. */
+  readonly mode: number;
+};
+
 export interface EvolutionApplicationTargetEnvironment {
   readonly io: EvolutionApplicationFileIo;
   /** Canonical repository root shared by the catalog, strategies, and Git manager. */
@@ -238,11 +245,22 @@ export class EvolutionApplicationTargets {
     mode: "apply" | "rollback",
     authorization: ExactTrackedFileCommitAuthorization,
   ): Promise<void> {
+    const relativePath = this.assertPromptCandidate(proposal);
+    const target = await this.describePromptTarget(relativePath);
+    const content = await this.readPromptObject(desiredDigest);
+    const currentBytes = await this.assertPromptTargetUnchanged(target.absolute, target, expectedBefore);
+    await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
+    await this.writePromptAtomically(target, content);
+    await this.assertPromptWriteLanded(target, desiredDigest);
+    await this.commitPromptChange(authorization, mode, relativePath, decision);
+  }
+
+  /** Only a role-prompt candidate may be applied here, and only at a configured prompt path. */
+  assertPromptCandidate(proposal: EvolutionProposal): string {
     if (proposal.candidate.kind !== "role-prompt") {
       throw new EvolutionApplicationError("POLICY_DENIED", "Not a role-prompt candidate");
     }
     const relativePath = proposal.candidate.path;
-    // Configured promptFile only
     const configured = Object.values(this.#loaded.config.roles ?? {}).some(
       (role) => role && typeof role === "object" && role.promptFile === relativePath,
     );
@@ -252,12 +270,17 @@ export class EvolutionApplicationTargets {
         `Prompt path '${relativePath}' is not a configured role promptFile`,
       );
     }
+    return relativePath;
+  }
 
-    const content = await this.readPromptObject(desiredDigest);
+  /**
+   * What is at the prompt path right now, and what is safe to assume about it. Evolution
+   * never creates or deletes a prompt file: it replaces the bytes of one that already exists
+   * as a regular, non-symlinked, sanctioned-permission file inside the repository.
+   */
+  async describePromptTarget(relativePath: string): Promise<PromptTargetFacts> {
     const absolute = path.resolve(this.#root, relativePath);
     assertCanonicalInsideRoot(this.#root, absolute, "Prompt target");
-
-    // Must already exist as tracked regular file — never create/delete
     let info: Awaited<ReturnType<typeof lstat>>;
     try {
       info = await this.#io.lstat(absolute);
@@ -282,24 +305,38 @@ export class EvolutionApplicationTargets {
         `Prompt target '${relativePath}' must not use special permission bits`,
       );
     }
-    const canonicalTarget = await this.#io.realpath(absolute);
-    if (canonicalTarget !== absolute) {
+    if ((await this.#io.realpath(absolute)) !== absolute) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
         `Prompt target '${relativePath}' must not traverse symbolic links`,
       );
     }
+    return { relativePath, absolute, mode: info.mode & 0o777 };
+  }
 
-    // Snapshot current bytes into the local object store for recovery/rollback.
-    // Prompt files must contain no secrets; these objects are local recovery only.
+  /**
+   * The preview the operator approved is still the truth: same bytes, same permissions, and
+   * still something a prompt file can be (UTF-8, bounded). Anything else means the world
+   * moved between preview and apply.
+   */
+  async assertPromptTargetUnchanged(
+    absolute: string,
+    target: PromptTargetFacts,
+    expectedBefore: TargetDigestState,
+  ): Promise<Buffer> {
     const currentBytes = await this.#io.readFile(absolute);
-    if (
-      sha256Bytes(currentBytes) !== expectedBefore.digest ||
-      (expectedBefore.mode !== undefined && (info.mode & 0o777) !== expectedBefore.mode)
-    ) {
+    // Two different things can move between preview and apply, and they are fixed by
+    // different people: content usually means someone is editing the prompt, mode usually
+    // means a deployment script changed the umask. Naming which one moved is the difference
+    // between "state invalid" and an operator knowing who to ask.
+    const mismatched = [
+      sha256Bytes(currentBytes) === expectedBefore.digest ? null : "content",
+      expectedBefore.mode !== undefined && target.mode !== expectedBefore.mode ? "mode" : null,
+    ].filter((field): field is string => field !== null);
+    if (mismatched.length > 0) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' changed after preview`,
+        `Prompt target '${target.relativePath}' changed after preview (${mismatched.join(", ")})`,
       );
     }
     try {
@@ -307,81 +344,120 @@ export class EvolutionApplicationTargets {
     } catch {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' is not valid UTF-8`,
+        `Prompt target '${target.relativePath}' is not valid UTF-8`,
       );
     }
     if (currentBytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' exceeds material size limit`,
+        `Prompt target '${target.relativePath}' exceeds material size limit`,
       );
     }
-    await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
+    return currentBytes;
+  }
 
+  /**
+   * Replace the bytes atomically: write a sibling temp file, fsync it, rename it over the
+   * target, then fsync the directory. A failure after the rename is not "the write failed" —
+   * the new bytes are already in place — so it is reported as recovery, not drift.
+   */
+  async writePromptAtomically(target: PromptTargetFacts, content: Buffer): Promise<void> {
+    const absolute = target.absolute;
     const directory = path.dirname(absolute);
-    const temporaryPath = path.join(
-      directory,
-      `.${path.basename(absolute)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
-    );
+    const temporaryPath = path.join(directory, promptTempName(path.basename(absolute)));
     let renamed = false;
     try {
-      await this.#io.beforeAtomicStage?.("open");
-      const handle = await this.#io.open(temporaryPath, "wx", info.mode & 0o777);
-      try {
-        await this.#io.beforeAtomicStage?.("write");
-        await handle.writeFile(content);
-        await this.#io.chmod(temporaryPath, info.mode & 0o777);
-        await this.#io.beforeAtomicStage?.("file-sync");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await this.writeTemporaryPrompt(temporaryPath, content, target.mode);
       await this.#io.beforeAtomicStage?.("rename");
-      if ((await this.#io.realpath(directory)) !== directory) {
-        throw new EvolutionApplicationError(
-          "TARGET_DRIFTED",
-          `Prompt parent directory changed before rename: ${relativePath}`,
-        );
-      }
+      await this.assertPromptParentUnchanged(directory, target.relativePath);
       await this.#io.rename(temporaryPath, absolute);
       renamed = true;
       await this.#io.beforeAtomicStage?.("directory-sync");
       await this.#io.syncDirectory(directory);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
-      if (renamed) {
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          `Prompt rename completed but directory fsync failed; recovery required: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+      throw this.promptWriteFailure(error, renamed, target.relativePath);
+    }
+  }
+
+  /** Create the temp file exclusively, fill it, and make its bytes durable. */
+  async writeTemporaryPrompt(temporaryPath: string, content: Buffer, mode: number): Promise<void> {
+    await this.#io.beforeAtomicStage?.("open");
+    const handle = await this.#io.open(temporaryPath, "wx", mode);
+    try {
+      await this.#io.beforeAtomicStage?.("write");
+      await handle.writeFile(content);
+      await this.#io.chmod(temporaryPath, mode);
+      await this.#io.beforeAtomicStage?.("file-sync");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** The directory must still be the one the path says it is, immediately before the rename. */
+  async assertPromptParentUnchanged(directory: string, relativePath: string): Promise<void> {
+    if ((await this.#io.realpath(directory)) !== directory) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Failed to write prompt target '${relativePath}': ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Prompt parent directory changed before rename: ${relativePath}`,
       );
     }
+  }
 
-    // Verify digest after write
-    const written = await this.#io.readFile(absolute);
-    const writtenDigest = sha256Bytes(written);
-    if (writtenDigest !== desiredDigest) {
+  /**
+   * What a failed write means. Once the rename happened the new bytes are in place and only
+   * the directory entry may not be durable — that is recovery, not drift.
+   */
+  promptWriteFailure(error: unknown, renamed: boolean, relativePath: string): EvolutionApplicationError {
+    const detail = error instanceof Error ? error.message : String(error);
+    return renamed
+      ? new EvolutionApplicationError(
+          "RECOVERY_REQUIRED",
+          `Prompt rename completed but directory fsync failed; recovery required: ${detail}`,
+        )
+      : new EvolutionApplicationError(
+          "TARGET_DRIFTED",
+          `Failed to write prompt target '${relativePath}': ${detail}`,
+        );
+  }
+
+  /** The bytes on disk after the replace must be the bytes the object store holds. */
+  async assertPromptWriteLanded(
+    target: PromptTargetFacts,
+    desiredDigest: string,
+  ): Promise<void> {
+    const written = await this.#io.readFile(target.absolute);
+    if (sha256Bytes(written) !== desiredDigest) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target digest mismatch after write for '${relativePath}'`,
+        `Prompt target digest mismatch after write for '${target.relativePath}'`,
       );
     }
-    const writtenInfo = await this.#io.lstat(absolute);
-    if (!writtenInfo.isFile() || writtenInfo.isSymbolicLink() || (writtenInfo.mode & 0o777) !== (info.mode & 0o777)) {
+    const writtenInfo = await this.#io.lstat(target.absolute);
+    if (
+      !writtenInfo.isFile() ||
+      writtenInfo.isSymbolicLink() ||
+      (writtenInfo.mode & 0o777) !== target.mode
+    ) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target permissions changed unexpectedly for '${relativePath}'`,
+        `Prompt target permissions changed unexpectedly for '${target.relativePath}'`,
       );
     }
+  }
 
+  /**
+   * Commit exactly that one file. The message names the direction and the operator so the
+   * history says who applied or rolled back what; the prompt template cache is dropped
+   * afterwards because agents would otherwise keep serving the previous text.
+   */
+  async commitPromptChange(
+    authorization: ExactTrackedFileCommitAuthorization,
+    mode: "apply" | "rollback",
+    relativePath: string,
+    decision: HumanDecision,
+  ): Promise<void> {
     try {
       await this.#git.commitExactTrackedFile(
         authorization,
@@ -392,7 +468,6 @@ export class EvolutionApplicationTargets {
     } catch (error) {
       throw mapGitError(error);
     }
-
     clearPromptTemplateCache();
   }
 
@@ -402,107 +477,106 @@ export class EvolutionApplicationTargets {
     after: TargetDigestState,
     _mode: "apply" | "rollback",
   ): Promise<void> {
+    const name = this.assertStrategyCandidate(proposal);
+    try {
+      if (isAbsentDefinition(after)) {
+        await this.removeStrategyDefinition(name, before);
+        return;
+      }
+      await this.saveStrategyDefinition(name, before, after);
+    } catch (error) {
+      throw this.strategyApplyFailure(error);
+    }
+  }
+
+  /**
+   * Only a strategy blueprint may be applied here, and never one the project configures.
+   *
+   * The config/custom question has one subtlety worth keeping: `source()` reports "config" for
+   * every name that is not a custom blueprint, including names nobody configured, so it cannot
+   * decide this alone. The name is refused only when the loaded config actually declares it.
+   */
+  assertStrategyCandidate(proposal: EvolutionProposal): string {
     if (proposal.candidate.kind !== "strategy-blueprint") {
       throw new EvolutionApplicationError("POLICY_DENIED", "Not a strategy-blueprint candidate");
     }
     const name = proposal.candidate.name;
-    // Configured (agent-team.yaml) strategies are never mutated. source() reports
-    // "config" for names that are not present as custom blueprints; when a name is
-    // both a baseline config name and somehow custom, customDefinition wins. Reject
-    // when the name is a baseline-only configured strategy.
     const custom = this.#strategies.customDefinition(name);
-    if (!custom && this.#strategies.source(name) === "config") {
-      // source returns "config" for any non-custom name, including unknown names.
-      // Unknown names are allowed for create. Detect baseline names via conflict on save.
-      // Preflight: if resolve would find a config strategy and custom is absent, block
-      // only when the catalog considers it a configured strategy (save throws CONFLICT).
-      // We probe by checking whether the name exists in loaded config strategies.
-      const configuredNames = new Set(
-        Object.keys(this.#loaded.config.strategies?.definitions ?? {}),
+    if (custom || this.#strategies.source(name) !== "config") return name;
+    const configuredNames = new Set(Object.keys(this.#loaded.config.strategies?.definitions ?? {}));
+    if (configuredNames.has(name)) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Configured strategy '${name}' cannot be modified by evolution application`,
       );
-      if (configuredNames.has(name)) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          `Configured strategy '${name}' cannot be modified by evolution application`,
-        );
-      }
     }
-
-    try {
-      if (!after.present || after.strategyDefinition === null || after.strategyDefinition === undefined) {
-        const current = this.#strategies.customDefinition(name);
-        if (!current) {
-          if (!before.present) {
-            return;
-          }
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Strategy blueprint '${name}' is absent but rollback expected a definition`,
-          );
-        }
-        await this.#strategies.delete(name, {
-          expectedBefore: before.strategyDefinition ?? current,
-        });
-        return;
-      }
-
-      const expectedBefore: StrategyBlueprintExpectedBefore = before.present
-        ? (before.strategyDefinition ?? this.#strategies.customDefinition(name) ?? null)
-        : null;
-      await this.#strategies.save(name, after.strategyDefinition, { expectedBefore });
-    } catch (error) {
-      if (error instanceof EvolutionApplicationError) {
-        throw error;
-      }
-      if (error instanceof StrategyBlueprintDriftError) {
-        throw new EvolutionApplicationError("TARGET_DRIFTED", error.message);
-      }
-      if (error instanceof StrategyBlueprintConflictError) {
-        throw new EvolutionApplicationError("POLICY_DENIED", error.message);
-      }
-      if (error instanceof StrategyBlueprintIndeterminateError) {
-        throw new EvolutionApplicationError("RECOVERY_REQUIRED", error.message);
-      }
-      if (error instanceof StrategyBlueprintError) {
-        throw new EvolutionApplicationError("POLICY_DENIED", error.message);
-      }
-      throw error;
-    }
+    return name;
   }
 
-  async ingestPromptMaterial(contentDigest: string, content: Uint8Array): Promise<void> {
-    if (typeof contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(contentDigest)) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        "Role-prompt contentDigest must be a lowercase SHA-256 hex digest",
-      );
+  /** Remove a custom blueprint, refusing when the rollback expected one that is not there. */
+  async removeStrategyDefinition(name: string, before: TargetDigestState): Promise<void> {
+    const current = this.#strategies.customDefinition(name);
+    if (current) {
+      await this.#strategies.delete(name, {
+        expectedBefore: before.strategyDefinition ?? current,
+      });
+      return;
     }
-    let bytes: Buffer;
-    try {
-      bytes = Buffer.from(content);
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        "Role-prompt content must be valid UTF-8 text",
-      );
-    }
-    if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        `Role-prompt content exceeds ${EVOLUTION_PROMPT_MATERIAL_MAX_BYTES} bytes`,
-      );
-    }
-    const actual = sha256Bytes(bytes);
-    if (actual !== contentDigest) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        `Role-prompt content digest mismatch: expected ${contentDigest}, got ${actual}`,
-      );
-    }
+    if (!before.present) return;
+    throw new EvolutionApplicationError(
+      "TARGET_DRIFTED",
+      `Strategy blueprint '${name}' is absent but rollback expected a definition`,
+    );
+  }
 
+  /** Save the definition, with the state the caller believed it was replacing. */
+  async saveStrategyDefinition(
+    name: string,
+    before: TargetDigestState,
+    after: TargetDigestState,
+  ): Promise<void> {
+    const expectedBefore: StrategyBlueprintExpectedBefore = before.present
+      ? (before.strategyDefinition ?? this.#strategies.customDefinition(name) ?? null)
+      : null;
+    await this.#strategies.save(name, after.strategyDefinition!, { expectedBefore });
+  }
+
+  /**
+   * What a failed catalog mutation means for the caller. Drift is a disagreement about the
+   * current definition, conflict is a policy refusal, indeterminate means the write may have
+   * happened — and that last one is the only one a retry must not treat as "did not happen".
+   */
+  strategyApplyFailure(error: unknown): unknown {
+    if (error instanceof EvolutionApplicationError) return error;
+    if (error instanceof StrategyBlueprintDriftError) {
+      return new EvolutionApplicationError("TARGET_DRIFTED", error.message);
+    }
+    if (error instanceof StrategyBlueprintIndeterminateError) {
+      return new EvolutionApplicationError("RECOVERY_REQUIRED", error.message);
+    }
+    if (error instanceof StrategyBlueprintConflictError || error instanceof StrategyBlueprintError) {
+      return new EvolutionApplicationError("POLICY_DENIED", error.message);
+    }
+    return error;
+  }
+
+  /**
+   * Store prompt bytes under their digest. Four questions, in order: are these bytes a usable
+   * prompt at all, is the store usable, is the object already there (then this is a no-op),
+   * and did the write land.
+   */
+  async ingestPromptMaterial(contentDigest: string, content: Uint8Array): Promise<void> {
+    const bytes = assertPromptMaterialContent(contentDigest, content);
+    await this.assertObjectsDirectoryUsable();
     const objectPath = path.join(this.#objectsDirectory, contentDigest);
     assertCanonicalInsideRoot(this.#root, objectPath, "Prompt object");
+    if (await this.objectAlreadyStored(objectPath, contentDigest)) return;
+    await this.persistPromptObject(objectPath, contentDigest, bytes);
+    await this.assertObjectLanded(objectPath, contentDigest);
+  }
+
+  /** The object directory must exist, be ours, and not be reached through a link. */
+  async assertObjectsDirectoryUsable(): Promise<void> {
     await createDirectoryChain(this.#io, this.#root, this.#objectsDirectory, 0o700);
     if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
       throw new EvolutionApplicationError(
@@ -510,7 +584,13 @@ export class EvolutionApplicationTargets {
         "Prompt object directory must not traverse symbolic links",
       );
     }
+  }
 
+  /**
+   * Whether the object is already there and intact. An intact one makes the call a no-op; a
+   * damaged one is recovery, not something to silently rewrite.
+   */
+  async objectAlreadyStored(objectPath: string, contentDigest: string): Promise<boolean> {
     try {
       const existingInfo = await this.#io.lstat(objectPath);
       if (existingInfo.isSymbolicLink() || !existingInfo.isFile()) {
@@ -532,16 +612,16 @@ export class EvolutionApplicationTargets {
           `Corrupted prompt object at ${contentDigest}`,
         );
       }
-      // Idempotent re-ingest of identical object
-      return;
+      return true;
     } catch (error) {
-      if (!isNotFound(error)) {
-        if (error instanceof EvolutionApplicationError) throw error;
-        throw error;
-      }
+      if (isNotFound(error)) return false;
+      throw error;
     }
+  }
 
-    const temporaryPath = `${objectPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  /** Write the object through a temp file, then rename it into place. */
+  async persistPromptObject(objectPath: string, contentDigest: string, bytes: Buffer): Promise<void> {
+    const temporaryPath = siblingTempName(objectPath);
     try {
       const handle = await this.#io.open(temporaryPath, "wx", 0o600);
       try {
@@ -557,81 +637,133 @@ export class EvolutionApplicationTargets {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       throw new EvolutionApplicationError(
         "MATERIAL_MISSING",
-        `Failed to persist prompt object: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Failed to persist prompt object: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    void contentDigest;
+  }
 
-    // Post-condition
+  /** The object on disk must hash to the digest it is filed under. */
+  async assertObjectLanded(objectPath: string, contentDigest: string): Promise<void> {
     const written = await this.#io.readFile(objectPath);
-    if (sha256Bytes(written) !== contentDigest) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        `Prompt object digest mismatch after write for ${contentDigest}`,
-      );
-    }
+    if (sha256Bytes(written) === contentDigest) return;
+    throw new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      `Prompt object digest mismatch after write for ${contentDigest}`,
+    );
   }
 
   async readPromptObject(digest: string): Promise<Buffer> {
+    this.assertPromptObjectDigest(digest);
+    try {
+      const objectPath = await this.describePromptObject(digest);
+      return this.verifyPromptObjectBytes(digest, await this.#io.readFile(objectPath));
+    } catch (error) {
+      throw this.promptObjectFailure(error, digest);
+    }
+  }
+
+  /** A digest is the whole address of an object: anything else is not one. */
+  assertPromptObjectDigest(digest: string): void {
     if (!/^[a-f0-9]{64}$/.test(digest)) {
       throw new EvolutionApplicationError("MATERIAL_MISSING", "Invalid prompt object digest");
     }
+  }
+
+  /**
+   * Where the object lives and whether that path is trustworthy: inside the repository, in a
+   * directory that is not a link, and a regular file with the permissions we wrote it with.
+   */
+  async describePromptObject(digest: string): Promise<string> {
     const objectPath = path.join(this.#objectsDirectory, digest);
     assertCanonicalInsideRoot(this.#root, objectPath, "Prompt object");
-    try {
-      if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          "Prompt object directory must not traverse symbolic links",
-        );
-      }
-      const info = await this.#io.lstat(objectPath);
-      if (info.isSymbolicLink() || !info.isFile()) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object must be a regular non-symlink file: ${digest}`,
-        );
-      }
-      if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object permissions must be 0600: ${digest}`,
-        );
-      }
-      const bytes = await this.#io.readFile(objectPath);
-      if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object exceeds size limit: ${digest}`,
-        );
-      }
-      if (sha256Bytes(bytes) !== digest) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Corrupted prompt object: ${digest}`,
-        );
-      }
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object is not valid UTF-8: ${digest}`,
-        );
-      }
-      return Buffer.from(bytes);
-    } catch (error) {
-      if (error instanceof EvolutionApplicationError) throw error;
-      if (isNotFound(error)) {
-        throw new EvolutionApplicationError(
-          "MATERIAL_MISSING",
-          `Prompt object not found: ${digest}`,
-        );
-      }
-      throw error;
+    if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        "Prompt object directory must not traverse symbolic links",
+      );
     }
+    const info = await this.#io.lstat(objectPath);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object must be a regular non-symlink file: ${digest}`,
+      );
+    }
+    if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object permissions must be 0600: ${digest}`,
+      );
+    }
+    return objectPath;
   }
+
+  /** The bytes must still be the bytes the digest names, and still be usable as a prompt. */
+  verifyPromptObjectBytes(digest: string, bytes: Buffer): Buffer {
+    if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
+      throw new EvolutionApplicationError("MATERIAL_MISSING", `Prompt object exceeds size limit: ${digest}`);
+    }
+    if (sha256Bytes(bytes) !== digest) {
+      throw new EvolutionApplicationError("MATERIAL_MISSING", `Corrupted prompt object: ${digest}`);
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new EvolutionApplicationError(
+        "MATERIAL_MISSING",
+        `Prompt object is not valid UTF-8: ${digest}`,
+      );
+    }
+    return Buffer.from(bytes);
+  }
+
+  /** A read that failed for reasons other than our own guards, named for the operator. */
+  promptObjectFailure(error: unknown, digest: string): unknown {
+    if (error instanceof EvolutionApplicationError) return error;
+    if (isNotFound(error)) {
+      return new EvolutionApplicationError("MATERIAL_MISSING", `Prompt object not found: ${digest}`);
+    }
+    return error;
+  }
+}
+
+/** A target that carries no definition: the operation is a removal. */
+function isAbsentDefinition(target: TargetDigestState): boolean {
+  return !target.present || target.strategyDefinition === null || target.strategyDefinition === undefined;
+}
+
+/** The bytes must be exactly what the digest names, and usable as a prompt. */
+function assertPromptMaterialContent(contentDigest: string, content: Uint8Array): Buffer {
+  if (typeof contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(contentDigest)) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      "Role-prompt contentDigest must be a lowercase SHA-256 hex digest",
+    );
+  }
+  const bytes = Buffer.from(content);
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      "Role-prompt content must be valid UTF-8 text",
+    );
+  }
+  if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      `Role-prompt content exceeds ${EVOLUTION_PROMPT_MATERIAL_MAX_BYTES} bytes`,
+    );
+  }
+  const actual = sha256Bytes(bytes);
+  if (actual !== contentDigest) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      `Role-prompt content digest mismatch: expected ${contentDigest}, got ${actual}`,
+    );
+  }
+  return bytes;
 }
 
 export async function createDirectoryChain(
@@ -640,36 +772,68 @@ export async function createDirectoryChain(
   target: string,
   mode: number,
 ): Promise<void> {
-  const relative = path.relative(root, target);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new EvolutionPersistenceValidationError(
-      `Path must remain below repository root: ${target}`,
-    );
-  }
+  const relative = relativeInsideRoot(root, target);
   let current = root;
   for (const segment of relative.split(path.sep)) {
     current = path.join(current, segment);
-    try {
-      const info = await io.lstat(current);
-      if (info.isSymbolicLink() || !info.isDirectory()) {
-        throw new EvolutionPersistenceValidationError(
-          `Path component must be a real directory: ${current}`,
-        );
-      }
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-      try {
-        await io.mkdir(current, { mode });
-      } catch (mkdirError) {
-        if (!isAlreadyExists(mkdirError)) throw mkdirError;
-      }
-      const info = await io.lstat(current);
-      if (info.isSymbolicLink() || !info.isDirectory()) {
-        throw new EvolutionPersistenceValidationError(
-          `Path component must be a real directory: ${current}`,
-        );
-      }
-    }
+    await ensureRealDirectory(io, current, mode);
+  }
+}
+
+/** The part of `target` below `root`, or a refusal: a chain may never leave the repository. */
+function relativeInsideRoot(root: string, target: string): string {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new EvolutionPersistenceValidationError(`Path must remain below repository root: ${target}`);
+  }
+  return relative;
+}
+
+/**
+ * One component of the chain: either a real directory already, or created and then checked
+ * again. The second check is not redundant — `mkdir` on a path whose parent is a link creates
+ * through the link, so what the path resolved to before the call is not what it means after.
+ */
+async function ensureRealDirectory(
+  io: EvolutionApplicationFileIo,
+  current: string,
+  mode: number,
+): Promise<void> {
+  const existing = await inspectDirectoryComponent(io, current);
+  if (existing !== "missing") {
+    assertRealDirectory(existing, current);
+    return;
+  }
+  try {
+    await io.mkdir(current, { mode });
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+  }
+  // Straight `lstat`, not the tolerant helper: before this refactor a component that
+  // disappeared between mkdir and the check surfaced the raw ENOENT, and that stays true.
+  assertRealDirectory(await io.lstat(current), current);
+}
+
+async function inspectDirectoryComponent(
+  io: EvolutionApplicationFileIo,
+  current: string,
+): Promise<{ isSymbolicLink(): boolean; isDirectory(): boolean } | "missing"> {
+  try {
+    return await io.lstat(current);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    return "missing";
+  }
+}
+
+function assertRealDirectory(
+  info: { isSymbolicLink(): boolean; isDirectory(): boolean } | "missing",
+  current: string,
+): void {
+  if (info === "missing" || info.isSymbolicLink() || !info.isDirectory()) {
+    throw new EvolutionPersistenceValidationError(
+      `Path component must be a real directory: ${current}`,
+    );
   }
 }
 
@@ -710,9 +874,7 @@ export async function cleanOrphanTemps(
     if (isNotFound(error)) return;
     throw error;
   }
-  const pattern = new RegExp(
-    `^${escapeRegExp(basename)}\\.[0-9]+\\.[a-f0-9]{16}\\.tmp$`,
-  );
+  const pattern = siblingTempPattern(basename);
   for (const entry of entries) {
     if (!pattern.test(entry)) continue;
     const absolute = path.join(directory, entry);
