@@ -425,3 +425,46 @@ async function git(root: string, args: string[]) {
   if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout);
   return result;
 }
+
+describe("worktree administration", () => {
+  async function repo() {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-worktrees-"));
+    await run("git", ["init", "-b", "main"], root);
+    await run("git", ["config", "user.name", "Agent Team Test"], root);
+    await run("git", ["config", "user.email", "agent-team@example.com"], root);
+    await writeFile(path.join(root, "README.md"), "# Fixture\n", "utf8");
+    await run("git", ["add", "."], root);
+    await run("git", ["commit", "-m", "initial"], root);
+    const base = await run("git", ["rev-parse", "HEAD"], root);
+    return { root, base: base.trim() };
+  }
+
+  async function run(command: string, args: string[], cwd: string): Promise<string> {
+    const result = await runProcess({ command, args, cwd, timeoutMs: 30_000 });
+    if (result.exitCode !== 0) throw new Error(result.stderr);
+    return result.stdout;
+  }
+
+  it("creates concurrent worktrees in one repository without corrupting the ledger", async () => {
+    // git reads `.git/worktrees/**` while writing it, so two parallel `worktree add`
+    // calls made one of them fail with
+    // `fatal: failed to read .git/worktrees/alpha/commondir: Undefined error: 0`.
+    // The tasks in that wave share one repository, which is exactly the shape an
+    // acceptance-gate run hit under load.
+    const { root, base } = await repo();
+    const worktrees = path.join(root, ".agent-team", "worktrees");
+    const manager = new GitManager(root, worktrees);
+    const names = ["alpha", "beta", "gamma"];
+    const created = await Promise.all(
+      names.map((name) =>
+        manager.createWorktree(`agent-team/run/${name}`, base, path.join(worktrees, "run", name)),
+      ),
+    );
+
+    for (const worktree of created) {
+      expect(await readFile(path.join(worktree.path, "README.md"), "utf8")).toBe("# Fixture\n");
+    }
+    const listed = await run("git", ["worktree", "list", "--porcelain"], root);
+    expect(listed.match(/^worktree /gm)).toHaveLength(names.length + 1);
+  }, 120_000);
+});

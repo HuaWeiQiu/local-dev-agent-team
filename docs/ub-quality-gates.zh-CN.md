@@ -371,6 +371,11 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 `unstableKeys` 必然相同——它只能抓「扫描期间文件被改」，抓不到「这份覆盖率本身是一次
 运气不好的采样」。`getInventory 20.24` 就是这种形态的高概率版本。
 
+**顺序依赖只有换顺序才会暴露。** 覆盖率签名在两次相同顺序的运行里可能一致，而
+真正的问题是「谁先跑」。手动入口：`pnpm test:shuffle`（固定 seed `20261102`）。
+它不是 PR 门禁——顺序检查跑一轮全量，成本与收益都更像 nightly；但没有这个入口时，
+我们只能靠撞。
+
 **默认行为不能因为少写一个 flag 就静默改变语义。** `--coverage-a/--coverage-b` 只在
 `--use-existing-coverage` 下生效；漏了后者，门禁会按 self 模式自己再造两份覆盖率去比，
 配对好的报告被忽略——两次自采若恰好一致，就会写出一份 `coverageSource: self` 的基线，
