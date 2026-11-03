@@ -477,72 +477,87 @@ export class EvolutionApplicationTargets {
     after: TargetDigestState,
     _mode: "apply" | "rollback",
   ): Promise<void> {
+    const name = this.assertStrategyCandidate(proposal);
+    try {
+      if (isAbsentDefinition(after)) {
+        await this.removeStrategyDefinition(name, before);
+        return;
+      }
+      await this.saveStrategyDefinition(name, before, after);
+    } catch (error) {
+      throw this.strategyApplyFailure(error);
+    }
+  }
+
+  /**
+   * Only a strategy blueprint may be applied here, and never one the project configures.
+   *
+   * The config/custom question has one subtlety worth keeping: `source()` reports "config" for
+   * every name that is not a custom blueprint, including names nobody configured, so it cannot
+   * decide this alone. The name is refused only when the loaded config actually declares it.
+   */
+  assertStrategyCandidate(proposal: EvolutionProposal): string {
     if (proposal.candidate.kind !== "strategy-blueprint") {
       throw new EvolutionApplicationError("POLICY_DENIED", "Not a strategy-blueprint candidate");
     }
     const name = proposal.candidate.name;
-    // Configured (agent-team.yaml) strategies are never mutated. source() reports
-    // "config" for names that are not present as custom blueprints; when a name is
-    // both a baseline config name and somehow custom, customDefinition wins. Reject
-    // when the name is a baseline-only configured strategy.
     const custom = this.#strategies.customDefinition(name);
-    if (!custom && this.#strategies.source(name) === "config") {
-      // source returns "config" for any non-custom name, including unknown names.
-      // Unknown names are allowed for create. Detect baseline names via conflict on save.
-      // Preflight: if resolve would find a config strategy and custom is absent, block
-      // only when the catalog considers it a configured strategy (save throws CONFLICT).
-      // We probe by checking whether the name exists in loaded config strategies.
-      const configuredNames = new Set(
-        Object.keys(this.#loaded.config.strategies?.definitions ?? {}),
+    if (custom || this.#strategies.source(name) !== "config") return name;
+    const configuredNames = new Set(Object.keys(this.#loaded.config.strategies?.definitions ?? {}));
+    if (configuredNames.has(name)) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Configured strategy '${name}' cannot be modified by evolution application`,
       );
-      if (configuredNames.has(name)) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          `Configured strategy '${name}' cannot be modified by evolution application`,
-        );
-      }
     }
+    return name;
+  }
 
-    try {
-      if (!after.present || after.strategyDefinition === null || after.strategyDefinition === undefined) {
-        const current = this.#strategies.customDefinition(name);
-        if (!current) {
-          if (!before.present) {
-            return;
-          }
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Strategy blueprint '${name}' is absent but rollback expected a definition`,
-          );
-        }
-        await this.#strategies.delete(name, {
-          expectedBefore: before.strategyDefinition ?? current,
-        });
-        return;
-      }
-
-      const expectedBefore: StrategyBlueprintExpectedBefore = before.present
-        ? (before.strategyDefinition ?? this.#strategies.customDefinition(name) ?? null)
-        : null;
-      await this.#strategies.save(name, after.strategyDefinition, { expectedBefore });
-    } catch (error) {
-      if (error instanceof EvolutionApplicationError) {
-        throw error;
-      }
-      if (error instanceof StrategyBlueprintDriftError) {
-        throw new EvolutionApplicationError("TARGET_DRIFTED", error.message);
-      }
-      if (error instanceof StrategyBlueprintConflictError) {
-        throw new EvolutionApplicationError("POLICY_DENIED", error.message);
-      }
-      if (error instanceof StrategyBlueprintIndeterminateError) {
-        throw new EvolutionApplicationError("RECOVERY_REQUIRED", error.message);
-      }
-      if (error instanceof StrategyBlueprintError) {
-        throw new EvolutionApplicationError("POLICY_DENIED", error.message);
-      }
-      throw error;
+  /** Remove a custom blueprint, refusing when the rollback expected one that is not there. */
+  async removeStrategyDefinition(name: string, before: TargetDigestState): Promise<void> {
+    const current = this.#strategies.customDefinition(name);
+    if (current) {
+      await this.#strategies.delete(name, {
+        expectedBefore: before.strategyDefinition ?? current,
+      });
+      return;
     }
+    if (!before.present) return;
+    throw new EvolutionApplicationError(
+      "TARGET_DRIFTED",
+      `Strategy blueprint '${name}' is absent but rollback expected a definition`,
+    );
+  }
+
+  /** Save the definition, with the state the caller believed it was replacing. */
+  async saveStrategyDefinition(
+    name: string,
+    before: TargetDigestState,
+    after: TargetDigestState,
+  ): Promise<void> {
+    const expectedBefore: StrategyBlueprintExpectedBefore = before.present
+      ? (before.strategyDefinition ?? this.#strategies.customDefinition(name) ?? null)
+      : null;
+    await this.#strategies.save(name, after.strategyDefinition!, { expectedBefore });
+  }
+
+  /**
+   * What a failed catalog mutation means for the caller. Drift is a disagreement about the
+   * current definition, conflict is a policy refusal, indeterminate means the write may have
+   * happened — and that last one is the only one a retry must not treat as "did not happen".
+   */
+  strategyApplyFailure(error: unknown): unknown {
+    if (error instanceof EvolutionApplicationError) return error;
+    if (error instanceof StrategyBlueprintDriftError) {
+      return new EvolutionApplicationError("TARGET_DRIFTED", error.message);
+    }
+    if (error instanceof StrategyBlueprintIndeterminateError) {
+      return new EvolutionApplicationError("RECOVERY_REQUIRED", error.message);
+    }
+    if (error instanceof StrategyBlueprintConflictError || error instanceof StrategyBlueprintError) {
+      return new EvolutionApplicationError("POLICY_DENIED", error.message);
+    }
+    return error;
   }
 
   async ingestPromptMaterial(contentDigest: string, content: Uint8Array): Promise<void> {
@@ -721,6 +736,11 @@ export class EvolutionApplicationTargets {
     }
     return error;
   }
+}
+
+/** A target that carries no definition: the operation is a removal. */
+function isAbsentDefinition(target: TargetDigestState): boolean {
+  return !target.present || target.strategyDefinition === null || target.strategyDefinition === undefined;
 }
 
 export async function createDirectoryChain(

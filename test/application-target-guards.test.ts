@@ -32,6 +32,7 @@ import {
 import { siblingTempName } from "../src/evolution/temp-names.js";
 import { GitManager } from "../src/git/manager.js";
 import { StrategyBlueprintCatalog } from "../src/strategies/catalog.js";
+import { DurableEvolutionCatalog } from "../src/evolution/persistence.js";
 
 /**
  * These cases drive the **target layer directly**.
@@ -72,25 +73,45 @@ function fileIo(): EvolutionApplicationFileIo {
  */
 async function targetsFor(
   overrides: Partial<{ promptContent: Buffer; promptMode: number }> = {},
-): Promise<{ root: string; targets: EvolutionApplicationTargets }> {
+): Promise<{
+  root: string;
+  targets: EvolutionApplicationTargets;
+  strategies: StrategyBlueprintCatalog;
+  catalog: DurableEvolutionCatalog;
+  loaded: LoadedConfig;
+}> {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), "agent-team-target-guard-")));
   await mkdir(path.join(root, "prompts"), { recursive: true });
   await writeFile(path.join(root, promptPath), overrides.promptContent ?? Buffer.from("original prompt\n"));
   if (overrides.promptMode !== undefined) await chmod(path.join(root, promptPath), overrides.promptMode);
+  const baseConfig = createDefaultConfig("guard");
   const loaded: LoadedConfig = {
     root,
     path: path.join(root, "agent-team.yaml"),
-    config: createDefaultConfig("guard"),
+    config: {
+      ...baseConfig,
+      roles: {
+        ...baseConfig.roles,
+        worker: { ...baseConfig.roles.worker, promptFile: promptPath },
+      },
+    },
   };
+  const strategies = await StrategyBlueprintCatalog.open(loaded);
   const targets = new EvolutionApplicationTargets({
     io: fileIo(),
     root,
     objectsDirectory: path.join(root, ".agent-team", "evolution", "objects", "sha256"),
-    strategies: await StrategyBlueprintCatalog.open(loaded),
+    strategies,
     git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
     loaded,
   });
-  return { root, targets };
+  return {
+    root,
+    targets,
+    strategies,
+    catalog: await DurableEvolutionCatalog.open(loaded),
+    loaded,
+  };
 }
 
 /** What a preview would have recorded for the file as it stands. */
@@ -350,5 +371,196 @@ describe("prompt object store guards", () => {
     const content = Buffer.from("stored prompt\n");
     await targets.ingestPromptMaterial(digestOf(content), content);
     await expect(targets.readPromptObject(digestOf(content))).resolves.toEqual(content);
+  });
+});
+
+describe("strategy target failure mapping", () => {
+  const definition = (maxParallel: number) => ({
+    topology: { mode: "parallel-dag" as const },
+    maxParallel,
+    maxReworkAttempts: 3,
+    executionTimeoutSeconds: 3_600,
+    maxAgentInvocations: 42,
+    maxProcessOutputBytes: 65_536,
+    maxArtifactBytes: 1_048_576,
+    roleProfiles: { worker: "codex-worker" },
+    approvalGates: ["plan", "final"] as const,
+    approvalTimeoutSeconds: 600,
+  });
+
+  /** A real proposal for a strategy candidate, so the target layer sees what it really sees. */
+  async function strategyProposal(name: string) {
+    const world = await targetsFor();
+    await world.catalog.propose({
+      id: `${name}-proposal`,
+      createdAt: new Date().toISOString(),
+      policy: {
+        version: 1,
+        capabilities: {
+          automaticExecution: false,
+          automaticPromotion: false,
+          networkPublication: false,
+          secretStorage: false,
+        },
+        allowedPromptPaths: [],
+      },
+      candidate: { kind: "strategy-blueprint", name, definition: definition(4) },
+    });
+    const proposal = world.catalog.getProposal(`${name}-proposal`);
+    if (!proposal) throw new Error("proposal disappeared");
+    return { ...world, proposal };
+  }
+
+  it("maps a definition that moved underneath the apply to TARGET_DRIFTED", async () => {
+    const { targets, strategies, proposal } = await strategyProposal("drifted");
+    await strategies.save("drifted", definition(2), { expectedBefore: null });
+    await strategies.save("drifted", definition(3), { expectedBefore: definition(2) });
+    await expect(
+      targets.applyStrategyTarget(
+        proposal,
+        { kind: "strategy-blueprint", identity: "drifted", digest: null, present: true, strategyDefinition: definition(2) },
+        { kind: "strategy-blueprint", identity: "drifted", digest: null, present: true, strategyDefinition: definition(5) },
+        "apply",
+      ),
+    ).rejects.toMatchObject({ code: "TARGET_DRIFTED" });
+  });
+
+  it("maps a save that expected absence but found a definition to TARGET_DRIFTED", async () => {
+    const { targets, strategies, proposal } = await strategyProposal("conflicting");
+    await strategies.save("conflicting", definition(2), { expectedBefore: null });
+    await expect(
+      targets.applyStrategyTarget(
+        proposal,
+        { kind: "strategy-blueprint", identity: "conflicting", digest: null, present: false },
+        { kind: "strategy-blueprint", identity: "conflicting", digest: null, present: true, strategyDefinition: definition(6) },
+        "apply",
+      ),
+    ).rejects.toMatchObject({
+      // The catalog calls this drift, not conflict: the write expected absence and found a
+      // definition, which is a disagreement about the current state, not a policy refusal.
+      code: "TARGET_DRIFTED",
+      message: "Strategy blueprint 'conflicting' drifted: expected absence before write",
+    });
+  });
+
+  it("refuses to modify a strategy the project configures", async () => {
+    const { targets, loaded } = await targetsFor();
+    const configured = Object.keys(loaded.config.strategies?.definitions ?? {})[0];
+    expect(configured).toBeDefined();
+    const { catalog } = await targetsFor();
+    await catalog.propose({
+      id: "configured-proposal",
+      createdAt: new Date().toISOString(),
+      policy: {
+        version: 1,
+        capabilities: {
+          automaticExecution: false,
+          automaticPromotion: false,
+          networkPublication: false,
+          secretStorage: false,
+        },
+        allowedPromptPaths: [],
+      },
+      candidate: { kind: "strategy-blueprint", name: configured!, definition: definition(4) },
+    });
+    const proposal = catalog.getProposal("configured-proposal");
+    if (!proposal) throw new Error("proposal disappeared");
+    await expect(
+      targets.applyStrategyTarget(
+        proposal,
+        { kind: "strategy-blueprint", identity: configured!, digest: null, present: false },
+        { kind: "strategy-blueprint", identity: configured!, digest: null, present: true, strategyDefinition: definition(4) },
+        "apply",
+      ),
+    ).rejects.toThrow(/cannot be modified by evolution application/);
+  });
+});
+
+describe("prompt candidate guard", () => {
+  async function propose(
+    candidate: Record<string, unknown>,
+    id: string,
+    allowedPromptPaths: string[] = [],
+  ) {
+    const world = await targetsFor();
+    await world.catalog.propose({
+      id,
+      createdAt: new Date().toISOString(),
+      policy: {
+        version: 1,
+        capabilities: {
+          automaticExecution: false,
+          automaticPromotion: false,
+          networkPublication: false,
+          secretStorage: false,
+        },
+        allowedPromptPaths,
+      },
+      candidate,
+    });
+    const proposal = world.catalog.getProposal(id);
+    if (!proposal) throw new Error("proposal disappeared");
+    return { ...world, proposal };
+  }
+
+  it("refuses a candidate that is not a role prompt", async () => {
+    const { targets, proposal } = await propose(
+      {
+        kind: "strategy-blueprint",
+        name: "not-a-prompt",
+        definition: {
+          topology: { mode: "parallel-dag" },
+          maxParallel: 4,
+          maxReworkAttempts: 3,
+          executionTimeoutSeconds: 3_600,
+          maxAgentInvocations: 42,
+          maxProcessOutputBytes: 65_536,
+          maxArtifactBytes: 1_048_576,
+          roleProfiles: { worker: "codex-worker" },
+          approvalGates: ["plan", "final"],
+          approvalTimeoutSeconds: 600,
+        },
+      },
+      "not-a-prompt-proposal",
+    );
+    expect(() => targets.assertPromptCandidate(proposal)).toThrow(
+      "Not a role-prompt candidate",
+    );
+  });
+
+  it("refuses a prompt path no role configures", async () => {
+    // The proposal must be made against a config that does allow the path — the catalog
+    // refuses anything else. The layer under test is then built with a config that no longer
+    // names that role: the state a config edit between propose and apply produces.
+    const { root, proposal } = await propose(
+      { kind: "role-prompt", path: promptPath, contentDigest: sha256Bytes("x") },
+      "stranger-proposal",
+      [promptPath],
+    );
+    const loaded: LoadedConfig = {
+      root,
+      path: path.join(root, "agent-team.yaml"),
+      config: createDefaultConfig("guard"),
+    };
+    const targets = new EvolutionApplicationTargets({
+      io: fileIo(),
+      root,
+      objectsDirectory: path.join(root, ".agent-team", "evolution", "objects", "sha256"),
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+    });
+    expect(() => targets.assertPromptCandidate(proposal)).toThrow(
+      `Prompt path '${promptPath}' is not a configured role promptFile`,
+    );
+  });
+
+  it("returns the path of a prompt the project does configure", async () => {
+    const { targets, proposal } = await propose(
+      { kind: "role-prompt", path: promptPath, contentDigest: sha256Bytes("x") },
+      "configured-prompt-proposal",
+      [promptPath],
+    );
+    expect(targets.assertPromptCandidate(proposal)).toBe(promptPath);
   });
 });
