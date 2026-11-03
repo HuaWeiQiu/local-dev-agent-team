@@ -32,33 +32,43 @@ export function parseLcov(text) {
     const line = raw.trimEnd();
     const sf = SF_PATTERN.exec(line);
     if (sf) {
-      current = { path: sf[1], lines: new Map(), extras: [], lf: undefined, lh: undefined };
+      current = emptyRecord(sf[1]);
       files.set(current.path, current);
       continue;
     }
     if (!current) continue;
-    const da = DA_PATTERN.exec(line);
-    if (da) {
-      // Repeated DA for one line: keep the maximum, which is what "was it executed" means.
-      const number = Number(da[1]);
-      const hits = Number(da[2]);
-      current.lines.set(number, Math.max(current.lines.get(number) ?? 0, hits));
-      continue;
-    }
-    const lf = LF_PATTERN.exec(line);
-    if (lf) {
-      current.lf = Number(lf[1]);
-      continue;
-    }
-    const lh = LH_PATTERN.exec(line);
-    if (lh) {
-      current.lh = Number(lh[1]);
-      continue;
-    }
-    if (line === "end_of_record") continue;
-    if (line !== "") current.extras.push(line);
+    applyField(current, line);
   }
   return files;
+}
+
+function emptyRecord(path) {
+  return { path, lines: new Map(), extras: [], lf: undefined, lh: undefined };
+}
+
+/** One field of a file record: a DA line, an LF/LH summary, or a verbatim extra. */
+function applyField(record, line) {
+  const da = DA_PATTERN.exec(line);
+  if (da) {
+    applyHit(record, Number(da[1]), Number(da[2]));
+    return;
+  }
+  const lf = LF_PATTERN.exec(line);
+  if (lf) {
+    record.lf = Number(lf[1]);
+    return;
+  }
+  const lh = LH_PATTERN.exec(line);
+  if (lh) {
+    record.lh = Number(lh[1]);
+    return;
+  }
+  if (line !== "end_of_record" && line !== "") record.extras.push(line);
+}
+
+/** Repeated DA for one line keeps the maximum, which is what "was it executed" means. */
+function applyHit(record, number, hits) {
+  record.lines.set(number, Math.max(record.lines.get(number) ?? 0, hits));
 }
 
 /**
@@ -76,21 +86,31 @@ export function mergeReports(reports, { quorum } = {}) {
   const partialFiles = [];
 
   for (const path of [...paths].sort()) {
-    const present = reports.filter((report) => report.has(path));
-    if (present.length < reports.length) partialFiles.push({ path, presentIn: present.length });
-    const lineNumbers = new Set(present.flatMap((report) => [...report.get(path).lines.keys()]));
-    const lines = new Map();
-    for (const number of [...lineNumbers].sort((left, right) => left - right)) {
-      const executions = present.filter((report) => (report.get(path).lines.get(number) ?? 0) > 0).length;
-      if (executions > 0 && executions < reports.length) divergentLines += 1;
-      lines.set(number, executions >= threshold ? 1 : 0);
-    }
-    const extras = present[0]?.get(path).extras ?? [];
-    merged.set(path, { path, lines, extras });
+    const result = mergePath(path, reports, threshold);
+    merged.set(path, result.record);
+    divergentLines += result.divergent;
+    if (result.partial) partialFiles.push(result.partial);
   }
 
   return { merged, divergentLines, partialFiles, threshold };
 }
+
+/** One path across all runs: majority per line, plus what the runs disagreed about. */
+function mergePath(path, reports, threshold) {
+  const present = reports.filter((report) => report.has(path));
+  const lineNumbers = new Set(present.flatMap((report) => [...report.get(path).lines.keys()]));
+  const lines = new Map();
+  let divergent = 0;
+  for (const number of [...lineNumbers].sort((left, right) => left - right)) {
+    const executions = present.filter((report) => (report.get(path).lines.get(number) ?? 0) > 0).length;
+    if (executions > 0 && executions < reports.length) divergent += 1;
+    lines.set(number, executions >= threshold ? 1 : 0);
+  }
+  const extras = present[0]?.get(path).extras ?? [];
+  const partial = present.length < reports.length ? { path, presentIn: present.length } : undefined;
+  return { record: { path, lines, extras }, divergent, partial };
+}
+
 
 /** The merged coverage as lcov text, with LF/LH recomputed from the merged lines. */
 export function serializeLcov(merged) {
