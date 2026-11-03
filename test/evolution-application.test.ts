@@ -6,10 +6,12 @@ import {
   readFile,
   readdir,
   rename,
+  symlink,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -2793,6 +2795,41 @@ describe("the restored state validator refuses states the catalog disagrees with
   });
 });
 
+/**
+ * Crash-recovery coverage: the matrix this suite is filling in.
+ *
+ * A recovery function is scored on **branch** coverage (crapper reads `BRDA` records when a
+ * function has any), and one crash world walks exactly one path through it. So "add another
+ * crash of the same kind" does not move the number: only a *different* world does.
+ *
+ * Rows are worlds, not functions — a function is just code that reads a world, and one world
+ * can serve several functions. Cells say which branch the world reaches, or why a branch can
+ * never be reached. The suite is complete when every cell is either exercised or marked
+ * unreachable with a reason.
+ *
+ * | world (crash point)                              | what it reaches |
+ * | ------------------------------------------------ | --------------- |
+ * | target written, catalog not advanced (strategy)   | `finishPromotion` promote arm; `finishRollback` rollback arm |
+ * | target written, catalog not advanced (prompt)     | `restoreInterruptedPrompt` success path; `verifyPromptGitOutcome` false arm |
+ * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
+ * | pending snapshot lost its digest                  | `restoreInterruptedPrompt` "no recoverable snapshot" arm |
+ * | target replaced by a symlink or a non-file        | `restoreInterruptedPrompt` "not a safe regular file" arm |
+ * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
+ * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
+ * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
+ *
+ * Deliberately **unreachable** (kept, not covered):
+ *   - `finishPromotion`'s `status === "promoted"` and `finishRollback`'s `status === "rolled-back"`:
+ *     idempotent guards for a repeated call; the recovery flow never enters with the catalog
+ *     already advanced, because `situationFor` routes that case elsewhere.
+ *   - `finishPromotion`'s `status !== "evaluated"` / `finishRollback`'s `status !== "promoted"`:
+ *     the same `situationFor` refuses first (verified: a rejected proposal left `recoveryRequired`
+ *     true without ever calling the finish step).
+ *
+ * One world per row, and no new injection point unless the real world has one: the fixtures use
+ * the existing `io.rename` / `catalogIo.beforeAtomicStage` / `FailOnceExactCommitGitManager`
+ * seams. Each extra seam is a window the product does not have.
+ */
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;
@@ -2943,6 +2980,81 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
       completed: [{ commandId: "recover-new-new-command", status: "applied" }],
     });
   });
+
+  /** A prompt promotion that crashed after the bytes landed and before the commit. */
+  async function interruptedPromptWorld(id: string) {
+    const harness = await createHarness({
+      gitFactory: (root) =>
+        new FailOnceExactCommitGitManager(root, path.join(root, ".agent-team", "worktrees")),
+    });
+    const candidate = Buffer.from(`Candidate prompt for ${id}\n`, "utf8");
+    await harness.coordinator.propose({
+      id,
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation(id);
+    await harness.coordinator.evaluateServerPreflight(id);
+    const preview = await harness.coordinator.previewPromotion({ proposalId: id, operator });
+    (harness.git as FailOnceExactCommitGitManager).failNextExactCommit = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: `${id}-command`,
+        proposalId: id,
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    return harness;
+  }
+
+  it("cleans the temp files an interrupted prompt write left behind", async () => {
+    // One world covers all three branches of the cleanup: a matching temp file is removed, an
+    // unrelated file is kept, and a non-file entry with the same name shape is left alone.
+    const harness = await interruptedPromptWorld("temp-cleanup");
+    const directory = path.join(harness.root, "prompts");
+    const matching = path.join(directory, `.worker.md.4242.${"a".repeat(16)}.tmp`);
+    const recoveryShaped = path.join(directory, `.worker.md.4243.${"b".repeat(16)}.recovery.tmp`);
+    const unrelated = path.join(directory, "notes.md");
+    await writeFile(matching, "left by a killed process\n", "utf8");
+    await writeFile(recoveryShaped, "left by a killed restore\n", "utf8");
+    await writeFile(unrelated, "somebody's notes\n", "utf8");
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(existsSync(matching)).toBe(false);
+    expect(existsSync(recoveryShaped)).toBe(false);
+    expect(existsSync(unrelated)).toBe(true);
+    expect(await readFile(unrelated, "utf8")).toBe("somebody's notes\n");
+    // The cleanup ran as part of opening: the coordinator came up and can read the catalog.
+    expect(reopened.coordinator.readProposal("temp-cleanup")).toMatchObject({
+      id: "temp-cleanup",
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "leaves a temp-shaped symlink alone when cleaning up",
+    async () => {
+      // Creating symlinks on Windows needs a privilege the CI user does not have, so this one
+      // is skipped there. The cleanup must not follow the link and delete its target.
+      const harness = await interruptedPromptWorld("temp-symlink");
+      const directory = path.join(harness.root, "prompts");
+      const outside = path.join(harness.root, "outside.md");
+      const link = path.join(directory, `.worker.md.4244.${"c".repeat(16)}.tmp`);
+      await writeFile(outside, "must survive\n", "utf8");
+      await symlink(outside, link);
+
+      const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+      expect(existsSync(outside)).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("must survive\n");
+      expect(existsSync(link)).toBe(true);
+      expect(reopened.coordinator.readProposal("temp-symlink")).toMatchObject({
+        id: "temp-symlink",
+      });
+    },
+  );
 
   it("restores the prompt when the write landed but the Git commit did not", async () => {
     // The crash point for a role prompt is between "bytes written" and "committed": the file
