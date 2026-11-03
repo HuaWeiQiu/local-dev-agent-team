@@ -22,28 +22,35 @@ export async function commandAvailable(
   command: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
-  if (command.includes("/") || command.includes("\\")) {
-    try {
-      await access(command);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  const pathValue = env.PATH ?? env.Path ?? "";
-  const parts = pathValue.split(path.delimiter).filter(Boolean);
-  const candidates = process.platform === "win32" ? [`${command}.cmd`, `${command}.exe`, command] : [command];
-  for (const dir of parts) {
-    for (const name of candidates) {
-      try {
-        await access(path.join(dir, name));
-        return true;
-      } catch {
-        // continue
-      }
-    }
+  if (isPathLike(command)) return await fileExists(command);
+  for (const candidate of pathCandidates(command, env)) {
+    if (await fileExists(candidate)) return true;
   }
   return false;
+}
+
+/** A command with a separator is a path the caller already resolved. */
+function isPathLike(command: string): boolean {
+  return command.includes("/") || command.includes("\\");
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every place the shell would look, including the Windows executable suffixes. */
+function pathCandidates(command: string, env: NodeJS.ProcessEnv): string[] {
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const directories = pathValue.split(path.delimiter).filter(Boolean);
+  const names = process.platform === "win32"
+    ? [`${command}.cmd`, `${command}.exe`, command]
+    : [command];
+  return directories.flatMap((directory) => names.map((name) => path.join(directory, name)));
 }
 
 export async function qualityCommandAvailability(
