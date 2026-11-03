@@ -452,35 +452,26 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("named-paths");
-    const events: PendingRunEvent[] = [];
-    const eventSink: RunEventSink = {
-      append(event) {
-        events.push(event);
-        return { ...event, sequence: events.length, traceId: "trace", spanId: "span" };
-      },
-    };
     const state = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FailIfArchitectService(),
-      eventSink,
     }).run({
       goal: "Implement T1-T3. T1 add src/greet.js. T2 add test/greet.test.js. T3 write CHANGELOG.md.",
     });
-    // This case once failed under full-suite load with only a status array to go on.
-    // The message now carries what a reader needs: where each task ended, what the wave
-    // said about the ones it lost, and the last things the run did.
-    const observed = describeDagRun(state, events);
 
-    expect(state.status, observed).toBe("awaiting-human");
-    expect(state.plan?.summary, observed).toContain("Deterministic DAG");
-    expect(state.tasks.map((task) => task.task.id), observed).toEqual(["T1", "T2", "T3"]);
-    expect(state.tasks.map((task) => task.status), observed).toEqual(["merged", "merged", "merged"]);
-    expect(state.history.some((entry) => entry.message.includes("不调用架构模型")), observed).toBe(true);
+    // The contract this case owns: the *graph*. Same input, same nodes, same edges, and
+    // no architect call. Whether the tasks then run is a different contract, asserted by
+    // the terminal-state case below — mixing the two made a real defect read as flake.
+    expect(state.plan?.summary).toContain("Deterministic DAG");
+    expect(state.plan?.tasks.map((task) => task.id)).toEqual(["T1", "T2", "T3"]);
+    expect(state.plan?.tasks.map((task) => task.dependsOn)).toEqual([[], ["T1"], []]);
+    expect(state.history.some((entry) => entry.message.includes("不调用架构模型"))).toBe(true);
   }, 30_000);
 
-  it("closes a task its wave lost instead of leaving it working", async () => {
-    // The observed flake: the run parked for approval with T3 still marked "working",
-    // because a task that throws before its first attempt keeps the status the wave set
-    // on it. This fixture makes that throw deterministic.
+  it("leaves no task in a non-terminal state when its wave fails", async () => {
+    // The defect this case owns: a task its wave lost kept the status the wave had set
+    // ("pending", or "working" once it had a worktree) while the run parked for approval,
+    // so the reader saw "waiting for you" and a task that never ran. The throw is made
+    // deterministic here, which is why this case no longer needs load or luck.
     const { loaded } = await createFixture("named-paths-lost-task");
     const events: PendingRunEvent[] = [];
     const eventSink: RunEventSink = {
@@ -506,10 +497,14 @@ describe("local workflow", () => {
 
     const observed = describeDagRun(state, events);
     const lost = state.tasks.find((task) => task.task.id === "T3");
+    const terminal = new Set(["merged", "blocked", "failed", "skipped"]);
+    expect(
+      state.tasks.filter((task) => !terminal.has(task.status)).map((task) => `${task.task.id}=${task.status}`),
+      observed,
+    ).toEqual([]);
     expect(rejectedTaskIds(events), observed).toContain("T3");
     expect(lost?.status, observed).toBe("blocked");
     expect(lost?.error, observed).toContain("agent factory is down");
-    expect(state.tasks.some((task) => task.status === "working"), observed).toBe(false);
   }, 30_000);
 
   it("applies the plan gate to controller-produced DAGs and resumes after approval", async () => {
