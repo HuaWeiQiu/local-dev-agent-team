@@ -11,7 +11,7 @@ export default defineConfig({
       // sources: a second run that clears that directory then killed the first
       // with `ENOENT ... lcov-report/sorter.js` from `V8ToIstanbul.load`, and the
       // quality gate read the crash as 0% coverage.
-      exclude: [...configDefaults.coverage.exclude, "target/**", "coverage/**"],
+      exclude: [...(configDefaults.coverage.exclude ?? []), "target/**", "coverage/**"],
       // Explicit and outside the instrumented tree, so a report is never written
       // into a directory this same run is scanning for sources.
       reportsDirectory: "target/coverage/typescript",
