@@ -581,6 +581,23 @@ resource path `binaries\agent-team-node-x86_64-pc-windows-msvc.exe` doesn't exis
 
 那些用例证明的是「macOS 怎么解析一个 Windows 路径」，不是「Windows 会怎样」。**判据：要证明一条平台无关的规则，被测代码本身不能调用平台相关的辅助函数。** 现在 drive 分支走 `new URL("file:///")` + `pathname` 赋值，两种系统上是同一段代码；真正的证据是 `desktop-windows-x64` 由 fail 变 pass。
 
+### 失效的断言看起来和有效的断言一模一样
+
+一个解析不到的类型名出现在 `as` 位置时，TypeScript 不会停下来。它把那个名字当成 `any`，于是 `as AdapterDoctorSpec` 退化成 `as any`：**编译通过、断言失效、什么都不校验**。
+
+这个形态比"没写断言"更难发现，因为它长得和有效断言一模一样。`test/adapters-doctor.test.ts` 就是这样：`AdapterDoctorSpec` 从 `adapters/types.js` 引入，而它实际声明在 `adapters/shared.ts`；那条 `as` 站了很久。测试一直在调真函数，行为是对的——但输入形状一次都没被校验过，接口哪天改了字段，测试不会响。
+
+**判据：一条类型断言的有效性，依赖它的类型名能被解析。** 而当类型检查覆盖不到那个文件时（`test/**` 曾长期不在 `tsc` 的 include 里），两条独立失效就叠成一条看起来有防护的测试。
+
+验证方式不是"改完 0 错误"，是**反证**：把被测字段改个名字，看编译器会不会指名道姓——
+
+```
+TS2561: Object literal may only specify known properties, but 'authArgsTypo'
+does not exist in type 'AdapterDoctorSpec'. Did you mean to write 'authArgs'?
+```
+
+这条和上一条同源：**你无法用"跑通了"证明检查在起作用，只能用"故意弄错会不会红"证明。**
+
 ### 三个样本的共同形状
 
 | 样本 | 断言证明了什么 | 部署的世界 |
