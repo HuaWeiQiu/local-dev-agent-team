@@ -1,34 +1,34 @@
 {
-  "updatedAt": "2026-11-03T06:50:27.280Z",
+  "updatedAt": "2026-11-03T07:20:04.245Z",
   "generation": {
-    "headSha": "c11580a36fc235febe2d64d5192e633c3f7f6b49",
+    "headSha": "221a3e4f7a76d7b63ea5e81e43aabcb5c2964bb9",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T06:50:27.279Z",
+    "generatedAt": "2026-11-03T07:20:04.244Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 4,
+      "divergentLines": 1,
       "partialFiles": 0,
       "digests": [
-        "8303dcfd44bb628f7f0cf7c2d9f43bdc05e885f8d1887c20db6809db1f7294b1",
-        "ba22636d793bd835e6de8a4fed6ed630c0b9d1241ed43663335568d4cbeed69f",
-        "3715502eda032349276232f0eadc4023a9b98610a92ad1058d363433d772b238"
+        "c90e1d606a20740f07f9ca5bb50233351dbdd8ca9ece6bfbd85ff28d659710d7",
+        "e784d09b83f14f7bdc8a4604aafe7e2d9d970020e9bb90e785fb216399246fb6",
+        "770da5608f6d6428172028152b5010ec5a3705ec4e7bbf000d9814d7e12aa0ab"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 999047,
-      "sha256": "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d"
+      "bytes": 1000490,
+      "sha256": "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d",
-        "283e52149c98d9e114fce4eb3c3109a6247cfcf61bf6b26a939478a1e70d206d"
+        "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56",
+        "01c7f0659fcdf3c462f3770daee322b99b3b5db9c9795fde158aae14e7d86e56"
       ]
     }
   },
@@ -97,7 +97,6 @@
     "domain.plan#assessPlanCompleteness": 21.0497,
     "workflow.cleanup.RunArtifactCleaner#cleanup": 20.6986,
     "evidence.local#buildRunEvidence": 20.5248,
-    "scripts.coverage-caliber-attribution#renderAttribution": 20.5248,
     "desktop.settings#getInventory": 20.2391,
     "evolution.automation#projectRunOutcome": 20.2184,
     "components.UsagePanel#UsageCard": 20,
@@ -136,7 +135,6 @@
     "server.project-runtime#startProjectRuntime": 12.8948,
     "evidence.local#directoryBytes": 12.4074,
     "providers.failure#errorChainText": 12.4074,
-    "scripts.coverage-caliber-attribution#settledScore": 12.4074,
     "server.run-retention.RunRetention#integrationDiff": 12.4074,
     "domain.plan#extractNamedDeliverables": 12.144,
     "process.live-children#reapOrphanAgentProcesses": 12.144,
@@ -152,7 +150,6 @@
     "logs.render#renderLogLines": 11.4406,
     "jev.client.JevClient#requestChat": 11.2868,
     "evidence.local#artifactKind": 11.187,
-    "scripts.coverage-caliber-attribution#parseArgs": 11.0551,
     "experience.catalog.ExperienceCatalog#retrieveVerified": 11.0441,
     "github.client.GithubClient#findPullRequest": 11.001,
     "workflow.checkpoints.CheckpointService#isOnlyPostCheckpointMerges": 11,
