@@ -250,8 +250,8 @@ export class EvolutionApplicationTargets {
     const content = await this.readPromptObject(desiredDigest);
     const currentBytes = await this.assertPromptTargetUnchanged(target.absolute, target, expectedBefore);
     await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
-    await this.writePromptAtomically(target.absolute, content, target.mode);
-    await this.assertPromptWriteLanded(target.absolute, desiredDigest, target.mode);
+    await this.writePromptAtomically(target, content);
+    await this.assertPromptWriteLanded(target, desiredDigest);
     await this.commitPromptChange(authorization, mode, relativePath, decision);
   }
 
@@ -361,21 +361,22 @@ export class EvolutionApplicationTargets {
    * target, then fsync the directory. A failure after the rename is not "the write failed" —
    * the new bytes are already in place — so it is reported as recovery, not drift.
    */
-  async writePromptAtomically(absolute: string, content: Buffer, mode: number): Promise<void> {
+  async writePromptAtomically(target: PromptTargetFacts, content: Buffer): Promise<void> {
+    const absolute = target.absolute;
     const directory = path.dirname(absolute);
     const temporaryPath = path.join(directory, promptTempName(path.basename(absolute)));
     let renamed = false;
     try {
-      await this.writeTemporaryPrompt(temporaryPath, content, mode);
+      await this.writeTemporaryPrompt(temporaryPath, content, target.mode);
       await this.#io.beforeAtomicStage?.("rename");
-      await this.assertPromptParentUnchanged(directory, absolute);
+      await this.assertPromptParentUnchanged(directory, target.relativePath);
       await this.#io.rename(temporaryPath, absolute);
       renamed = true;
       await this.#io.beforeAtomicStage?.("directory-sync");
       await this.#io.syncDirectory(directory);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
-      throw this.promptWriteFailure(error, renamed, absolute);
+      throw this.promptWriteFailure(error, renamed, target.relativePath);
     }
   }
 
@@ -395,11 +396,11 @@ export class EvolutionApplicationTargets {
   }
 
   /** The directory must still be the one the path says it is, immediately before the rename. */
-  async assertPromptParentUnchanged(directory: string, absolute: string): Promise<void> {
+  async assertPromptParentUnchanged(directory: string, relativePath: string): Promise<void> {
     if ((await this.#io.realpath(directory)) !== directory) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt parent directory changed before rename: ${path.basename(absolute)}`,
+        `Prompt parent directory changed before rename: ${relativePath}`,
       );
     }
   }
@@ -408,7 +409,7 @@ export class EvolutionApplicationTargets {
    * What a failed write means. Once the rename happened the new bytes are in place and only
    * the directory entry may not be durable — that is recovery, not drift.
    */
-  promptWriteFailure(error: unknown, renamed: boolean, absolute: string): EvolutionApplicationError {
+  promptWriteFailure(error: unknown, renamed: boolean, relativePath: string): EvolutionApplicationError {
     const detail = error instanceof Error ? error.message : String(error);
     return renamed
       ? new EvolutionApplicationError(
@@ -417,32 +418,31 @@ export class EvolutionApplicationTargets {
         )
       : new EvolutionApplicationError(
           "TARGET_DRIFTED",
-          `Failed to write prompt target '${path.basename(absolute)}': ${detail}`,
+          `Failed to write prompt target '${relativePath}': ${detail}`,
         );
   }
 
   /** The bytes on disk after the replace must be the bytes the object store holds. */
   async assertPromptWriteLanded(
-    absolute: string,
+    target: PromptTargetFacts,
     desiredDigest: string,
-    mode: number,
   ): Promise<void> {
-    const written = await this.#io.readFile(absolute);
+    const written = await this.#io.readFile(target.absolute);
     if (sha256Bytes(written) !== desiredDigest) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target digest mismatch after write for '${path.basename(absolute)}'`,
+        `Prompt target digest mismatch after write for '${target.relativePath}'`,
       );
     }
-    const writtenInfo = await this.#io.lstat(absolute);
+    const writtenInfo = await this.#io.lstat(target.absolute);
     if (
       !writtenInfo.isFile() ||
       writtenInfo.isSymbolicLink() ||
-      (writtenInfo.mode & 0o777) !== mode
+      (writtenInfo.mode & 0o777) !== target.mode
     ) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target permissions changed unexpectedly for '${path.basename(absolute)}'`,
+        `Prompt target permissions changed unexpectedly for '${target.relativePath}'`,
       );
     }
   }

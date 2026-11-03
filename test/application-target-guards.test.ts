@@ -217,11 +217,11 @@ describe("prompt write verification", () => {
     const facts = await targets.describePromptTarget(promptPath);
     // A digest the file cannot possibly have: the write "landed" but not as asked.
     await expect(
-      targets.assertPromptWriteLanded(facts.absolute, sha256Bytes("some other bytes"), facts.mode),
+      targets.assertPromptWriteLanded(facts, sha256Bytes("some other bytes")),
     ).rejects.toMatchObject({
       code: "RECOVERY_REQUIRED",
       // The message names the file, not the path: it is built from the basename.
-      message: "Prompt target digest mismatch after write for 'worker.md'",
+      message: `Prompt target digest mismatch after write for '${promptPath}'`,
     });
     void root;
   });
@@ -235,10 +235,10 @@ describe("prompt write verification", () => {
     await rm(path.join(root, promptPath));
     await symlink(outside, path.join(root, promptPath));
     await expect(
-      targets.assertPromptWriteLanded(facts.absolute, sha256Bytes(content), facts.mode),
+      targets.assertPromptWriteLanded(facts, sha256Bytes(content)),
     ).rejects.toMatchObject({
       code: "RECOVERY_REQUIRED",
-      message: "Prompt target permissions changed unexpectedly for 'worker.md'",
+      message: `Prompt target permissions changed unexpectedly for '${promptPath}'`,
     });
   });
 
@@ -246,11 +246,7 @@ describe("prompt write verification", () => {
     const { targets } = await targetsFor();
     const facts = await targets.describePromptTarget(promptPath);
     await expect(
-      targets.assertPromptWriteLanded(
-        facts.absolute,
-        sha256Bytes(Buffer.from("original prompt\n")),
-        facts.mode,
-      ),
+      targets.assertPromptWriteLanded(facts, sha256Bytes(Buffer.from("original prompt\n"))),
     ).resolves.toBeUndefined();
   });
 });
