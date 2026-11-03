@@ -53,8 +53,7 @@ export async function runFlow(
   options: { startAt?: RunNodeKind } = {},
 ): Promise<FlowRunResult> {
   const order = orderedNodes(graph);
-  const startIndex = options.startAt ? order.findIndex((node) => node.id === options.startAt) : 0;
-  if (startIndex < 0) throw new Error(`flow cannot start at unknown node '${options.startAt}'`);
+  const startIndex = startIndexFor(order, options.startAt);
   let lastNode: RunNodeKind | undefined;
 
   for (const node of order.slice(startIndex)) {
@@ -62,21 +61,8 @@ export async function runFlow(
       await runtime.onNode?.({ nodeId: node.id, status: "skipped", reason: "condition not met" });
       continue;
     }
-    const handler = runtime.handlers[node.kind];
-    if (!handler) throw new Error(`no handler registered for flow node '${node.kind}'`);
     lastNode = node.id;
-    await runtime.onNode?.({ nodeId: node.id, status: "started" });
-    let outcome: NodeOutcome;
-    try {
-      outcome = await handler(node);
-    } catch (error) {
-      await runtime.onNode?.({
-        nodeId: node.id,
-        status: "failed",
-        reason: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-      });
-      throw error;
-    }
+    const outcome = await executeNode(node, runtime);
     if (outcome === "park") {
       await runtime.onNode?.({ nodeId: node.id, status: "parked" });
       return { status: "parked", lastNode };
@@ -84,4 +70,32 @@ export async function runFlow(
     await runtime.onNode?.({ nodeId: node.id, status: "completed" });
   }
   return { status: "completed", lastNode };
+}
+
+/** Where the walk starts: an explicit node, or the head of the graph. */
+function startIndexFor(order: Array<FlowNode<RunNodeKind>>, startAt: RunNodeKind | undefined): number {
+  if (!startAt) return 0;
+  const index = order.findIndex((node) => node.id === startAt);
+  if (index >= 0) return index;
+  throw new Error(`flow cannot start at unknown node '${startAt}'`);
+}
+
+/** One node: announce it, run its handler, report a failure with the handler's message. */
+async function executeNode(
+  node: FlowNode<RunNodeKind>,
+  runtime: FlowRuntime,
+): Promise<NodeOutcome> {
+  const handler = runtime.handlers[node.kind];
+  if (!handler) throw new Error(`no handler registered for flow node '${node.kind}'`);
+  await runtime.onNode?.({ nodeId: node.id, status: "started" });
+  try {
+    return await handler(node);
+  } catch (error) {
+    await runtime.onNode?.({ nodeId: node.id, status: "failed", reason: failureReason(error) });
+    throw error;
+  }
+}
+
+function failureReason(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 300);
 }

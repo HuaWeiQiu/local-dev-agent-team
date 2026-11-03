@@ -16,29 +16,39 @@ export interface PlanEditSummary {
  * architect plan, plus the worker profile allow-list. Throws a readable error.
  */
 export function parseEditedPlan(input: unknown, config: AgentTeamConfig): TaskPlan {
-  const parsed = taskPlanSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new Error(
-      `Edited plan is invalid: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".") || "plan"}: ${issue.message}`)
-        .join("; ")}`,
-    );
-  }
-  const plan = parsed.data;
+  const plan = parsablePlan(input);
   validateTaskPlan(plan);
-  if (plan.design) {
-    const issues = designIssues(plan);
-    if (issues.length > 0) {
-      throw new Error(`Edited plan design does not match its tasks: ${issues.join("; ")}`);
-    }
+  assertDesignMatchesTasks(plan);
+  assertWorkerProfilesAllowed(plan, config);
+  return plan;
+}
+
+function parsablePlan(input: unknown): TaskPlan {
+  const parsed = taskPlanSchema.safeParse(input);
+  if (parsed.success) return parsed.data;
+  const detail = parsed.error.issues
+    .map((issue) => `${issue.path.join(".") || "plan"}: ${issue.message}`)
+    .join("; ");
+  throw new Error(`Edited plan is invalid: ${detail}`);
+}
+
+function assertDesignMatchesTasks(plan: TaskPlan): void {
+  if (!plan.design) return;
+  const issues = designIssues(plan);
+  if (issues.length > 0) {
+    throw new Error(`Edited plan design does not match its tasks: ${issues.join("; ")}`);
   }
+}
+
+function assertWorkerProfilesAllowed(plan: TaskPlan, config: AgentTeamConfig): void {
   const allowed = config.roles.worker?.allowedProfiles ?? [];
   for (const task of plan.tasks) {
-    if (task.profile !== null && !allowed.includes(task.profile)) {
-      throw new Error(`Task '${task.id}' uses profile '${task.profile}', which the worker role does not allow`);
-    }
+    const disallowed = task.profile !== null && !allowed.includes(task.profile);
+    if (!disallowed) continue;
+    throw new Error(
+      `Task '${task.id}' uses profile '${task.profile}', which the worker role does not allow`,
+    );
   }
-  return plan;
 }
 
 export function summarizePlanEdit(before: TaskPlan, after: TaskPlan): PlanEditSummary {
