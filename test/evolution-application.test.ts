@@ -2270,6 +2270,164 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
     expect(catalog.revision).toBe(catalogRevision);
     expect(coordinator.getApplicationState()).toEqual(stateAfterFirst);
   });
+
+  /**
+   * A Phase-2 legacy promotion: the catalog is driven directly (no application proof) and
+   * only then is the coordinator opened, because an open coordinator owns the catalog
+   * writer.
+   */
+  async function legacyPromotion(options: {
+    id: string;
+    name: string;
+    live: NamedStrategy | undefined;
+    candidate: NamedStrategy;
+  }) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-legacy-promotion-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const strategies = await StrategyBlueprintCatalog.open(loaded);
+    const clock = createClock();
+    const stamp = () => new Date(clock.now()).toISOString();
+    if (options.live) {
+      await strategies.save(options.name, options.live, { expectedBefore: null });
+    }
+    await catalog.propose({
+      id: options.id,
+      createdAt: stamp(),
+      policy: validPolicy(),
+      candidate: strategyCandidate(options.name, options.candidate),
+    });
+    await catalog.beginEvaluation(options.id, stamp());
+    const evaluating = catalog.getProposal(options.id);
+    if (!evaluating) throw new Error(`Proposal '${options.id}' disappeared before evaluation`);
+    const evidence = boundEvidence(evaluating);
+    await catalog.evaluate(options.id, evidence, stamp());
+    await catalog.promote(options.id, evidence, {
+      actor: operator,
+      reason: "Legacy Phase 2 promotion without application proof",
+      decidedAt: stamp(),
+    });
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies,
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    return { root, loaded, catalog, strategies, coordinator, clock, revision: catalog.revision };
+  }
+
+  it("stamps an apply's completion from a second clock read, not the decision time", async () => {
+    // A refactor that folds the two record writes into one helper will want to reuse
+    // `decidedAt`: it looks like the same stamp written twice. It is not. The apply tail
+    // reads the clock again after the target write, so a project whose clock advances
+    // between calls sees two instants; collapsing them silently moves the recorded
+    // completion back to the start of the command. This clock advances on every read, so a
+    // collapse fails here rather than in production.
+    const harness = await legacyPromotion({
+      id: "clock-apply",
+      name: "clock-apply",
+      live: manuallyManagedStrategy,
+      candidate: strategyB,
+    });
+    const commandId = "clock-apply-command";
+    await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "clock-apply",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Apply over a manually managed strategy",
+      mode: "apply",
+    });
+    const state = harness.coordinator.getApplicationState();
+    const application = state.applications.find((record) => record.proposalId === "clock-apply");
+    const completed = state.completed.find((record) => record.commandId === commandId);
+    expect(completed?.completedAt).not.toBe(application?.appliedAt);
+    expect(Date.parse(completed!.completedAt)).toBeGreaterThan(Date.parse(application!.appliedAt));
+  });
+
+  it("stamps an adoption's completion with the decision time it already recorded", async () => {
+    // The other half of the same decision: adopt never touches the target, so it finishes
+    // synchronously and reuses `decidedAt`. If the two tails are ever unified, this is the
+    // case that says the asymmetry is intended.
+    const harness = await legacyPromotion({
+      id: "clock-adopt",
+      name: "clock-adopt",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const commandId = "clock-adopt-command";
+    await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "clock-adopt",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    });
+    const state = harness.coordinator.getApplicationState();
+    const application = state.applications.find((record) => record.proposalId === "clock-adopt");
+    const completed = state.completed.find((record) => record.commandId === commandId);
+    expect(completed?.completedAt).toBe(application?.appliedAt);
+  });
+
+  it("replays a completed reconciliation even when the state is not writable", async () => {
+    // The command lookup happens before `assertWritable`, so a completed command answers
+    // from its binding even when the coordinator is in a state that refuses *new* work.
+    // Hoisting the writable check above the dedupe turns every retry of a known command
+    // into RECOVERY_REQUIRED, which is the opposite of idempotent.
+    const harness = await legacyPromotion({
+      id: "replay-when-not-writable",
+      name: "replay-when-not-writable",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const commandId = "replay-when-not-writable-command";
+    const first = await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "replay-when-not-writable",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    });
+    expect(first.deduplicated).toBe(false);
+    await harness.coordinator.close();
+
+    // The durable file is the only way to reach "not writable with a completed command":
+    // mark the state as needing recovery, then reopen.
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      "application-state.json",
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: Record<string, unknown> & { recoveryRequired: boolean };
+      payloadDigest: string;
+    };
+    document.payload.recoveryRequired = true;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    const reopened = await createHarness({ root: harness.root });
+    expect(reopened.coordinator.getApplicationState().recoveryRequired).toBe(true);
+    await expect(reopened.coordinator.propose({
+      id: "refused-while-not-writable",
+      policy: validPolicy(),
+      candidate: strategyCandidate("refused-while-not-writable", strategyA),
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await expect(reopened.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "replay-when-not-writable",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    })).resolves.toMatchObject({ deduplicated: true, applicationStatus: "adopted" });
+  });
 });
 
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
