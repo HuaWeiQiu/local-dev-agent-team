@@ -140,6 +140,14 @@ type ReconcileContext = {
   applicationBeforeTarget: TargetDigestState;
 };
 
+/** One deterministic preflight finding. */
+type PreflightItem = {
+  kind: "deterministic";
+  id: string;
+  status: "pass" | "fail";
+  summary: string;
+};
+
 /** Create and verify the coordinator's storage before anything is read from it. */
 async function prepareApplicationDirectories(
   io: EvolutionApplicationFileIo,
@@ -518,170 +526,250 @@ export class EvolutionApplicationCoordinator {
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
     return await this.#enqueue(async () => {
       this.assertWritable();
-      let proposal = this.requireProposal(proposalId);
-      if (proposal.status === "evaluated") {
-        this.assertServerPreflightSource(proposal);
-        return { proposal, committedRevision: this.#catalog.revision };
-      }
-      if (proposal.status === "proposed") {
-        const begun = await this.#catalog.beginEvaluation(
-          proposal.id,
-          new Date(this.#now()).toISOString(),
-          this.#state.catalogWriter,
-        );
-        proposal = begun.proposal;
-      } else if (proposal.status !== "evaluating") {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' cannot run server preflight from status '${proposal.status}'`,
-        );
-      }
-
-      const candidateDigest = computeCandidateDigest(proposal.candidate);
-      const items: Array<{
-        kind: "deterministic";
-        id: string;
-        status: "pass" | "fail";
-        summary: string;
-      }> = [];
-      let trusted = true;
-      try {
-        this.assertPolicyAllows(proposal);
-        if (proposal.candidate.kind === "strategy-blueprint") {
-          if (proposal.policy.allowedPromptPaths.length !== 0) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              "Strategy candidates cannot carry prompt path capabilities",
-            );
-          }
-          const configuredNames = new Set(
-            Object.keys(this.#loaded.config.strategies?.definitions ?? {}),
-          );
-          if (configuredNames.has(proposal.candidate.name)) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Configured strategy '${proposal.candidate.name}' is read-only`,
-            );
-          }
-        } else {
-          const trustedPaths = new Set(
-            Object.values(this.#loaded.config.roles)
-              .map((role) => role.promptFile)
-              .filter((value): value is string => typeof value === "string"),
-          );
-          if (
-            !trustedPaths.has(proposal.candidate.path) ||
-            proposal.policy.allowedPromptPaths.length !== 1 ||
-            proposal.policy.allowedPromptPaths[0] !== proposal.candidate.path
-          ) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Prompt candidate path '${proposal.candidate.path}' is not the exact current trusted path`,
-            );
-          }
-        }
-        items.push(serverPreflightItem(
-          "server-candidate-trust-v1",
-          "pass",
-          "Current project trust and bounded capabilities accepted; candidate was not executed",
-        ));
-      } catch (error) {
-        if (!(error instanceof EvolutionApplicationError) || error.code !== "POLICY_DENIED") {
-          throw error;
-        }
-        trusted = false;
-        items.push(serverPreflightItem(
-          "server-candidate-trust-v1",
-          "fail",
-          `Current project trust rejected the candidate: ${error.message}; candidate was not executed`,
-        ));
-      }
-
-      if (proposal.candidate.kind === "strategy-blueprint") {
-        if (!trusted) {
-          items.push(serverPreflightItem(
-            "server-strategy-preflight-v1",
-            "fail",
-            "Strategy preflight was not run because candidate trust failed; candidate was not executed",
-          ));
-        } else {
-          try {
-            this.#strategies.preflight(
-              proposal.candidate.name,
-              proposal.candidate.definition,
-            );
-            items.push(serverPreflightItem(
-              "server-strategy-preflight-v1",
-              "pass",
-              "Strategy schema, topology, profiles, and current catalog composition passed; candidate was not executed",
-            ));
-          } catch (error) {
-            if (!(error instanceof StrategyBlueprintError)) throw error;
-            items.push(serverPreflightItem(
-              "server-strategy-preflight-v1",
-              "fail",
-              `Strategy preflight rejected the candidate: ${error.message}; candidate was not executed`,
-            ));
-          }
-        }
-      } else if (!trusted) {
-        items.push(
-          serverPreflightItem(
-            "server-prompt-object-integrity-v1",
-            "fail",
-            "Prompt object verification was not run because candidate trust failed; candidate was not executed",
-          ),
-          serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "fail",
-            "Prompt target verification was not run because candidate trust failed; candidate was not executed",
-          ),
-        );
-      } else {
-        await this.#targets.readPromptObject(proposal.candidate.contentDigest);
-        items.push(serverPreflightItem(
-          "server-prompt-object-integrity-v1",
-          "pass",
-          "Content-addressed prompt object digest, size, permissions, and UTF-8 passed; candidate was not executed",
-        ));
-        try {
-          const live = await this.#targets.readTargetState(proposal.candidate);
-          if (!live.present || !live.digest) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Prompt target '${proposal.candidate.path}' must already exist`,
-            );
-          }
-          await this.#targets.readLivePromptText(proposal.candidate.path, live.digest);
-          await this.#git.verifyTrackedRegularFile(proposal.candidate.path);
-          items.push(serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "pass",
-            "Live prompt target is canonical, readable UTF-8, size-bounded, and tracked by HEAD; candidate was not executed",
-          ));
-        } catch (error) {
-          const mapped = error instanceof GitManagerError ? mapGitError(error) : error;
-          if (
-            !(mapped instanceof EvolutionApplicationError) ||
-            (mapped.code !== "POLICY_DENIED" && mapped.code !== "TARGET_DRIFTED")
-          ) {
-            throw mapped;
-          }
-          items.push(serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "fail",
-            `Live prompt target failed trust checks: ${mapped.message}; candidate was not executed`,
-          ));
-        }
-      }
-
+      const transition = await this.preparePreflight(proposalId);
+      if (transition.settled !== undefined) return transition.settled;
+      const proposal = transition.proposal;
+      const trust = await this.collectCandidateTrust(proposal);
+      const items = [
+        ...trust.items,
+        ...(proposal.candidate.kind === "strategy-blueprint"
+          ? this.strategyPreflightItems(proposal, trust.trusted)
+          : await this.promptPreflightItems(proposal, trust.trusted)),
+      ];
       return await this.#catalog.evaluateServerPreflight(
         proposal.id,
-        { proposalId: proposal.id, candidateDigest, items },
+        { proposalId: proposal.id, candidateDigest: computeCandidateDigest(proposal.candidate), items },
         new Date(this.#now()).toISOString(),
         this.#state.catalogWriter,
       );
     });
+  }
+
+  /**
+   * Move the proposal into `evaluating`, or return the answer an already-evaluated proposal
+   * gets. An `evaluated` proposal is only accepted when its evaluation came from this same
+   * server preflight — otherwise a proposal evaluated by older, external evidence would be
+   * reported as if the server had checked it.
+   */
+  private async preparePreflight(
+    proposalId: string,
+  ): Promise<
+    | { proposal: EvolutionProposal; settled?: undefined }
+    | { proposal: EvolutionProposal; settled: { proposal: EvolutionProposal; committedRevision: number } }
+  > {
+    let proposal = this.requireProposal(proposalId);
+    if (proposal.status === "evaluated") {
+      this.assertServerPreflightSource(proposal);
+      return {
+        proposal,
+        settled: { proposal, committedRevision: this.#catalog.revision },
+      };
+    }
+    if (proposal.status === "proposed") {
+      const begun = await this.#catalog.beginEvaluation(
+        proposal.id,
+        new Date(this.#now()).toISOString(),
+        this.#state.catalogWriter,
+      );
+      proposal = begun.proposal;
+      return { proposal };
+    }
+    if (proposal.status !== "evaluating") {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' cannot run server preflight from status '${proposal.status}'`,
+      );
+    }
+    return { proposal };
+  }
+
+  /**
+   * The trust check becomes a **recorded item**, not an exception: a candidate the project
+   * may not use is still evaluated, with `fail` written into the evidence. Only a
+   * POLICY_DENIED verdict is absorbed — anything else is a defect and propagates.
+   */
+  private async collectCandidateTrust(
+    proposal: EvolutionProposal,
+  ): Promise<{ trusted: boolean; items: PreflightItem[] }> {
+    try {
+      this.assertCandidateTrust(proposal);
+      return {
+        trusted: true,
+        items: [
+          serverPreflightItem(
+            "server-candidate-trust-v1",
+            "pass",
+            "Current project trust and bounded capabilities accepted; candidate was not executed",
+          ),
+        ],
+      };
+    } catch (error) {
+      if (!(error instanceof EvolutionApplicationError) || error.code !== "POLICY_DENIED") {
+        throw error;
+      }
+      return {
+        trusted: false,
+        items: [
+          serverPreflightItem(
+            "server-candidate-trust-v1",
+            "fail",
+            `Current project trust rejected the candidate: ${error.message}; candidate was not executed`,
+          ),
+        ],
+      };
+    }
+  }
+
+  /** Current project trust: capabilities off, and the exact path/name the project already uses. */
+  private assertCandidateTrust(proposal: EvolutionProposal): void {
+    this.assertPolicyAllows(proposal);
+    if (proposal.candidate.kind === "strategy-blueprint") {
+      this.assertStrategyCandidateTrust(proposal, proposal.candidate);
+      return;
+    }
+    this.assertPromptCandidateTrust(proposal, proposal.candidate);
+  }
+
+  private assertStrategyCandidateTrust(
+    proposal: EvolutionProposal,
+    candidate: Extract<EvolutionProposal["candidate"], { kind: "strategy-blueprint" }>,
+  ): void {
+    if (proposal.policy.allowedPromptPaths.length !== 0) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Strategy candidates cannot carry prompt path capabilities",
+      );
+    }
+    const configuredNames = new Set(Object.keys(this.#loaded.config.strategies?.definitions ?? {}));
+    if (configuredNames.has(candidate.name)) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Configured strategy '${candidate.name}' is read-only`,
+      );
+    }
+  }
+
+  private assertPromptCandidateTrust(
+    proposal: EvolutionProposal,
+    candidate: Extract<EvolutionProposal["candidate"], { kind: "role-prompt" }>,
+  ): void {
+    const trustedPaths = new Set(
+      Object.values(this.#loaded.config.roles)
+        .map((role) => role.promptFile)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    if (
+      !trustedPaths.has(candidate.path) ||
+      proposal.policy.allowedPromptPaths.length !== 1 ||
+      proposal.policy.allowedPromptPaths[0] !== candidate.path
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Prompt candidate path '${candidate.path}' is not the exact current trusted path`,
+      );
+    }
+  }
+
+  /** The strategy half of the deterministic preflight, as one pass/fail item. */
+  private strategyPreflightItems(proposal: EvolutionProposal, trusted: boolean): PreflightItem[] {
+    if (!trusted) {
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "fail",
+          "Strategy preflight was not run because candidate trust failed; candidate was not executed",
+        ),
+      ];
+    }
+    if (proposal.candidate.kind !== "strategy-blueprint") return [];
+    try {
+      this.#strategies.preflight(proposal.candidate.name, proposal.candidate.definition);
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "pass",
+          "Strategy schema, topology, profiles, and current catalog composition passed; candidate was not executed",
+        ),
+      ];
+    } catch (error) {
+      if (!(error instanceof StrategyBlueprintError)) throw error;
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "fail",
+          `Strategy preflight rejected the candidate: ${error.message}; candidate was not executed`,
+        ),
+      ];
+    }
+  }
+
+  /** The prompt half: object integrity, then the live target's trust. */
+  private async promptPreflightItems(
+    proposal: EvolutionProposal,
+    trusted: boolean,
+  ): Promise<PreflightItem[]> {
+    if (proposal.candidate.kind !== "role-prompt") return [];
+    if (!trusted) {
+      return [
+        serverPreflightItem(
+          "server-prompt-object-integrity-v1",
+          "fail",
+          "Prompt object verification was not run because candidate trust failed; candidate was not executed",
+        ),
+        serverPreflightItem(
+          "server-prompt-target-trust-v1",
+          "fail",
+          "Prompt target verification was not run because candidate trust failed; candidate was not executed",
+        ),
+      ];
+    }
+    await this.#targets.readPromptObject(proposal.candidate.contentDigest);
+    return [
+      serverPreflightItem(
+        "server-prompt-object-integrity-v1",
+        "pass",
+        "Content-addressed prompt object digest, size, permissions, and UTF-8 passed; candidate was not executed",
+      ),
+      await this.promptTargetItem(proposal),
+    ];
+  }
+
+  /**
+   * The live prompt target must be canonical, readable, size-bounded and tracked by HEAD.
+   * A target that fails those checks is a `fail` item, not an error: the preflight's job is
+   * to report the candidate's standing, including "this project's own prompt is unusable".
+   */
+  private async promptTargetItem(proposal: EvolutionProposal): Promise<PreflightItem> {
+    if (proposal.candidate.kind !== "role-prompt") throw new Error("prompt candidate required");
+    try {
+      const live = await this.#targets.readTargetState(proposal.candidate);
+      if (!live.present || !live.digest) {
+        throw new EvolutionApplicationError(
+          "POLICY_DENIED",
+          `Prompt target '${proposal.candidate.path}' must already exist`,
+        );
+      }
+      await this.#targets.readLivePromptText(proposal.candidate.path, live.digest);
+      await this.#git.verifyTrackedRegularFile(proposal.candidate.path);
+      return serverPreflightItem(
+        "server-prompt-target-trust-v1",
+        "pass",
+        "Live prompt target is canonical, readable UTF-8, size-bounded, and tracked by HEAD; candidate was not executed",
+      );
+    } catch (error) {
+      const mapped = error instanceof GitManagerError ? mapGitError(error) : error;
+      if (
+        !(mapped instanceof EvolutionApplicationError) ||
+        (mapped.code !== "POLICY_DENIED" && mapped.code !== "TARGET_DRIFTED")
+      ) {
+        throw mapped;
+      }
+      return serverPreflightItem(
+        "server-prompt-target-trust-v1",
+        "fail",
+        `Live prompt target failed trust checks: ${mapped.message}; candidate was not executed`,
+      );
+    }
   }
 
   async assertServerPreflightEvaluation(proposalId: string): Promise<void> {
