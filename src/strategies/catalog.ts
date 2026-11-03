@@ -202,59 +202,17 @@ export class StrategyBlueprintCatalog {
     loaded: LoadedConfig,
     options: { io?: Partial<StrategyBlueprintFileIo> } = {},
   ): Promise<StrategyBlueprintCatalog> {
-    if (!loaded || typeof loaded !== "object") {
-      throw new StrategyBlueprintValidationError("LoadedConfig is required");
-    }
-    if (typeof loaded.root !== "string" || !loaded.root.trim()) {
-      throw new StrategyBlueprintValidationError("LoadedConfig.root is required");
-    }
-    if (!loaded.config || typeof loaded.config !== "object") {
-      throw new StrategyBlueprintValidationError("LoadedConfig.config is required");
-    }
-
+    assertLoadedConfig(loaded);
     const io: StrategyBlueprintFileIo = { ...defaultFileIo, ...options.io };
-    let root: string;
-    try {
-      root = await io.realpath(path.resolve(loaded.root));
-      const rootInfo = await io.lstat(root);
-      if (!rootInfo.isDirectory()) {
-        throw new StrategyBlueprintUnsafePathError(
-          `LoadedConfig.root must resolve to a directory: ${root}`,
-        );
-      }
-    } catch (error) {
-      if (error instanceof StrategyBlueprintError) throw error;
-      throw new StrategyBlueprintUnsafePathError(
-        `Unable to resolve repository root '${loaded.root}': ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-
-    const stateDirectoryRelative = loaded.config.project?.stateDirectory;
-    if (typeof stateDirectoryRelative !== "string" || !stateDirectoryRelative.trim()) {
-      throw new StrategyBlueprintValidationError(
-        "project.stateDirectory must be a non-empty repository-relative path",
-      );
-    }
-
+    const root = await resolveRootDirectory(io, loaded.root);
     const stateDirectory = resolveRepositoryOwnedDirectory(
       root,
-      stateDirectoryRelative,
+      assertStateDirectory(loaded),
       "project.stateDirectory",
     );
     const filePath = path.join(stateDirectory, "strategy-blueprints.json");
-
-    await createRepositoryOwnedDirectory(io, root, stateDirectory);
-    await assertRepositoryOwnedStorage(io, root, stateDirectory, filePath);
-    await cleanOrphanTemporaryFiles(io, stateDirectory, filePath);
-
-    const catalog = new StrategyBlueprintCatalog(loaded, {
-      root,
-      stateDirectory,
-      filePath,
-      io,
-    });
+    await prepareStorage({ io, root, stateDirectory, filePath });
+    const catalog = new StrategyBlueprintCatalog(loaded, { root, stateDirectory, filePath, io });
     await catalog.load();
     return catalog;
   }
@@ -673,6 +631,87 @@ function sortObjectKeys(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+function assertLoadedConfig(loaded: LoadedConfig): void {
+  assertConfigCarrier(loaded);
+  assertConfigRoot(loaded.root);
+  assertConfigProject(loaded.config);
+}
+
+function assertConfigCarrier(loaded: LoadedConfig): void {
+  if (!loaded || typeof loaded !== "object") {
+    throw new StrategyBlueprintValidationError("LoadedConfig is required");
+  }
+}
+
+function assertConfigRoot(root: unknown): void {
+  if (typeof root !== "string" || !root.trim()) {
+    throw new StrategyBlueprintValidationError("LoadedConfig.root is required");
+  }
+}
+
+function assertConfigProject(config: unknown): void {
+  if (!config || typeof config !== "object") {
+    throw new StrategyBlueprintValidationError("LoadedConfig.config is required");
+  }
+}
+
+/** The repository root must resolve, and it must be a directory. */
+async function resolveRootDirectory(
+  io: StrategyBlueprintFileIo,
+  rootInput: string,
+): Promise<string> {
+  try {
+    const root = await io.realpath(path.resolve(rootInput));
+    assertRootIsDirectory(root, await io.lstat(root));
+    return root;
+  } catch (error) {
+    throw rootResolutionError(error, rootInput);
+  }
+}
+
+function assertRootIsDirectory(root: string, info: { isDirectory(): boolean }): void {
+  if (info.isDirectory()) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `LoadedConfig.root must resolve to a directory: ${root}`,
+  );
+}
+
+function rootResolutionError(error: unknown, rootInput: string): StrategyBlueprintError {
+  if (error instanceof StrategyBlueprintError) return error;
+  return new StrategyBlueprintUnsafePathError(
+    `Unable to resolve repository root '${rootInput}': ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+}
+
+function assertStateDirectory(loaded: LoadedConfig): string {
+  const relative = loaded.config.project?.stateDirectory;
+  if (typeof relative !== "string" || !relative.trim()) {
+    throw new StrategyBlueprintValidationError(
+      "project.stateDirectory must be a non-empty repository-relative path",
+    );
+  }
+  return relative;
+}
+
+/**
+ * Everything the catalog needs before it can read its file, in order: create the
+ * state directory, prove it is repository-owned, then sweep orphaned temp files.
+ * The order is the contract - a check before the write, and a sweep last.
+ */
+async function prepareStorage(input: {
+  io: StrategyBlueprintFileIo;
+  root: string;
+  stateDirectory: string;
+  filePath: string;
+}): Promise<void> {
+  const { io, root, stateDirectory, filePath } = input;
+  await createRepositoryOwnedDirectory(io, root, stateDirectory);
+  await assertRepositoryOwnedStorage(io, root, stateDirectory, filePath);
+  await cleanOrphanTemporaryFiles(io, stateDirectory, filePath);
 }
 
 function resolveRepositoryOwnedDirectory(
