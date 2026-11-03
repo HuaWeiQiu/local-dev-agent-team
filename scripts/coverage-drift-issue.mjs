@@ -15,6 +15,11 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { renderAttribution } from "./coverage-caliber-attribution.mjs";
+import { infrastructureReport, readReport, reportFromText } from "./drift-report.mjs";
+
+// Re-exported so the two readers of a drift report keep one public name for its rule.
+export { infrastructureReport, readReport, reportFromText };
 
 /**
  * Unified on 2026-11-02: the guard runs on macos-14 with Node 26 (the machine that
@@ -40,37 +45,16 @@ const CALIBER_NOTE = CALIBER_UNIFIED
 const SEARCH = "Coverage drift in:title";
 
 /**
- * A report that cannot be read is an infrastructure verdict, not a clean ledger:
- * the gate writes this file on every path it controls, so a missing or broken file
- * means something outside the gate broke.
+ * The attribution appendix, when this night produced one. A file that cannot be parsed is a
+ * note in the issue, not a crash: the nightly must survive its own explanation failing.
  */
-export function infrastructureReport(error) {
-  return {
-    kind: "infrastructure",
-    generatedAt: new Date().toISOString(),
-    threshold: 10,
-    baseline: ".ub-crap-baseline.json",
-    error,
-    counts: { new: 0, worse: 0, fixed: 0 },
-    new: [],
-    worse: [],
-    fixed: [],
-  };
-}
-
-export function reportFromText(text) {
+export function readAttribution(file) {
+  if (!file || !existsSync(file)) return undefined;
   try {
-    const parsed = JSON.parse(text);
-    if (parsed && typeof parsed === "object" && typeof parsed.kind === "string") return parsed;
-    return infrastructureReport("drift report is not a verdict object");
+    return JSON.parse(readFileSync(file, "utf8"));
   } catch {
-    return infrastructureReport("drift report is not valid JSON");
+    return { status: "failed", reason: "归因文件不是合法 JSON" };
   }
-}
-
-export function readReport(file) {
-  if (!existsSync(file)) return infrastructureReport(`drift report missing at ${file}`);
-  return reportFromText(readFileSync(file, "utf8"));
 }
 
 /** What to do with the report: a title, a body, and whether to close instead. */
@@ -86,11 +70,14 @@ export function issuePlan(report, options = {}) {
   };
 }
 
-function renderBody(report, { kind, counts, raised, runUrl, generatedAt }) {
+function renderBody(report, { kind, counts, raised, runUrl, generatedAt, attribution }) {
   return [
     ...(CALIBER_NOTE ? [CALIBER_NOTE.trim(), ""] : []),
     ...renderHeader(report, counts, generatedAt, kind),
+    // What grew, then why it grew: the attribution is only ever an appendix to the verdict,
+    // and it is absent whenever there was nothing new to explain.
     ...renderVerdict(report, kind, raised),
+    ...renderAttribution(attribution),
     ...section("已还清", report.fixed ?? [], (entry) => `${entry.key}（基线 ${fmt(entry.frozen)}）`),
     ...(runUrl ? ["", `运行记录：${runUrl}`] : []),
     "",
@@ -196,13 +183,18 @@ function openIssue(gh, plan) {
 }
 
 function main(argv) {
-  const [file] = argv;
+  const [file, attributionFile] = argv;
   if (!file) {
-    process.stderr.write("usage: node scripts/coverage-drift-issue.mjs <drift-report.json>\n");
+    process.stderr.write(
+      "usage: node scripts/coverage-drift-issue.mjs <drift-report.json> [caliber-attribution.json]\n",
+    );
     return 1;
   }
   const report = readReport(file);
-  const plan = issuePlan(report, { runUrl: process.env.RUN_URL });
+  const plan = issuePlan(report, {
+    runUrl: process.env.RUN_URL,
+    attribution: readAttribution(attributionFile),
+  });
   const applied = applyPlan(plan);
   process.stdout.write(`issue: ${applied.action} ${JSON.stringify(applied)}\n`);
   return 0;
