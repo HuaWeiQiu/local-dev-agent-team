@@ -696,7 +696,7 @@ describe("drift provenance", () => {
   it("carries head, tool, source and machine in the payload", async () => {
     const { driftPayload } = await import("../scripts/ub-quality-gate.mjs");
     const payload = driftPayload({
-      report: { new: [], worse: [], fixed: [] },
+      report: { new: [], worse: [], fixed: [], withinNoise: [] },
       provenance: {
         headSha: "abc",
         toolCommit: "6fd92c4",
@@ -1073,7 +1073,7 @@ describe("refresh from three merged coverage runs", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agent-team-merge-"));
     await mainTree(dir);
     for (const [index, value] of hits.entries()) {
-      const name = ["a", "b", "c"][index];
+      const name = ["a", "b", "c"][index]!;
       await mkdir(path.join(dir, name), { recursive: true });
       await writeFile(path.join(dir, name, "lcov.info"), sample(value), "utf8");
     }
@@ -1116,7 +1116,12 @@ describe("refresh from three merged coverage runs", () => {
     const { stableBaseline, requireReproducibleCoverage } = await import("../scripts/ub-quality-gate.mjs");
     const { dir, options } = await fixture([1, 0, 0]);
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    expect(requireReproducibleCoverage(options, dir).merge?.divergentLines).toBe(1);
+    // The return is a union: the merge summary only exists when the scan ran.
+    // `toMatchObject` states the expectation without pretending the field is
+    // always there, which is what `?.` would have done.
+    expect(requireReproducibleCoverage(options, dir)).toMatchObject({
+      merge: { divergentLines: 1 },
+    });
     stderr.mockRestore();
     const merged = await readFile(path.join(dir, "target", "coverage", "typescript", "lcov.info"), "utf8");
     expect(merged).toContain("DA:1,0");

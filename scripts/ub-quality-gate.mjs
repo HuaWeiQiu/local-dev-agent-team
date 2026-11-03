@@ -793,6 +793,12 @@ function reportRegressions(worse) {
  * reader acts on them differently: debt that appeared, debt that grew, debt that
  * was paid. `new` and `worse` are sorted by score, `fixed` by what it used to cost.
  */
+/**
+ * @param {Map<string, number>} scores
+ * @param {Record<string, number>} baseline
+ * @param {number} [threshold]
+ * @returns {DriftReport}
+ */
 export function driftBetween(scores, baseline, threshold = 10) {
   return sortDrift({
     ...debtSince(scores, baseline, threshold),
@@ -801,6 +807,24 @@ export function driftBetween(scores, baseline, threshold = 10) {
 }
 
 /** Debt that appeared, and debt that grew; both already over the threshold. */
+/**
+ * @typedef {{ key: string, score: number }} NewDebt
+ * @typedef {{ key: string, score: number, frozen: number }} WorseDebt
+ * @typedef {{ key: string, frozen: number }} FixedDebt
+ * @typedef {{
+ *   new: NewDebt[],
+ *   worse: WorseDebt[],
+ *   fixed: FixedDebt[],
+ *   withinNoise: WorseDebt[],
+ * }} DriftReport
+ */
+
+/**
+ * @param {Map<string, number>} scores
+ * @param {Record<string, number>} baseline
+ * @param {number} threshold
+ * @returns {{ new: NewDebt[], worse: WorseDebt[], withinNoise: WorseDebt[] }}
+ */
 function debtSince(scores, baseline, threshold) {
   const fresh = [];
   const worse = [];
@@ -834,6 +858,12 @@ function withinNoiseBand(before, after) {
 }
 
 /** Baseline entries that no longer cost anything: gone, or back under the line. */
+/**
+ * @param {Map<string, number>} scores
+ * @param {Record<string, number>} baseline
+ * @param {number} threshold
+ * @returns {FixedDebt[]}
+ */
 function paidDebt(scores, baseline, threshold) {
   const fixed = [];
   for (const [key, frozen] of Object.entries(baseline)) {
@@ -843,6 +873,7 @@ function paidDebt(scores, baseline, threshold) {
   return fixed;
 }
 
+/** @param {DriftReport} report */
 function sortDrift(report) {
   const byScore = (left, right) => right.score - left.score || left.key.localeCompare(right.key);
   report.new.sort(byScore);
@@ -924,10 +955,10 @@ export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPat
  * @property {string} baseline
  * @property {string} error
  * @property {DriftCounts} counts
- * @property {unknown[]} new
- * @property {unknown[]} worse
- * @property {unknown[]} fixed
- * @property {unknown[]} withinNoise
+ * @property {NewDebt[]} new
+ * @property {WorseDebt[]} worse
+ * @property {FixedDebt[]} fixed
+ * @property {WorseDebt[]} withinNoise
  * @property {Record<string, unknown>} [provenance]
  */
 
@@ -938,10 +969,10 @@ export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPat
  * @property {number} threshold
  * @property {string} baseline
  * @property {DriftCounts} counts
- * @property {unknown[]} new
- * @property {unknown[]} worse
- * @property {unknown[]} fixed
- * @property {unknown[]} withinNoise
+ * @property {NewDebt[]} new
+ * @property {WorseDebt[]} worse
+ * @property {FixedDebt[]} fixed
+ * @property {WorseDebt[]} withinNoise
  * @property {Record<string, unknown>} [provenance]
  */
 
@@ -951,7 +982,7 @@ export function provenance({ ub, env = process.env, cwd = process.cwd(), lcovPat
  * three zero counters, and must never be reported as "clean".
  *
  * @param {{
- *   report?: { new: unknown[], worse: unknown[], fixed: unknown[], withinNoise?: unknown[] },
+ *   report?: DriftReport,
  *   error?: string,
  *   threshold?: number,
  *   baseline?: string,
@@ -984,7 +1015,7 @@ export function driftPayload({
     worse: verdict.worse,
     fixed: verdict.fixed,
     // Kept as evidence, never counted: these moves are inside the noise band.
-    withinNoise: verdict.withinNoise ?? [],
+    withinNoise: verdict.withinNoise,
   };
 }
 
