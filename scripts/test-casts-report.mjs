@@ -23,12 +23,13 @@
  * not the words in the enclosing test name. Names are the author's choice;
  * positions are facts.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const defaultBaseline = path.join(defaultRoot, ".test-casts-baseline.json");
 
 /**
  * @typedef {{ path: string, text: string }} Source
@@ -75,6 +76,38 @@ function castForm(node) {
   const inner = node.expression;
   const widening = ts.isAsExpression(inner) && inner.type.kind === ts.SyntaxKind.UnknownKeyword;
   return widening ? "unknown-as" : undefined;
+}
+
+/**
+ * Casts per file and form. Counting by file rather than by line keeps the
+ * comparison stable while edits move lines around; two casts of the same form in
+ * one file can still trade places, which is why the total is checked as well.
+ * @param {Cast[]} casts
+ * @returns {Record<string, number>}
+ */
+export function countByFileForm(casts) {
+  const counts = {};
+  for (const cast of casts) {
+    const key = `${cast.file}:${cast.form}`;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * Every key that grew relative to the baseline. A key absent from the baseline
+ * is allowed only at zero, so a brand new file cannot introduce one.
+ * @param {Cast[]} casts
+ * @param {{ counts: Record<string, number> }} baseline
+ */
+export function compareToBaseline(casts, baseline) {
+  const now = countByFileForm(casts);
+  const violations = [];
+  for (const [key, count] of Object.entries(now)) {
+    const allowed = baseline.counts[key] ?? 0;
+    if (count > allowed) violations.push({ key, allowed, count });
+  }
+  return violations.sort((left, right) => right.count - left.count);
 }
 
 /** @param {Cast[]} casts */
@@ -125,6 +158,46 @@ export function readSources(directory, root = defaultRoot) {
   return sources;
 }
 
+function readBaseline(baselinePath) {
+  if (!existsSync(baselinePath)) {
+    throw new Error(
+      `No cast baseline at ${baselinePath}. Run with --update-baseline once to create it.`,
+    );
+  }
+  return JSON.parse(readFileSync(baselinePath, "utf8"));
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  process.stdout.write(formatReport(collectCasts(readSources(path.join(defaultRoot, "test")))));
+  const args = process.argv.slice(2);
+  const baselinePath = args.includes("--baseline")
+    ? args[args.indexOf("--baseline") + 1]
+    : defaultBaseline;
+  const casts = collectCasts(readSources(path.join(defaultRoot, "test")));
+
+  if (args.includes("--update-baseline")) {
+    const { total, byForm } = summarize(casts);
+    writeFileSync(
+      baselinePath,
+      `${JSON.stringify({ total, byForm, counts: countByFileForm(casts) }, null, 2)}\n`,
+    );
+    process.stdout.write(`wrote ${total} cast(s) to ${baselinePath}\n`);
+  } else if (args.includes("--check")) {
+    const { total } = summarize(casts);
+    const violations = compareToBaseline(casts, readBaseline(baselinePath));
+    if (violations.length > 0) {
+      process.stderr.write(
+        `type-escape casts grew: ${violations.length} file/form pair(s) over baseline\n`,
+      );
+      for (const { key, allowed, count } of violations) {
+        process.stderr.write(`  ${key}: ${allowed} -> ${count}\n`);
+        for (const cast of casts.filter((c) => `${c.file}:${c.form}` === key)) {
+          process.stderr.write(`    ${cast.file}:${cast.line} (${cast.parent})\n`);
+        }
+      }
+      process.exit(1);
+    }
+    process.stdout.write(`${total} type-escape cast(s), none added\n`);
+  } else {
+    process.stdout.write(formatReport(casts));
+  }
 }
