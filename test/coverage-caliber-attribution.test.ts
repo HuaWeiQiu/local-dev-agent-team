@@ -80,6 +80,12 @@ describe("coverage caliber attribution", () => {
     expect(attributionPlan(paid).run).toBe(false);
   });
 
+  it("stays quiet when the report says new debt but lists no keys", () => {
+    const plan = attributionPlan({ kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [] });
+    expect(plan.run).toBe(false);
+    expect(plan.reason).toContain("没列出键");
+  });
+
   it("measures only the new keys, whatever characters they contain", () => {
     const cells = [
       { commit: "HEAD", mode: "existing", scores: new Map([["a#b(1).c", 20], ["a#b_1_.c", 20], ["z#other", 20]]) },
@@ -182,6 +188,9 @@ describe("coverage caliber attribution", () => {
     expect(() => parseArgs(["--nope"], {})).toThrow("unknown argument");
     expect(() => parseArgs(["--ub"], {})).toThrow("--ub requires a value");
     expect(parseArgs([], {})).toMatchObject({ out: "caliber-attribution.json" });
+    expect(parseArgs(["--help"], {}).help).toBe(true);
+    expect(parseArgs(["-h"], {}).help).toBe(true);
+    expect(main(["--help"], memoryIO([]).io)).toBe(0);
     expect(parseArgs(["a.json"], { UB_BIN: "/tmp/ub" })).toMatchObject({ report: "a.json", ub: "/tmp/ub" });
   });
 });

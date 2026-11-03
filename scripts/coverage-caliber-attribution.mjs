@@ -45,27 +45,36 @@ export const MODES = ["existing"];
 const USAGE = `usage: node scripts/coverage-caliber-attribution.mjs <drift-report.json>
               [caliber-attribution.json] [--ub PATH]`;
 
+const DEFAULTS = { report: "", out: "caliber-attribution.json" };
+
 export function parseArgs(argv, env = process.env) {
-  const options = {
-    report: "",
-    out: "caliber-attribution.json",
-    ub: env.UB_BIN?.trim() || resolveUb(),
-  };
+  const options = { ...DEFAULTS, ub: envUb(env) };
   const positional = [];
-  for (let index = 0; index < argv.length; index += 1) {
+  let index = 0;
+  while (index < argv.length) {
     const arg = argv[index];
     if (arg === "--help" || arg === "-h") return { ...options, help: true };
     if (arg === "--ub") {
-      const next = argv[index + 1];
-      if (!next) throw new Error(`--ub requires a value\n${USAGE}`);
-      options.ub = next;
-      index += 1;
+      options.ub = valueAt(argv, index);
+      index += 2;
       continue;
     }
     if (arg.startsWith("--")) throw new Error(`unknown argument '${arg}'\n${USAGE}`);
     positional.push(arg);
+    index += 1;
   }
   return { ...options, report: positional[0] ?? "", out: positional[1] ?? options.out };
+}
+
+/** Where the tool chain comes from: the environment first, then the usual install paths. */
+function envUb(env) {
+  return env.UB_BIN?.trim() || resolveUb();
+}
+
+function valueAt(argv, index) {
+  const next = argv[index + 1];
+  if (!next) throw new Error(`${argv[index]} requires a value\n${USAGE}`);
+  return next;
 }
 
 /**
@@ -77,14 +86,14 @@ export function parseArgs(argv, env = process.env) {
  * paid, `worse` moves inside the noise band are not debt yet).
  */
 export function attributionPlan(report) {
-  if (report?.kind === "infrastructure") {
-    return { run: false, reason: "扫描本身没跑完，没有账本结论可以归因" };
-  }
-  const counts = report?.counts ?? { new: 0, worse: 0, fixed: 0 };
-  if (!(counts.new > 0)) return { run: false, reason: "本轮没有新增债务，不归因" };
+  if (report?.kind === "infrastructure") return skip("扫描本身没跑完，没有账本结论可以归因");
+  if (!(report?.counts?.new > 0)) return skip("本轮没有新增债务，不归因");
   const keys = (report.new ?? []).map((entry) => entry.key).filter(Boolean);
-  if (keys.length === 0) return { run: false, reason: "报告写着 new > 0，却没列出键，不归因" };
-  return { run: true, keys };
+  return keys.length > 0 ? { run: true, keys } : skip("报告写着 new > 0，却没列出键，不归因");
+}
+
+function skip(reason) {
+  return { run: false, reason };
 }
 
 /** An anchored alternation: the report must list these keys and nothing else. */
@@ -110,12 +119,8 @@ function outsideNoise(reported, measured) {
 
 /** The score the repeats settled on: the first cell, since a stable row agrees with itself. */
 function settledScore(row) {
-  for (const modes of Object.values(row.perCommit ?? {})) {
-    for (const runs of Object.values(modes)) {
-      if (typeof runs[0] === "number") return runs[0];
-    }
-  }
-  return undefined;
+  const cells = Object.values(row.perCommit ?? {}).flatMap((modes) => Object.values(modes));
+  return cells.flat().find((value) => typeof value === "number");
 }
 
 /**
@@ -181,36 +186,47 @@ function valueCell(row) {
  */
 export function renderAttribution(model) {
   if (!model || model.status === "skipped") return [];
-  const heading = "### 归因（caliber）";
-  if (model.status === "failed") {
-    return [
-      heading,
-      "",
-      `这次没能归因：\`${model.reason}\`。账本结论不受影响——归因只是解释，不是守卫。`,
-      "",
-    ];
-  }
-  const rows = model.rows ?? [];
-  const summary = model.summary ?? {};
+  return model.status === "failed" ? renderFailed(model) : renderMeasured(model);
+}
+
+function renderFailed(model) {
   return [
-    heading,
+    HEADING,
     "",
-    `用账本同一条命令（${(model.modes ?? MODES).join(" / ")}）把新增的 ${rows.length} 个键各跑了 ` +
-      `${model.repeats ?? REPEATS} 次：stable ${summary.stable ?? 0}，` +
-      `run-sensitive ${summary["run-sensitive"] ?? 0}，not-reproduced ${summary["not-reproduced"] ?? 0}。`,
-    "",
-    "| 键 | 裁决 | 账本 | 多次分数 |",
-    "| --- | --- | --- | --- |",
-    ...rows.map(
-      (row) => `| \`${row.key}\` | \`${row.verdict}\` | ${fmt(row.ledger)} | ${valueCell(row)} |`,
-    ),
-    "",
-    "- `stable`：同一条命令复现出同一个分数，这是真变化（新代码，或覆盖率真的降了），去读那个函数。",
-    "- `run-sensitive`：几次分数不一致，至少有一部分是测量噪声，先别把它当债去补测试。",
-    "- `not-reproduced`：几次重测自己一致，但都不等于账本那个数——账本这条是采样噪声，别去补测试，也别拿它写基线。",
+    `这次没能归因：\`${model.reason}\`。账本结论不受影响——归因只是解释，不是守卫。`,
     "",
   ];
 }
+
+function renderMeasured(model) {
+  const rows = model.rows ?? [];
+  return [HEADING, "", summaryLine(model, rows.length), "", ...renderTable(rows), "", ...VERDICT_NOTES, ""];
+}
+
+function summaryLine(model, count) {
+  const summary = model.summary ?? {};
+  const verdicts = Object.entries(summary).map(([verdict, value]) => `${verdict} ${value}`);
+  return (
+    `用账本同一条命令（${(model.modes ?? MODES).join(" / ")}）把新增的 ${count} 个键各跑了 ` +
+    `${model.repeats ?? REPEATS} 次：${verdicts.join("，")}。`
+  );
+}
+
+function renderTable(rows) {
+  return ["| 键 | 裁决 | 账本 | 多次分数 |", "| --- | --- | --- | --- |", ...rows.map(renderRow)];
+}
+
+function renderRow(row) {
+  return `| \`${row.key}\` | \`${row.verdict}\` | ${fmt(row.ledger)} | ${valueCell(row)} |`;
+}
+
+const HEADING = "### 归因（caliber）";
+
+const VERDICT_NOTES = [
+  "- `stable`：同一条命令复现出同一个分数，这是真变化（新代码，或覆盖率真的降了），去读那个函数。",
+  "- `run-sensitive`：几次分数不一致，至少有一部分是测量噪声，先别把它当债去补测试。",
+  "- `not-reproduced`：几次重测自己一致，但都不等于账本那个数——账本这条是采样噪声，别去补测试，也别拿它写基线。",
+];
 
 export function main(argv = process.argv.slice(2), io = defaultIO()) {
   let options;
