@@ -273,6 +273,24 @@ export function selfCheck() {
  * what it writes when two runs disagree) is then ordinary code a test can drive, instead
  * of something only a five-minute subprocess run can reach.
  */
+/**
+ * @typedef {Object} CaliberIO
+ * @property {string} cwd
+ * @property {(file: string) => string} read
+ * @property {(file: string, text: string) => void} write
+ * @property {(from: string, to: string) => void} copy
+ * @property {(file: string) => boolean} exists
+ * @property {(dir: string) => unknown} mkdirp  The caller never reads the result.
+ * @property {(command: string, args: string[]) => void} run
+ * @property {(command: string, args: string[]) => { status: number | null }} runTool
+ *   Only the exit status is read; declaring `SpawnSyncReturns` here would demand
+ *   pid/output/signal from every stand-in for fields nothing looks at.
+ */
+
+/**
+ * @param {string} [cwd]
+ * @returns {CaliberIO}
+ */
 export function defaultIO(cwd = process.cwd()) {
   return {
     cwd,
