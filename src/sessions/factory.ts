@@ -50,30 +50,19 @@ export class SessionFactory {
   }
 
   async plan(adapterName: string, profile: AgentProfile, cwd: string): Promise<SessionPlan> {
-    const oneShot = (reason?: string, version?: string): SessionPlan => ({
-      kind: "one-shot",
-      capabilities: NO_CAPABILITIES,
-      ...(reason ? { reason } : {}),
-      ...(version ? { version } : {}),
-    });
-    if (this.mode === "off") return oneShot("sessions are disabled");
-    if (adapterName !== "codex" && adapterName !== "claude") return oneShot();
+    if (this.mode === "off") return oneShotPlan("sessions are disabled");
+    if (!isStreamableAdapter(adapterName)) return oneShotPlan();
     if (profile.args.length > 0) {
-      return oneShot("profile.args apply to one-shot invocation only");
+      return oneShotPlan("profile.args apply to one-shot invocation only");
     }
     const executable = profile.executable ?? adapterName;
     const version = await this.version(executable, cwd);
-    if (!version) return oneShot(`could not read the ${adapterName} version`);
-    const minimum = adapterName === "codex" ? MIN_CODEX_APP_SERVER_VERSION : MIN_CLAUDE_STREAM_VERSION;
+    if (!version) return oneShotPlan(`could not read the ${adapterName} version`);
+    const minimum = minimumStreamVersion(adapterName);
     if (compareVersions(version, minimum) < 0) {
-      return oneShot(`${adapterName} ${version} is older than ${minimum}`, version);
+      return oneShotPlan(`${adapterName} ${version} is older than ${minimum}`, version);
     }
-    const resume = profile.externalTools === "inherit";
-    return {
-      kind: adapterName === "codex" ? "codex-app-server" : "claude-stream",
-      capabilities: { steer: true, interrupt: true, askUser: true, resume },
-      version,
-    };
+    return streamPlan(adapterName, version, profile);
   }
 
   async open(
@@ -101,6 +90,42 @@ export class SessionFactory {
     }
     return cached;
   }
+}
+
+function oneShotPlan(reason?: string, version?: string): SessionPlan {
+  return {
+    kind: "one-shot",
+    capabilities: NO_CAPABILITIES,
+    ...(reason ? { reason } : {}),
+    ...(version ? { version } : {}),
+  };
+}
+
+/** Only these two adapters keep a long-lived session. */
+function isStreamableAdapter(adapterName: string): adapterName is "codex" | "claude" {
+  return adapterName === "codex" || adapterName === "claude";
+}
+
+function minimumStreamVersion(adapterName: "codex" | "claude"): string {
+  return adapterName === "codex" ? MIN_CODEX_APP_SERVER_VERSION : MIN_CLAUDE_STREAM_VERSION;
+}
+
+/** A resumed session needs inherited external tools; everything else steers. */
+function streamPlan(
+  adapterName: "codex" | "claude",
+  version: string,
+  profile: AgentProfile,
+): SessionPlan {
+  return {
+    kind: adapterName === "codex" ? "codex-app-server" : "claude-stream",
+    capabilities: {
+      steer: true,
+      interrupt: true,
+      askUser: true,
+      resume: profile.externalTools === "inherit",
+    },
+    version,
+  };
 }
 
 async function probeVersion(executable: string, cwd: string): Promise<string | undefined> {
