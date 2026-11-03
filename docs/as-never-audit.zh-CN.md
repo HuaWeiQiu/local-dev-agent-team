@@ -1,4 +1,14 @@
-# `as never` 审计：真实 309 处，在动第一处之前
+# 类型逃逸审计：404 处，在动第一处之前
+
+> **第三版**：只统计 `as never` 会漏掉一半。现在报三种形态，因为**只追踪一个数字，我们就在优化那个数字，而不是在减少绕过。**
+
+```bash
+node scripts/test-casts-report.mjs
+# 404 type-escape cast(s) under test/
+# by form:  256 never / 148 unknown-as / 0 any
+```
+
+`as unknown as T` 是安静的那种：它不需要 `never`，读起来像一次必要的收窄，做的事和 `as never` 完全一样——在那处表达式上关掉检查。**148 处是 `as never` 的一半还多，而它从没进过任何统计。**
 
 > **计数更正（第二版）**：初版的 315 是用 `grep "as never"` 数出来的，而这个模式会匹配到 `"...that was never promoted"` —— **`was never` 含有 `as never` 这个子串**。逐条核对后，315 里有 **6 处不是 cast**，真实是 **309**。这也意味着表格里那 6 行不该存在，D 桶的"噪音"要分成两种：**真 cast 但无效**，和**根本不是 cast**。
 
@@ -280,3 +290,49 @@
 2. 每批两个数字一起报，只有一个下降说明在把洞藏起来；
 3. C? 那 36 处逐条判完再决定去留；
 4. 全部清零后再加 eslint 锁——**否则锁的是空壳**。
+
+
+## `as unknown as` 的判据：只允许在替身构造的边界
+
+两类的分野不是"写在哪里"，而是**同一个对象被 cast 了几次**：
+
+| 类 | 判据 | 处数 |
+|---|---|---|
+| **边界构造** | 替身在这里被造出来（helper 的 `return`、对象字面量的属性、`const` 初始化），且**只 cast 一次** | **95** |
+| **使用点** | 同一个替身在别处再 cast 一次才能用 | **53** |
+
+按父节点：
+
+| 父节点 | 处数 | 类 |
+|---|---|---|
+| `ReturnStatement` | 64 | 边界（helper 的返回值，抽样全部是 `return {...} as unknown as T`）|
+| `ParenthesizedExpression` | 33 | **使用点**（`(instance as unknown as { respond: … }).respond = …`，为了塞一个方法）|
+| `VariableDeclaration` | 22 | 边界 |
+| `NewExpression` | 10 | **使用点**（`new X(fakeStore(…) as unknown as RunStateStore)`）|
+| `PropertyAssignment` | 9 | 边界 |
+| `CallExpression` | 8 | **使用点**（`events.push(event as unknown as Record<string, unknown>)`）|
+| `BinaryExpression` | 2 | 使用点 |
+
+**规则（写进评审）：**
+
+> `as unknown as T` 只允许出现在**替身被造出来的那一处**——一个真实实例做不出来（私有状态、构造参数不可达）的时候。它必须带一行注释说明替的是谁。同一对象在后续使用点再 cast，属于使用点，是要修的债。
+
+`NewExpression` 那 10 处正好示范了违约的形状：`fakeStore()` 没标返回类型，于是每个 `new X(...)` 的调用点各 cast 一次。**把返回类型标在 helper 上，10 处塌成 1 处。**
+
+## 三种形态的父节点分布
+
+| 父节点 | `as never` | `as unknown as` |
+|---|---|---|
+| `PropertyAssignment` | 98 | 9 |
+| `CallExpression` | 68 | 8 |
+| `ReturnStatement` | 23 | 64 |
+| `VariableDeclaration` | 23 | 22 |
+| `ParenthesizedExpression` | 7 | 33 |
+| `ArrayLiteralExpression` | 10 | — |
+| `JsxExpression` | 9 | — |
+| `NewExpression` | 8 | 10 |
+| `ArrowFunction` | 5 | — |
+| `BinaryExpression` | 2 | 2 |
+| `AsExpression` | 3 | — |
+
+两张表放在一起看才清楚：`as never` 集中在**属性值和实参**（fixture 里的字段），`as unknown as` 集中在**返回值和括号表达式**（替身和"塞方法"）。**同一件事的两种写法，位置不同，修法也不同。**

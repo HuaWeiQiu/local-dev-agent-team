@@ -10,8 +10,8 @@ describe("cast reporting", () => {
   it("finds a cast and reports the parent node that positions it", () => {
     const casts = castsIn("const a = 1 as never;\nconst b = { k: 2 } as never;\n");
     expect(casts).toEqual([
-      { file: "test/sample.test.ts", line: 1, parent: "VariableDeclaration" },
-      { file: "test/sample.test.ts", line: 2, parent: "VariableDeclaration" },
+      { file: "test/sample.test.ts", line: 1, parent: "VariableDeclaration", form: "never" },
+      { file: "test/sample.test.ts", line: 2, parent: "VariableDeclaration", form: "never" },
     ]);
   });
 
@@ -55,15 +55,27 @@ describe("cast reporting", () => {
     expect(collectCasts(sources)).toHaveLength(1);
   });
 
-  it("summarises by parent and by file, and formats both", () => {
-    const casts = castsIn("const a = 1 as never;\nconst b = [{ c: 2 } as never];\n");
-    expect(summarize(casts)).toEqual({
-      total: 2,
-      byParent: { ArrayLiteralExpression: 1, VariableDeclaration: 1 },
-      byFile: { "test/sample.test.ts": 2 },
+  it("counts the double cast as its own form, not as a never", () => {
+    // `as unknown as T` needs no `never` and reads like a necessary widening,
+    // but it turns off the same check. A report tracking only `as never` would
+    // measure how often we chose that spelling.
+    const casts = castsIn(
+      "const a = 1 as never;\nconst b = {} as unknown as { x: number };\nconst c = 2 as any;\n",
+    );
+    expect(casts.map((cast) => cast.form)).toEqual(["never", "unknown-as", "any"]);
+  });
+
+  it("summarises by form, parent and file, and formats all three", () => {
+    const casts = castsIn("const a = 1 as never;\nconst b = [{ c: 2 } as never];\nconst d = {} as unknown as X;\n");
+    expect(summarize(casts)).toMatchObject({
+      total: 3,
+      byForm: { never: 2, "unknown-as": 1 },
+      byParent: { ArrayLiteralExpression: 1, VariableDeclaration: 2 },
+      byFile: { "test/sample.test.ts": 3 },
     });
     const report = formatReport(casts);
-    expect(report).toContain("2 `as never` cast(s) under test/");
+    expect(report).toContain("3 type-escape cast(s) under test/");
+    expect(report).toContain("by form:");
     expect(report).toContain("by parent node:");
     expect(report).toContain("by file:");
   });
