@@ -31,6 +31,25 @@ async function stubTool(body: string): Promise<string> {
   return file;
 }
 
+function gitIn(dir: string, ...args: string[]): string {
+  const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+/**
+ * A fixture that models the real workflow: the tree being measured *is* the commit that
+ * becomes `main`. A refresh is refused on any other tree, so every baseline test starts
+ * from this shape rather than from a bare directory.
+ */
+async function mainTree(dir: string): Promise<string> {
+  gitIn(dir, "init", "-q", "-b", "main");
+  gitIn(dir, "-c", "user.email=gate@example.com", "-c", "user.name=gate", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture");
+  const head = gitIn(dir, "rev-parse", "HEAD");
+  gitIn(dir, "update-ref", "refs/remotes/origin/main", head);
+  return head;
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [script, ...args], {
     encoding: "utf8",
@@ -52,6 +71,7 @@ describe("ub quality gate wrapper", () => {
       coverageA: "",
       coverageB: "",
       coverageC: "",
+      expectBase: "",
       ub: "",
       extra: [],
     });
@@ -615,6 +635,7 @@ describe("baseline stability guard", () => {
   it("refuses to write a baseline when the scans disagree", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-stable-"));
+    await mainTree(root);
     const counter = path.join(root, "calls");
     // A tool that returns a different score on each invocation: exactly the wobble
     // that froze 20.24 for a function that measures 23.90.
@@ -632,6 +653,7 @@ describe("baseline stability guard", () => {
   it("writes the baseline when two scans agree", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-stable-ok-"));
+    await mainTree(root);
     const tool = await stubTool(
       `mkdir -p "${path.join(root, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(root, ".metrics", "crap.edn")}"`,
     );
@@ -682,6 +704,7 @@ describe("baseline generation provenance", () => {
   it("records how the frozen numbers were produced", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-generation-"));
+    await mainTree(root);
     const counter = path.join(root, "calls");
     const lcov = path.join(root, "target", "coverage", "typescript", "lcov.info");
     // Same scores both times, but each scan writes its own coverage report — the
@@ -730,6 +753,7 @@ describe("stability guard tells noise from drift", () => {
   it("prints what moved when it refuses", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-baseline-refuse-"));
+    await mainTree(root);
     const counter = path.join(root, "calls");
     const tool = await stubTool(
       `mkdir -p "${path.join(root, ".metrics")}"; n=$(cat "${counter}" 2>/dev/null || echo 0); echo $((n+1)) > "${counter}"; ` +
@@ -830,6 +854,7 @@ describe("tampering with the report mid-refresh", () => {
 describe("a refresh needs two coverage runs to agree", () => {
   async function root(contents: { a?: string; b?: string }) {
     const dir = await mkdtemp(path.join(tmpdir(), "agent-team-pair-"));
+    await mainTree(dir);
     for (const [name, text] of Object.entries(contents)) {
       if (text === undefined) continue;
       await mkdir(path.join(dir, `${name}`), { recursive: true });
@@ -908,6 +933,89 @@ describe("a refresh needs two coverage runs to agree", () => {
   });
 });
 
+describe("a refresh only measures the tree that becomes main", () => {
+  /** HEAD one commit behind `origin/main`: the shape that froze #198 and #206. */
+  async function behindTree(dir: string) {
+    await mainTree(dir);
+    gitIn(dir, "-c", "user.email=gate@example.com", "-c", "user.name=gate", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "ahead");
+    const base = gitIn(dir, "rev-parse", "HEAD");
+    gitIn(dir, "update-ref", "refs/remotes/origin/main", base);
+    gitIn(dir, "reset", "-q", "--hard", "HEAD~1");
+    return { head: gitIn(dir, "rev-parse", "HEAD"), base };
+  }
+
+  const scores120 = async (dir: string) =>
+    stubTool(
+      `mkdir -p "${path.join(dir, ".metrics")}"; echo '{:name "f", :namespace "a", :complexity 5, :coverage 0.0, :crap 120.0}' > "${path.join(dir, ".metrics", "crap.edn")}"`,
+    );
+
+  it("refuses a tree that is behind the commit it would become", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-base-behind-"));
+    const { head, base } = await behindTree(dir);
+    const tool = await scores120(dir);
+    const messages: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      messages.push(String(chunk));
+      return true;
+    });
+    const options = parseArgs(["--update-baseline", "--baseline", "base.json"], {});
+    expect(stableBaseline(tool, options, dir)).toBe(1);
+    stderr.mockRestore();
+    const printed = messages.join("");
+    expect(printed).toContain("refusing to write");
+    expect(printed).toContain(head);
+    expect(printed).toContain(base);
+    expect(printed.toLowerCase()).toContain("measure the tree that will become main");
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+    // Refused before spending a scan: the cheap check runs first.
+    expect(existsSync(path.join(dir, ".metrics", "crap.edn"))).toBe(false);
+  });
+
+  it("refuses instead of assuming when origin/main cannot be resolved", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-base-missing-"));
+    gitIn(dir, "init", "-q", "-b", "main");
+    gitIn(dir, "-c", "user.email=gate@example.com", "-c", "user.name=gate", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture");
+    const tool = await scores120(dir);
+    const messages: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      messages.push(String(chunk));
+      return true;
+    });
+    const options = parseArgs(["--update-baseline", "--baseline", "base.json"], {});
+    expect(stableBaseline(tool, options, dir)).toBe(1);
+    stderr.mockRestore();
+    // Silent success here would be the same accident in a new costume.
+    expect(messages.join("")).toContain("--expect-base");
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+
+  it("accepts a base the operator declares by hand", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-base-declared-"));
+    const { head } = await behindTree(dir);
+    const tool = await scores120(dir);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const options = parseArgs(["--update-baseline", "--baseline", "base.json", "--expect-base", head], {});
+    expect(stableBaseline(tool, options, dir)).toBe(0);
+    stdout.mockRestore();
+    expect(JSON.parse(await readFile(path.join(dir, "base.json"), "utf8")).scores).toEqual({ "a#f": 120 });
+  });
+
+  it("still refuses when the declared base disagrees with the tree", async () => {
+    const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "agent-team-base-wrong-"));
+    const { base } = await behindTree(dir);
+    const tool = await scores120(dir);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const options = parseArgs(["--update-baseline", "--baseline", "base.json", "--expect-base", base], {});
+    expect(stableBaseline(tool, options, dir)).toBe(1);
+    stderr.mockRestore();
+    expect(existsSync(path.join(dir, "base.json"))).toBe(false);
+  });
+});
+
 describe("tool commit", () => {
   it("prefers a declared commit over reading the checkout", async () => {
     const { toolCommit } = await import("../scripts/ub-quality-gate.mjs");
@@ -921,6 +1029,7 @@ describe("the coverage pair has a flag dependency", () => {
   it("refuses a pair given without --use-existing-coverage", async () => {
     const { stableBaseline } = await import("../scripts/ub-quality-gate.mjs");
     const dir = await mkdtemp(path.join(tmpdir(), "agent-team-pair-flag-"));
+    await mainTree(dir);
     await mkdir(path.join(dir, "a"), { recursive: true });
     await mkdir(path.join(dir, "b"), { recursive: true });
     await writeFile(path.join(dir, "a", "lcov.info"), "SF:src/a.ts\nDA:1,1\n", "utf8");
@@ -947,6 +1056,7 @@ describe("refresh from three merged coverage runs", () => {
 
   async function fixture(hits: [number, number, number]) {
     const dir = await mkdtemp(path.join(tmpdir(), "agent-team-merge-"));
+    await mainTree(dir);
     for (const [index, value] of hits.entries()) {
       const name = ["a", "b", "c"][index];
       await mkdir(path.join(dir, name), { recursive: true });

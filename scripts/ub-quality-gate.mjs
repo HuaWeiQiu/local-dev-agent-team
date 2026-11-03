@@ -39,7 +39,15 @@ import { pathToFileURL } from "node:url";
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
                                   [--all] [--ub PATH] [--drift-report PATH]
-                                  [--coverage-a PATH --coverage-b PATH] [-- extra args]
+                                  [--coverage-a PATH --coverage-b PATH] [--expect-base REF]
+                                  [-- extra args]
+
+  --update-baseline          only on the tree that will become main. The gate compares
+                             HEAD with origin/main (or with --expect-base REF) and refuses
+                             to write otherwise: a baseline freezes whatever it measures,
+                             so measuring a stale tree freezes debt that was already paid.
+                             When origin/main cannot be resolved (offline, detached) the
+                             refresh is refused unless --expect-base names the commit.
 
   --coverage-a/--coverage-b  two independently produced coverage reports. They must cover
                              the same lines for a baseline to be written (hit counts may
@@ -81,6 +89,7 @@ export function defaultOptions(env = process.env) {
     coverageA: "",
     coverageB: "",
     coverageC: "",
+    expectBase: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -105,6 +114,7 @@ const VALUE_FLAGS = {
   "--coverage-a": "coverageA",
   "--coverage-b": "coverageB",
   "--coverage-c": "coverageC",
+  "--expect-base": "expectBase",
 };
 
 /** Flags that only flip a boolean. */
@@ -526,6 +536,10 @@ function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
 
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
   let mergeFacts;
+  // Cheapest check first, and the one that has cost the most: a refresh measured on a
+  // tree that is not the one about to become main freezes debt that is already paid.
+  const wrongTree = baseRefusal(options, cwd);
+  if (wrongTree !== undefined) return wrongTree;
   const misuse = coveragePairMisuse(options);
   if (misuse !== undefined) return misuse;
   const pairVerdict = coveragePairVerdict(options, cwd);
@@ -544,6 +558,57 @@ export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
     options.baseline,
     baselineGeneration({ ub, cwd, first, second, merge: mergeFacts }),
   );
+}
+
+/** What this tree is, and what it is supposed to become. */
+export function baselineBase(options, cwd = process.cwd()) {
+  const declared = options.expectBase?.trim();
+  const target = declared || "origin/main";
+  const resolved = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${target}^{commit}`], {
+    cwd,
+    encoding: "utf8",
+  });
+  const base = resolved.status === 0 ? resolved.stdout.trim() : undefined;
+  return { head: gitHeadSha(cwd), target, base };
+}
+
+/**
+ * A baseline is a promise about the tree that becomes `main`. Measured anywhere else it
+ * makes a different promise: `#198` was measured before `#197` and froze 7 entries that had
+ * already been cleared; `#206` did the same with 3 more. Nothing about that is carelessness
+ * that more care would fix — the process simply had no gate, and a rule people have to
+ * remember is a rule people forget. So this is not a flag: it runs on every refresh.
+ *
+ * Refusing to guess is part of it. When `origin/main` cannot be resolved (offline, detached
+ * head, not a repository), a silent pass would be the same failure in a new costume, so the
+ * refresh stops and asks for `--expect-base <ref|sha>`.
+ */
+export function baseRefusal(options, cwd = process.cwd()) {
+  const { head, target, base } = baselineBase(options, cwd);
+  if (!head) return refuseUnknownBase({ head, target, base, why: "HEAD is not readable here" });
+  if (!base) return refuseUnknownBase({ head, target, base, why: `${target} does not resolve` });
+  if (head === base) return undefined;
+  process.stderr.write(
+    "baseline: refusing to write — this tree is not the commit that will become main:\n" +
+      `  HEAD         ${head}\n  ${target.padEnd(11)}  ${base}\n\n` +
+      "A refresh freezes whatever it measures, and a stale tree measures debt that is " +
+      "already paid: #198 froze 7 such entries, #206 froze 3.\n" +
+      "Measure the tree that will become main:\n" +
+      "  git fetch origin && git rebase origin/main   # then refresh\n" +
+      "If this tree is the base under another name, say which: --expect-base <ref|sha>.\n",
+  );
+  return 1;
+}
+
+function refuseUnknownBase({ head, target, base, why }) {
+  process.stderr.write(
+    `baseline: refusing to write — cannot tell whether this tree will become main: ${why}.\n` +
+      `  HEAD         ${head ?? "unreadable"}\n  ${target.padEnd(11)}  ${base ?? "unreadable"}\n\n` +
+      "A baseline measured on the wrong tree freezes debt that is already paid, so this is " +
+      "not guessed: fetch origin/main, or declare the commit explicitly with " +
+      "--expect-base <ref|sha>.\n",
+  );
+  return 1;
 }
 
 /**
