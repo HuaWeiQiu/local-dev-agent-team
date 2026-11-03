@@ -117,6 +117,57 @@ export type EvolutionApplicationCoordinatorOptions = {
   previewTtlMs?: number;
 };
 
+/** One reconciliation, after the identity, the preconditions and the plan are resolved. */
+type ReconcileContext = {
+  commandId: string;
+  operator: string;
+  reason: string;
+  mode: "adopt" | "apply";
+  promptContent?: Uint8Array;
+  requestDigest: string;
+  materialDigest: string | null;
+  proposal: EvolutionProposal;
+  target: ReturnType<typeof targetFromCandidate>;
+  activeProposalId: string | null;
+  revision: number;
+  expectedRevision: number;
+  decidedAt: string;
+  humanDecision: HumanDecision;
+  candidateDigest: string;
+  beforeTarget: TargetDigestState;
+  livePromptContent: Buffer | undefined;
+  legacyPredecessor: LegacyPredecessorResolution;
+  applicationBeforeTarget: TargetDigestState;
+};
+
+/** One deterministic preflight finding. */
+type PreflightItem = {
+  kind: "deterministic";
+  id: string;
+  status: "pass" | "fail";
+  summary: string;
+};
+
+/** Create and verify the coordinator's storage before anything is read from it. */
+async function prepareApplicationDirectories(
+  io: EvolutionApplicationFileIo,
+  repositoryRoot: string,
+  evolutionDirectory: string,
+  applicationFilePath: string,
+  objectsDirectory: string,
+): Promise<void> {
+  await createDirectoryChain(io, repositoryRoot, evolutionDirectory, 0o700);
+  await createDirectoryChain(io, repositoryRoot, objectsDirectory, 0o700);
+  await assertSafeRegularFileOrMissing(io, repositoryRoot, applicationFilePath);
+  await cleanOrphanTemps(io, evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
+}
+
+/** What a legacy Phase-2 promotion left behind, when it left anything. */
+type LegacyPredecessorResolution = {
+  application: ApplicationRecord | null;
+  completion: CompletedApplicationRecord | null;
+};
+
 const defaultFileIo: EvolutionApplicationFileIo = {
   mkdir,
   lstat,
@@ -218,13 +269,13 @@ export class EvolutionApplicationCoordinator {
       targets: this.#targets,
       state: this.#state,
       host: {
-        assertOpen: () => this.#assertOpen(),
-        assertWritable: () => this.#assertWritable(),
-        requireProposal: (proposalId) => this.#requireProposal(proposalId),
-        assertPolicyAllows: (proposal) => this.#assertPolicyAllows(proposal),
-        assertPromotable: (proposal) => this.#assertPromotable(proposal),
+        assertOpen: () => this.assertOpen(),
+        assertWritable: () => this.assertWritable(),
+        requireProposal: (proposalId) => this.requireProposal(proposalId),
+        assertPolicyAllows: (proposal) => this.assertPolicyAllows(proposal),
+        assertPromotable: (proposal) => this.assertPromotable(proposal),
         assertNoUnreconciledConflict: (proposal, op) =>
-          this.#assertNoUnreconciledConflict(proposal, op),
+          this.assertNoUnreconciledConflict(proposal, op),
       },
       now: options.now,
       previewTtlMs: options.previewTtlMs,
@@ -234,6 +285,38 @@ export class EvolutionApplicationCoordinator {
   static async open(
     options: EvolutionApplicationCoordinatorOptions,
   ): Promise<EvolutionApplicationCoordinator> {
+    EvolutionApplicationCoordinator.assertOpenOptions(options);
+    const io: EvolutionApplicationFileIo = { ...defaultFileIo, ...options.io };
+    await EvolutionApplicationCoordinator.assertSharedRoots(options, io);
+    const evolutionDirectory = options.catalog.evolutionDirectory;
+    const applicationFilePath = path.join(evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
+    const objectsDirectory = path.join(evolutionDirectory, "objects", "sha256");
+    await prepareApplicationDirectories(
+      io,
+      options.catalog.root,
+      evolutionDirectory,
+      applicationFilePath,
+      objectsDirectory,
+    );
+    const coordinator = new EvolutionApplicationCoordinator({
+      catalog: options.catalog,
+      strategies: options.strategies,
+      git: options.git,
+      loaded: options.loaded,
+      evolutionDirectory,
+      applicationFilePath,
+      objectsDirectory,
+      io,
+      assertQuiescent: options.assertQuiescent,
+      now: options.now ?? Date.now,
+      previewTtlMs: options.previewTtlMs ?? EVOLUTION_PREVIEW_TTL_MS,
+    });
+    await coordinator.startFromOpen(options);
+    return coordinator;
+  }
+
+  /** Everything the coordinator needs to exist at all; a partial wiring is refused. */
+  private static assertOpenOptions(options: EvolutionApplicationCoordinatorOptions): void {
     if (!options.catalog || !options.strategies || !options.git || !options.loaded) {
       throw new EvolutionApplicationError(
         "POLICY_DENIED",
@@ -246,8 +329,17 @@ export class EvolutionApplicationCoordinator {
         "EvolutionApplicationCoordinator requires an injected assertQuiescent callback",
       );
     }
+  }
 
-    const io: EvolutionApplicationFileIo = { ...defaultFileIo, ...options.io };
+  /**
+   * One repository, one canonical root, one state directory. Compared on resolved paths:
+   * two spellings of the same directory are the same repository, two directories that only
+   * look alike are not.
+   */
+  private static async assertSharedRoots(
+    options: EvolutionApplicationCoordinatorOptions,
+    io: EvolutionApplicationFileIo,
+  ): Promise<void> {
     const [loadedRoot, gitRoot] = await Promise.all([
       io.realpath(path.resolve(options.loaded.root)),
       io.realpath(path.resolve(options.git.root)),
@@ -263,44 +355,29 @@ export class EvolutionApplicationCoordinator {
         "Catalog, strategy catalog, Git manager, and loaded config must share one canonical repository and state directory",
       );
     }
-    const evolutionDirectory = options.catalog.evolutionDirectory;
-    const applicationFilePath = path.join(evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
-    const objectsDirectory = path.join(evolutionDirectory, "objects", "sha256");
+  }
 
-    await createDirectoryChain(io, options.catalog.root, evolutionDirectory, 0o700);
-    await createDirectoryChain(io, options.catalog.root, objectsDirectory, 0o700);
-    await assertSafeRegularFileOrMissing(io, options.catalog.root, applicationFilePath);
-    await cleanOrphanTemps(io, evolutionDirectory, EVOLUTION_APPLICATION_FILENAME);
-
-    const coordinator = new EvolutionApplicationCoordinator({
-      catalog: options.catalog,
-      strategies: options.strategies,
-      git: options.git,
-      loaded: options.loaded,
-      evolutionDirectory,
-      applicationFilePath,
-      objectsDirectory,
-      io,
-      assertQuiescent: options.assertQuiescent,
-      now: options.now ?? Date.now,
-      previewTtlMs: options.previewTtlMs ?? EVOLUTION_PREVIEW_TTL_MS,
-    });
-    await coordinator.#journal.loadOrInit();
-    coordinator.#state.catalogWriter = options.catalog.claimExclusiveWriter();
+  /**
+   * Load the journal, take the exclusive catalog writer, and only then mark the coordinator
+   * open. A failure here has to give the writer back: a released writer is what lets the
+   * next attempt (or the next process) open at all.
+   */
+  private async startFromOpen(options: EvolutionApplicationCoordinatorOptions): Promise<void> {
+    await this.#journal.loadOrInit();
+    this.#state.catalogWriter = options.catalog.claimExclusiveWriter();
     try {
-      await coordinator.#journal.reconcilePendingOnOpen();
-      coordinator.#journal.publishCommittedState();
-      coordinator.#state.opened = true;
-      return coordinator;
+      await this.#journal.reconcilePendingOnOpen();
+      this.#journal.publishCommittedState();
+      this.#state.opened = true;
     } catch (error) {
-      options.catalog.releaseExclusiveWriter(coordinator.#state.catalogWriter);
-      coordinator.#state.catalogWriter = undefined;
+      options.catalog.releaseExclusiveWriter(this.#state.catalogWriter);
+      this.#state.catalogWriter = undefined;
       throw error;
     }
   }
 
   async close(): Promise<void> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       this.#previewStore.clear();
       this.#state.opened = false;
       if (this.#state.catalogWriter) {
@@ -312,13 +389,13 @@ export class EvolutionApplicationCoordinator {
 
   /** Read a proposal from the durable catalog (no mutation). */
   readProposal(proposalId: string): EvolutionProposal | undefined {
-    this.#assertOpen();
+    this.assertOpen();
     return this.#catalog.getProposal(proposalId);
   }
 
   /** Return the durable application record for a proposal, if any. */
   getApplication(proposalId: string): ApplicationRecord | undefined {
-    this.#assertOpen();
+    this.assertOpen();
     const application = this.#state.publishedState.applications.find(
       (record) => record.proposalId === proposalId,
     );
@@ -327,7 +404,7 @@ export class EvolutionApplicationCoordinator {
 
   /** Snapshot application-state (not catalog). */
   getApplicationState(): ApplicationStateSnapshot {
-    this.#assertOpen();
+    this.assertOpen();
     return isolate(this.#state.publishedState);
   }
 
@@ -337,8 +414,8 @@ export class EvolutionApplicationCoordinator {
     catalog: EvolutionCatalogSnapshot;
     application: ApplicationStateSnapshot;
   }> {
-    return await this.#enqueue(async () => {
-      this.#assertOpen();
+    return await this.enqueue(async () => {
+      this.assertOpen();
       const { revision, snapshot } = await this.#catalog.readSnapshot();
       return isolate({
         catalogRevision: revision,
@@ -360,8 +437,8 @@ export class EvolutionApplicationCoordinator {
     promptContent?: Uint8Array;
     origin?: "automatic-controller-v1";
   }): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       const proposalInput = {
         id: input.id,
         createdAt: new Date(this.#now()).toISOString(),
@@ -399,8 +476,8 @@ export class EvolutionApplicationCoordinator {
   async beginEvaluation(
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.beginEvaluation(
         proposalId,
         new Date(this.#now()).toISOString(),
@@ -413,8 +490,8 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.evaluate(
         proposalId,
         evidence,
@@ -428,8 +505,8 @@ export class EvolutionApplicationCoordinator {
     proposalId: string,
     evidence: unknown,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.evaluateAutomaticRun(
         proposalId,
         evidence,
@@ -447,178 +524,258 @@ export class EvolutionApplicationCoordinator {
   async evaluateServerPreflight(
     proposalId: string,
   ): Promise<{ proposal: EvolutionProposal; committedRevision: number }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
-      let proposal = this.#requireProposal(proposalId);
-      if (proposal.status === "evaluated") {
-        this.#assertServerPreflightEvaluation(proposal);
-        return { proposal, committedRevision: this.#catalog.revision };
-      }
-      if (proposal.status === "proposed") {
-        const begun = await this.#catalog.beginEvaluation(
-          proposal.id,
-          new Date(this.#now()).toISOString(),
-          this.#state.catalogWriter,
-        );
-        proposal = begun.proposal;
-      } else if (proposal.status !== "evaluating") {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' cannot run server preflight from status '${proposal.status}'`,
-        );
-      }
-
-      const candidateDigest = computeCandidateDigest(proposal.candidate);
-      const items: Array<{
-        kind: "deterministic";
-        id: string;
-        status: "pass" | "fail";
-        summary: string;
-      }> = [];
-      let trusted = true;
-      try {
-        this.#assertPolicyAllows(proposal);
-        if (proposal.candidate.kind === "strategy-blueprint") {
-          if (proposal.policy.allowedPromptPaths.length !== 0) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              "Strategy candidates cannot carry prompt path capabilities",
-            );
-          }
-          const configuredNames = new Set(
-            Object.keys(this.#loaded.config.strategies?.definitions ?? {}),
-          );
-          if (configuredNames.has(proposal.candidate.name)) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Configured strategy '${proposal.candidate.name}' is read-only`,
-            );
-          }
-        } else {
-          const trustedPaths = new Set(
-            Object.values(this.#loaded.config.roles)
-              .map((role) => role.promptFile)
-              .filter((value): value is string => typeof value === "string"),
-          );
-          if (
-            !trustedPaths.has(proposal.candidate.path) ||
-            proposal.policy.allowedPromptPaths.length !== 1 ||
-            proposal.policy.allowedPromptPaths[0] !== proposal.candidate.path
-          ) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Prompt candidate path '${proposal.candidate.path}' is not the exact current trusted path`,
-            );
-          }
-        }
-        items.push(serverPreflightItem(
-          "server-candidate-trust-v1",
-          "pass",
-          "Current project trust and bounded capabilities accepted; candidate was not executed",
-        ));
-      } catch (error) {
-        if (!(error instanceof EvolutionApplicationError) || error.code !== "POLICY_DENIED") {
-          throw error;
-        }
-        trusted = false;
-        items.push(serverPreflightItem(
-          "server-candidate-trust-v1",
-          "fail",
-          `Current project trust rejected the candidate: ${error.message}; candidate was not executed`,
-        ));
-      }
-
-      if (proposal.candidate.kind === "strategy-blueprint") {
-        if (!trusted) {
-          items.push(serverPreflightItem(
-            "server-strategy-preflight-v1",
-            "fail",
-            "Strategy preflight was not run because candidate trust failed; candidate was not executed",
-          ));
-        } else {
-          try {
-            this.#strategies.preflight(
-              proposal.candidate.name,
-              proposal.candidate.definition,
-            );
-            items.push(serverPreflightItem(
-              "server-strategy-preflight-v1",
-              "pass",
-              "Strategy schema, topology, profiles, and current catalog composition passed; candidate was not executed",
-            ));
-          } catch (error) {
-            if (!(error instanceof StrategyBlueprintError)) throw error;
-            items.push(serverPreflightItem(
-              "server-strategy-preflight-v1",
-              "fail",
-              `Strategy preflight rejected the candidate: ${error.message}; candidate was not executed`,
-            ));
-          }
-        }
-      } else if (!trusted) {
-        items.push(
-          serverPreflightItem(
-            "server-prompt-object-integrity-v1",
-            "fail",
-            "Prompt object verification was not run because candidate trust failed; candidate was not executed",
-          ),
-          serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "fail",
-            "Prompt target verification was not run because candidate trust failed; candidate was not executed",
-          ),
-        );
-      } else {
-        await this.#targets.readPromptObject(proposal.candidate.contentDigest);
-        items.push(serverPreflightItem(
-          "server-prompt-object-integrity-v1",
-          "pass",
-          "Content-addressed prompt object digest, size, permissions, and UTF-8 passed; candidate was not executed",
-        ));
-        try {
-          const live = await this.#targets.readTargetState(proposal.candidate);
-          if (!live.present || !live.digest) {
-            throw new EvolutionApplicationError(
-              "POLICY_DENIED",
-              `Prompt target '${proposal.candidate.path}' must already exist`,
-            );
-          }
-          await this.#targets.readLivePromptText(proposal.candidate.path, live.digest);
-          await this.#git.verifyTrackedRegularFile(proposal.candidate.path);
-          items.push(serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "pass",
-            "Live prompt target is canonical, readable UTF-8, size-bounded, and tracked by HEAD; candidate was not executed",
-          ));
-        } catch (error) {
-          const mapped = error instanceof GitManagerError ? mapGitError(error) : error;
-          if (
-            !(mapped instanceof EvolutionApplicationError) ||
-            (mapped.code !== "POLICY_DENIED" && mapped.code !== "TARGET_DRIFTED")
-          ) {
-            throw mapped;
-          }
-          items.push(serverPreflightItem(
-            "server-prompt-target-trust-v1",
-            "fail",
-            `Live prompt target failed trust checks: ${mapped.message}; candidate was not executed`,
-          ));
-        }
-      }
-
+    return await this.enqueue(async () => {
+      this.assertWritable();
+      const transition = await this.preparePreflight(proposalId);
+      if (transition.settled !== undefined) return transition.settled;
+      const proposal = transition.proposal;
+      const trust = await this.collectCandidateTrust(proposal);
+      const items = [
+        ...trust.items,
+        ...(proposal.candidate.kind === "strategy-blueprint"
+          ? this.strategyPreflightItems(proposal, trust.trusted)
+          : await this.promptPreflightItems(proposal, trust.trusted)),
+      ];
       return await this.#catalog.evaluateServerPreflight(
         proposal.id,
-        { proposalId: proposal.id, candidateDigest, items },
+        { proposalId: proposal.id, candidateDigest: computeCandidateDigest(proposal.candidate), items },
         new Date(this.#now()).toISOString(),
         this.#state.catalogWriter,
       );
     });
   }
 
+  /**
+   * Move the proposal into `evaluating`, or return the answer an already-evaluated proposal
+   * gets. An `evaluated` proposal is only accepted when its evaluation came from this same
+   * server preflight — otherwise a proposal evaluated by older, external evidence would be
+   * reported as if the server had checked it.
+   */
+  private async preparePreflight(
+    proposalId: string,
+  ): Promise<
+    | { proposal: EvolutionProposal; settled?: undefined }
+    | { proposal: EvolutionProposal; settled: { proposal: EvolutionProposal; committedRevision: number } }
+  > {
+    let proposal = this.requireProposal(proposalId);
+    if (proposal.status === "evaluated") {
+      this.assertServerPreflightSource(proposal);
+      return {
+        proposal,
+        settled: { proposal, committedRevision: this.#catalog.revision },
+      };
+    }
+    if (proposal.status === "proposed") {
+      const begun = await this.#catalog.beginEvaluation(
+        proposal.id,
+        new Date(this.#now()).toISOString(),
+        this.#state.catalogWriter,
+      );
+      proposal = begun.proposal;
+      return { proposal };
+    }
+    if (proposal.status !== "evaluating") {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' cannot run server preflight from status '${proposal.status}'`,
+      );
+    }
+    return { proposal };
+  }
+
+  /**
+   * The trust check becomes a **recorded item**, not an exception: a candidate the project
+   * may not use is still evaluated, with `fail` written into the evidence. Only a
+   * POLICY_DENIED verdict is absorbed — anything else is a defect and propagates.
+   */
+  private async collectCandidateTrust(
+    proposal: EvolutionProposal,
+  ): Promise<{ trusted: boolean; items: PreflightItem[] }> {
+    try {
+      this.assertCandidateTrust(proposal);
+      return {
+        trusted: true,
+        items: [
+          serverPreflightItem(
+            "server-candidate-trust-v1",
+            "pass",
+            "Current project trust and bounded capabilities accepted; candidate was not executed",
+          ),
+        ],
+      };
+    } catch (error) {
+      if (!(error instanceof EvolutionApplicationError) || error.code !== "POLICY_DENIED") {
+        throw error;
+      }
+      return {
+        trusted: false,
+        items: [
+          serverPreflightItem(
+            "server-candidate-trust-v1",
+            "fail",
+            `Current project trust rejected the candidate: ${error.message}; candidate was not executed`,
+          ),
+        ],
+      };
+    }
+  }
+
+  /** Current project trust: capabilities off, and the exact path/name the project already uses. */
+  private assertCandidateTrust(proposal: EvolutionProposal): void {
+    this.assertPolicyAllows(proposal);
+    if (proposal.candidate.kind === "strategy-blueprint") {
+      this.assertStrategyCandidateTrust(proposal, proposal.candidate);
+      return;
+    }
+    this.assertPromptCandidateTrust(proposal, proposal.candidate);
+  }
+
+  private assertStrategyCandidateTrust(
+    proposal: EvolutionProposal,
+    candidate: Extract<EvolutionProposal["candidate"], { kind: "strategy-blueprint" }>,
+  ): void {
+    if (proposal.policy.allowedPromptPaths.length !== 0) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Strategy candidates cannot carry prompt path capabilities",
+      );
+    }
+    const configuredNames = new Set(Object.keys(this.#loaded.config.strategies?.definitions ?? {}));
+    if (configuredNames.has(candidate.name)) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Configured strategy '${candidate.name}' is read-only`,
+      );
+    }
+  }
+
+  private assertPromptCandidateTrust(
+    proposal: EvolutionProposal,
+    candidate: Extract<EvolutionProposal["candidate"], { kind: "role-prompt" }>,
+  ): void {
+    const trustedPaths = new Set(
+      Object.values(this.#loaded.config.roles)
+        .map((role) => role.promptFile)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    if (
+      !trustedPaths.has(candidate.path) ||
+      proposal.policy.allowedPromptPaths.length !== 1 ||
+      proposal.policy.allowedPromptPaths[0] !== candidate.path
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Prompt candidate path '${candidate.path}' is not the exact current trusted path`,
+      );
+    }
+  }
+
+  /** The strategy half of the deterministic preflight, as one pass/fail item. */
+  private strategyPreflightItems(proposal: EvolutionProposal, trusted: boolean): PreflightItem[] {
+    if (!trusted) {
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "fail",
+          "Strategy preflight was not run because candidate trust failed; candidate was not executed",
+        ),
+      ];
+    }
+    if (proposal.candidate.kind !== "strategy-blueprint") return [];
+    try {
+      this.#strategies.preflight(proposal.candidate.name, proposal.candidate.definition);
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "pass",
+          "Strategy schema, topology, profiles, and current catalog composition passed; candidate was not executed",
+        ),
+      ];
+    } catch (error) {
+      if (!(error instanceof StrategyBlueprintError)) throw error;
+      return [
+        serverPreflightItem(
+          "server-strategy-preflight-v1",
+          "fail",
+          `Strategy preflight rejected the candidate: ${error.message}; candidate was not executed`,
+        ),
+      ];
+    }
+  }
+
+  /** The prompt half: object integrity, then the live target's trust. */
+  private async promptPreflightItems(
+    proposal: EvolutionProposal,
+    trusted: boolean,
+  ): Promise<PreflightItem[]> {
+    if (proposal.candidate.kind !== "role-prompt") return [];
+    if (!trusted) {
+      return [
+        serverPreflightItem(
+          "server-prompt-object-integrity-v1",
+          "fail",
+          "Prompt object verification was not run because candidate trust failed; candidate was not executed",
+        ),
+        serverPreflightItem(
+          "server-prompt-target-trust-v1",
+          "fail",
+          "Prompt target verification was not run because candidate trust failed; candidate was not executed",
+        ),
+      ];
+    }
+    await this.#targets.readPromptObject(proposal.candidate.contentDigest);
+    return [
+      serverPreflightItem(
+        "server-prompt-object-integrity-v1",
+        "pass",
+        "Content-addressed prompt object digest, size, permissions, and UTF-8 passed; candidate was not executed",
+      ),
+      await this.promptTargetItem(proposal),
+    ];
+  }
+
+  /**
+   * The live prompt target must be canonical, readable, size-bounded and tracked by HEAD.
+   * A target that fails those checks is a `fail` item, not an error: the preflight's job is
+   * to report the candidate's standing, including "this project's own prompt is unusable".
+   */
+  private async promptTargetItem(proposal: EvolutionProposal): Promise<PreflightItem> {
+    if (proposal.candidate.kind !== "role-prompt") throw new Error("prompt candidate required");
+    try {
+      const live = await this.#targets.readTargetState(proposal.candidate);
+      if (!live.present || !live.digest) {
+        throw new EvolutionApplicationError(
+          "POLICY_DENIED",
+          `Prompt target '${proposal.candidate.path}' must already exist`,
+        );
+      }
+      await this.#targets.readLivePromptText(proposal.candidate.path, live.digest);
+      await this.#git.verifyTrackedRegularFile(proposal.candidate.path);
+      return serverPreflightItem(
+        "server-prompt-target-trust-v1",
+        "pass",
+        "Live prompt target is canonical, readable UTF-8, size-bounded, and tracked by HEAD; candidate was not executed",
+      );
+    } catch (error) {
+      const mapped = error instanceof GitManagerError ? mapGitError(error) : error;
+      if (
+        !(mapped instanceof EvolutionApplicationError) ||
+        (mapped.code !== "POLICY_DENIED" && mapped.code !== "TARGET_DRIFTED")
+      ) {
+        throw mapped;
+      }
+      return serverPreflightItem(
+        "server-prompt-target-trust-v1",
+        "fail",
+        `Live prompt target failed trust checks: ${mapped.message}; candidate was not executed`,
+      );
+    }
+  }
+
   async assertServerPreflightEvaluation(proposalId: string): Promise<void> {
-    await this.#enqueue(async () => {
-      this.#assertOpen();
-      this.#assertServerPreflightEvaluation(this.#requireProposal(proposalId));
+    await this.enqueue(async () => {
+      this.assertOpen();
+      this.assertServerPreflightSource(this.requireProposal(proposalId));
     });
   }
 
@@ -630,8 +787,8 @@ export class EvolutionApplicationCoordinator {
     record: RejectionRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.reject(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         reason: requireNonEmpty(input.reason, "reason"),
@@ -652,8 +809,8 @@ export class EvolutionApplicationCoordinator {
     record: ArchiveRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.archive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         ...(input.reason === undefined
@@ -673,8 +830,8 @@ export class EvolutionApplicationCoordinator {
     record: UnarchiveRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.unarchive(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         ...(input.reason === undefined
@@ -696,8 +853,8 @@ export class EvolutionApplicationCoordinator {
     record: DeletionRecord;
     committedRevision: number;
   }> {
-    return await this.#enqueue(async () => {
-      this.#assertWritable();
+    return await this.enqueue(async () => {
+      this.assertWritable();
       return await this.#catalog.deleteProposal(proposalId, {
         actor: requireNonEmpty(input.operator, "operator"),
         reason: requireNonEmpty(input.reason, "reason"),
@@ -719,7 +876,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision?: number;
   }): Promise<ApplicationPreview> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.createPromotionPreview(input);
     });
   }
@@ -732,8 +889,8 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
-      return await this.#executeCommand({
+    return await this.enqueue(async () => {
+      return await this.executeCommand({
         commandId: input.commandId,
         operation: "promote-and-apply",
         proposalId: input.proposalId,
@@ -755,8 +912,8 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult | undefined> {
-    return await this.#enqueue(async () => {
-      this.#assertOpen();
+    return await this.enqueue(async () => {
+      this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
       const reason = requireNonEmpty(input.reason, "reason");
@@ -773,7 +930,7 @@ export class EvolutionApplicationCoordinator {
       });
       const existing = this.#state.commands.get(commandId);
       if (!existing) return undefined;
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: input.operation,
         proposalId: input.proposalId,
         operator,
@@ -796,26 +953,15 @@ export class EvolutionApplicationCoordinator {
     mode: "adopt" | "apply";
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult | undefined> {
-    return await this.#enqueue(async () => {
-      this.#assertOpen();
+    return await this.enqueue(async () => {
+      this.assertOpen();
       const commandId = requireCommandId(input.commandId);
       const operator = requireNonEmpty(input.operator, "operator");
       const reason = requireNonEmpty(input.reason, "reason");
-      const materialDigest = input.promptContent
-        ? sha256Bytes(Buffer.from(input.promptContent))
-        : null;
-      const requestDigest = sha256Canonical({
-        operation: "reconcile-promoted",
-        proposalId: input.proposalId,
-        expectedRevision: input.expectedRevision,
-        operator,
-        reason,
-        mode: input.mode,
-        materialDigest,
-      });
+      const { materialDigest, requestDigest } = this.reconcileDigest(input, operator, reason);
       const existing = this.#state.commands.get(commandId);
       if (!existing) return undefined;
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: "reconcile-promoted",
         proposalId: input.proposalId,
         operator,
@@ -833,7 +979,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision?: number;
   }): Promise<ApplicationPreview> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.createRollbackPreview(input);
     });
   }
@@ -846,8 +992,8 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
-      return await this.#executeCommand({
+    return await this.enqueue(async () => {
+      return await this.executeCommand({
         commandId: input.commandId,
         operation: "rollback-applied",
         proposalId: input.proposalId,
@@ -870,7 +1016,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     expectedRevision: number;
   }): Promise<ApplicationPreviewDescription> {
-    return await this.#enqueue(async () => {
+    return await this.enqueue(async () => {
       return await this.#previewStore.describe(input);
     });
   }
@@ -890,40 +1036,17 @@ export class EvolutionApplicationCoordinator {
     /** Legacy Phase-2 prompt material; accepted only by reconcile/apply. */
     promptContent?: Uint8Array;
   }): Promise<ApplicationCommandResult> {
-    return await this.#enqueue(async () => {
-      this.#assertOpen();
-      const commandId = requireCommandId(input.commandId);
-      const operator = requireNonEmpty(input.operator, "operator");
-      const reason = requireNonEmpty(input.reason, "reason");
-      if (
-        input.promptContent !== undefined &&
-        !(input.promptContent instanceof Uint8Array)
-      ) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          "Legacy prompt material must be bytes",
-        );
-      }
-      if (input.mode === "adopt" && input.promptContent !== undefined) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          "Legacy prompt material is not accepted when adopting the live target",
-        );
-      }
-      const materialDigest =
-        input.promptContent === undefined ? null : sha256Bytes(Buffer.from(input.promptContent));
-      const requestDigest = sha256Canonical({
-        operation: "reconcile-promoted",
-        proposalId: input.proposalId,
-        expectedRevision: input.expectedRevision,
-        operator,
-        reason,
-        mode: input.mode,
-        materialDigest,
-      });
+    return await this.enqueue(async () => {
+      this.assertOpen();
+      const preface = this.reconcilePreface(input);
+      const commandId = preface.commandId;
+      const operator = preface.operator;
+      const reason = preface.reason;
+      const materialDigest = preface.materialDigest;
+      const requestDigest = preface.requestDigest;
       const existing = this.#state.commands.get(commandId);
       if (existing) {
-        return this.#dedupeOrConflict(existing, {
+        return this.dedupeOrConflict(existing, {
           operation: "reconcile-promoted",
           proposalId: input.proposalId,
           operator,
@@ -934,7 +1057,7 @@ export class EvolutionApplicationCoordinator {
           materialDigest,
         });
       }
-      this.#assertWritable();
+      this.assertWritable();
 
       const { revision, snapshot } = await this.#catalog.readSnapshot();
       if (input.expectedRevision !== revision) {
@@ -943,332 +1066,572 @@ export class EvolutionApplicationCoordinator {
           `Catalog revision ${input.expectedRevision} is stale; current is ${revision}`,
         );
       }
-      const proposal = this.#requireProposal(input.proposalId);
-      this.#assertPolicyAllows(proposal);
-      if (proposal.status !== "promoted") {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' must be promoted to reconcile (status=${proposal.status})`,
-        );
-      }
-      if (this.#state.applications.has(proposal.id)) {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' already has application proof`,
-        );
-      }
-      const target = targetFromCandidate(proposal.candidate);
-      const activeProposalId = this.#catalog.getActiveProposalId(target);
-      if (activeProposalId !== proposal.id) {
-        throw new EvolutionApplicationError(
-          "ACTIVE_TARGET_CONFLICT",
-          `Proposal '${proposal.id}' is not the active promotion for its target`,
-        );
-      }
+      const { proposal, target, activeProposalId } = this.assertReconcilable(input);
 
-      const decidedAt = new Date(this.#now()).toISOString();
-      const humanDecision = parseHumanDecision({
-        actor: operator,
-        reason,
-        decidedAt,
-      });
-      const candidateDigest = computeCandidateDigest(proposal.candidate);
-      const beforeTarget = await this.#targets.readTargetState(proposal.candidate);
-      let livePromptContent: Buffer | undefined;
-      if (proposal.candidate.kind === "role-prompt") {
-        if (!beforeTarget.present || !beforeTarget.digest) {
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Prompt target '${proposal.candidate.path}' must already exist for reconciliation`,
-          );
-        }
-        livePromptContent = await this.#targets.readLivePromptBytes(
-          proposal.candidate.path,
-          beforeTarget.digest,
-        );
-      }
-      const rollbackPreflight = await this.#catalog.preflightRollback(
-        proposal.id,
-        humanDecision,
-      );
-      const legacyPredecessor = await this.#resolveLegacyPredecessor({
+      const plan = await this.planReconcile({
+        proposal,
+        target,
         snapshot,
-        restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
-        liveTarget: beforeTarget,
-        mode: input.mode,
-        catalogRevision: revision,
+        revision,
+        commandId,
         operator,
         reason,
-        decidedAt,
-        humanDecision,
-        commandId,
+        mode: input.mode,
       });
-      if (
-        legacyPredecessor.application &&
-        applicationHistoryDepth(legacyPredecessor.application) >= MAX_APPLICATION_HISTORY_DEPTH
-      ) {
-        throw new EvolutionApplicationError(
-          "POLICY_DENIED",
-          `Application history for '${targetKey(target)}' reached the bounded depth of ${MAX_APPLICATION_HISTORY_DEPTH}`,
-        );
-      }
-      const applicationBeforeTarget = legacyPredecessor.application?.afterTarget ?? beforeTarget;
+      const context: ReconcileContext = {
+        commandId,
+        operator,
+        reason,
+        mode: input.mode,
+        ...(input.promptContent === undefined ? {} : { promptContent: input.promptContent }),
+        requestDigest,
+        materialDigest,
+        proposal,
+        target,
+        activeProposalId,
+        revision,
+        expectedRevision: input.expectedRevision,
+        ...plan,
+      };
 
       if (input.mode === "adopt") {
-        await this.#assertQuiescentSafe();
-        const expectedDigest =
-          proposal.candidate.kind === "role-prompt"
-            ? proposal.candidate.contentDigest
-            : sha256Canonical(proposal.candidate.definition);
-        if (beforeTarget.digest !== expectedDigest) {
-          throw new EvolutionApplicationError(
-            "TARGET_DRIFTED",
-            `Cannot adopt proposal '${proposal.id}': live target digest does not match candidate`,
-          );
-        }
-        if (livePromptContent) {
-          await this.#targets.ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
-        }
-        const application: ApplicationRecord = {
-          proposalId: proposal.id,
-          candidateDigest,
-          target,
-          status: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest!,
-          beforeTarget: applicationBeforeTarget,
-          afterTarget: beforeTarget,
-          previousApplication: legacyPredecessor.application,
-          rollbackSafe: legacyPredecessor.application !== null,
-          catalogRevision: revision,
-          operator,
-          reason,
-          appliedAt: decidedAt,
-          commandId,
-        };
-        if (legacyPredecessor.completion) {
-          this.#state.completed.push(legacyPredecessor.completion);
-        }
-        if (legacyPredecessor.application) {
-          this.#state.applications.delete(legacyPredecessor.application.proposalId);
-        }
-        this.#state.applications.set(proposal.id, application);
-        const completed: CompletedApplicationRecord = {
-          commandId,
-          operation: "reconcile-promoted",
-          proposalId: proposal.id,
-          candidateDigest,
-          status: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-          catalogRevisionBefore: revision,
-          catalogRevisionAfter: revision,
-          operator,
-          reason,
-          completedAt: decidedAt,
-          humanDecision,
-        };
-        this.#state.completed.push(completed);
-        const resultPayload: ApplicationCommandResultPayload = {
-          proposal,
-          committedCatalogRevision: revision,
-          applicationStatus: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-        };
-        const binding: CommandIdempotencyBinding = {
-          commandId,
-          operation: "reconcile-promoted",
-          proposalId: proposal.id,
-          candidateDigest,
-          operator,
-          reason,
-          expectedRevision: input.expectedRevision,
-          previewTokenDigest: `reconcile:${input.mode}`,
-          requestDigest,
-          materialDigest,
-          result: resultPayload,
-        };
-        this.#state.commands.set(commandId, binding);
-        await this.#journal.persist(this.#state.revision + 1);
-        return {
-          proposal,
-          committedCatalogRevision: revision,
-          applicationStatus: "adopted",
-          beforeTargetDigest: applicationBeforeTarget.digest,
-          afterTargetDigest: beforeTarget.digest,
-          deduplicated: false,
-        };
+        return await this.adoptLiveTarget(context);
       }
 
-      // mode === "apply": journaled apply without catalog promote (already promoted)
-      if (proposal.candidate.kind === "role-prompt") {
-        if (input.promptContent instanceof Uint8Array) {
-          await this.#targets.ingestPromptMaterial(
-            proposal.candidate.contentDigest,
-            input.promptContent,
-          );
-        } else {
-          await this.#targets.readPromptObject(proposal.candidate.contentDigest);
-        }
-      } else if (input.promptContent !== undefined) {
+      return await this.applyThroughJournal(context);
+    });
+  }
+
+  /**
+   * Write the candidate through the journal: stage the material, take the Git authorization,
+   * persist a pending operation, apply, then verify what is actually live before recording
+   * it. This is the only reconcile path that can fail *after* changing something, so every
+   * failure below either proves the target is untouched (record it aborted) or marks the
+   * state as needing recovery.
+   *
+   * Two things here look redundant and are not:
+   *   - the completion is stamped from a second clock read, because it happens after the
+   *     target write and records when that finished, not when the command was decided;
+   *   - `persist(...).catch(() => undefined)` on the recovery path swallows a write error on
+   *     purpose: the command is about to fail with RECOVERY_REQUIRED, and a persistence
+   *     error thrown here would replace the reason the operator needs to see.
+   */
+  async applyThroughJournal(input: ReconcileContext): Promise<ApplicationCommandResult> {
+    const proposal = input.proposal;
+    await this.stageReconcileMaterial(input);
+    const afterTarget = await this.#targets.plannedAfterState(proposal, input.beforeTarget);
+    await this.assertQuiescentSafe();
+    const gitAuthorization = await this.authorizeReconcileCommit(input);
+    if (input.livePromptContent) {
+      await this.#targets.ingestPromptMaterial(input.beforeTarget.digest!, input.livePromptContent);
+    }
+    const pending: PendingApplicationOperation = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      humanDecision: input.humanDecision,
+      catalogRevisionBefore: input.revision,
+      expectedCatalogRevisionAfter: input.revision,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget,
+      previousActiveProposalId: input.activeProposalId,
+      previousApplication: input.legacyPredecessor.application,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      expectedAuditDigest: null,
+      gitBaseHead: gitAuthorization?.head ?? null,
+      gitPath: gitAuthorization?.repositoryRelativePath ?? null,
+      startedAt: input.decidedAt,
+    };
+    if (input.legacyPredecessor.completion) {
+      this.#state.completed.push(input.legacyPredecessor.completion);
+    }
+    this.#state.pending = pending;
+    await this.#journal.persist(this.#state.revision + 1);
+
+    await this.applyOrRecover(input, afterTarget, gitAuthorization);
+
+    const liveAfter = await this.#targets.readTargetState(proposal.candidate);
+    if (!targetStatesEqual(liveAfter, afterTarget)) {
+      this.#state.recoveryRequired = true;
+      await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
+      throw new EvolutionApplicationError(
+        "RECOVERY_REQUIRED",
+        "Target apply completed with unexpected digest; manual recovery required",
+      );
+    }
+    return await this.recordApplied(input, afterTarget);
+  }
+
+  /** Stage the bytes the candidate needs, or read back the object it already has. */
+  async stageReconcileMaterial(input: ReconcileContext): Promise<void> {
+    const candidate = input.proposal.candidate;
+    if (candidate.kind !== "role-prompt") {
+      if (input.promptContent !== undefined) {
         throw new EvolutionApplicationError(
           "POLICY_DENIED",
           "Legacy prompt material is only accepted for role-prompt reconciliation",
         );
       }
-      const afterTarget = await this.#targets.plannedAfterState(proposal, beforeTarget);
-      await this.#assertQuiescentSafe();
-      let gitAuthorization: ExactTrackedFileCommitAuthorization | undefined;
-      if (proposal.candidate.kind === "role-prompt") {
-        try {
-          gitAuthorization = await this.#git.authorizeExactTrackedFileCommit(
-            proposal.candidate.path,
-          );
-        } catch (error) {
-          throw mapGitError(error);
-        }
-      }
-      if (livePromptContent) {
-        await this.#targets.ingestPromptMaterial(beforeTarget.digest!, livePromptContent);
-      }
-      const previewTokenDigest = `reconcile:${input.mode}`;
-      const pending: PendingApplicationOperation = {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        operator,
-        reason,
-        humanDecision,
-        catalogRevisionBefore: revision,
-        expectedCatalogRevisionAfter: revision,
-        beforeTarget: applicationBeforeTarget,
+      return;
+    }
+    if (input.promptContent instanceof Uint8Array) {
+      await this.#targets.ingestPromptMaterial(candidate.contentDigest, input.promptContent);
+      return;
+    }
+    await this.#targets.readPromptObject(candidate.contentDigest);
+  }
+
+  /** The commit this apply is allowed to make, when the candidate is a tracked prompt. */
+  async authorizeReconcileCommit(
+    input: ReconcileContext,
+  ): Promise<ExactTrackedFileCommitAuthorization | undefined> {
+    const candidate = input.proposal.candidate;
+    if (candidate.kind !== "role-prompt") return undefined;
+    try {
+      return await this.#git.authorizeExactTrackedFileCommit(candidate.path);
+    } catch (error) {
+      throw mapGitError(error);
+    }
+  }
+
+  /**
+   * Apply, and decide what the failure *means*: a target that provably did not move is an
+   * aborted command; anything else (including an error that already said recovery) leaves
+   * the pending operation in place and marks the state as needing recovery.
+   */
+  async applyOrRecover(
+    input: ReconcileContext,
+    afterTarget: TargetDigestState,
+    gitAuthorization: ExactTrackedFileCommitAuthorization | undefined,
+  ): Promise<void> {
+    try {
+      await this.#targets.applyTarget(
+        input.proposal,
+        input.beforeTarget,
         afterTarget,
-        previousActiveProposalId: activeProposalId,
-        previousApplication: legacyPredecessor.application,
-        previewTokenDigest,
-        requestDigest,
-        materialDigest,
-        expectedAuditDigest: null,
-        gitBaseHead: gitAuthorization?.head ?? null,
-        gitPath: gitAuthorization?.repositoryRelativePath ?? null,
-        startedAt: decidedAt,
-      };
-      if (legacyPredecessor.completion) {
-        this.#state.completed.push(legacyPredecessor.completion);
-      }
-      this.#state.pending = pending;
-      await this.#journal.persist(this.#state.revision + 1);
+        input.humanDecision,
+        "apply",
+        gitAuthorization,
+      );
+    } catch (error) {
+      throw await this.settleApplyFailure(error, input);
+    }
+  }
 
-      try {
-        await this.#targets.applyTarget(
-          proposal,
-          beforeTarget,
-          afterTarget,
-          humanDecision,
-          "apply",
-          gitAuthorization,
-        );
-      } catch (error) {
-        const mapped = mapToApplicationError(error);
-        // Target not applied (or indeterminate handled inside). Clear pending as aborted only if still old.
-        const live = await this.#targets.readTargetState(proposal.candidate);
-        if (mapped.code !== "RECOVERY_REQUIRED" && live.digest === beforeTarget.digest) {
-          await this.#journal.finalizePendingAs("aborted", revision, live.digest);
-        } else {
-          this.#state.recoveryRequired = true;
-          await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
-          throw mapToApplicationError(error, "RECOVERY_REQUIRED");
-        }
-        throw mapped;
-      }
+  async settleApplyFailure(
+    error: unknown,
+    input: ReconcileContext,
+  ): Promise<EvolutionApplicationError> {
+    const mapped = mapToApplicationError(error);
+    const live = await this.#targets.readTargetState(input.proposal.candidate);
+    if (mapped.code !== "RECOVERY_REQUIRED" && live.digest === input.beforeTarget.digest) {
+      await this.#journal.finalizePendingAs("aborted", input.revision, live.digest);
+      return mapped;
+    }
+    this.#state.recoveryRequired = true;
+    await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
+    return mapToApplicationError(error, "RECOVERY_REQUIRED");
+  }
 
-      const liveAfter = await this.#targets.readTargetState(proposal.candidate);
-      if (!targetStatesEqual(liveAfter, afterTarget)) {
-        this.#state.recoveryRequired = true;
-        await this.#journal.persist(this.#state.revision + 1).catch(() => undefined);
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          "Target apply completed with unexpected digest; manual recovery required",
-        );
-      }
-
-      const application: ApplicationRecord = {
-        proposalId: proposal.id,
-        candidateDigest,
-        target,
-        status: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest!,
-        beforeTarget: applicationBeforeTarget,
-        afterTarget,
-        previousApplication: legacyPredecessor.application,
-        rollbackSafe: true,
-        catalogRevision: revision,
-        operator,
-        reason,
-        appliedAt: decidedAt,
-        commandId,
-      };
-      if (legacyPredecessor.application) {
-        this.#state.applications.delete(legacyPredecessor.application.proposalId);
-      }
-      this.#state.applications.set(proposal.id, application);
-      const completed: CompletedApplicationRecord = {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        status: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest,
-        catalogRevisionBefore: revision,
-        catalogRevisionAfter: revision,
-        operator,
-        reason,
-        completedAt: new Date(this.#now()).toISOString(),
-        humanDecision,
-      };
-      this.#state.completed.push(completed);
-      this.#state.pending = null;
-      const resultPayload: ApplicationCommandResultPayload = {
+  /** Record an applied target: the proof, the completion, and the idempotency binding. */
+  async recordApplied(
+    input: ReconcileContext,
+    afterTarget: TargetDigestState,
+  ): Promise<ApplicationCommandResult> {
+    const proposal = input.proposal;
+    const application: ApplicationRecord = {
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      target: input.target,
+      status: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest!,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget,
+      previousApplication: input.legacyPredecessor.application,
+      rollbackSafe: true,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      appliedAt: input.decidedAt,
+      commandId: input.commandId,
+    };
+    if (input.legacyPredecessor.application) {
+      this.#state.applications.delete(input.legacyPredecessor.application.proposalId);
+    }
+    this.#state.applications.set(proposal.id, application);
+    const completed: CompletedApplicationRecord = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      status: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest,
+      catalogRevisionBefore: input.revision,
+      catalogRevisionAfter: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      // Deliberately the second clock read of this command: the apply finished here.
+      completedAt: new Date(this.#now()).toISOString(),
+      humanDecision: input.humanDecision,
+    };
+    this.#state.completed.push(completed);
+    this.#state.pending = null;
+    this.#state.commands.set(input.commandId, {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      expectedRevision: input.expectedRevision,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      result: {
         proposal,
-        committedCatalogRevision: revision,
+        committedCatalogRevision: input.revision,
         applicationStatus: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
+        beforeTargetDigest: input.applicationBeforeTarget.digest,
         afterTargetDigest: afterTarget.digest,
-      };
-      this.#state.commands.set(commandId, {
-        commandId,
-        operation: "reconcile-promoted",
-        proposalId: proposal.id,
-        candidateDigest,
-        operator,
-        reason,
-        expectedRevision: input.expectedRevision,
-        previewTokenDigest: `reconcile:${input.mode}`,
-        requestDigest,
-        materialDigest,
-        result: resultPayload,
-      });
-      await this.#journal.persist(this.#state.revision + 1);
-      return {
-        proposal,
-        committedCatalogRevision: revision,
-        applicationStatus: "applied",
-        beforeTargetDigest: applicationBeforeTarget.digest,
-        afterTargetDigest: afterTarget.digest,
-        deduplicated: false,
-      };
+      },
     });
+    await this.#journal.persist(this.#state.revision + 1);
+    return {
+      proposal,
+      committedCatalogRevision: input.revision,
+      applicationStatus: "applied",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: afterTarget.digest,
+      deduplicated: false,
+    };
+  }
+
+  /**
+   * Record a target that is already live as the outcome of this promotion. Nothing is
+   * written to the repository: adopt exists for Phase-2 promotions that applied before the
+   * journal did, so the only question is whether the live bytes really are the candidate's.
+   *
+   * It reads the clock once. Adoption finishes without a target write, so its completion
+   * carries the same instant as its decision — unlike apply, which stamps twice on purpose.
+   */
+  async adoptLiveTarget(input: ReconcileContext): Promise<ApplicationCommandResult> {
+    await this.assertQuiescentSafe();
+    const expectedDigest =
+      input.proposal.candidate.kind === "role-prompt"
+        ? input.proposal.candidate.contentDigest
+        : sha256Canonical(input.proposal.candidate.definition);
+    if (input.beforeTarget.digest !== expectedDigest) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Cannot adopt proposal '${input.proposal.id}': live target digest does not match candidate`,
+      );
+    }
+    if (input.livePromptContent) {
+      await this.#targets.ingestPromptMaterial(
+        input.beforeTarget.digest!,
+        input.livePromptContent,
+      );
+    }
+    const application: ApplicationRecord = {
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      target: input.target,
+      status: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest!,
+      beforeTarget: input.applicationBeforeTarget,
+      afterTarget: input.beforeTarget,
+      previousApplication: input.legacyPredecessor.application,
+      rollbackSafe: input.legacyPredecessor.application !== null,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      appliedAt: input.decidedAt,
+      commandId: input.commandId,
+    };
+    if (input.legacyPredecessor.completion) {
+      this.#state.completed.push(input.legacyPredecessor.completion);
+    }
+    if (input.legacyPredecessor.application) {
+      this.#state.applications.delete(input.legacyPredecessor.application.proposalId);
+    }
+    this.#state.applications.set(input.proposal.id, application);
+    const completed: CompletedApplicationRecord = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      status: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest,
+      catalogRevisionBefore: input.revision,
+      catalogRevisionAfter: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      completedAt: input.decidedAt,
+      humanDecision: input.humanDecision,
+    };
+    this.#state.completed.push(completed);
+    const binding: CommandIdempotencyBinding = {
+      commandId: input.commandId,
+      operation: "reconcile-promoted",
+      proposalId: input.proposal.id,
+      candidateDigest: input.candidateDigest,
+      operator: input.operator,
+      reason: input.reason,
+      expectedRevision: input.expectedRevision,
+      previewTokenDigest: `reconcile:${input.mode}`,
+      requestDigest: input.requestDigest,
+      materialDigest: input.materialDigest,
+      result: {
+        proposal: input.proposal,
+        committedCatalogRevision: input.revision,
+        applicationStatus: "adopted",
+        beforeTargetDigest: input.applicationBeforeTarget.digest,
+        afterTargetDigest: input.beforeTarget.digest,
+      },
+    };
+    this.#state.commands.set(input.commandId, binding);
+    await this.#journal.persist(this.#state.revision + 1);
+    return {
+      proposal: input.proposal,
+      committedCatalogRevision: input.revision,
+      applicationStatus: "adopted",
+      beforeTargetDigest: input.applicationBeforeTarget.digest,
+      afterTargetDigest: input.beforeTarget.digest,
+      deduplicated: false,
+    };
+  }
+
+  /**
+   * The facts a reconciliation is decided on: what the live target is now, what the
+   * promotion left behind, and whether the history has room. Reads only — nothing here
+   * mutates the target, the journal or the catalog, so an error thrown from this block
+   * leaves the project exactly as it was.
+   *
+   * `applicationBeforeTarget` is the *predecessor's* after-state when there is one, not the
+   * live state: a legacy predecessor's record is what a later rollback will restore, so
+   * recording the live state here would make the rollback of a chained promotion restore
+   * the wrong document.
+   */
+  async planReconcile(input: {
+    proposal: EvolutionProposal;
+    target: ReturnType<typeof targetFromCandidate>;
+    snapshot: EvolutionCatalogSnapshot;
+    revision: number;
+    commandId: string;
+    operator: string;
+    reason: string;
+    mode: "adopt" | "apply";
+  }): Promise<{
+    decidedAt: string;
+    humanDecision: HumanDecision;
+    candidateDigest: string;
+    beforeTarget: TargetDigestState;
+    livePromptContent: Buffer | undefined;
+    legacyPredecessor: LegacyPredecessorResolution;
+    applicationBeforeTarget: TargetDigestState;
+  }> {
+    const decidedAt = new Date(this.#now()).toISOString();
+    const humanDecision = parseHumanDecision({
+      actor: input.operator,
+      reason: input.reason,
+      decidedAt,
+    });
+    const candidateDigest = computeCandidateDigest(input.proposal.candidate);
+    const beforeTarget = await this.#targets.readTargetState(input.proposal.candidate);
+    const livePromptContent = await this.readLivePromptForReconcile(
+      input.proposal,
+      beforeTarget,
+    );
+    const rollbackPreflight = await this.#catalog.preflightRollback(
+      input.proposal.id,
+      humanDecision,
+    );
+    const legacyPredecessor = await this.resolveLegacyPredecessor({
+      snapshot: input.snapshot,
+      restoredProposalId: rollbackPreflight.record.restoredActiveProposalId,
+      liveTarget: beforeTarget,
+      mode: input.mode,
+      catalogRevision: input.revision,
+      operator: input.operator,
+      reason: input.reason,
+      decidedAt,
+      humanDecision,
+      commandId: input.commandId,
+    });
+    this.assertBoundedHistory(legacyPredecessor, input.target);
+    return {
+      decidedAt,
+      humanDecision,
+      candidateDigest,
+      beforeTarget,
+      livePromptContent,
+      legacyPredecessor,
+      applicationBeforeTarget: legacyPredecessor.application?.afterTarget ?? beforeTarget,
+    };
+  }
+
+  /**
+   * The bytes currently live for a prompt candidate, when there is a prompt candidate and a
+   * live document to read. A prompt target that does not exist yet cannot be reconciled:
+   * reconcile records an accomplished state, it does not create one.
+   */
+  async readLivePromptForReconcile(
+    proposal: EvolutionProposal,
+    beforeTarget: TargetDigestState,
+  ): Promise<Buffer | undefined> {
+    if (proposal.candidate.kind !== "role-prompt") return undefined;
+    if (!beforeTarget.present || !beforeTarget.digest) {
+      throw new EvolutionApplicationError(
+        "TARGET_DRIFTED",
+        `Prompt target '${proposal.candidate.path}' must already exist for reconciliation`,
+      );
+    }
+    return await this.#targets.readLivePromptBytes(proposal.candidate.path, beforeTarget.digest);
+  }
+
+  /** An unbounded history cannot be rolled back to a known state, so it is refused. */
+  assertBoundedHistory(
+    legacyPredecessor: LegacyPredecessorResolution,
+    target: ReturnType<typeof targetFromCandidate>,
+  ): void {
+    if (
+      legacyPredecessor.application &&
+      applicationHistoryDepth(legacyPredecessor.application) >= MAX_APPLICATION_HISTORY_DEPTH
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        `Application history for '${targetKey(target)}' reached the bounded depth of ${MAX_APPLICATION_HISTORY_DEPTH}`,
+      );
+    }
+  }
+
+  /**
+   * Everything that decides whether this proposal can be reconciled at all. All of it is a
+   * refusal: none of these checks changes what the command then does.
+   *
+   * The order matters — a proposal that is not promoted but already has proof reports the
+   * proof, not the lifecycle — because each message tells an operator what to fix first.
+   */
+  assertReconcilable(input: { proposalId: string }): {
+    proposal: EvolutionProposal;
+    target: ReturnType<typeof targetFromCandidate>;
+    activeProposalId: string | null;
+  } {
+    const proposal = this.requireProposal(input.proposalId);
+    this.assertPolicyAllows(proposal);
+    if (proposal.status !== "promoted") {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' must be promoted to reconcile (status=${proposal.status})`,
+      );
+    }
+    if (this.#state.applications.has(proposal.id)) {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' already has application proof`,
+      );
+    }
+    const target = targetFromCandidate(proposal.candidate);
+    const activeProposalId = this.#catalog.getActiveProposalId(target);
+    if (activeProposalId !== proposal.id) {
+      throw new EvolutionApplicationError(
+        "ACTIVE_TARGET_CONFLICT",
+        `Proposal '${proposal.id}' is not the active promotion for its target`,
+      );
+    }
+    return { proposal, target, activeProposalId };
+  }
+
+  /**
+   * The command's identity and idempotency key, resolved before anything is read from the
+   * catalog or the repository.
+   *
+   * Legacy Phase-2 material is accepted only for reconcile, and only as bytes: a string
+   * hashed as UTF-8 at one call site and as bytes at another would make two different
+   * commands share one command id. `adopt` refuses material outright — it records a target
+   * that is already live, so accepting bytes would turn "adopt what is there" into "write
+   * this instead".
+   */
+  reconcilePreface(input: {
+    commandId: string;
+    proposalId: string;
+    expectedRevision: number;
+    operator: string;
+    reason: string;
+    mode: "adopt" | "apply";
+    promptContent?: Uint8Array;
+  }): {
+    commandId: string;
+    operator: string;
+    reason: string;
+    materialDigest: string | null;
+    requestDigest: string;
+  } {
+    const commandId = requireCommandId(input.commandId);
+    const operator = requireNonEmpty(input.operator, "operator");
+    const reason = requireNonEmpty(input.reason, "reason");
+    if (
+      input.promptContent !== undefined &&
+      !(input.promptContent instanceof Uint8Array)
+    ) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Legacy prompt material must be bytes",
+      );
+    }
+    if (input.mode === "adopt" && input.promptContent !== undefined) {
+      throw new EvolutionApplicationError(
+        "POLICY_DENIED",
+        "Legacy prompt material is not accepted when adopting the live target",
+      );
+    }
+    return { commandId, operator, reason, ...this.reconcileDigest(input, operator, reason) };
+  }
+
+  /**
+   * The digest both reconcile entry points must agree on, so a retried command is
+   * recognised as the same command. Shared with `replayReconcileCommand`; the policy checks
+   * above are deliberately not shared with it — that method is a lookup, and giving it new
+   * rejections would be a behaviour change nobody asked for.
+   */
+  reconcileDigest(
+    input: {
+      proposalId: string;
+      expectedRevision: number;
+      mode: "adopt" | "apply";
+      promptContent?: Uint8Array;
+    },
+    operator: string,
+    reason: string,
+  ): { materialDigest: string | null; requestDigest: string } {
+    const materialDigest =
+      input.promptContent === undefined ? null : sha256Bytes(Buffer.from(input.promptContent));
+    const requestDigest = sha256Canonical({
+      operation: "reconcile-promoted",
+      proposalId: input.proposalId,
+      expectedRevision: input.expectedRevision,
+      operator,
+      reason,
+      mode: input.mode,
+      materialDigest,
+    });
+    return { materialDigest, requestDigest };
   }
 
   // ---------------------------------------------------------------------------
   // Internal command execution
   // ---------------------------------------------------------------------------
 
-  async #executeCommand(input: {
+  async executeCommand(input: {
     commandId: string;
     operation: "promote-and-apply" | "rollback-applied";
     proposalId: string;
@@ -1277,7 +1640,7 @@ export class EvolutionApplicationCoordinator {
     operator: string;
     reason: string;
   }): Promise<ApplicationCommandResult> {
-    this.#assertOpen();
+    this.assertOpen();
     const commandId = requireCommandId(input.commandId);
     const operator = requireNonEmpty(input.operator, "operator");
     const reason = requireNonEmpty(input.reason, "reason");
@@ -1294,7 +1657,7 @@ export class EvolutionApplicationCoordinator {
     });
     const existing = this.#state.commands.get(commandId);
     if (existing) {
-      return this.#dedupeOrConflict(existing, {
+      return this.dedupeOrConflict(existing, {
         operation: input.operation,
         proposalId: input.proposalId,
         operator,
@@ -1305,7 +1668,7 @@ export class EvolutionApplicationCoordinator {
         materialDigest,
       });
     }
-    this.#assertWritable();
+    this.assertWritable();
 
     const preview = this.#previewStore.consume(input.token, {
       kind: input.operation,
@@ -1322,8 +1685,8 @@ export class EvolutionApplicationCoordinator {
       );
     }
 
-    const proposal = this.#requireProposal(input.proposalId);
-    this.#assertPolicyAllows(proposal);
+    const proposal = this.requireProposal(input.proposalId);
+    this.assertPolicyAllows(proposal);
     const candidateDigest = computeCandidateDigest(proposal.candidate);
     if (candidateDigest !== preview.candidateDigest) {
       throw new EvolutionApplicationError(
@@ -1340,8 +1703,8 @@ export class EvolutionApplicationCoordinator {
     });
 
     if (input.operation === "promote-and-apply") {
-      this.#assertPromotable(proposal);
-      this.#assertNoUnreconciledConflict(proposal, "promote");
+      this.assertPromotable(proposal);
+      this.assertNoUnreconciledConflict(proposal, "promote");
     } else {
       if (proposal.status !== "promoted") {
         throw new EvolutionApplicationError(
@@ -1385,7 +1748,7 @@ export class EvolutionApplicationCoordinator {
       );
     }
 
-    await this.#assertQuiescentSafe();
+    await this.assertQuiescentSafe();
 
     const preflight =
       input.operation === "promote-and-apply"
@@ -1622,7 +1985,7 @@ export class EvolutionApplicationCoordinator {
     };
   }
 
-  #dedupeOrConflict(
+  dedupeOrConflict(
     existing: CommandIdempotencyBinding,
     attempt: {
       operation: ApplicationCommandKind;
@@ -1664,7 +2027,7 @@ export class EvolutionApplicationCoordinator {
   // Gates
   // ---------------------------------------------------------------------------
 
-  #requireProposal(proposalId: string): EvolutionProposal {
+  requireProposal(proposalId: string): EvolutionProposal {
     const proposal = this.#catalog.getProposal(proposalId);
     if (!proposal) {
       throw new EvolutionApplicationError(
@@ -1675,7 +2038,7 @@ export class EvolutionApplicationCoordinator {
     return proposal;
   }
 
-  #assertPromotable(proposal: EvolutionProposal): void {
+  assertPromotable(proposal: EvolutionProposal): void {
     if (proposal.status !== "evaluated") {
       throw new EvolutionApplicationError(
         "INVALID_LIFECYCLE",
@@ -1690,7 +2053,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertServerPreflightEvaluation(proposal: EvolutionProposal): void {
+  assertServerPreflightSource(proposal: EvolutionProposal): void {
     if (proposal.evaluation?.source !== "server-structural-preflight-v1") {
       throw new EvolutionApplicationError(
         "EVALUATION_SOURCE_UNTRUSTED",
@@ -1699,7 +2062,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertPolicyAllows(proposal: EvolutionProposal): void {
+  assertPolicyAllows(proposal: EvolutionProposal): void {
     const caps = proposal.policy.capabilities;
     if (
       caps.automaticExecution ||
@@ -1714,7 +2077,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertNoUnreconciledConflict(
+  assertNoUnreconciledConflict(
     proposal: EvolutionProposal,
     _op: "promote" | "rollback",
   ): void {
@@ -1728,7 +2091,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  async #assertQuiescentSafe(): Promise<void> {
+  async assertQuiescentSafe(): Promise<void> {
     try {
       await this.#assertQuiescent();
     } catch (error) {
@@ -1739,7 +2102,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertOpen(): void {
+  assertOpen(): void {
     if (!this.#state.opened) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
@@ -1748,8 +2111,8 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  #assertWritable(): void {
-    this.#assertOpen();
+  assertWritable(): void {
+    this.assertOpen();
     if (this.#state.recoveryRequired) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
@@ -1764,7 +2127,7 @@ export class EvolutionApplicationCoordinator {
     }
   }
 
-  async #resolveLegacyPredecessor(input: {
+  async resolveLegacyPredecessor(input: {
     snapshot: EvolutionCatalogSnapshot;
     restoredProposalId: string | null;
     liveTarget: TargetDigestState;
@@ -1775,10 +2138,7 @@ export class EvolutionApplicationCoordinator {
     decidedAt: string;
     humanDecision: HumanDecision;
     commandId: string;
-  }): Promise<{
-    application: ApplicationRecord | null;
-    completion: CompletedApplicationRecord | null;
-  }> {
+  }): Promise<LegacyPredecessorResolution> {
     if (input.restoredProposalId === null) {
       return { application: null, completion: null };
     }
@@ -1862,7 +2222,7 @@ export class EvolutionApplicationCoordinator {
     return { application: isolate(application), completion: isolate(completion) };
   }
 
-  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.#queue.then(operation).catch((error: unknown) => {
       throw mapToApplicationError(error);
     });
@@ -1886,22 +2246,33 @@ function serverPreflightItem(
   return { kind: "deterministic", id, status, summary };
 }
 
+/** The errno code on a thrown value, when it has one. */
+export function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error
+    ? (error as NodeJS.ErrnoException).code
+    : undefined;
+}
+
+/**
+ * Windows cannot fsync a directory handle and reports it as one of these codes. Everywhere
+ * else, a failed sync is a real failure: the directory may not be durable.
+ *
+ * `platform` is a parameter rather than a read of `process.platform` so both branches can be
+ * exercised on one machine — this is the only place in the file whose behaviour depends on
+ * the operating system, and it was previously untestable off Windows.
+ */
+export function isIgnorableSyncFailure(code: string | undefined, platform: string): boolean {
+  if (platform !== "win32") return false;
+  return code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM";
+}
+
 async function defaultSyncDirectory(directoryPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
   try {
     handle = await openAsync(directoryPath, "r");
     await handle.sync();
   } catch (error) {
-    const code =
-      error instanceof Error && "code" in error
-        ? (error as NodeJS.ErrnoException).code
-        : undefined;
-    if (
-      process.platform === "win32" &&
-      (code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM")
-    ) {
-      return;
-    }
+    if (isIgnorableSyncFailure(errorCode(error), process.platform)) return;
     throw error;
   } finally {
     await handle?.close();

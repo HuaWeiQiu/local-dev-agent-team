@@ -313,6 +313,53 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 要么不碰。文件里条数多（`claude-session.ts` 9 条、`automatic-controller.ts` 8 条）时，
 把它当成一个「整文件批」，一次做完一次合。
 
+### 度量看不见 `#` 私有方法（2026-11 实测）
+
+crapper 的 TypeScript 解析器**不认 ECMAScript 私有方法**。同一份 lcov、同一个文件：
+
+```ts
+class Sample {
+  run() { return this.hashPrivate() + this.hashTsPrivate(); }
+  #hashPrivate() { … }            // ← 完全不出现在报告里
+  private hashTsPrivate() { … }   // ← 出现，cc 与覆盖率都正常
+}
+```
+
+后果不是"少报一两条"，而是**拆分 `#` 方法会把复杂度搬进度量盲区**：账本会显示
+`reconcilePromoted 54 → 5`，而实际代码一行没少。这正是"把温度计砸了"的另一种形态，只不过
+砸得无声——所以这条只靠代码审查看不出来。
+
+**2026-11：`src/**` 禁止 `#` 方法（eslint `no-restricted-syntax` + `MethodDefinition[key.type='PrivateIdentifier']`）。**
+理由不是风格，是"计分域内的东西必须被看见"——`#` 合法，但在这个仓里有让它从账本里消失的副作用。
+规则带注释说明，免得下一个人当成洁癖。私有**字段**不受影响（不参与打分）。
+
+**把剩下 53 个 `#` 方法转成 `private` 之后，账本第一次看见它们，立刻冒出 16 条 >10：**
+
+| CRAP | 函数 |
+| --- | --- |
+| 171.49 | `application-journal#validateRestoredState` |
+| 120.69 | `application-target#applyPromptTarget` |
+| 85.18 | `catalog#restoreFromValidatedMaterial` |
+| 67.87 | `application-journal#restoreInterruptedPrompt` |
+| 55.97 | `application-journal#completePendingFromLive` |
+| 50.90 | `application#executeCommand` |
+| 46.20 | `application-target#applyStrategyTarget` |
+| 32.09 | `application-journal#cleanPendingPromptTemps` |
+| 26.96 | `application-journal#verifyPromptGitOutcome` |
+| 23.49 | `persistence#persist` |
+| 15.55 / 14.38 / 13.26 / 12.00 / 10.21 / 10.21 | `finishPromotion` / `catalogOutcomeMatchesPending` / `verifyPromptAbortOutcome` / `resolveLegacyPredecessor` / `finishRollback` / `settleApplyFailure` |
+
+这 16 条**从来没有进过任何一版基线**。也就是说在此之前，"这个文件已经清了"这句话，
+在这些函数上是假的——而账本、CI、代码审查都不会说。
+
+做法：**被度量的方法用 TS `private`，不用 `#`**。仓库里本来就是 `private` 占多数
+（136 处 vs 25 处），语义上两种都禁止外部访问，`private` 还能被工具看见、被编译器检查调用点。
+
+代价要说清楚：`#` 在运行时也真的不可访问，`private` 只在类型层。把这个文件里 12 个 `#` 方法
+改成 `private` 之后，账本第一次看见它们——其中 4 条立刻被证明**从未被测试执行过**
+（`assertReconcilable` 的覆盖率是 25%）。**盲区消失的那一刻，通常是账本数字变难看的那一刻**，
+这才是它该有的样子。
+
 ### CRAP 地板：低覆盖时 cc 有一条硬上限
 
 `CRAP = cc² × (1−cov)³ + cc`。覆盖率不动时，**cc 本身就决定了地板值**，所以“靠拆”也有一个

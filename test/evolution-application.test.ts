@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -398,6 +399,118 @@ describe("EvolutionApplicationCoordinator server-owned preflight", () => {
         },
       },
     });
+  });
+
+  it("records a strategy candidate that carries prompt path capabilities as a trust failure", async () => {
+    // The strategy branch of the trust check. Without this case the branch is dead code on
+    // paper, and the evaluator is free to start accepting a strategy that could edit prompts.
+    const harness = await createHarness();
+    await harness.coordinator.propose({
+      id: "preflight-strategy-with-paths",
+      policy: { ...validPolicy(), allowedPromptPaths: [promptPath] },
+      candidate: strategyCandidate("preflight-paths", strategyA),
+    });
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-strategy-with-paths",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: [
+            "server-candidate-trust-v1",
+            "server-strategy-preflight-v1",
+          ],
+        },
+      },
+    });
+  });
+
+  it("records a prompt target that has gone missing as a target-trust failure", async () => {
+    const harness = await createHarness();
+    const content = Buffer.from("Candidate for a prompt that no longer exists\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-missing-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    await rm(path.join(harness.root, promptPath));
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-missing-target",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: ["server-prompt-target-trust-v1"],
+        },
+      },
+    });
+  });
+
+  it("records a prompt target that is no longer tracked by HEAD as a target-trust failure", async () => {
+    const harness = await createHarness();
+    const content = Buffer.from("Candidate for a prompt HEAD no longer tracks\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-untracked-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    // Untracked, not modified: the file is still there and still readable, which is exactly
+    // the case a "does it exist" check would wave through.
+    await git(harness.root, ["rm", "--cached", promptPath]);
+    const result = await harness.coordinator.evaluateServerPreflight(
+      "preflight-untracked-target",
+    );
+    expect(result.proposal).toMatchObject({
+      evaluation: {
+        result: {
+          passed: false,
+          failedDeterministicIds: ["server-prompt-target-trust-v1"],
+        },
+      },
+    });
+  });
+
+  it("refuses to read an I/O failure as a policy verdict", async () => {
+    // The target check absorbs POLICY_DENIED and TARGET_DRIFTED, because those describe the
+    // candidate. A broken disk describes nothing about the candidate: it must propagate
+    // instead of being recorded as "this prompt is untrusted", which would quietly pass an
+    // unreadable prompt off as a reviewed finding.
+    const harness = await createHarness({
+      io: {
+        readFile: async (file) => {
+          if (String(file).endsWith(promptPath)) {
+            throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+          }
+          return await readFile(file);
+        },
+      },
+    });
+    const content = Buffer.from("Candidate whose target cannot be read\n", "utf8");
+    await harness.coordinator.propose({
+      id: "preflight-unreadable-target",
+      policy: validPolicy(),
+      candidate: {
+        kind: "role-prompt",
+        path: promptPath,
+        contentDigest: sha256(content),
+      },
+      promptContent: content,
+    });
+    await expect(
+      harness.coordinator.evaluateServerPreflight("preflight-unreadable-target"),
+    ).rejects.toThrow(/permission denied/);
   });
 
   it("verifies prompt object integrity and the live Git-tracked target", async () => {
@@ -2269,6 +2382,324 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
     expect(await gitText(root, ["rev-parse", "HEAD"])).toBe(headAfterFirst);
     expect(catalog.revision).toBe(catalogRevision);
     expect(coordinator.getApplicationState()).toEqual(stateAfterFirst);
+  });
+
+  /**
+   * A Phase-2 legacy promotion: the catalog is driven directly (no application proof) and
+   * only then is the coordinator opened, because an open coordinator owns the catalog
+   * writer.
+   */
+  async function legacyPromotion(options: {
+    id: string;
+    name: string;
+    live: NamedStrategy | undefined;
+    candidate: NamedStrategy;
+  }) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-legacy-promotion-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const strategies = await StrategyBlueprintCatalog.open(loaded);
+    const clock = createClock();
+    const stamp = () => new Date(clock.now()).toISOString();
+    if (options.live) {
+      await strategies.save(options.name, options.live, { expectedBefore: null });
+    }
+    await catalog.propose({
+      id: options.id,
+      createdAt: stamp(),
+      policy: validPolicy(),
+      candidate: strategyCandidate(options.name, options.candidate),
+    });
+    await catalog.beginEvaluation(options.id, stamp());
+    const evaluating = catalog.getProposal(options.id);
+    if (!evaluating) throw new Error(`Proposal '${options.id}' disappeared before evaluation`);
+    const evidence = boundEvidence(evaluating);
+    await catalog.evaluate(options.id, evidence, stamp());
+    await catalog.promote(options.id, evidence, {
+      actor: operator,
+      reason: "Legacy Phase 2 promotion without application proof",
+      decidedAt: stamp(),
+    });
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies,
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    return { root, loaded, catalog, strategies, coordinator, clock, revision: catalog.revision };
+  }
+
+  it("refuses a proposal that is not promoted", async () => {
+    // One of the three refusals inside the precondition guard. They were dead code on
+    // paper until the guard stopped being a `#`-private method: the metric cannot see
+    // those, so a 25% coverage report was the first evidence they were never exercised.
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(harness, "not-promoted", "not-promoted", strategyA);
+    await expect(harness.coordinator.reconcilePromoted({
+      commandId: "not-promoted-command",
+      proposalId: "not-promoted",
+      expectedRevision: harness.catalog.revision,
+      operator,
+      reason: "Reconcile something that was never promoted",
+      mode: "adopt",
+    })).rejects.toMatchObject({
+      code: "INVALID_LIFECYCLE",
+      message: expect.stringContaining("must be promoted"),
+    });
+  });
+
+  it("refuses a proposal that already has application proof", async () => {
+    const harness = await legacyPromotion({
+      id: "already-proved",
+      name: "already-proved",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const command = {
+      proposalId: "already-proved",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt" as const,
+    };
+    await harness.coordinator.reconcilePromoted({ ...command, commandId: "already-proved-first" });
+    await expect(
+      harness.coordinator.reconcilePromoted({ ...command, commandId: "already-proved-second" }),
+    ).rejects.toMatchObject({
+      code: "INVALID_LIFECYCLE",
+      message: expect.stringContaining("application proof"),
+    });
+  });
+
+  it("refuses a proposal that is not the active promotion for its target", async () => {
+    // Two promotions for one target: the older one keeps its `promoted` status but is no
+    // longer active, so reconciling it would record a state the target has moved past.
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-not-active-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const clock = createClock();
+    const promote = async (id: string) => {
+      await catalog.propose({
+        id,
+        createdAt: new Date(clock.now()).toISOString(),
+        policy: validPolicy(),
+        candidate: strategyCandidate("shared-target", strategyB),
+      });
+      await catalog.beginEvaluation(id, new Date(clock.now()).toISOString());
+      const evaluating = catalog.getProposal(id);
+      if (!evaluating) throw new Error(`Proposal '${id}' disappeared`);
+      const evidence = boundEvidence(evaluating);
+      await catalog.evaluate(id, evidence, new Date(clock.now()).toISOString());
+      await catalog.promote(id, evidence, {
+        actor: operator,
+        reason: "Legacy Phase 2 promotion without application proof",
+        decidedAt: new Date(clock.now()).toISOString(),
+      });
+    };
+    await promote("active-target");
+    await promote("superseded-target");
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    await expect(coordinator.reconcilePromoted({
+      commandId: "superseded-command",
+      proposalId: "active-target",
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Reconcile a promotion that was superseded",
+      mode: "adopt",
+    })).rejects.toMatchObject({ code: "ACTIVE_TARGET_CONFLICT" });
+  });
+
+  it("stamps an apply's completion from a second clock read, not the decision time", async () => {
+    // A refactor that folds the two record writes into one helper will want to reuse
+    // `decidedAt`: it looks like the same stamp written twice. It is not. The apply tail
+    // reads the clock again after the target write, so a project whose clock advances
+    // between calls sees two instants; collapsing them silently moves the recorded
+    // completion back to the start of the command. This clock advances on every read, so a
+    // collapse fails here rather than in production.
+    const harness = await legacyPromotion({
+      id: "clock-apply",
+      name: "clock-apply",
+      live: manuallyManagedStrategy,
+      candidate: strategyB,
+    });
+    const commandId = "clock-apply-command";
+    await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "clock-apply",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Apply over a manually managed strategy",
+      mode: "apply",
+    });
+    const state = harness.coordinator.getApplicationState();
+    const application = state.applications.find((record) => record.proposalId === "clock-apply");
+    const completed = state.completed.find((record) => record.commandId === commandId);
+    expect(completed?.completedAt).not.toBe(application?.appliedAt);
+    expect(Date.parse(completed!.completedAt)).toBeGreaterThan(Date.parse(application!.appliedAt));
+  });
+
+  it("stamps an adoption's completion with the decision time it already recorded", async () => {
+    // The other half of the same decision: adopt never touches the target, so it finishes
+    // synchronously and reuses `decidedAt`. If the two tails are ever unified, this is the
+    // case that says the asymmetry is intended.
+    const harness = await legacyPromotion({
+      id: "clock-adopt",
+      name: "clock-adopt",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const commandId = "clock-adopt-command";
+    await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "clock-adopt",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    });
+    const state = harness.coordinator.getApplicationState();
+    const application = state.applications.find((record) => record.proposalId === "clock-adopt");
+    const completed = state.completed.find((record) => record.commandId === commandId);
+    expect(completed?.completedAt).toBe(application?.appliedAt);
+  });
+
+  it("replays a completed reconciliation even when the state is not writable", async () => {
+    // The command lookup happens before `assertWritable`, so a completed command answers
+    // from its binding even when the coordinator is in a state that refuses *new* work.
+    // Hoisting the writable check above the dedupe turns every retry of a known command
+    // into RECOVERY_REQUIRED, which is the opposite of idempotent.
+    const harness = await legacyPromotion({
+      id: "replay-when-not-writable",
+      name: "replay-when-not-writable",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const commandId = "replay-when-not-writable-command";
+    const first = await harness.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "replay-when-not-writable",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    });
+    expect(first.deduplicated).toBe(false);
+    await harness.coordinator.close();
+
+    // The durable file is the only way to reach "not writable with a completed command":
+    // mark the state as needing recovery, then reopen.
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      "application-state.json",
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: Record<string, unknown> & { recoveryRequired: boolean };
+      payloadDigest: string;
+    };
+    document.payload.recoveryRequired = true;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    const reopened = await createHarness({ root: harness.root });
+    expect(reopened.coordinator.getApplicationState().recoveryRequired).toBe(true);
+    await expect(reopened.coordinator.propose({
+      id: "refused-while-not-writable",
+      policy: validPolicy(),
+      candidate: strategyCandidate("refused-while-not-writable", strategyA),
+    })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await expect(reopened.coordinator.reconcilePromoted({
+      commandId,
+      proposalId: "replay-when-not-writable",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt",
+    })).resolves.toMatchObject({ deduplicated: true, applicationStatus: "adopted" });
+  });
+});
+
+describe("directory sync failure classification", () => {
+  it("ignores the four codes Windows reports for a directory handle", async () => {
+    const { isIgnorableSyncFailure } = await import("../src/evolution/application.js");
+    for (const code of ["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]) {
+      expect(isIgnorableSyncFailure(code, "win32")).toBe(true);
+    }
+    expect(isIgnorableSyncFailure("ENOENT", "win32")).toBe(false);
+    expect(isIgnorableSyncFailure(undefined, "win32")).toBe(false);
+  });
+
+  it("treats a failed directory sync as real everywhere else", async () => {
+    // On macOS and Linux the same code is a genuine failure: the directory may not be
+    // durable, and pretending otherwise is how a crash loses a committed command.
+    const { isIgnorableSyncFailure } = await import("../src/evolution/application.js");
+    for (const platform of ["darwin", "linux"]) {
+      expect(isIgnorableSyncFailure("EINVAL", platform)).toBe(false);
+    }
+  });
+
+  it("reads the errno code off a thrown value", async () => {
+    const { errorCode } = await import("../src/evolution/application.js");
+    expect(errorCode(Object.assign(new Error("boom"), { code: "EISDIR" }))).toBe("EISDIR");
+    expect(errorCode(new Error("no code"))).toBeUndefined();
+    expect(errorCode("not an error")).toBeUndefined();
+  });
+});
+
+describe("EvolutionApplicationCoordinator open guards", () => {
+  it("refuses a wiring that is missing a collaborator", async () => {
+    // @ts-expect-error: a coordinator cannot be opened without collaborators; the guard
+    // under test is what turns that into a domain error instead of a crash.
+    const opened = EvolutionApplicationCoordinator.open({});
+    await expect(opened).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: expect.stringContaining("requires catalog, strategies, git, and loaded config"),
+    });
+  });
+
+  it("refuses a wiring without the quiescence callback", async () => {
+    // The callback is what makes "no workflow is running" checkable, so a coordinator
+    // without it would apply changes blind. It is refused before anything is opened.
+    const harness = await createHarness();
+    await expect(
+      EvolutionApplicationCoordinator.open({
+        catalog: harness.catalog,
+        strategies: harness.strategies,
+        git: harness.git,
+        loaded: harness.loaded,
+        // @ts-expect-error: the callback is required; leaving it out is the case under test.
+        assertQuiescent: undefined,
+      }),
+    ).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: expect.stringContaining("assertQuiescent"),
+    });
+  });
+
+  it("refuses collaborators that do not share one canonical repository", async () => {
+    const harness = await createHarness();
+    const elsewhere = await mkdtemp(path.join(tmpdir(), "agent-team-other-root-"));
+    await expect(
+      EvolutionApplicationCoordinator.open({
+        catalog: harness.catalog,
+        strategies: harness.strategies,
+        git: new GitManager(elsewhere, path.join(elsewhere, ".agent-team", "worktrees")),
+        loaded: harness.loaded,
+        assertQuiescent: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "POLICY_DENIED", message: expect.stringContaining("canonical repository") });
   });
 });
 

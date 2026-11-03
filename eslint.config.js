@@ -41,6 +41,26 @@ export default tseslint.config(
     },
   },
   {
+    // `#name()` is a legal language feature, and in this repository it has one side effect
+    // that is not about style: the CRAP tool's TypeScript parser does not see ECMAScript
+    // private methods at all, so a function moved into `#name()` leaves the ledger while
+    // staying in the code. That makes "extract it into a private method" a way to make the
+    // number go down without changing anything — no red build, and nothing a reviewer can
+    // see. Use TypeScript `private` instead: same compile-time guarantee, and the metric
+    // can still see it. (Private *fields* are fine: they are not scored.)
+    files: ["src/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "MethodDefinition[key.type='PrivateIdentifier']",
+          message:
+            "Use TypeScript `private` instead of `#`: the CRAP metric cannot see ECMAScript private methods, so complexity moved into one silently leaves the ledger.",
+        },
+      ],
+    },
+  },
+  {
     // Type-aware rules only where files belong to a tsconfig project.
     files: ["src/**/*.ts"],
     languageOptions: {
