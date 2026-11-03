@@ -149,17 +149,32 @@ jobs:
           echo "coverage source: $COVERAGE_SOURCE" >> "$GITHUB_STEP_SUMMARY"
           node scripts/ub-quality-gate.mjs "${args[@]}"
 
+      # Attribution, not a gate. The report above says the ledger grew; this says why, for
+      # exactly the keys that grew, by asking whether the same command produces the same
+      # score again. It is gated on `new > 0` because every cell is a full suite run: three
+      # runs are worth paying for when debt appeared, and a waste on a night that reported
+      # nothing. `continue-on-error` plus an exit-0 contract means even a broken measurement
+      # is a line in the issue rather than a red job — a red X on a step that only explains
+      # things teaches people to ignore red Xs.
+      - name: Attribute the new debt
+        if: steps.coverage_gate.outputs.available == 'true'
+        continue-on-error: true
+        timeout-minutes: 45
+        run: node scripts/coverage-caliber-attribution.mjs drift-report.json caliber-attribution.json
+
       - name: Open or update the drift issue
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: node scripts/coverage-drift-issue.mjs drift-report.json
+        run: node scripts/coverage-drift-issue.mjs drift-report.json caliber-attribution.json
 
       - name: Keep the report for triage
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: coverage-drift-report
-          path: drift-report.json
+          path: |
+            drift-report.json
+            caliber-attribution.json
           if-no-files-found: warn

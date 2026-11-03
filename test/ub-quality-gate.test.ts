@@ -468,6 +468,33 @@ describe("coverage drift issue plan", () => {
     expect(plan.body).toContain("a#paid（基线 60.0）");
   });
 
+  it("appends the attribution to the verdict it explains, not as its own issue", async () => {
+    const { issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan(
+      { kind: "ledger", counts: { new: 1, worse: 0, fixed: 0 }, new: [{ key: "a#fresh", score: 40 }] },
+      {
+        attribution: {
+          status: "measured",
+          repeats: 3,
+          modes: ["existing"],
+          summary: { stable: 1, "run-sensitive": 0 },
+          rows: [{ key: "a#fresh", ledger: 40, perCommit: { HEAD: { existing: [40, 40, 40.2] } }, verdict: "stable" }],
+        },
+      },
+    );
+    expect(plan.body).toContain("新增债务");
+    expect(plan.body).toContain("### 归因（caliber）");
+    expect(plan.body).toContain("| `a#fresh` | `stable` | 40.00 | 40.00 · 40.00 · 40.20 |");
+    expect(plan.body.indexOf("### 归因")).toBeGreaterThan(plan.body.indexOf("新增债务"));
+  });
+
+  it("says nothing about attribution when there was none", async () => {
+    const { issuePlan, readAttribution } = await import("../scripts/coverage-drift-issue.mjs");
+    const plan = issuePlan({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 1 } });
+    expect(plan.body).not.toContain("归因");
+    expect(readAttribution("/definitely/not/here.json")).toBeUndefined();
+  });
+
   it("closes instead of opening when the ledger did not grow", async () => {
     const { issuePlan } = await import("../scripts/coverage-drift-issue.mjs");
     const plan = issuePlan({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 3 } });
