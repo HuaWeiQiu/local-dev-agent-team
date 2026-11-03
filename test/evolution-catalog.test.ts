@@ -1197,20 +1197,20 @@ describe("restore material shape", () => {
     catalog.promote("prop-shape", boundEvidence(evaluated), humanDecision());
     const material = catalog.exportDurableMaterial();
 
-    expect(() => restoreEvolutionCatalog(defaultTrust, null as never)).toThrow(/must be an object/);
+    expect(() => restoreEvolutionCatalog(defaultTrust, null)).toThrow(/must be an object/);
     expect(() =>
-      restoreEvolutionCatalog(defaultTrust, { ...material, extra: 1 } as never),
+      restoreEvolutionCatalog(defaultTrust, { ...material, extra: 1 }),
     ).toThrow(/missing or unexpected fields/);
     expect(() =>
-      restoreEvolutionCatalog(defaultTrust, { ...material, proposals: "x" } as never),
+      restoreEvolutionCatalog(defaultTrust, { ...material, proposals: "x" }),
     ).toThrow(/must be arrays/);
 
     const badPointer = structuredClone(material);
-    badPointer.activeProposals[0]!.target = { kind: "unknown" } as never;
+    badPointer.activeProposals[0]!.target = { kind: "unknown" };
     expect(() => restoreEvolutionCatalog(defaultTrust, badPointer)).toThrow(/unsupported/);
 
     const missingName = structuredClone(material);
-    missingName.activeProposals[0]!.target = { kind: "strategy-blueprint" } as never;
+    missingName.activeProposals[0]!.target = { kind: "strategy-blueprint" };
     expect(() => restoreEvolutionCatalog(defaultTrust, missingName)).toThrow(/unexpected fields/);
   });
 
@@ -1218,12 +1218,12 @@ describe("restore material shape", () => {
     const catalog = createCatalog();
     propose(catalog, { id: "prop-trust" });
     const material = catalog.exportDurableMaterial();
-    expect(() => restoreEvolutionCatalog({} as never, material)).toThrow(/EvolutionTrustContext/);
+    expect(() => restoreEvolutionCatalog({}, material)).toThrow(/EvolutionTrustContext/);
     expect(() =>
-      restoreEvolutionCatalog({ ...defaultTrust, configuredRolePromptPaths: [1] } as never, material),
+      restoreEvolutionCatalog({ ...defaultTrust, configuredRolePromptPaths: [1] }, material),
     ).toThrow(/must contain strings/);
     expect(() =>
-      restoreEvolutionCatalog({ ...defaultTrust, roleAllowedProfiles: { worker: [1] } } as never, material),
+      restoreEvolutionCatalog({ ...defaultTrust, roleAllowedProfiles: { worker: [1] } }, material),
     ).toThrow(/profile-name strings/);
   });
 

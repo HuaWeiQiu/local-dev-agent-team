@@ -681,10 +681,17 @@ export type EvolutionCatalogRestoreMaterial = {
  * Build a pure catalog from durable material. The restore entry point repeats
  * trust and provenance validation, so callers cannot bypass the catalog boundary.
  */
+/**
+ * Both parameters are `unknown`: restore material comes from a file, and the
+ * trust context comes from whatever assembled it. Declaring them at their
+ * validated types let the signature claim a check that had not run yet.
+ */
 export function restoreEvolutionCatalog(
-  trust: EvolutionTrustContext,
-  material: EvolutionCatalogRestoreMaterial,
+  trust: unknown,
+  material: unknown,
 ): EvolutionCatalog {
+  assertTrustShape(trust);
+  assertRestoreShape(material);
   return EvolutionCatalog.restore(trust, material);
 }
 
@@ -703,20 +710,23 @@ function validateRestoreMaterial(
 }
 
 /** Shape before content: an object with exactly the four arrays. */
-function assertRestoreShape(material: EvolutionCatalogRestoreMaterial): void {
+function assertRestoreShape(
+  material: unknown,
+): asserts material is EvolutionCatalogRestoreMaterial {
   if (!material || typeof material !== "object" || Array.isArray(material)) {
     throw new EvolutionValidationError("restore material must be an object");
   }
+  const candidate = material as Record<string, unknown>;
   assertExactRestoreKeys(
-    material as unknown as Record<string, unknown>,
+    candidate,
     ["proposals", "auditRecords", "activeProposals", "promotionRecords"],
     "restore material",
   );
   if (
-    !Array.isArray(material.proposals) ||
-    !Array.isArray(material.auditRecords) ||
-    !Array.isArray(material.activeProposals) ||
-    !Array.isArray(material.promotionRecords)
+    !Array.isArray(candidate.proposals) ||
+    !Array.isArray(candidate.auditRecords) ||
+    !Array.isArray(candidate.activeProposals) ||
+    !Array.isArray(candidate.promotionRecords)
   ) {
     throw new EvolutionValidationError("restore material fields must be arrays");
   }
@@ -1169,13 +1179,17 @@ function snapshotTrustContext(trust: EvolutionTrustContext): EvolutionTrustConte
   };
 }
 
-function assertTrustShape(trust: EvolutionTrustContext): void {
+function assertTrustShape(trust: unknown): asserts trust is EvolutionTrustContext {
+  const candidate = trust as
+    | { configuredRolePromptPaths?: unknown; roleAllowedProfiles?: unknown }
+    | null
+    | undefined;
   if (
-    !trust ||
-    !Array.isArray(trust.configuredRolePromptPaths) ||
-    !trust.roleAllowedProfiles ||
-    typeof trust.roleAllowedProfiles !== "object" ||
-    Array.isArray(trust.roleAllowedProfiles)
+    !candidate ||
+    !Array.isArray(candidate.configuredRolePromptPaths) ||
+    !candidate.roleAllowedProfiles ||
+    typeof candidate.roleAllowedProfiles !== "object" ||
+    Array.isArray(candidate.roleAllowedProfiles)
   ) {
     throw new EvolutionValidationError("trust: A valid EvolutionTrustContext is required");
   }
