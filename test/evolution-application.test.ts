@@ -2660,7 +2660,10 @@ describe("directory sync failure classification", () => {
 
 describe("EvolutionApplicationCoordinator open guards", () => {
   it("refuses a wiring that is missing a collaborator", async () => {
-    await expect(EvolutionApplicationCoordinator.open({} as never)).rejects.toMatchObject({
+    // @ts-expect-error: a coordinator cannot be opened without collaborators; the guard
+    // under test is what turns that into a domain error instead of a crash.
+    const opened = EvolutionApplicationCoordinator.open({});
+    await expect(opened).rejects.toMatchObject({
       code: "POLICY_DENIED",
       message: expect.stringContaining("requires catalog, strategies, git, and loaded config"),
     });
@@ -2676,7 +2679,8 @@ describe("EvolutionApplicationCoordinator open guards", () => {
         strategies: harness.strategies,
         git: harness.git,
         loaded: harness.loaded,
-        assertQuiescent: undefined as never,
+        // @ts-expect-error: the callback is required; leaving it out is the case under test.
+        assertQuiescent: undefined,
       }),
     ).rejects.toMatchObject({
       code: "POLICY_DENIED",
