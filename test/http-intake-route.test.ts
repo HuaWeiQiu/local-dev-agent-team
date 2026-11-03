@@ -33,7 +33,7 @@ describe("intake route", () => {
   it("refuses everything while intake is off", async () => {
     const ctx = context(false);
     await expect(
-      route.handler(ctx, {} as never, response().res, new URL("http://x/intake/github"), "/api", "http://x", undefined),
+      route.handler(ctx, {}, response().res, new URL("http://x/intake/github"), "/api", "http://x", undefined),
     ).rejects.toMatchObject({ status: 409, code: "INTAKE_DISABLED" });
     expect((ctx as never as { calls: unknown[] }).calls).toEqual([]);
   });
