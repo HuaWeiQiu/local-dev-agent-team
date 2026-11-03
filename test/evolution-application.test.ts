@@ -2319,6 +2319,94 @@ describe("EvolutionApplicationCoordinator reconciliation boundaries", () => {
     return { root, loaded, catalog, strategies, coordinator, clock, revision: catalog.revision };
   }
 
+  it("refuses a proposal that is not promoted", async () => {
+    // One of the three refusals inside the precondition guard. They were dead code on
+    // paper until the guard stopped being a `#`-private method: the metric cannot see
+    // those, so a 25% coverage report was the first evidence they were never exercised.
+    const harness = await createHarness();
+    await proposeEvaluatedStrategy(harness, "not-promoted", "not-promoted", strategyA);
+    await expect(harness.coordinator.reconcilePromoted({
+      commandId: "not-promoted-command",
+      proposalId: "not-promoted",
+      expectedRevision: harness.catalog.revision,
+      operator,
+      reason: "Reconcile something that was never promoted",
+      mode: "adopt",
+    })).rejects.toMatchObject({
+      code: "INVALID_LIFECYCLE",
+      message: expect.stringContaining("must be promoted"),
+    });
+  });
+
+  it("refuses a proposal that already has application proof", async () => {
+    const harness = await legacyPromotion({
+      id: "already-proved",
+      name: "already-proved",
+      live: strategyB,
+      candidate: strategyB,
+    });
+    const command = {
+      proposalId: "already-proved",
+      expectedRevision: harness.revision,
+      operator,
+      reason: "Adopt the target the promotion already wrote",
+      mode: "adopt" as const,
+    };
+    await harness.coordinator.reconcilePromoted({ ...command, commandId: "already-proved-first" });
+    await expect(
+      harness.coordinator.reconcilePromoted({ ...command, commandId: "already-proved-second" }),
+    ).rejects.toMatchObject({
+      code: "INVALID_LIFECYCLE",
+      message: expect.stringContaining("application proof"),
+    });
+  });
+
+  it("refuses a proposal that is not the active promotion for its target", async () => {
+    // Two promotions for one target: the older one keeps its `promoted` status but is no
+    // longer active, so reconciling it would record a state the target has moved past.
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-not-active-"));
+    await initializeRepository(root);
+    const loaded = createLoadedConfig(root);
+    const catalog = await DurableEvolutionCatalog.open(loaded);
+    const clock = createClock();
+    const promote = async (id: string) => {
+      await catalog.propose({
+        id,
+        createdAt: new Date(clock.now()).toISOString(),
+        policy: validPolicy(),
+        candidate: strategyCandidate("shared-target", strategyB),
+      });
+      await catalog.beginEvaluation(id, new Date(clock.now()).toISOString());
+      const evaluating = catalog.getProposal(id);
+      if (!evaluating) throw new Error(`Proposal '${id}' disappeared`);
+      const evidence = boundEvidence(evaluating);
+      await catalog.evaluate(id, evidence, new Date(clock.now()).toISOString());
+      await catalog.promote(id, evidence, {
+        actor: operator,
+        reason: "Legacy Phase 2 promotion without application proof",
+        decidedAt: new Date(clock.now()).toISOString(),
+      });
+    };
+    await promote("active-target");
+    await promote("superseded-target");
+    const coordinator = await EvolutionApplicationCoordinator.open({
+      catalog,
+      strategies: await StrategyBlueprintCatalog.open(loaded),
+      git: new GitManager(root, path.join(root, ".agent-team", "worktrees")),
+      loaded,
+      assertQuiescent: () => undefined,
+      now: clock.now,
+    });
+    await expect(coordinator.reconcilePromoted({
+      commandId: "superseded-command",
+      proposalId: "active-target",
+      expectedRevision: catalog.revision,
+      operator,
+      reason: "Reconcile a promotion that was superseded",
+      mode: "adopt",
+    })).rejects.toMatchObject({ code: "ACTIVE_TARGET_CONFLICT" });
+  });
+
   it("stamps an apply's completion from a second clock read, not the decision time", async () => {
     // A refactor that folds the two record writes into one helper will want to reuse
     // `decidedAt`: it looks like the same stamp written twice. It is not. The apply tail
