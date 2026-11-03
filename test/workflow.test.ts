@@ -12,6 +12,7 @@ import type {
 } from "../src/agents/service.js";
 import { createDefaultConfig } from "../src/config/defaults.js";
 import { loadConfig } from "../src/config/load.js";
+import type { NamedStrategy } from "../src/config/schema.js";
 import type { PendingRunEvent, RunEventSink } from "../src/events/types.js";
 import { runProcess } from "../src/process/run.js";
 import { RunStateStore } from "../src/state/store.js";
@@ -116,6 +117,14 @@ class AcceptanceCommandAgentService extends FakeAgentService {
   }
 }
 
+/**
+ * A named strategy with the fields the schema requires but every case used to
+ * restate. Cases override only what they measure.
+ */
+function strategyDefinition(patch: Partial<NamedStrategy> = {}): NamedStrategy {
+  return { topology: { mode: "parallel-dag" }, roleProfiles: {}, ...patch };
+}
+
 describe("local workflow", () => {
   it("runs a sequential topology through review, tests, and integration", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agent-team-workflow-"));
@@ -124,12 +133,12 @@ describe("local workflow", () => {
     await git(root, ["config", "user.email", "agent-team@example.com"]);
     const config = createDefaultConfig("fixture");
     config.project.maxParallel = 2;
-    config.strategies!.definitions.strict = {
+    config.strategies!.definitions.strict = strategyDefinition({
       topology: { mode: "sequential" },
       maxParallel: 1,
       maxReworkAttempts: 3,
       roleProfiles: { reviewer: "codex-planner" },
-    };
+    });
     config.quality.commands = [
       { command: process.execPath, args: ["-e", "process.exit(0)"] },
     ];
@@ -271,6 +280,9 @@ describe("local workflow", () => {
         roleProfiles: {},
         approvalGates: ["final"] as Array<"plan" | "final">,
         approvalTimeoutSeconds: 86_400,
+        topology: { version: 1 as const, mode: "parallel-dag" as const, stages: [], edges: [] },
+        swarmMaxConcurrency: 2,
+        explore: { enabled: false, maxInjectedChars: 400, failOpen: true },
       },
       tasks: [],
       history: [],
@@ -331,13 +343,13 @@ describe("local workflow", () => {
     await git(root, ["config", "user.name", "Agent Team Test"]);
     await git(root, ["config", "user.email", "agent-team@example.com"]);
     const config = createDefaultConfig("fixture");
-    config.strategies!.definitions.guarded = {
+    config.strategies!.definitions.guarded = strategyDefinition({
       maxParallel: 2,
       maxReworkAttempts: 2,
       roleProfiles: {},
       approvalGates: ["plan", "final"],
       approvalTimeoutSeconds: 86_400,
-    };
+    });
     config.quality.commands = [
       { command: process.execPath, args: ["-e", "process.exit(0)"] },
     ];
@@ -516,13 +528,13 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("named-paths-plan-gate", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const service = new CountWorkerCallsService();
     const runner = new LocalWorkflowRunner(loaded, {
@@ -569,12 +581,12 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("partial-success", (config) => {
-      config.strategies!.definitions.demo = {
+      config.strategies!.definitions.demo = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 0,
         roleProfiles: {},
         approvalGates: ["final"],
-      };
+      });
     });
     const state = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new ChangelogFailAgentService(),
@@ -653,12 +665,12 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("partial-final", (config) => {
-      config.strategies!.definitions.demo = {
+      config.strategies!.definitions.demo = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 0,
         roleProfiles: {},
         approvalGates: ["final"],
-      };
+      });
     });
     const state = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new PartialEscalateFinalService(),
@@ -707,12 +719,12 @@ describe("local workflow", () => {
       }
     }
     const { loaded } = await createFixture("all-merged-final", (config) => {
-      config.strategies!.definitions.demo = {
+      config.strategies!.definitions.demo = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 0,
         roleProfiles: {},
         approvalGates: ["final"],
-      };
+      });
     });
     const state = await new LocalWorkflowRunner(loaded, {
       createAgentService: () => new AllMergedEscalateFinalService(),
@@ -770,14 +782,14 @@ describe("local workflow", () => {
 
   it("propagates budget exhaustion instead of spinning it into rework attempts", async () => {
     const { root, loaded } = await createFixture("budget", (config) => {
-      config.strategies!.definitions.budgeted = {
+      config.strategies!.definitions.budgeted = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["final"],
         maxProcessOutputBytes: 10_485_760,
         maxArtifactBytes: 1_048_576,
-      };
+      });
       // Each quality run writes ~3MB of artifacts, blowing the 1MB artifact
       // budget on the first recordQuality call.
       config.quality.commands = [
@@ -807,14 +819,14 @@ describe("local workflow", () => {
 
   it("keeps sibling tasks running when a wave task fails hard", async () => {
     const { loaded } = await createFixture("wave-abort", (config) => {
-      config.strategies!.definitions.swarm = {
+      config.strategies!.definitions.swarm = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 1,
         roleProfiles: {},
         approvalGates: ["final"],
         maxProcessOutputBytes: 10_485_760,
         maxArtifactBytes: 1_048_576,
-      };
+      });
       // Beta blows the artifact budget during its quality gates — a hard
       // failure that must abort alpha's in-flight agent invocation.
       config.quality.commands = [
@@ -842,13 +854,13 @@ describe("local workflow", () => {
 
   it("keeps tasks merged after the latest checkpoint as completed during recovery", async () => {
     const { root, loaded } = await createFixture("merged-recovery", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -915,13 +927,13 @@ describe("local workflow", () => {
 
   it("resumes when HEAD is ahead of the checkpoint by exactly the recorded merge commits", async () => {
     const { root, loaded } = await createFixture("post-merge-crash", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -987,13 +999,13 @@ describe("local workflow", () => {
 
   it("recovers a merge whose state save crashed after git.merge", async () => {
     const { root, loaded } = await createFixture("merge-save-crash", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -1058,13 +1070,13 @@ describe("local workflow", () => {
 
   it("clears a stale merging marker when the crash happened before git.merge", async () => {
     const { root, loaded } = await createFixture("pre-merge-crash", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -1124,13 +1136,13 @@ describe("local workflow", () => {
 
   it("refuses a forged merge subject that does not point at the recorded task commit", async () => {
     const { root, loaded } = await createFixture("forged-subject", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -1183,15 +1195,15 @@ describe("local workflow", () => {
 
   it("pauses into a resumable interrupted state and keeps the task worktree", async () => {
     const { root, loaded } = await createFixture("pause-runner", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 1,
         maxReworkAttempts: 0,
         roleProfiles: {},
         approvalGates: ["final"],
-      };
+      });
     });
     class BlockingAgentService extends FakeAgentService {
-      workflowSignal?: AbortSignal;
+      workflowSignal?: AbortSignal | undefined;
       override async runText(options: TextRoleInvocationOptions): Promise<TextRoleResponse> {
         const context = options.context as { task: { id: string; ownedPaths: string[] } };
         const target = path.join(options.cwd!, context.task.ownedPaths[0]!);
@@ -1250,13 +1262,13 @@ describe("local workflow", () => {
 
   it("blocks a resume whose accumulated execution time budget is exhausted", async () => {
     const { root, loaded } = await createFixture("time-budget", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -1281,13 +1293,13 @@ describe("local workflow", () => {
 
   it("continues a task's attempt count across resume and blocks when the limit is reached", async () => {
     const { root, loaded } = await createFixture("rework-limit", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 1,
         maxReworkAttempts: 1,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     let workerCalls = 0;
     class FailingWorkerService extends FakeAgentService {
@@ -1343,13 +1355,13 @@ describe("local workflow", () => {
 
   it("still refuses recovery when the post-checkpoint HEAD contains foreign commits", async () => {
     const { root, loaded } = await createFixture("foreign-head", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     const runner = new LocalWorkflowRunner(loaded, {
       createAgentService: () => new FakeAgentService(),
@@ -1398,13 +1410,13 @@ describe("local workflow", () => {
 
   it("resumes a quality-passed task by reviewing or merging instead of redoing worker work", async () => {
     const { root, loaded } = await createFixture("reuse-passed", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     let workerCalls = 0;
     class CountingAgentService extends FakeAgentService {
@@ -1469,13 +1481,13 @@ describe("local workflow", () => {
 
   it("resumes a quality-passed reviewing task without rerunning the worker", async () => {
     const { root, loaded } = await createFixture("reuse-review", (config) => {
-      config.strategies!.definitions.guarded = {
+      config.strategies!.definitions.guarded = strategyDefinition({
         maxParallel: 2,
         maxReworkAttempts: 2,
         roleProfiles: {},
         approvalGates: ["plan", "final"],
         approvalTimeoutSeconds: 86_400,
-      };
+      });
     });
     let workerCalls = 0;
     class CountingAgentService extends FakeAgentService {
