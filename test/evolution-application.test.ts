@@ -2944,6 +2944,84 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     });
   });
 
+  it("recovers when the target was promoted but the catalog never advanced", async () => {
+    // The mirror of the rollback case above: same crash window (between the target write and
+    // the catalog write), opposite direction. Kept deliberately symmetric so that changing
+    // one of the two makes the other the obvious next thing to check.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(
+      harness,
+      "recover-promote-old-catalog",
+      "recover-promote-old-catalog",
+      strategyA,
+    );
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "recover-promote-old-catalog",
+      operator,
+    });
+    failNextCatalogWrite = true;
+
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "recover-promote-command",
+        proposalId: "recover-promote-old-catalog",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Promote the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: target promoted, catalog unchanged, journal pending.
+    expect(harness.strategies.customDefinition("recover-promote-old-catalog")).toMatchObject(
+      strategyA,
+    );
+    expect(harness.catalog.getProposal("recover-promote-old-catalog")).toMatchObject({
+      status: "evaluated",
+    });
+    expect(harness.coordinator.getApplicationState()).toMatchObject({
+      pending: { commandId: "recover-promote-command" },
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("recover-promote-old-catalog")).toMatchObject({
+      status: "promoted",
+    });
+    expect(reopened.strategies.customDefinition("recover-promote-old-catalog")).toMatchObject(
+      strategyA,
+    );
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "recover-promote-command",
+          operation: "promote-and-apply",
+          status: "applied",
+        }),
+      ]),
+    );
+    const promotionAudit = reopened.catalog
+      .snapshot()
+      .auditRecords.filter((record) => record.kind === "promotion")
+      .at(-1);
+    expect(promotionAudit).toMatchObject({
+      proposalId: "recover-promote-old-catalog",
+      applicationCommandId: "recover-promote-command",
+    });
+  });
+
   it("finishes the rollback when the target was restored but the catalog never advanced", async () => {
     // The crash point is between the target write and the catalog write: the repository
     // already shows the restored state, the catalog still says "promoted", and the journal
