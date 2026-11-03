@@ -506,6 +506,7 @@ export interface RunEvidence {
     label: string;
     status: EvidenceCheckStatus;
     detail: string;
+    skipped?: boolean;
   }>;
   tasks: Array<{
     id: string;

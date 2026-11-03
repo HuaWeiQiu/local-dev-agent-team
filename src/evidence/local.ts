@@ -1,6 +1,6 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import type { RunState } from "../state/types.js";
+import type { ApprovalRequest, RunState } from "../state/types.js";
 import { assertRunId, type RunStateStore } from "../state/store.js";
 import type {
   EvidenceArtifact,
@@ -9,6 +9,9 @@ import type {
   IntegrationDiffEvidence,
   RunEvidence,
 } from "./types.js";
+
+const mergeableStatuses = new Set<string>(["ready-to-merge", "completed"]);
+const attentionStatuses = new Set<string>(["blocked", "cancelled", "interrupted", "ci-failed"]);
 
 const maxArtifactEntries = 1_000;
 const maxPreviewBytes = 256 * 1024;
@@ -78,18 +81,10 @@ export function buildRunEvidence(
   diff: IntegrationDiffEvidence,
 ): RunEvidence {
   const checks = evidenceChecks(state);
-  const hasFailure = checks.some((check) => check.status === "fail");
-  const allPassed = checks.every((check) => check.status === "pass");
-  const attentionStatuses = new Set(["blocked", "cancelled", "interrupted", "ci-failed"]);
-  const readiness = allPassed && ["ready-to-merge", "completed"].includes(state.status)
-    ? "ready"
-    : hasFailure || attentionStatuses.has(state.status)
-      ? "attention"
-      : "in-progress";
   return {
     runId: state.id,
     status: state.status,
-    readiness,
+    readiness: resolveReadiness(state, checks),
     checks,
     tasks: state.tasks.map((task) => ({
       id: task.task.id,
@@ -108,46 +103,112 @@ export function buildRunEvidence(
   };
 }
 
+/**
+ * The four checks, in the order the evidence panel renders them. The order is a
+ * contract with the UI, not an accident of how this array is written: it is the
+ * order a person reads tasks -> quality -> decision -> approval.
+ */
+/**
+ * "Ready" needs both halves: every check passed *and* the run reached a
+ * mergeable status. Either half alone is not readiness, which is why the two
+ * attention sources below cannot be collapsed into one condition — a run can
+ * have no failing check and still be blocked.
+ */
+function resolveReadiness(
+  state: RunState,
+  checks: EvidenceCheck[],
+): RunEvidence["readiness"] {
+  const allPassed = checks.every((check) => check.status === "pass");
+  if (allPassed && mergeableStatuses.has(state.status)) return "ready";
+  const hasFailure = checks.some((check) => check.status === "fail");
+  if (hasFailure || attentionStatuses.has(state.status)) return "attention";
+  return "in-progress";
+}
+
 function evidenceChecks(state: RunState): EvidenceCheck[] {
-  const taskFailures = state.tasks.filter((task) => task.status === "blocked").length;
-  const tasksPassed = state.tasks.length > 0 && state.tasks.every((task) => task.status === "merged");
-  const tasks: EvidenceCheck = taskFailures > 0
-    ? { id: "tasks", label: "任务集成", status: "fail", detail: `${taskFailures} 个任务已阻塞` }
-    : tasksPassed
-      ? { id: "tasks", label: "任务集成", status: "pass", detail: `${state.tasks.length} 个任务已合并` }
-      : { id: "tasks", label: "任务集成", status: "pending", detail: `${state.tasks.filter((task) => task.status === "merged").length}/${state.tasks.length} 个任务已合并` };
-  const quality: EvidenceCheck = state.finalQuality
-    ? {
-        id: "quality",
-        label: "最终质量门禁",
-        status: state.finalQuality.passed ? "pass" : "fail",
-        detail: state.finalQuality.passed ? "全部命令通过" : "存在失败的质量命令",
-      }
-    : { id: "quality", label: "最终质量门禁", status: "pending", detail: "尚未执行" };
-  const decision: EvidenceCheck = state.finalDecision
-    ? {
-        id: "decision",
-        label: "交付审查",
-        status: state.finalDecision.decision === "ready" ? "pass" : "fail",
-        detail: state.finalDecision.reason,
-      }
-    : { id: "decision", label: "交付审查", status: "pending", detail: "尚无最终判定" };
-  const finalApproval = state.approvals?.filter((approval) => approval.gate === "final").at(-1);
-  const approval: EvidenceCheck = !state.strategy.approvalGates.includes("final")
-    ? { id: "approval", label: "交付审批", status: "pass", detail: "策略未要求最终审批" }
-    : finalApproval
-      ? {
-          id: "approval",
-          label: "交付审批",
-          status: finalApproval.status === "approved" ? "pass" : finalApproval.status === "rejected" ? "fail" : "pending",
-          detail: finalApproval.status === "approved"
-            ? `已由 ${finalApproval.response?.actor ?? "操作者"} 批准`
-            : finalApproval.status === "rejected"
-              ? `已由 ${finalApproval.response?.actor ?? "操作者"} 拒绝`
-              : "等待人工核对证据",
-        }
-      : { id: "approval", label: "交付审批", status: "pending", detail: "尚未进入审批边界" };
-  return [tasks, quality, decision, approval];
+  return [tasksCheck(state), qualityCheck(state), decisionCheck(state), approvalCheck(state)];
+}
+
+/**
+ * Blocked tasks outrank the all-merged case: a run with one blocked task and
+ * three merged ones has failed, and reporting "3/4 已合并" would read as progress.
+ */
+function tasksCheck(state: RunState): EvidenceCheck {
+  const blocked = state.tasks.filter((task) => task.status === "blocked").length;
+  if (blocked > 0) {
+    return { id: "tasks", label: "任务集成", status: "fail", detail: `${blocked} 个任务已阻塞` };
+  }
+  const merged = state.tasks.filter((task) => task.status === "merged").length;
+  if (state.tasks.length > 0 && merged === state.tasks.length) {
+    return {
+      id: "tasks",
+      label: "任务集成",
+      status: "pass",
+      detail: `${state.tasks.length} 个任务已合并`,
+    };
+  }
+  return {
+    id: "tasks",
+    label: "任务集成",
+    status: "pending",
+    detail: `${merged}/${state.tasks.length} 个任务已合并`,
+  };
+}
+
+function qualityCheck(state: RunState): EvidenceCheck {
+  if (!state.finalQuality) {
+    return { id: "quality", label: "最终质量门禁", status: "pending", detail: "尚未执行" };
+  }
+  return {
+    id: "quality",
+    label: "最终质量门禁",
+    status: state.finalQuality.passed ? "pass" : "fail",
+    detail: state.finalQuality.passed ? "全部命令通过" : "存在失败的质量命令",
+  };
+}
+
+function decisionCheck(state: RunState): EvidenceCheck {
+  if (!state.finalDecision) {
+    return { id: "decision", label: "交付审查", status: "pending", detail: "尚无最终判定" };
+  }
+  return {
+    id: "decision",
+    label: "交付审查",
+    status: state.finalDecision.decision === "ready" ? "pass" : "fail",
+    detail: state.finalDecision.reason,
+  };
+}
+
+/** Only the last final-gate approval counts; earlier ones were superseded. */
+function approvalCheck(state: RunState): EvidenceCheck {
+  if (!state.strategy.approvalGates.includes("final")) return approvalNotRequired();
+  const approval = state.approvals?.filter((entry) => entry.gate === "final").at(-1);
+  if (!approval) {
+    return { id: "approval", label: "交付审批", status: "pending", detail: "尚未进入审批边界" };
+  }
+  return { id: "approval", label: "交付审批", ...approvalOutcome(approval) };
+}
+
+/**
+ * The one check that passes without anyone doing anything. It carries
+ * `skipped: true` because `status: "pass"` alone would make "a person approved
+ * this" and "this run never needed approval" indistinguishable in the payload.
+ */
+function approvalNotRequired(): EvidenceCheck {
+  return {
+    id: "approval",
+    label: "交付审批",
+    status: "pass",
+    detail: "策略未要求最终审批",
+    skipped: true,
+  };
+}
+
+function approvalOutcome(approval: ApprovalRequest): Pick<EvidenceCheck, "status" | "detail"> {
+  const actor = approval.response?.actor ?? "操作者";
+  if (approval.status === "approved") return { status: "pass", detail: `已由 ${actor} 批准` };
+  if (approval.status === "rejected") return { status: "fail", detail: `已由 ${actor} 拒绝` };
+  return { status: "pending", detail: "等待人工核对证据" };
 }
 
 async function walkArtifacts(
@@ -228,15 +289,44 @@ async function validateArtifactPath(
   throw new Error(`Artifact '${relativePath}' was not found`);
 }
 
-function artifactKind(relativePath: string): EvidenceArtifact["kind"] {
-  const segments = relativePath.toLowerCase().split("/");
+/**
+ * Classification rules in priority order. A data table rather than a chain of
+ * ifs because the complexity here is the *number of rules*, and that number
+ * grows: adding a rule should be adding a row, not raising the complexity of a
+ * function that the quality gate scores.
+ *
+ * Order is the contract. `quality/context.json` is context, not quality, and
+ * `quality/0.log` is quality, not agent output.
+ */
+const artifactKindRules: Array<{
+  kind: EvidenceArtifact["kind"];
+  matches: (segments: string[], name: string) => boolean;
+}> = [
+  {
+    kind: "context",
+    matches: (_segments, name) => name === "context.json" || name.endsWith(".schema.json"),
+  },
+  {
+    kind: "quality",
+    matches: (segments, name) => segments.includes("quality") || /^\d+\.log$/.test(name),
+  },
+  { kind: "review", matches: (segments) => segments.includes("review") },
+  { kind: "test", matches: (segments) => segments.includes("test") },
+  {
+    kind: "agent-output",
+    matches: (_segments, name) =>
+      ["stdout.log", "stderr.log", "last-message.json"].includes(name),
+  },
+];
+
+export function artifactKind(relativePath: string): EvidenceArtifact["kind"] {
+  // Normalised here, not in the caller. The only caller happens to pass `/`
+  // separators today, and depending on that would make a Windows caller
+  // classify every artifact as "other" without failing — a silent wrong answer
+  // is worse than a crash.
+  const segments = relativePath.replaceAll("\\", "/").toLowerCase().split("/");
   const name = segments.at(-1) ?? "";
-  if (name === "context.json" || name.endsWith(".schema.json")) return "context";
-  if (segments.includes("quality") || /^\d+\.log$/.test(name)) return "quality";
-  if (segments.includes("review")) return "review";
-  if (segments.includes("test")) return "test";
-  if (["stdout.log", "stderr.log", "last-message.json"].includes(name)) return "agent-output";
-  return "other";
+  return artifactKindRules.find((rule) => rule.matches(segments, name))?.kind ?? "other";
 }
 
 function isMissing(error: unknown): boolean {
