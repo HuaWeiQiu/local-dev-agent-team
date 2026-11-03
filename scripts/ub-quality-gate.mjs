@@ -30,6 +30,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mergeCoverageReports } from "./coverage-merge.mjs";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os, { arch, platform } from "node:os";
 import path from "node:path";
@@ -44,6 +45,10 @@ const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mut
                              the same lines for a baseline to be written (hit counts may
                              differ); when they do not, both reports are kept under
                              target/coverage/unstable/ for offline comparison.
+                             Add --coverage-c for a third run: the three are then merged
+                             line by line by majority (a line covered in >= 2 of 3 counts
+                             as covered), which is the caliber a refresh should use —
+                             one missed line does not invalidate a whole report.
                              These two REQUIRE --use-existing-coverage (after the "--"),
                              otherwise the gate regenerates its own coverage and ignores
                              the pair:
@@ -75,6 +80,7 @@ export function defaultOptions(env = process.env) {
     driftReport: "",
     coverageA: "",
     coverageB: "",
+    coverageC: "",
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -98,6 +104,7 @@ const VALUE_FLAGS = {
   "--drift-report": "driftReport",
   "--coverage-a": "coverageA",
   "--coverage-b": "coverageB",
+  "--coverage-c": "coverageC",
 };
 
 /** Flags that only flip a boolean. */
@@ -468,6 +475,7 @@ export function coverageSignature(text) {
 }
 
 export function requireReproducibleCoverage(options, cwd = process.cwd()) {
+  if (options.coverageC) return mergeThreeReports(options, cwd);
   const declared = [options.coverageA, options.coverageB];
   if (declared.some((file) => !file)) {
     process.stderr.write(
@@ -517,10 +525,12 @@ function preserveUnstableCoverage(paths, cwd, a, b, signatures = {}) {
 }
 
 export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
+  let mergeFacts;
   const misuse = coveragePairMisuse(options);
   if (misuse !== undefined) return misuse;
   const pairVerdict = coveragePairVerdict(options, cwd);
-  if (pairVerdict !== undefined) return pairVerdict;
+  if (pairVerdict?.status !== undefined) return pairVerdict.status;
+  mergeFacts = pairVerdict?.merge;
   const first = scanOnce(ub, options, cwd);
   // Tests only: a tamper between the scans has no other seam, because in production
   // nothing in this process can be told to act there.
@@ -532,7 +542,7 @@ export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
     second.scores,
     path.resolve(cwd, options.baseline),
     options.baseline,
-    baselineGeneration({ ub, cwd, first, second }),
+    baselineGeneration({ ub, cwd, first, second, merge: mergeFacts }),
   );
 }
 
@@ -557,8 +567,7 @@ function coveragePairMisuse(options) {
 /** Existing mode only: the two input reports must agree before anything is scored. */
 function coveragePairVerdict(options, cwd) {
   if (!usesExistingCoverage(options)) return undefined;
-  const pair = requireReproducibleCoverage(options, cwd);
-  return pair.status;
+  return requireReproducibleCoverage(options, cwd);
 }
 
 /** Everything that makes two scans unusable as a baseline, or nothing. */
@@ -582,6 +591,43 @@ function tamperRefusal(first, second) {
     ? coverageChanged(first.lcov, second.before)
     : coverageChanged(first.before, second.before);
   return changed ? refuseTamperedCoverage(changed) : undefined;
+}
+
+/**
+ * Three independent runs, merged line by line. A line is covered when at least two runs
+ * executed it: one execution is sampling noise, zero is a path nobody tests. Report-level
+ * voting is deliberately not used — it would let a block missed in one file decide the
+ * verdict for every other file.
+ */
+function mergeThreeReports(options, cwd) {
+  const paths = [options.coverageA, options.coverageB, options.coverageC].map((file) =>
+    path.resolve(cwd, file),
+  );
+  const texts = paths.map((file) => (existsSync(file) ? readFileSync(file, "utf8") : undefined));
+  if (texts.some((text) => !text)) {
+    process.stderr.write(
+      "baseline: refusing to write — all three coverage reports are required for a merge " +
+        "(--coverage-a --coverage-b --coverage-c)\n",
+    );
+    return { status: 3 };
+  }
+  const merged = mergeCoverageReports(texts);
+  mkdirSync(path.dirname(coveragePath(cwd)), { recursive: true });
+  writeFileSync(coveragePath(cwd), merged.lcov);
+  process.stderr.write(
+    `baseline: merged 3 coverage runs, ${merged.divergentLines} divergent line(s), ` +
+      `${merged.partialFiles.length} partially-measured file(s)\n`,
+  );
+  return {
+    status: undefined,
+    merge: {
+      runs: 3,
+      rule: "line-majority",
+      divergentLines: merged.divergentLines,
+      partialFiles: merged.partialFiles.length,
+      digests: paths.map((file) => lcovProvenance(file)?.sha256),
+    },
+  };
 }
 
 /** A missing report is not an empty ledger: it is no measurement at all. */
@@ -635,7 +681,7 @@ function agreedDigests(existing, first, second) {
     : [first.lcov?.sha256, second.lcov?.sha256];
 }
 
-export function baselineGeneration({ ub, cwd = process.cwd(), first, second }) {
+export function baselineGeneration({ ub, cwd = process.cwd(), first, second, merge }) {
   const existing = Boolean(first.existing);
   const frozenLcov = frozenReport(existing, second);
   const agreed = agreedDigests(existing, first, second);
@@ -646,6 +692,9 @@ export function baselineGeneration({ ub, cwd = process.cwd(), first, second }) {
     ...(existing ? { coverageSource: "existing" } : {}),
     scans: 2,
     generatedAt: new Date().toISOString(),
+    // How the numbers were merged, and how much the runs disagreed: a rising
+    // `divergentLines` is the earliest sign that the tests started wobbling again.
+    ...(merge ? { merge } : {}),
     ...(frozenLcov ? { lcov: frozenLcov } : {}),
     ...(agreed[0] && agreed[1] ? { agreement: { scans: 2, sha256: agreed } } : {}),
   };
