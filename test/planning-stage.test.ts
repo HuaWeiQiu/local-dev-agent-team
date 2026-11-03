@@ -37,7 +37,11 @@ function design(patch: Partial<ArchitectureDesign> = {}): ArchitectureDesign {
   };
 }
 
-/** The two collaborators the stage needs; both are classes, so a stand-in has to be cast once, here. */
+/**
+ * The two collaborators the stage needs. `CheckpointService` is a class with
+ * private state, so this cast is the boundary where the stand-in is built — the
+ * call sites below get real types.
+ */
 function stage(options: { roles?: Record<string, unknown> } = {}) {
   const env = {
     loaded: {
@@ -46,8 +50,8 @@ function stage(options: { roles?: Record<string, unknown> } = {}) {
         roles: options.roles ?? { worker: { allowedProfiles: ["p"] } },
       },
     },
-  } as unknown as RunnerEnv;
-  const checkpoints = { save: vi.fn() } as unknown as CheckpointService;
+  } as unknown as RunnerEnv; // RunnerEnv carries five collaborators this case never reaches.
+  const checkpoints = { save: vi.fn() } as unknown as CheckpointService; // class with private state.
   return new PlanningStage(env, checkpoints);
 }
 
@@ -106,13 +110,13 @@ function context(plans: unknown[], overrides: Partial<RunContext> = {}): TestCon
       transition: vi.fn(async () => undefined),
       emit: vi.fn(),
       artifactDirectory: vi.fn(() => "/tmp/agent-team-explore"),
-    } as unknown as RunStateStore,
-    git: {} as unknown as RunContext["git"],
-    budget: {} as unknown as RunContext["budget"],
+    } as unknown as RunStateStore, // class with a private save queue; three methods are all it needs here.
+    git: {} as unknown as RunContext["git"], // GitManager instance; planning never shells out to git.
+    budget: {} as unknown as RunContext["budget"], // RunBudgetTracker instance; nothing here spends.
     ...overrides,
     // Last, so the mock stays a mock: `overrides` would widen it back to the
     // interface and every `mockRejectedValue` call below would lose its type.
-    agent: { runStructured } as unknown as TestContext["agent"],
+    agent: { runStructured } as unknown as TestContext["agent"], // only runStructured is reached; the rest of RoleAgentService is unbuilt.
   };
 }
 

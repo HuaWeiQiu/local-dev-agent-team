@@ -1,14 +1,14 @@
 {
-  "total": 404,
+  "total": 401,
   "byForm": {
     "never": 256,
-    "unknown-as": 148
+    "unknown-as": 145
   },
   "counts": {
     "test/adapter-conformance.test.ts:never": 3,
     "test/adapters-doctor.test.ts:unknown-as": 1,
     "test/adapters-doctor.test.ts:never": 2,
-    "test/agent-fallback.test.ts:unknown-as": 4,
+    "test/agent-fallback.test.ts:unknown-as": 1,
     "test/assignment-outcome.test.ts:unknown-as": 2,
     "test/assignment-outcome.test.ts:never": 1,
     "test/authority-gate.test.ts:never": 1,
