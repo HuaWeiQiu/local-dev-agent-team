@@ -560,39 +560,23 @@ export class EvolutionApplicationTargets {
     return error;
   }
 
+  /**
+   * Store prompt bytes under their digest. Four questions, in order: are these bytes a usable
+   * prompt at all, is the store usable, is the object already there (then this is a no-op),
+   * and did the write land.
+   */
   async ingestPromptMaterial(contentDigest: string, content: Uint8Array): Promise<void> {
-    if (typeof contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(contentDigest)) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        "Role-prompt contentDigest must be a lowercase SHA-256 hex digest",
-      );
-    }
-    let bytes: Buffer;
-    try {
-      bytes = Buffer.from(content);
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        "Role-prompt content must be valid UTF-8 text",
-      );
-    }
-    if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        `Role-prompt content exceeds ${EVOLUTION_PROMPT_MATERIAL_MAX_BYTES} bytes`,
-      );
-    }
-    const actual = sha256Bytes(bytes);
-    if (actual !== contentDigest) {
-      throw new EvolutionApplicationError(
-        "MATERIAL_MISSING",
-        `Role-prompt content digest mismatch: expected ${contentDigest}, got ${actual}`,
-      );
-    }
-
+    const bytes = assertPromptMaterialContent(contentDigest, content);
+    await this.assertObjectsDirectoryUsable();
     const objectPath = path.join(this.#objectsDirectory, contentDigest);
     assertCanonicalInsideRoot(this.#root, objectPath, "Prompt object");
+    if (await this.objectAlreadyStored(objectPath, contentDigest)) return;
+    await this.persistPromptObject(objectPath, contentDigest, bytes);
+    await this.assertObjectLanded(objectPath, contentDigest);
+  }
+
+  /** The object directory must exist, be ours, and not be reached through a link. */
+  async assertObjectsDirectoryUsable(): Promise<void> {
     await createDirectoryChain(this.#io, this.#root, this.#objectsDirectory, 0o700);
     if ((await this.#io.realpath(this.#objectsDirectory)) !== this.#objectsDirectory) {
       throw new EvolutionApplicationError(
@@ -600,7 +584,13 @@ export class EvolutionApplicationTargets {
         "Prompt object directory must not traverse symbolic links",
       );
     }
+  }
 
+  /**
+   * Whether the object is already there and intact. An intact one makes the call a no-op; a
+   * damaged one is recovery, not something to silently rewrite.
+   */
+  async objectAlreadyStored(objectPath: string, contentDigest: string): Promise<boolean> {
     try {
       const existingInfo = await this.#io.lstat(objectPath);
       if (existingInfo.isSymbolicLink() || !existingInfo.isFile()) {
@@ -622,15 +612,15 @@ export class EvolutionApplicationTargets {
           `Corrupted prompt object at ${contentDigest}`,
         );
       }
-      // Idempotent re-ingest of identical object
-      return;
+      return true;
     } catch (error) {
-      if (!isNotFound(error)) {
-        if (error instanceof EvolutionApplicationError) throw error;
-        throw error;
-      }
+      if (isNotFound(error)) return false;
+      throw error;
     }
+  }
 
+  /** Write the object through a temp file, then rename it into place. */
+  async persistPromptObject(objectPath: string, contentDigest: string, bytes: Buffer): Promise<void> {
     const temporaryPath = siblingTempName(objectPath);
     try {
       const handle = await this.#io.open(temporaryPath, "wx", 0o600);
@@ -647,20 +637,20 @@ export class EvolutionApplicationTargets {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       throw new EvolutionApplicationError(
         "MATERIAL_MISSING",
-        `Failed to persist prompt object: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Failed to persist prompt object: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    void contentDigest;
+  }
 
-    // Post-condition
+  /** The object on disk must hash to the digest it is filed under. */
+  async assertObjectLanded(objectPath: string, contentDigest: string): Promise<void> {
     const written = await this.#io.readFile(objectPath);
-    if (sha256Bytes(written) !== contentDigest) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        `Prompt object digest mismatch after write for ${contentDigest}`,
-      );
-    }
+    if (sha256Bytes(written) === contentDigest) return;
+    throw new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      `Prompt object digest mismatch after write for ${contentDigest}`,
+    );
   }
 
   async readPromptObject(digest: string): Promise<Buffer> {
@@ -741,6 +731,39 @@ export class EvolutionApplicationTargets {
 /** A target that carries no definition: the operation is a removal. */
 function isAbsentDefinition(target: TargetDigestState): boolean {
   return !target.present || target.strategyDefinition === null || target.strategyDefinition === undefined;
+}
+
+/** The bytes must be exactly what the digest names, and usable as a prompt. */
+function assertPromptMaterialContent(contentDigest: string, content: Uint8Array): Buffer {
+  if (typeof contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(contentDigest)) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      "Role-prompt contentDigest must be a lowercase SHA-256 hex digest",
+    );
+  }
+  const bytes = Buffer.from(content);
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      "Role-prompt content must be valid UTF-8 text",
+    );
+  }
+  if (bytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      `Role-prompt content exceeds ${EVOLUTION_PROMPT_MATERIAL_MAX_BYTES} bytes`,
+    );
+  }
+  const actual = sha256Bytes(bytes);
+  if (actual !== contentDigest) {
+    throw new EvolutionApplicationError(
+      "MATERIAL_MISSING",
+      `Role-prompt content digest mismatch: expected ${contentDigest}, got ${actual}`,
+    );
+  }
+  return bytes;
 }
 
 export async function createDirectoryChain(

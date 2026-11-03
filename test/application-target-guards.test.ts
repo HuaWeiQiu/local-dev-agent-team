@@ -564,3 +564,117 @@ describe("prompt candidate guard", () => {
     expect(targets.assertPromptCandidate(proposal)).toBe(promptPath);
   });
 });
+
+describe("strategy definition validation", () => {
+  it("maps a definition the catalog rejects to POLICY_DENIED", async () => {
+    const world = await targetsFor();
+    await world.catalog.propose({
+      id: "invalid-definition",
+      createdAt: new Date().toISOString(),
+      policy: {
+        version: 1,
+        capabilities: {
+          automaticExecution: false,
+          automaticPromotion: false,
+          networkPublication: false,
+          secretStorage: false,
+        },
+        allowedPromptPaths: [],
+      },
+      candidate: {
+        kind: "strategy-blueprint",
+        name: "invalid-definition",
+        definition: {
+          topology: { mode: "parallel-dag" },
+          maxParallel: 4,
+          maxReworkAttempts: 3,
+          executionTimeoutSeconds: 3_600,
+          maxAgentInvocations: 42,
+          maxProcessOutputBytes: 65_536,
+          maxArtifactBytes: 1_048_576,
+          roleProfiles: { worker: "codex-worker" },
+          approvalGates: ["plan", "final"],
+          approvalTimeoutSeconds: 600,
+        },
+      },
+    });
+    const proposal = world.catalog.getProposal("invalid-definition");
+    if (!proposal) throw new Error("proposal disappeared");
+    // The catalog validates on save; a definition that breaks the schema is refused there,
+    // which the target layer must surface as POLICY_DENIED rather than as a crash.
+    await expect(
+      world.targets.applyStrategyTarget(
+        proposal,
+        { kind: "strategy-blueprint", identity: "invalid-definition", digest: null, present: false },
+        {
+          kind: "strategy-blueprint",
+          identity: "invalid-definition",
+          digest: null,
+          present: true,
+          // @ts-expect-error: deliberately impossible (negative parallel width). The catalog
+          // validates on save, and the target layer must surface that as POLICY_DENIED.
+          strategyDefinition: { ...proposal.candidate.definition, maxParallel: -1 },
+        },
+        "apply",
+      ),
+    ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+  });
+});
+
+describe("object idempotency check", () => {
+  async function withObject(content: Buffer) {
+    const world = await targetsFor();
+    const objects = path.join(world.root, ".agent-team", "evolution", "objects", "sha256");
+    await mkdir(objects, { recursive: true });
+    const digest = sha256Bytes(content);
+    const objectPath = path.join(objects, digest);
+    return { ...world, objects, digest, objectPath };
+  }
+
+  it("says the object is absent when there is nothing there", async () => {
+    const { targets, objectPath, digest } = await withObject(Buffer.from("missing\n"));
+    await expect(targets.objectAlreadyStored(objectPath, digest)).resolves.toBe(false);
+  });
+
+  it("says the object is stored when it is intact", async () => {
+    const content = Buffer.from("stored\n");
+    const { targets, objectPath, digest } = await withObject(content);
+    await writeFile(objectPath, content);
+    await chmod(objectPath, 0o600);
+    await expect(targets.objectAlreadyStored(objectPath, digest)).resolves.toBe(true);
+  });
+
+  it("refuses a stored object that is a symlink", async () => {
+    const content = Buffer.from("stored\n");
+    const { root, targets, objectPath, digest } = await withObject(content);
+    const outside = path.join(root, "elsewhere-object");
+    await writeFile(outside, content);
+    await symlink(outside, objectPath);
+    await expect(targets.objectAlreadyStored(objectPath, digest)).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+      message: `Prompt object path is not a regular file: ${objectPath}`,
+    });
+  });
+
+  it("refuses a stored object with the wrong permissions", async () => {
+    const content = Buffer.from("stored\n");
+    const { targets, objectPath, digest } = await withObject(content);
+    await writeFile(objectPath, content);
+    await chmod(objectPath, 0o644);
+    await expect(targets.objectAlreadyStored(objectPath, digest)).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+      message: `Prompt object permissions must be 0600: ${digest}`,
+    });
+  });
+
+  it("refuses a stored object whose bytes no longer match the digest", async () => {
+    const content = Buffer.from("stored\n");
+    const { targets, objectPath, digest } = await withObject(content);
+    await writeFile(objectPath, Buffer.from("tampered\n"));
+    await chmod(objectPath, 0o600);
+    await expect(targets.objectAlreadyStored(objectPath, digest)).rejects.toMatchObject({
+      code: "RECOVERY_REQUIRED",
+      message: `Corrupted prompt object at ${digest}`,
+    });
+  });
+});
