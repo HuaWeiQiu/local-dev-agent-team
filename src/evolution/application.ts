@@ -909,28 +909,7 @@ export class EvolutionApplicationCoordinator {
           `Catalog revision ${input.expectedRevision} is stale; current is ${revision}`,
         );
       }
-      const proposal = this.#requireProposal(input.proposalId);
-      this.#assertPolicyAllows(proposal);
-      if (proposal.status !== "promoted") {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' must be promoted to reconcile (status=${proposal.status})`,
-        );
-      }
-      if (this.#state.applications.has(proposal.id)) {
-        throw new EvolutionApplicationError(
-          "INVALID_LIFECYCLE",
-          `Proposal '${proposal.id}' already has application proof`,
-        );
-      }
-      const target = targetFromCandidate(proposal.candidate);
-      const activeProposalId = this.#catalog.getActiveProposalId(target);
-      if (activeProposalId !== proposal.id) {
-        throw new EvolutionApplicationError(
-          "ACTIVE_TARGET_CONFLICT",
-          `Proposal '${proposal.id}' is not the active promotion for its target`,
-        );
-      }
+      const { proposal, target, activeProposalId } = this.#assertReconcilable(input);
 
       const decidedAt = new Date(this.#now()).toISOString();
       const humanDecision = parseHumanDecision({
@@ -1228,6 +1207,43 @@ export class EvolutionApplicationCoordinator {
         deduplicated: false,
       };
     });
+  }
+
+  /**
+   * Everything that decides whether this proposal can be reconciled at all. All of it is a
+   * refusal: none of these checks changes what the command then does.
+   *
+   * The order matters — a proposal that is not promoted but already has proof reports the
+   * proof, not the lifecycle — because each message tells an operator what to fix first.
+   */
+  #assertReconcilable(input: { proposalId: string }): {
+    proposal: EvolutionProposal;
+    target: ReturnType<typeof targetFromCandidate>;
+    activeProposalId: string | null;
+  } {
+    const proposal = this.#requireProposal(input.proposalId);
+    this.#assertPolicyAllows(proposal);
+    if (proposal.status !== "promoted") {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' must be promoted to reconcile (status=${proposal.status})`,
+      );
+    }
+    if (this.#state.applications.has(proposal.id)) {
+      throw new EvolutionApplicationError(
+        "INVALID_LIFECYCLE",
+        `Proposal '${proposal.id}' already has application proof`,
+      );
+    }
+    const target = targetFromCandidate(proposal.candidate);
+    const activeProposalId = this.#catalog.getActiveProposalId(target);
+    if (activeProposalId !== proposal.id) {
+      throw new EvolutionApplicationError(
+        "ACTIVE_TARGET_CONFLICT",
+        `Proposal '${proposal.id}' is not the active promotion for its target`,
+      );
+    }
+    return { proposal, target, activeProposalId };
   }
 
   /**
