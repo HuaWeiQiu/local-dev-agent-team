@@ -431,52 +431,33 @@ export class StrategyBlueprintCatalog {
   }
 
   private async load(): Promise<void> {
-    let contents: string;
+    const contents = await this.readCatalogDocument();
+    if (contents === undefined) return;
+    const document = parseCatalogDocument(contents, this.filePath);
+    assertNoBaseNameConflicts(Object.keys(document.definitions), this.baseNames);
+    this.persistedContents = contents;
+    this.customDefinitions = structuredClone(document.definitions);
+    this.loaded.config = effectiveConfig({
+      loaded: this.loaded,
+      filePath: this.filePath,
+      defaultName: this.runtimeDefaultName,
+      baseDefinitions: this.baseDefinitions,
+      customDefinitions: this.customDefinitions,
+    });
+  }
+
+  /** A missing catalog file is an empty catalog, not an error. */
+  private async readCatalogDocument(): Promise<string | undefined> {
     try {
       await assertPrimaryFileSafe(this.io, this.root, this.filePath);
-      contents = await this.io.readFile(this.filePath, "utf8");
+      return await this.io.readFile(this.filePath, "utf8");
     } catch (error) {
-      if (isNotFound(error)) return;
-      if (error instanceof StrategyBlueprintError) throw error;
+      if (isNotFound(error)) return undefined;
       throw error;
     }
-    let document: unknown;
-    try {
-      document = JSON.parse(contents) as unknown;
-    } catch {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}: expected JSON`,
-      );
-    }
-    const parsed = persistedBlueprintsSchema.safeParse(document);
-    if (!parsed.success) {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}:\n${formatIssues(parsed.error.issues)}`,
-      );
-    }
-    this.persistedContents = contents;
-    for (const name of Object.keys(parsed.data.definitions)) {
-      if (this.baseNames.has(name)) {
-        throw new StrategyBlueprintConflictError(
-          `Custom strategy '${name}' conflicts with a configured strategy`,
-        );
-      }
-    }
-    this.customDefinitions = structuredClone(parsed.data.definitions);
-    const effective = configSchema.safeParse({
-      ...this.loaded.config,
-      strategies: {
-        default: this.runtimeDefaultName,
-        definitions: { ...this.baseDefinitions, ...this.customDefinitions },
-      },
-    });
-    if (!effective.success) {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}:\n${formatIssues(effective.error.issues)}`,
-      );
-    }
-    this.loaded.config = effective.data;
   }
+
+
 
   private refreshEffectiveConfig(): void {
     this.loaded.config.strategies = {
@@ -631,6 +612,52 @@ function sortObjectKeys(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+function parseCatalogDocument(contents: string, filePath: string) {
+  let document: unknown;
+  try {
+    document = JSON.parse(contents) as unknown;
+  } catch {
+    throw new StrategyBlueprintValidationError(
+      `Invalid strategy blueprint catalog at ${filePath}: expected JSON`,
+    );
+  }
+  const parsed = persistedBlueprintsSchema.safeParse(document);
+  if (parsed.success) return parsed.data;
+  throw new StrategyBlueprintValidationError(
+    `Invalid strategy blueprint catalog at ${filePath}:\n${formatIssues(parsed.error.issues)}`,
+  );
+}
+
+function assertNoBaseNameConflicts(names: string[], baseNames: ReadonlySet<string>): void {
+  for (const name of names) {
+    if (!baseNames.has(name)) continue;
+    throw new StrategyBlueprintConflictError(
+      `Custom strategy '${name}' conflicts with a configured strategy`,
+    );
+  }
+}
+
+/** The merged catalog must still satisfy the config schema before it is adopted. */
+function effectiveConfig(input: {
+  loaded: LoadedConfig;
+  filePath: string;
+  defaultName: string;
+  baseDefinitions: Record<string, NamedStrategy>;
+  customDefinitions: Record<string, NamedStrategy>;
+}) {
+  const effective = configSchema.safeParse({
+    ...input.loaded.config,
+    strategies: {
+      default: input.defaultName,
+      definitions: { ...input.baseDefinitions, ...input.customDefinitions },
+    },
+  });
+  if (effective.success) return effective.data;
+  throw new StrategyBlueprintValidationError(
+    `Invalid strategy blueprint catalog at ${input.filePath}:\n${formatIssues(effective.error.issues)}`,
+  );
 }
 
 function assertLoadedConfig(loaded: LoadedConfig): void {
@@ -883,33 +910,50 @@ async function cleanOrphanTemporaryFiles(
   stateDirectory: string,
   filePath: string,
 ): Promise<void> {
-  let entries: string[];
+  const entries = await readDirectoryEntries(io, stateDirectory);
+  if (entries === undefined) return;
+  const ownedTemporaryName = orphanTemporaryPattern(filePath);
+  for (const entry of entries) {
+    if (!ownedTemporaryName.test(entry)) continue;
+    await removeOrphan(io, stateDirectory, entry);
+  }
+}
+
+/** A missing directory is not a cleanup problem; anything else is. */
+async function readDirectoryEntries(
+  io: StrategyBlueprintFileIo,
+  stateDirectory: string,
+): Promise<string[] | undefined> {
   try {
-    entries = await io.readdir(stateDirectory);
+    return await io.readdir(stateDirectory);
   } catch (error) {
-    if (isNotFound(error)) {
-      return;
-    }
+    if (isNotFound(error)) return undefined;
     throw error;
   }
+}
 
+/** The temporary names this catalog itself writes: `<file>.<pid>.<uuid>.tmp`. */
+function orphanTemporaryPattern(filePath: string): RegExp {
   const escapedBaseName = escapeRegularExpression(path.basename(filePath));
-  const ownedTemporaryName = new RegExp(
+  return new RegExp(
     `^${escapedBaseName}\\.\\d+\\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.tmp$`,
     "i",
   );
-  for (const entry of entries) {
-    if (!ownedTemporaryName.test(entry)) {
-      continue;
-    }
-    const absolute = path.join(stateDirectory, entry);
-    try {
-      const info = await io.lstat(absolute);
-      if (info.isSymbolicLink() || !info.isFile()) continue;
-      await io.rm(absolute, { force: true });
-    } catch {
-      // Best-effort cleanup only; never mask primary-document failures.
-    }
+}
+
+/** Best-effort: never mask a primary-document failure with a cleanup failure. */
+async function removeOrphan(
+  io: StrategyBlueprintFileIo,
+  stateDirectory: string,
+  entry: string,
+): Promise<void> {
+  const absolute = path.join(stateDirectory, entry);
+  try {
+    const info = await io.lstat(absolute);
+    if (info.isSymbolicLink() || !info.isFile()) return;
+    await io.rm(absolute, { force: true });
+  } catch {
+    // Best-effort cleanup only; never mask primary-document failures.
   }
 }
 
