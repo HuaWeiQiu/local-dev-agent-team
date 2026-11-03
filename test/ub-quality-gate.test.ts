@@ -388,15 +388,30 @@ describe("nightly drift report", () => {
     expect(report.worse[0]!.score).toBe(55);
   });
 
+  it("refuses to read error without narrowing on kind", () => {
+    const ledger = driftPayload({ report: driftBetween(new Map(), {}, 10), threshold: 10 });
+    // The ledger branch has no `error` at all. If this line ever compiles, the
+    // union was flattened back into one object with an optional field and every
+    // consumer lost the obligation to narrow — which is how the nightly issue
+    // reported "unknown error" for scans that had not run.
+    // @ts-expect-error - reading a field that only the infrastructure branch declares.
+    expect(ledger.error).toBeUndefined();
+  });
+
   it("marks an infrastructure verdict instead of an empty ledger", () => {
     const ledger = driftPayload({ report: driftBetween(new Map(), {}, 10), threshold: 10 });
     expect(ledger).toMatchObject({ kind: "ledger", counts: { new: 0, worse: 0, fixed: 0 } });
-    expect(ledger.error).toBeUndefined();
+    // Not `ledger.error === undefined`: on the ledger branch the field does not
+    // exist at all, and reading it is a compile error. `.not.toHaveProperty`
+    // states that without asking the type to pretend otherwise.
+    expect(ledger).not.toHaveProperty("error");
 
     const broken = driftPayload({ error: "gate: layer exited 1", threshold: 10 });
-    expect(broken.kind).toBe("infrastructure");
-    expect(broken.error).toBe("gate: layer exited 1");
-    expect(broken.counts).toEqual({ new: 0, worse: 0, fixed: 0 });
+    expect(broken).toMatchObject({
+      kind: "infrastructure",
+      error: "gate: layer exited 1",
+      counts: { new: 0, worse: 0, fixed: 0 },
+    });
   });
 
   it("writes the verdict and exits 0 on a full scan", async () => {
