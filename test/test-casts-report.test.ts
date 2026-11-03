@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { collectCasts, formatReport, readSources, summarize } from "../scripts/test-casts-report.mjs";
+import {
+  collectCasts,
+  compareToBaseline,
+  countByFileForm,
+  formatReport,
+  readSources,
+  summarize,
+} from "../scripts/test-casts-report.mjs";
 
 const castsIn = (text: string, path = "test/sample.test.ts") => collectCasts([{ path, text }]);
 
@@ -63,6 +70,32 @@ describe("cast reporting", () => {
       "const a = 1 as never;\nconst b = {} as unknown as { x: number };\nconst c = 2 as any;\n",
     );
     expect(casts.map((cast) => cast.form)).toEqual(["never", "unknown-as", "any"]);
+  });
+
+  it("counts per file and form, so a comparison survives line drift", () => {
+    const casts = castsIn("const a = 1 as never;\nconst b = {} as unknown as X;\nconst c = 2 as never;\n");
+    expect(countByFileForm(casts)).toEqual({
+      "test/sample.test.ts:never": 2,
+      "test/sample.test.ts:unknown-as": 1,
+    });
+  });
+
+  it("reports a file/form pair that grew past the baseline, and allows one that shrank", () => {
+    const casts = castsIn("const a = 1 as never;\nconst b = 2 as never;\n");
+    expect(
+      compareToBaseline(casts, { counts: { "test/sample.test.ts:never": 1 } }),
+    ).toEqual([{ key: "test/sample.test.ts:never", allowed: 1, count: 2 }]);
+    // Fewer than the baseline is the point of the gate: it only refuses growth.
+    expect(
+      compareToBaseline(casts, { counts: { "test/sample.test.ts:never": 5 } }),
+    ).toEqual([]);
+  });
+
+  it("does not let a brand new file introduce a cast", () => {
+    const casts = castsIn("const a = 1 as never;\n");
+    expect(compareToBaseline(casts, { counts: {} })).toEqual([
+      { key: "test/sample.test.ts:never", allowed: 0, count: 1 },
+    ]);
   });
 
   it("summarises by form, parent and file, and formats all three", () => {
