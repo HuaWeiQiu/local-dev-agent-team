@@ -195,7 +195,12 @@ describe("main", () => {
       argv: ["node", "prepare-desktop-runtime.mjs", "--describe-target"],
       env: { AGENT_TEAM_TAURI_TARGET: "x86_64-pc-windows-msvc" },
       root,
-      io: { spawn: rustcOnly("aarch64-apple-darwin"), fetch: undefined as never, stdout: stream },
+      io: {
+          spawn: rustcOnly("aarch64-apple-darwin"),
+          fetch: undefined as never,
+          stdout: stream,
+          run: () => ({ status: 0, stdout: "", stderr: "" }),
+        },
     });
 
     expect(JSON.parse(written.join(""))).toEqual({
@@ -216,7 +221,12 @@ describe("main", () => {
         argv: ["node", "prepare-desktop-runtime.mjs"],
         env: { AGENT_TEAM_TAURI_TARGET: "x86_64-pc-windows-msvc" },
         root,
-        io: { spawn: rustcOnly("aarch64-apple-darwin"), fetch: undefined as never, stdout: stream },
+        io: {
+          spawn: rustcOnly("aarch64-apple-darwin"),
+          fetch: undefined as never,
+          stdout: stream,
+          run: () => ({ status: 0, stdout: "", stderr: "" }),
+        },
       }),
     ).rejects.toThrow(/needs a matching native host; current host is aarch64-apple-darwin/);
   });
@@ -418,6 +428,7 @@ describe("main", () => {
           spawn: () => ({ status: 1, stdout: "", stderr: "rustc: command not found" }),
           fetch: undefined as never,
           stdout: recordingStdout().stream,
+          run: () => ({ status: 0, stdout: "", stderr: "" }),
         },
       }),
     ).rejects.toThrow("Unable to inspect the Rust target: rustc: command not found");
@@ -434,6 +445,7 @@ describe("main", () => {
           spawn: () => ({ status: 0, stdout: "rustc 1.90.0\n", stderr: "" }),
           fetch: undefined as never,
           stdout: recordingStdout().stream,
+          run: () => ({ status: 0, stdout: "", stderr: "" }),
         },
       }),
     ).rejects.toThrow("Unable to determine the Rust host target");

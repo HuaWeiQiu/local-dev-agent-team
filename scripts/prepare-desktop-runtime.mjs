@@ -40,6 +40,21 @@ import {
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+/**
+ * The two fields the pipeline reads from a child process. Declared here so a test
+ * can hand it a stand-in without reproducing `SpawnSyncReturns` — this file never
+ * reads `pid`, `output` or `signal`, and requiring them would describe a wider
+ * contract than the code has.
+ *
+ * @typedef {{ status: number | null, stdout: string, stderr: string }} ChildResult
+ * @typedef {{
+ *   spawn: (command: string, args: string[], options?: Record<string, unknown>) => ChildResult,
+ *   fetch: (url: string) => Promise<{ ok: boolean, status: number, text: () => Promise<string>, arrayBuffer: () => Promise<ArrayBuffer> }>,
+ *   stdout: { write: (chunk: string) => unknown },
+ *   run: (args: string[]) => ChildResult,
+ * }} RuntimeIo
+ */
+
 const NODE_VERSION = "24.19.0";
 const STAGING_PREFIX = ".app-staging-";
 
@@ -216,7 +231,11 @@ export async function cleanupApplicationStagingDirectories(runtimeDirectory) {
  */
 export async function prepareApplicationRuntime(
   runtimeDirectory,
-  { repositoryRoot = defaultRepositoryRoot, run = runPnpm, spawn = spawnSync } = {},
+  /** @type {{ repositoryRoot?: string, run?: (args: string[]) => ChildResult, spawn?: (command: string, args: string[], options?: Record<string, unknown>) => ChildResult }} */ {
+    repositoryRoot = defaultRepositoryRoot,
+    run = runPnpm,
+    spawn = spawnSync,
+  } = {},
 ) {
   const applicationDirectory = path.join(runtimeDirectory, "app");
   await cleanupApplicationStagingDirectories(runtimeDirectory);
@@ -258,6 +277,14 @@ export function describeTarget(plan) {
  * packaging matrix asks "which archive would Windows get" from whichever host happens to run
  * the question, so requiring a matching native host would make the question unanswerable on
  * every other platform.
+ */
+/**
+ * @param {{
+ *   argv: string[],
+ *   env: Record<string, string | undefined>,
+ *   root: string,
+ *   io: RuntimeIo,
+ * }} options
  */
 export async function main({ argv, env, root, io }) {
   const host = readRustHost(io.spawn);
