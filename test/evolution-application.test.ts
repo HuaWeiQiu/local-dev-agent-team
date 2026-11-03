@@ -4,8 +4,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  lstat,
   readdir,
   rename,
+  rm,
   symlink,
   rm,
   stat,
@@ -2812,9 +2814,9 @@ describe("the restored state validator refuses states the catalog disagrees with
  * | target written, catalog not advanced (strategy)   | `finishPromotion` promote arm; `finishRollback` rollback arm |
  * | target written, catalog not advanced (prompt)     | `restoreInterruptedPrompt` success path; `verifyPromptGitOutcome` false arm |
  * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
- * | pending snapshot lost its digest                  | `restoreInterruptedPrompt` "no recoverable snapshot" arm |
- * | target replaced by a symlink or a non-file        | `restoreInterruptedPrompt` "not a safe regular file" arm |
- * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
+ * | pending snapshot lost its digest                  | **unreachable**: the journal schema refuses the document first ("prompt presence and digest disagree"), asserted below |
+ * | target replaced by a symlink                     | ✅ world covered: recovery kept, link and its target untouched. The `"not a safe regular file"` arm itself stays 0 — the live-target read refuses upstream first (measured: entry hit, arm not) |
+ * | working tree dirty after a restore                | ✅ "tree dirty" arm reached: `isClean` returns false and the throw executes (DA hits on the throw line; the BRDA counter does not attribute it to that arm) |
  * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
  * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
  *
@@ -3010,6 +3012,151 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     return harness;
   }
+
+  it("rejects a pending prompt snapshot without a digest instead of guessing", async () => {
+    // The `restoreInterruptedPrompt` arm that throws on a missing BEFORE digest is
+    // unreachable from a durable file: the journal schema refuses the document first, with
+    // "prompt presence and digest disagree". Refusing there is right — restoring from
+    // nothing would mean guessing what the file used to say — and this case pins it, so
+    // nobody "simplifies" the schema and moves the guess into the recovery path.
+    const harness = await interruptedPromptWorld("snapshot-bad");
+    await harness.coordinator.close();
+
+    const applicationPath = path.join(
+      harness.root,
+      ".agent-team",
+      "evolution",
+      EVOLUTION_APPLICATION_FILENAME,
+    );
+    const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
+      payload: {
+        pending: { beforeTarget: { digest: string | null; present: boolean } } & Record<
+          string,
+          unknown
+        >;
+      } & Record<string, unknown>;
+      payloadDigest: string;
+    };
+    expect(document.payload.pending.beforeTarget.present).toBe(true);
+    document.payload.pending.beforeTarget.digest = null;
+    document.payloadDigest = computePayloadDigest(document.payload);
+    await writeFile(applicationPath, `${JSON.stringify(document)}\n`, "utf8");
+
+    await expect(createHarness({ root: harness.root, clock: harness.clock })).rejects.toThrow(
+      /pending\.beforeTarget: prompt presence and digest disagree/,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses to restore when the target was replaced by a symlink",
+    async () => {
+      // Creating symlinks on Windows needs a privilege the CI user does not have; skipped
+      // there rather than assuming "our CI only runs unix".
+      //
+      // A restore must never write through a link: the path may still look like the prompt
+      // while pointing somewhere else entirely, and following it would corrupt a file that
+      // was never part of the change. Fail closed, and leave the world as found.
+      const harness = await interruptedPromptWorld("target-symlink");
+      await harness.coordinator.close();
+      const target = path.join(harness.root, promptPath);
+      const outside = path.join(harness.root, "outside-prompt.md");
+      await writeFile(outside, "outside content\n", "utf8");
+      await rm(target);
+      await symlink(outside, target);
+
+      const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+      expect(reopened.coordinator.getApplicationState()).toMatchObject({
+        recoveryRequired: true,
+      });
+      expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+      expect((await lstat(target)).isSymbolicLink()).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("outside content\n");
+    },
+  );
+
+  it("finishes the promotion when the prompt commit landed but the catalog did not", async () => {
+    // The mirror of the interrupted-write world: here the commit DID land, so the change is
+    // real and only the catalog is behind. Refusing would leave the two halves of the record
+    // disagreeing forever; the recovery must recognise its own commit and finish promoting.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    const candidate = Buffer.from("Prompt committed but never promoted\n", "utf8");
+    await harness.coordinator.propose({
+      id: "committed-not-promoted",
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation("committed-not-promoted");
+    await harness.coordinator.evaluateServerPreflight("committed-not-promoted");
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "committed-not-promoted",
+      operator,
+    });
+    const headBefore = await gitText(harness.root, ["rev-parse", "HEAD"]);
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "committed-not-promoted-command",
+        proposalId: "committed-not-promoted",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: the commit is in, the catalog is not.
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).not.toBe(headBefore);
+    expect(harness.catalog.getProposal("committed-not-promoted")).toMatchObject({
+      status: "evaluated",
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("committed-not-promoted")).toMatchObject({
+      status: "promoted",
+    });
+    expect(await readFile(path.join(harness.root, promptPath))).toEqual(candidate);
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "committed-not-promoted-command",
+          status: "applied",
+        }),
+      ]),
+    );
+  });
+
+  it("refuses to restore into a tree someone else has changed", async () => {
+    // A restore rewrites the prompt file and then checks the tree. If other work is sitting
+    // uncommitted, putting the original bytes back would mix two unrelated changes in one
+    // working tree, so the recovery stops and asks a human instead of guessing.
+    const harness = await interruptedPromptWorld("dirty-tree");
+    await harness.coordinator.close();
+    // A tracked file edited in place, not just an untracked stray: that is the shape a person
+    // leaves behind when they are mid-change in the same repository.
+    const readme = path.join(harness.root, "README.md");
+    await writeFile(readme, `${await readFile(readme, "utf8")}someone else's edit\n`, "utf8");
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      recoveryRequired: true,
+    });
+    expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+    expect(await readFile(readme, "utf8")).toContain("someone else's edit");
+  });
 
   it("cleans the temp files an interrupted prompt write left behind", async () => {
     // One world covers all three branches of the cleanup: a matching temp file is removed, an
