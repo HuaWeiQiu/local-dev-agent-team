@@ -2816,7 +2816,7 @@ describe("the restored state validator refuses states the catalog disagrees with
  * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
  * | pending snapshot lost its digest                  | **unreachable**: the journal schema refuses the document first ("prompt presence and digest disagree"), asserted below |
  * | target replaced by a symlink                     | ✅ world covered: recovery kept, link and its target untouched. The `"not a safe regular file"` arm itself stays 0 — the live-target read refuses upstream first (measured: entry hit, arm not) |
- * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
+ * | working tree dirty after a restore                | ✅ "tree dirty" arm reached: `isClean` returns false and the throw executes (DA hits on the throw line; the BRDA counter does not attribute it to that arm) |
  * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
  * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
  *
