@@ -202,59 +202,17 @@ export class StrategyBlueprintCatalog {
     loaded: LoadedConfig,
     options: { io?: Partial<StrategyBlueprintFileIo> } = {},
   ): Promise<StrategyBlueprintCatalog> {
-    if (!loaded || typeof loaded !== "object") {
-      throw new StrategyBlueprintValidationError("LoadedConfig is required");
-    }
-    if (typeof loaded.root !== "string" || !loaded.root.trim()) {
-      throw new StrategyBlueprintValidationError("LoadedConfig.root is required");
-    }
-    if (!loaded.config || typeof loaded.config !== "object") {
-      throw new StrategyBlueprintValidationError("LoadedConfig.config is required");
-    }
-
+    assertLoadedConfig(loaded);
     const io: StrategyBlueprintFileIo = { ...defaultFileIo, ...options.io };
-    let root: string;
-    try {
-      root = await io.realpath(path.resolve(loaded.root));
-      const rootInfo = await io.lstat(root);
-      if (!rootInfo.isDirectory()) {
-        throw new StrategyBlueprintUnsafePathError(
-          `LoadedConfig.root must resolve to a directory: ${root}`,
-        );
-      }
-    } catch (error) {
-      if (error instanceof StrategyBlueprintError) throw error;
-      throw new StrategyBlueprintUnsafePathError(
-        `Unable to resolve repository root '${loaded.root}': ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-
-    const stateDirectoryRelative = loaded.config.project?.stateDirectory;
-    if (typeof stateDirectoryRelative !== "string" || !stateDirectoryRelative.trim()) {
-      throw new StrategyBlueprintValidationError(
-        "project.stateDirectory must be a non-empty repository-relative path",
-      );
-    }
-
+    const root = await resolveRootDirectory(io, loaded.root);
     const stateDirectory = resolveRepositoryOwnedDirectory(
       root,
-      stateDirectoryRelative,
+      assertStateDirectory(loaded),
       "project.stateDirectory",
     );
     const filePath = path.join(stateDirectory, "strategy-blueprints.json");
-
-    await createRepositoryOwnedDirectory(io, root, stateDirectory);
-    await assertRepositoryOwnedStorage(io, root, stateDirectory, filePath);
-    await cleanOrphanTemporaryFiles(io, stateDirectory, filePath);
-
-    const catalog = new StrategyBlueprintCatalog(loaded, {
-      root,
-      stateDirectory,
-      filePath,
-      io,
-    });
+    await prepareStorage({ io, root, stateDirectory, filePath });
+    const catalog = new StrategyBlueprintCatalog(loaded, { root, stateDirectory, filePath, io });
     await catalog.load();
     return catalog;
   }
@@ -473,52 +431,33 @@ export class StrategyBlueprintCatalog {
   }
 
   private async load(): Promise<void> {
-    let contents: string;
+    const contents = await this.readCatalogDocument();
+    if (contents === undefined) return;
+    const document = parseCatalogDocument(contents, this.filePath);
+    assertNoBaseNameConflicts(Object.keys(document.definitions), this.baseNames);
+    this.persistedContents = contents;
+    this.customDefinitions = structuredClone(document.definitions);
+    this.loaded.config = effectiveConfig({
+      loaded: this.loaded,
+      filePath: this.filePath,
+      defaultName: this.runtimeDefaultName,
+      baseDefinitions: this.baseDefinitions,
+      customDefinitions: this.customDefinitions,
+    });
+  }
+
+  /** A missing catalog file is an empty catalog, not an error. */
+  private async readCatalogDocument(): Promise<string | undefined> {
     try {
       await assertPrimaryFileSafe(this.io, this.root, this.filePath);
-      contents = await this.io.readFile(this.filePath, "utf8");
+      return await this.io.readFile(this.filePath, "utf8");
     } catch (error) {
-      if (isNotFound(error)) return;
-      if (error instanceof StrategyBlueprintError) throw error;
+      if (isNotFound(error)) return undefined;
       throw error;
     }
-    let document: unknown;
-    try {
-      document = JSON.parse(contents) as unknown;
-    } catch {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}: expected JSON`,
-      );
-    }
-    const parsed = persistedBlueprintsSchema.safeParse(document);
-    if (!parsed.success) {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}:\n${formatIssues(parsed.error.issues)}`,
-      );
-    }
-    this.persistedContents = contents;
-    for (const name of Object.keys(parsed.data.definitions)) {
-      if (this.baseNames.has(name)) {
-        throw new StrategyBlueprintConflictError(
-          `Custom strategy '${name}' conflicts with a configured strategy`,
-        );
-      }
-    }
-    this.customDefinitions = structuredClone(parsed.data.definitions);
-    const effective = configSchema.safeParse({
-      ...this.loaded.config,
-      strategies: {
-        default: this.runtimeDefaultName,
-        definitions: { ...this.baseDefinitions, ...this.customDefinitions },
-      },
-    });
-    if (!effective.success) {
-      throw new StrategyBlueprintValidationError(
-        `Invalid strategy blueprint catalog at ${this.filePath}:\n${formatIssues(effective.error.issues)}`,
-      );
-    }
-    this.loaded.config = effective.data;
   }
+
+
 
   private refreshEffectiveConfig(): void {
     this.loaded.config.strategies = {
@@ -537,17 +476,7 @@ export class StrategyBlueprintCatalog {
 
     try {
       await assertRepositoryOwnedStorage(this.io, this.root, this.stateDirectory, this.filePath);
-      await this.io.beforeAtomicStage?.("open");
-      const handle = await this.io.open(temporaryPath, "wx", 0o600);
-      try {
-        await this.io.beforeAtomicStage?.("write");
-        await handle.writeFile(serialized, "utf8");
-        await this.io.beforeAtomicStage?.("file-sync");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-
+      await atomicStage(this.io, temporaryPath, serialized);
       await assertRepositoryOwnedStorage(this.io, this.root, this.stateDirectory, this.filePath);
       await this.io.beforeAtomicStage?.("rename");
       renameAttempted = true;
@@ -556,27 +485,17 @@ export class StrategyBlueprintCatalog {
       await this.io.syncDirectory(this.stateDirectory);
       this.persistedContents = serialized;
     } catch (error) {
-      if (!renameAttempted) {
+      if (renameAttempted) {
+        // The rename may or may not be durable: refuse further writes until reopen.
+        this.indeterminate = true;
+      } else {
         await this.io.rm(temporaryPath, { force: true }).catch(() => undefined);
       }
-      if (renameAttempted) {
-        this.indeterminate = true;
-        throw new StrategyBlueprintIndeterminateError(
-          `Strategy blueprint catalog rename was attempted and its durability outcome is indeterminate; reopen before continuing: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-      if (error instanceof StrategyBlueprintError) {
-        throw error;
-      }
-      throw new StrategyBlueprintValidationError(
-        `Failed to persist strategy blueprint catalog at ${this.filePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      throw persistFailure(error, renameAttempted, this.filePath);
     }
   }
+
+
 
   private async assertDiskBaseline(): Promise<void> {
     let currentContents: string | null;
@@ -675,47 +594,234 @@ function sortObjectKeys(value: unknown): unknown {
   return value;
 }
 
+/** Write the temporary file and make its bytes durable before the rename. */
+async function atomicStage(
+  io: StrategyBlueprintFileIo,
+  temporaryPath: string,
+  serialized: string,
+): Promise<void> {
+  await io.beforeAtomicStage?.("open");
+  const handle = await io.open(temporaryPath, "wx", 0o600);
+  try {
+    await io.beforeAtomicStage?.("write");
+    await handle.writeFile(serialized, "utf8");
+    await io.beforeAtomicStage?.("file-sync");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * After a rename the durability outcome is unknown, so the catalog must be
+ * reopened; before it, the temporary file is gone and the error can be rethrown.
+ */
+function persistFailure(
+  error: unknown,
+  renameAttempted: boolean,
+  filePath: string,
+): Error {
+  if (renameAttempted) {
+    return new StrategyBlueprintIndeterminateError(
+      `Strategy blueprint catalog rename was attempted and its durability outcome is indeterminate; reopen before continuing: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (error instanceof StrategyBlueprintError) return error;
+  return new StrategyBlueprintValidationError(
+    `Failed to persist strategy blueprint catalog at ${filePath}: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+}
+
+function parseCatalogDocument(contents: string, filePath: string) {
+  let document: unknown;
+  try {
+    document = JSON.parse(contents) as unknown;
+  } catch {
+    throw new StrategyBlueprintValidationError(
+      `Invalid strategy blueprint catalog at ${filePath}: expected JSON`,
+    );
+  }
+  const parsed = persistedBlueprintsSchema.safeParse(document);
+  if (parsed.success) return parsed.data;
+  throw new StrategyBlueprintValidationError(
+    `Invalid strategy blueprint catalog at ${filePath}:\n${formatIssues(parsed.error.issues)}`,
+  );
+}
+
+function assertNoBaseNameConflicts(names: string[], baseNames: ReadonlySet<string>): void {
+  for (const name of names) {
+    if (!baseNames.has(name)) continue;
+    throw new StrategyBlueprintConflictError(
+      `Custom strategy '${name}' conflicts with a configured strategy`,
+    );
+  }
+}
+
+/** The merged catalog must still satisfy the config schema before it is adopted. */
+function effectiveConfig(input: {
+  loaded: LoadedConfig;
+  filePath: string;
+  defaultName: string;
+  baseDefinitions: Record<string, NamedStrategy>;
+  customDefinitions: Record<string, NamedStrategy>;
+}) {
+  const effective = configSchema.safeParse({
+    ...input.loaded.config,
+    strategies: {
+      default: input.defaultName,
+      definitions: { ...input.baseDefinitions, ...input.customDefinitions },
+    },
+  });
+  if (effective.success) return effective.data;
+  throw new StrategyBlueprintValidationError(
+    `Invalid strategy blueprint catalog at ${input.filePath}:\n${formatIssues(effective.error.issues)}`,
+  );
+}
+
+function assertLoadedConfig(loaded: LoadedConfig): void {
+  assertConfigCarrier(loaded);
+  assertConfigRoot(loaded.root);
+  assertConfigProject(loaded.config);
+}
+
+function assertConfigCarrier(loaded: LoadedConfig): void {
+  if (!loaded || typeof loaded !== "object") {
+    throw new StrategyBlueprintValidationError("LoadedConfig is required");
+  }
+}
+
+function assertConfigRoot(root: unknown): void {
+  if (typeof root !== "string" || !root.trim()) {
+    throw new StrategyBlueprintValidationError("LoadedConfig.root is required");
+  }
+}
+
+function assertConfigProject(config: unknown): void {
+  if (!config || typeof config !== "object") {
+    throw new StrategyBlueprintValidationError("LoadedConfig.config is required");
+  }
+}
+
+/** The repository root must resolve, and it must be a directory. */
+async function resolveRootDirectory(
+  io: StrategyBlueprintFileIo,
+  rootInput: string,
+): Promise<string> {
+  try {
+    const root = await io.realpath(path.resolve(rootInput));
+    assertRootIsDirectory(root, await io.lstat(root));
+    return root;
+  } catch (error) {
+    throw rootResolutionError(error, rootInput);
+  }
+}
+
+function assertRootIsDirectory(root: string, info: { isDirectory(): boolean }): void {
+  if (info.isDirectory()) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `LoadedConfig.root must resolve to a directory: ${root}`,
+  );
+}
+
+function rootResolutionError(error: unknown, rootInput: string): StrategyBlueprintError {
+  if (error instanceof StrategyBlueprintError) return error;
+  return new StrategyBlueprintUnsafePathError(
+    `Unable to resolve repository root '${rootInput}': ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+}
+
+function assertStateDirectory(loaded: LoadedConfig): string {
+  const relative = loaded.config.project?.stateDirectory;
+  if (typeof relative !== "string" || !relative.trim()) {
+    throw new StrategyBlueprintValidationError(
+      "project.stateDirectory must be a non-empty repository-relative path",
+    );
+  }
+  return relative;
+}
+
+/**
+ * Everything the catalog needs before it can read its file, in order: create the
+ * state directory, prove it is repository-owned, then sweep orphaned temp files.
+ * The order is the contract - a check before the write, and a sweep last.
+ */
+async function prepareStorage(input: {
+  io: StrategyBlueprintFileIo;
+  root: string;
+  stateDirectory: string;
+  filePath: string;
+}): Promise<void> {
+  const { io, root, stateDirectory, filePath } = input;
+  await createRepositoryOwnedDirectory(io, root, stateDirectory);
+  await assertRepositoryOwnedStorage(io, root, stateDirectory, filePath);
+  await cleanOrphanTemporaryFiles(io, stateDirectory, filePath);
+}
+
 function resolveRepositoryOwnedDirectory(
   root: string,
   relativeDirectory: string,
   label: string,
 ): string {
-  if (!relativeDirectory || relativeDirectory.includes("\0")) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must be a non-empty repository-relative path`,
-    );
-  }
-  if (relativeDirectory !== relativeDirectory.trim()) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must not include leading or trailing whitespace`,
-    );
-  }
-  if (path.isAbsolute(relativeDirectory) || /^[A-Za-z]:[\\/]/.test(relativeDirectory)) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must be repository-relative (absolute paths are not allowed)`,
-    );
-  }
-  if (relativeDirectory.includes("\\")) {
-    throw new StrategyBlueprintUnsafePathError(`${label} must use POSIX separators only`);
-  }
+  assertRelativeDirectory(relativeDirectory, label);
   const segments = relativeDirectory.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must not contain empty, '.', or '..' segments`,
-    );
-  }
+  assertNoDotSegments(segments, label);
+  return resolveInsideRoot(root, segments, label);
+}
 
+/** The five refusals that make a path unsafe before it is even resolved. */
+function assertRelativeDirectory(relativeDirectory: string, label: string): void {
+  assertNonEmptyPath(relativeDirectory, label);
+  assertTrimmedPath(relativeDirectory, label);
+  assertNotAbsolutePath(relativeDirectory, label);
+  assertPosixSeparators(relativeDirectory, label);
+}
+
+function assertNonEmptyPath(relativeDirectory: string, label: string): void {
+  if (relativeDirectory && !relativeDirectory.includes("\0")) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must be a non-empty repository-relative path`,
+  );
+}
+
+function assertTrimmedPath(relativeDirectory: string, label: string): void {
+  if (relativeDirectory === relativeDirectory.trim()) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must not include leading or trailing whitespace`,
+  );
+}
+
+function assertNotAbsolutePath(relativeDirectory: string, label: string): void {
+  if (!path.isAbsolute(relativeDirectory) && !/^[A-Za-z]:[\\/]/.test(relativeDirectory)) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must be repository-relative (absolute paths are not allowed)`,
+  );
+}
+
+function assertPosixSeparators(relativeDirectory: string, label: string): void {
+  if (!relativeDirectory.includes("\\")) return;
+  throw new StrategyBlueprintUnsafePathError(`${label} must use POSIX separators only`);
+}
+
+function assertNoDotSegments(segments: string[], label: string): void {
+  if (!segments.some((segment) => !segment || segment === "." || segment === "..")) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must not contain empty, '.', or '..' segments`,
+  );
+}
+
+/** The resolved path must stay inside the repository root, prefix and all. */
+function resolveInsideRoot(root: string, segments: string[], label: string): string {
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, ...segments);
-  const rootPrefix = resolvedRoot.endsWith(path.sep)
-    ? resolvedRoot
-    : `${resolvedRoot}${path.sep}`;
-  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must resolve inside the repository root`,
-    );
-  }
-  return resolved;
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  if (resolved === resolvedRoot || resolved.startsWith(rootPrefix)) return resolved;
+  throw new StrategyBlueprintUnsafePathError(`${label} must resolve inside the repository root`);
 }
 
 async function createRepositoryOwnedDirectory(
@@ -826,33 +932,50 @@ async function cleanOrphanTemporaryFiles(
   stateDirectory: string,
   filePath: string,
 ): Promise<void> {
-  let entries: string[];
+  const entries = await readDirectoryEntries(io, stateDirectory);
+  if (entries === undefined) return;
+  const ownedTemporaryName = orphanTemporaryPattern(filePath);
+  for (const entry of entries) {
+    if (!ownedTemporaryName.test(entry)) continue;
+    await removeOrphan(io, stateDirectory, entry);
+  }
+}
+
+/** A missing directory is not a cleanup problem; anything else is. */
+async function readDirectoryEntries(
+  io: StrategyBlueprintFileIo,
+  stateDirectory: string,
+): Promise<string[] | undefined> {
   try {
-    entries = await io.readdir(stateDirectory);
+    return await io.readdir(stateDirectory);
   } catch (error) {
-    if (isNotFound(error)) {
-      return;
-    }
+    if (isNotFound(error)) return undefined;
     throw error;
   }
+}
 
+/** The temporary names this catalog itself writes: `<file>.<pid>.<uuid>.tmp`. */
+function orphanTemporaryPattern(filePath: string): RegExp {
   const escapedBaseName = escapeRegularExpression(path.basename(filePath));
-  const ownedTemporaryName = new RegExp(
+  return new RegExp(
     `^${escapedBaseName}\\.\\d+\\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.tmp$`,
     "i",
   );
-  for (const entry of entries) {
-    if (!ownedTemporaryName.test(entry)) {
-      continue;
-    }
-    const absolute = path.join(stateDirectory, entry);
-    try {
-      const info = await io.lstat(absolute);
-      if (info.isSymbolicLink() || !info.isFile()) continue;
-      await io.rm(absolute, { force: true });
-    } catch {
-      // Best-effort cleanup only; never mask primary-document failures.
-    }
+}
+
+/** Best-effort: never mask a primary-document failure with a cleanup failure. */
+async function removeOrphan(
+  io: StrategyBlueprintFileIo,
+  stateDirectory: string,
+  entry: string,
+): Promise<void> {
+  const absolute = path.join(stateDirectory, entry);
+  try {
+    const info = await io.lstat(absolute);
+    if (info.isSymbolicLink() || !info.isFile()) return;
+    await io.rm(absolute, { force: true });
+  } catch {
+    // Best-effort cleanup only; never mask primary-document failures.
   }
 }
 
@@ -860,23 +983,24 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Windows refuses to fsync a directory with these codes; every other platform is strict. */
+const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EISDIR", "EPERM"]);
+
 async function defaultSyncDirectory(directoryPath: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof openAsync>> | undefined;
   try {
     handle = await openAsync(directoryPath, "r");
     await handle.sync();
   } catch (error) {
-    const code = errorCode(error);
-    if (
-      process.platform === "win32" &&
-      (code === "EINVAL" || code === "ENOTSUP" || code === "EISDIR" || code === "EPERM")
-    ) {
-      return;
-    }
+    if (isWindowsSyncUnsupported(error)) return;
     throw error;
   } finally {
     await handle?.close();
   }
+}
+
+function isWindowsSyncUnsupported(error: unknown): boolean {
+  return process.platform === "win32" && UNSUPPORTED_DIRECTORY_SYNC_CODES.has(String(errorCode(error)));
 }
 
 function isNotFound(error: unknown): boolean {
