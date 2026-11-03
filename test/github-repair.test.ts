@@ -27,6 +27,26 @@ const failedCheck = {
 };
 
 describe("GithubRepairRunner", () => {
+  it("builds the production agent when none is injected, and reports its failure", async () => {
+    const fixture = await createFixture();
+    // Production (src/cli.ts) constructs the runner without an agent, so the
+    // right-hand side of `this.agent ?? new ProfiledAgentService(...)` is the
+    // path every real repair takes. Point the worker role at a profile that does
+    // not exist so that path fails fast instead of spawning a real CLI.
+    fixture.loaded.config.roles.worker.defaultProfile = "missing-profile";
+    fixture.loaded.config.roles.worker.allowedProfiles = ["missing-profile"];
+    const runner = new GithubRepairRunner(fixture.loaded, fixture.store, fixture.client);
+
+    const result = await runner.repair(fixture.state);
+
+    expect(result.status).toBe("ci-failed");
+    expect(result.error).toBeTruthy();
+    expect(result.githubRepairAttempts).toBe(1);
+    const statuses = result.history.map((entry) => entry.status);
+    expect(statuses).toContain("repairing");
+    expect(statuses.at(-1)).toBe("ci-failed");
+  });
+
   it("repairs failed checks, pushes the fix, and returns to waiting-ci", async () => {
     const fixture = await createFixture();
     const textCalls: TextRoleInvocationOptions[] = [];
