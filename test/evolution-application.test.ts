@@ -2944,6 +2944,86 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     });
   });
 
+  it("finishes the rollback when the target was restored but the catalog never advanced", async () => {
+    // The crash point is between the target write and the catalog write: the repository
+    // already shows the restored state, the catalog still says "promoted", and the journal
+    // still holds the pending rollback. Reopening must finish the catalog half rather than
+    // demand recovery — otherwise every crash in this window needs an operator.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog rollback");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(
+      harness,
+      "recover-rollback-old-catalog",
+      "recover-rollback-old-catalog",
+      strategyA,
+    );
+    await promoteStrategy(
+      harness,
+      "recover-rollback-old-catalog",
+      "recover-rollback-apply-command",
+      "Apply the promotion that will be rolled back",
+    );
+    const preview = await harness.coordinator.previewRollback({
+      proposalId: "recover-rollback-old-catalog",
+      operator,
+    });
+    failNextCatalogWrite = true;
+
+    await expect(
+      harness.coordinator.rollbackAppliedPromotion({
+        commandId: "recover-rollback-command",
+        proposalId: "recover-rollback-old-catalog",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Restore the manually managed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    expect(harness.strategies.customDefinition("recover-rollback-old-catalog")).toBeUndefined();
+    expect(harness.catalog.getProposal("recover-rollback-old-catalog")).toMatchObject({
+      status: "promoted",
+    });
+    expect(harness.coordinator.getApplicationState()).toMatchObject({
+      pending: { commandId: "recover-rollback-command" },
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("recover-rollback-old-catalog")).toMatchObject({
+      status: "rolled-back",
+    });
+    expect(reopened.strategies.customDefinition("recover-rollback-old-catalog")).toBeUndefined();
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "recover-rollback-command",
+          operation: "rollback-applied",
+          status: "rolled-back",
+        }),
+      ]),
+    );
+    const rollbackAudit = reopened.catalog
+      .snapshot()
+      .auditRecords.filter((record) => record.kind === "rollback")
+      .at(-1);
+    expect(rollbackAudit).toMatchObject({
+      proposalId: "recover-rollback-old-catalog",
+      applicationCommandId: "recover-rollback-command",
+    });
+  });
+
   it("finalizes rollback when the catalog committed but the final journal write was lost", async () => {
     let failRollbackFinal = false;
     let rollbackApplicationRenameCount = 0;
