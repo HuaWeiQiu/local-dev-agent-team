@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import { type GitManager } from "../git/manager.js";
@@ -16,12 +15,12 @@ import {
   EvolutionPersistenceValidationError,
 } from "./persistence.js";
 import { applicationPayloadSchema } from "./application-schemas.js";
+import { promptTempName, promptTempPattern, siblingTempName } from "./temp-names.js";
 import {
   EVOLUTION_APPLICATION_DOCUMENT_VERSION,
   EvolutionApplicationError,
   MAX_APPLICATION_HISTORY_DEPTH,
   applicationHistoryHasCommand,
-  escapeRegExp,
   isolate,
   isNotFound,
   sha256Canonical,
@@ -1076,7 +1075,7 @@ export class EvolutionApplicationJournal {
     const directory = path.dirname(absolute);
     const temporaryPath = path.join(
       directory,
-      `.${path.basename(absolute)}.${process.pid}.${randomBytes(8).toString("hex")}.recovery.tmp`,
+      promptTempName(path.basename(absolute), { recovery: true }),
     );
     try {
       const handle = await this.#io.open(temporaryPath, "wx", before.mode);
@@ -1118,10 +1117,7 @@ export class EvolutionApplicationJournal {
         "Pending prompt parent directory is unsafe",
       );
     }
-    const escaped = escapeRegExp(path.basename(absolute));
-    const pattern = new RegExp(
-      `^\\.${escaped}\\.[0-9]+\\.[a-f0-9]{16}(?:\\.recovery)?\\.tmp$`,
-    );
+    const pattern = promptTempPattern(path.basename(absolute), { allowRecovery: true });
     for (const entry of await this.#io.readdir(directory)) {
       if (!pattern.test(entry)) continue;
       const candidate = path.join(directory, entry);
@@ -1350,7 +1346,7 @@ export class EvolutionApplicationJournal {
 
   /** Write through a temporary file, then rename and fsync the directory. */
   async writeDocument(serialized: string, nextRevision: number): Promise<void> {
-    const temporaryPath = `${this.#applicationFilePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    const temporaryPath = siblingTempName(this.#applicationFilePath);
     try {
       await this.writeTemporary(serialized, temporaryPath);
       await this.#io.rename(temporaryPath, this.#applicationFilePath);

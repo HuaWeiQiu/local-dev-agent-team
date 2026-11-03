@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
 import { type lstat } from "node:fs/promises";
 import path from "node:path";
+import { promptTempName, siblingTempName, siblingTempPattern } from "./temp-names.js";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import type { LoadedConfig } from "../config/load.js";
 import type { NamedStrategy } from "../config/schema.js";
@@ -27,7 +27,6 @@ import {
   EvolutionApplicationError,
   assertCanonicalInsideRoot,
   decodeUtf8,
-  escapeRegExp,
   isolate,
   isAlreadyExists,
   isNotFound,
@@ -319,10 +318,7 @@ export class EvolutionApplicationTargets {
     await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
 
     const directory = path.dirname(absolute);
-    const temporaryPath = path.join(
-      directory,
-      `.${path.basename(absolute)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
-    );
+    const temporaryPath = path.join(directory, promptTempName(path.basename(absolute)));
     let renamed = false;
     try {
       await this.#io.beforeAtomicStage?.("open");
@@ -541,7 +537,7 @@ export class EvolutionApplicationTargets {
       }
     }
 
-    const temporaryPath = `${objectPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    const temporaryPath = siblingTempName(objectPath);
     try {
       const handle = await this.#io.open(temporaryPath, "wx", 0o600);
       try {
@@ -710,9 +706,7 @@ export async function cleanOrphanTemps(
     if (isNotFound(error)) return;
     throw error;
   }
-  const pattern = new RegExp(
-    `^${escapeRegExp(basename)}\\.[0-9]+\\.[a-f0-9]{16}\\.tmp$`,
-  );
+  const pattern = siblingTempPattern(basename);
   for (const entry of entries) {
     if (!pattern.test(entry)) continue;
     const absolute = path.join(directory, entry);
