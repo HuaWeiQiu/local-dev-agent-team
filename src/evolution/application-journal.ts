@@ -99,30 +99,87 @@ function applicationCommandView(application: ApplicationRecord): Record<string, 
 }
 
 /** The operation-specific half of the proof: each operation carries extra requirements. */
-function operationChecks(input: ProofInput): Array<{ field: string; holds: boolean }> {
-  const { application, completion, command } = input;
-  if (completion === undefined) return [];
-  if (completion.operation === "promote-and-apply") {
-    return [
-      { field: "command", holds: command !== undefined },
-      { field: "command.operation", holds: command === undefined || command.operation === "promote-and-apply" },
-      { field: "application.rollbackSafe", holds: application.rollbackSafe },
-      { field: "application.status", holds: application.status === "applied" },
-    ];
-  }
-  if (completion.operation !== "reconcile-promoted") return [];
-  const withoutCommandAllowed =
-    input.syntheticLegacyBaseline && COMMAND_FALLBACK["reconcile-promoted"] !== null;
-  return [
-    { field: "completion.status", holds: completion.status === application.status },
-    { field: "command.operation", holds: command === undefined || command.operation === "reconcile-promoted" },
-    { field: "application.status", holds: command === undefined || input.reconcileStatusMatches },
+/**
+ * The extra requirement each operation puts on its proof, as rows: a field name and a
+ * predicate. Adding an operation adds rows; it never adds a branch to `operationChecks`.
+ */
+const OPERATION_PROOF_CHECKS: Record<
+  string,
+  Array<{ field: string; requires: (input: ProofInput) => boolean }>
+> = {
+  "promote-and-apply": [
+    { field: "command", requires: (input) => input.command !== undefined },
+    {
+      field: "command.operation",
+      requires: (input) =>
+        input.command === undefined || input.command.operation === "promote-and-apply",
+    },
+    { field: "application.rollbackSafe", requires: (input) => input.application.rollbackSafe },
+    { field: "application.status", requires: (input) => input.application.status === "applied" },
+  ],
+  "reconcile-promoted": [
+    {
+      field: "completion.status",
+      requires: (input) => input.completion?.status === input.application.status,
+    },
+    {
+      field: "command.operation",
+      requires: (input) =>
+        input.command === undefined || input.command.operation === "reconcile-promoted",
+    },
+    {
+      field: "application.status",
+      requires: (input) => input.command === undefined || input.reconcileStatusMatches,
+    },
     {
       field: "application.rollbackSafe",
-      holds: command === undefined || application.rollbackSafe === input.reconcileRollbackSafe,
+      requires: (input) => input.application.rollbackSafe === input.reconcileRollbackSafe,
     },
-    { field: "syntheticLegacyBaseline", holds: command !== undefined || withoutCommandAllowed },
-  ];
+    {
+      field: "syntheticLegacyBaseline",
+      requires: (input) =>
+        input.command !== undefined ||
+        (input.syntheticLegacyBaseline && COMMAND_FALLBACK["reconcile-promoted"] !== null),
+    },
+  ],
+};
+
+/** The rows for this operation, evaluated. Nothing here branches on the operation itself. */
+function operationChecks(input: ProofInput): Array<{ field: string; holds: boolean }> {
+  const rows =
+    input.completion === undefined ? [] : (OPERATION_PROOF_CHECKS[input.completion.operation] ?? []);
+  return rows.map((row) => ({ field: row.field, holds: row.requires(input) }));
+}
+
+type Pair = [string, Record<string, unknown> | undefined, Record<string, unknown>];
+
+/** A completion must always agree, so a missing one is a row with nothing to compare. */
+function completionPairs(input: ProofInput): Pair[] {
+  const { application, completion } = input;
+  return completion === undefined
+    ? [["completion", undefined, {}]]
+    : [["completion", completionView(completion), applicationCompletionView(application)]];
+}
+
+/** A missing command is the legacy Phase-2 shape, so it contributes no row at all. */
+function commandPairs(input: ProofInput): Pair[] {
+  const { application, command } = input;
+  return command === undefined
+    ? []
+    : [["command", commandView(command), applicationCommandView(application)]];
+}
+
+/** Every field the pairs disagree about, named `record.field`. */
+function pairMismatches(pairs: Pair[]): string[] {
+  const failed: string[] = [];
+  for (const [name, actual, expected] of pairs) {
+    if (actual === undefined) {
+      failed.push(name);
+      continue;
+    }
+    failed.push(...prefixed(name, mismatchedFields(actual, expected)));
+  }
+  return failed;
 }
 
 /** Dot-paths of the fields where `actual` disagrees with `expected`; empty means agreement. */
@@ -399,27 +456,13 @@ export class EvolutionApplicationJournal {
    * says 'adopted'".
    */
   private proofMismatches(input: ProofInput): string[] {
-    const { application, completion, command } = input;
-    const pairs: Array<[string, Record<string, unknown> | undefined, Record<string, unknown>]> = [
-      [
-        "completion",
-        completion === undefined ? undefined : completionView(completion),
-        applicationCompletionView(application),
-      ],
-      [
-        "command",
-        command === undefined ? undefined : commandView(command),
-        applicationCommandView(application),
-      ],
+    const { application } = input;
+    // The pairs are generated by their own functions: a record that must agree contributes
+    // one row, and a record that may legitimately be absent contributes none.
+    const mismatches = [
+      ...pairMismatches(completionPairs(input)),
+      ...pairMismatches(commandPairs(input)),
     ];
-    // A missing completion is always a mismatch. A missing command is not: it is the
-    // legacy Phase-2 shape, and each operation decides for itself whether that is allowed
-    // (`operationChecks`, plus the catalogRevisionBefore check below).
-    const mismatches: string[] = completion === undefined ? ["completion"] : [];
-    for (const [name, actual, expected] of pairs) {
-      if (actual === undefined) continue;
-      mismatches.push(...prefixed(name, mismatchedFields(actual, expected)));
-    }
     const checks: Array<{ field: string; holds: boolean }> = [
       { field: "proposal", holds: input.proposal !== undefined },
       { field: "expectedAfterTarget", holds: input.expectedAfterTarget !== null },
@@ -445,9 +488,9 @@ export class EvolutionApplicationJournal {
       {
         field: COMMAND_FALLBACK.fallback,
         holds:
-          command !== undefined ||
-          completion === undefined ||
-          completion.catalogRevisionBefore === application.catalogRevision,
+          input.command !== undefined ||
+          input.completion === undefined ||
+          input.completion.catalogRevisionBefore === application.catalogRevision,
       },
       ...operationChecks(input),
     ];
