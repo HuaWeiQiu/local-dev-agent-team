@@ -3074,6 +3074,90 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
     },
   );
 
+  it("finishes the promotion when the prompt commit landed but the catalog did not", async () => {
+    // The mirror of the interrupted-write world: here the commit DID land, so the change is
+    // real and only the catalog is behind. Refusing would leave the two halves of the record
+    // disagreeing forever; the recovery must recognise its own commit and finish promoting.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    const candidate = Buffer.from("Prompt committed but never promoted\n", "utf8");
+    await harness.coordinator.propose({
+      id: "committed-not-promoted",
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation("committed-not-promoted");
+    await harness.coordinator.evaluateServerPreflight("committed-not-promoted");
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "committed-not-promoted",
+      operator,
+    });
+    const headBefore = await gitText(harness.root, ["rev-parse", "HEAD"]);
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "committed-not-promoted-command",
+        proposalId: "committed-not-promoted",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: the commit is in, the catalog is not.
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).not.toBe(headBefore);
+    expect(harness.catalog.getProposal("committed-not-promoted")).toMatchObject({
+      status: "evaluated",
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("committed-not-promoted")).toMatchObject({
+      status: "promoted",
+    });
+    expect(await readFile(path.join(harness.root, promptPath))).toEqual(candidate);
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "committed-not-promoted-command",
+          status: "applied",
+        }),
+      ]),
+    );
+  });
+
+  it("refuses to restore into a tree someone else has changed", async () => {
+    // A restore rewrites the prompt file and then checks the tree. If other work is sitting
+    // uncommitted, putting the original bytes back would mix two unrelated changes in one
+    // working tree, so the recovery stops and asks a human instead of guessing.
+    const harness = await interruptedPromptWorld("dirty-tree");
+    await harness.coordinator.close();
+    // A tracked file edited in place, not just an untracked stray: that is the shape a person
+    // leaves behind when they are mid-change in the same repository.
+    const readme = path.join(harness.root, "README.md");
+    await writeFile(readme, `${await readFile(readme, "utf8")}someone else's edit\n`, "utf8");
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      recoveryRequired: true,
+    });
+    expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+    expect(await readFile(readme, "utf8")).toContain("someone else's edit");
+  });
+
   it("cleans the temp files an interrupted prompt write left behind", async () => {
     // One world covers all three branches of the cleanup: a matching temp file is removed, an
     // unrelated file is kept, and a non-file entry with the same name shape is left alone.
