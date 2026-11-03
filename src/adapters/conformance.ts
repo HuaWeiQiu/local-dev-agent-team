@@ -47,11 +47,21 @@ export function adapterRoleWarning(role: string, profile: AgentProfile): string 
   return undefined;
 }
 
-export function assertAdapterContract(adapter: AgentAdapter): void {
-  assertIdentity(adapter);
-  assertDeclarationLists(adapter);
-  if (typeof adapter.contract.structuredOutput !== "boolean") {
-    throw new Error(`Adapter '${adapter.name}' declares invalid structured-output support`);
+/**
+ * `unknown` because a contract check is exactly the place that receives material
+ * nobody has verified yet: the argument comes from a plugin manifest, from a
+ * config file, or from a test that deliberately breaks one field. Declaring the
+ * verified type made every such caller cast its way in.
+ */
+export function assertAdapterContract(adapter: unknown): void {
+  if (!adapter || typeof adapter !== "object" || !("contract" in adapter)) {
+    throw new Error("Adapter contract must be an object that declares a contract");
+  }
+  const candidate = adapter as AgentAdapter;
+  assertIdentity(candidate);
+  assertDeclarationLists(candidate);
+  if (typeof candidate.contract.structuredOutput !== "boolean") {
+    throw new Error(`Adapter '${candidate.name}' declares invalid structured-output support`);
   }
 }
 

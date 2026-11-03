@@ -66,7 +66,7 @@ describe("assertAdapterContract", () => {
   it("rejects a bad name, contract and duplicate declarations", () => {
     expect(() => assertAdapterContract(adapter({ name: "Bad Name" }))).toThrow(/Invalid agent adapter name/);
     expect(() =>
-      assertAdapterContract(adapter({ contract: { ...adapter().contract, version: 2 } as never })),
+      assertAdapterContract({ ...adapter(), contract: { ...adapter().contract, version: 2 } }),
     ).toThrow(/unsupported contract/);
     expect(() =>
       assertAdapterContract(adapter({ supportedReasoning: ["low", "low"] })),
@@ -75,11 +75,16 @@ describe("assertAdapterContract", () => {
       assertAdapterContract(adapter({ supportedReasoning: [] })),
     ).toThrow(/at least one/i);
     expect(() =>
-      assertAdapterContract(adapter({ supportedReasoning: ["nope"] as never })),
+      assertAdapterContract({ ...adapter(), supportedReasoning: ["nope"] }),
     ).toThrow(/unsupported reasoning level/i);
     expect(() =>
-      assertAdapterContract(adapter({ contract: { ...adapter().contract, structuredOutput: "yes" } as never })),
+      assertAdapterContract({ ...adapter(), contract: { ...adapter().contract, structuredOutput: "yes" } }),
     ).toThrow(/structured-output/);
+    // The parameter is unverified input now, so something that is not even a
+    // carrier has to be rejected by this check rather than by a TypeError
+    // somewhere inside it.
+    expect(() => assertAdapterContract(null)).toThrow(/must be an object/);
+    expect(() => assertAdapterContract({ name: "kimi" })).toThrow(/must be an object/);
   });
 });
 
