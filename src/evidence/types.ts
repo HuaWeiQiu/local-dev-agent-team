@@ -7,6 +7,14 @@ export interface EvidenceCheck {
   label: string;
   status: EvidenceCheckStatus;
   detail: string;
+  /**
+   * True when the check passed because nothing was required, not because the
+   * thing was done. `status: "pass"` alone cannot tell those apart, and "did the
+   * work" and "never needed to" call for different answers when a run is
+   * audited — so the distinction has to exist in the payload, not only in the
+   * wording of `detail`.
+   */
+  skipped?: boolean;
 }
 
 export interface EvidenceArtifact {
