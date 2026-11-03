@@ -39,6 +39,14 @@ import {
 } from "./application-shared.js";
 
 /** Dependencies shared by every repository-local evolution target mutation. */
+/** What a prompt target looks like on disk, once it has been vetted. */
+export type PromptTargetFacts = {
+  readonly relativePath: string;
+  readonly absolute: string;
+  /** The permission bits to preserve across the replace. */
+  readonly mode: number;
+};
+
 export interface EvolutionApplicationTargetEnvironment {
   readonly io: EvolutionApplicationFileIo;
   /** Canonical repository root shared by the catalog, strategies, and Git manager. */
@@ -237,11 +245,22 @@ export class EvolutionApplicationTargets {
     mode: "apply" | "rollback",
     authorization: ExactTrackedFileCommitAuthorization,
   ): Promise<void> {
+    const relativePath = this.assertPromptCandidate(proposal);
+    const target = await this.describePromptTarget(relativePath);
+    const content = await this.readPromptObject(desiredDigest);
+    const currentBytes = await this.assertPromptTargetUnchanged(target.absolute, target, expectedBefore);
+    await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
+    await this.writePromptAtomically(target.absolute, content, target.mode);
+    await this.assertPromptWriteLanded(target.absolute, desiredDigest, target.mode);
+    await this.commitPromptChange(authorization, mode, relativePath, decision);
+  }
+
+  /** Only a role-prompt candidate may be applied here, and only at a configured prompt path. */
+  assertPromptCandidate(proposal: EvolutionProposal): string {
     if (proposal.candidate.kind !== "role-prompt") {
       throw new EvolutionApplicationError("POLICY_DENIED", "Not a role-prompt candidate");
     }
     const relativePath = proposal.candidate.path;
-    // Configured promptFile only
     const configured = Object.values(this.#loaded.config.roles ?? {}).some(
       (role) => role && typeof role === "object" && role.promptFile === relativePath,
     );
@@ -251,12 +270,17 @@ export class EvolutionApplicationTargets {
         `Prompt path '${relativePath}' is not a configured role promptFile`,
       );
     }
+    return relativePath;
+  }
 
-    const content = await this.readPromptObject(desiredDigest);
+  /**
+   * What is at the prompt path right now, and what is safe to assume about it. Evolution
+   * never creates or deletes a prompt file: it replaces the bytes of one that already exists
+   * as a regular, non-symlinked, sanctioned-permission file inside the repository.
+   */
+  async describePromptTarget(relativePath: string): Promise<PromptTargetFacts> {
     const absolute = path.resolve(this.#root, relativePath);
     assertCanonicalInsideRoot(this.#root, absolute, "Prompt target");
-
-    // Must already exist as tracked regular file — never create/delete
     let info: Awaited<ReturnType<typeof lstat>>;
     try {
       info = await this.#io.lstat(absolute);
@@ -281,24 +305,31 @@ export class EvolutionApplicationTargets {
         `Prompt target '${relativePath}' must not use special permission bits`,
       );
     }
-    const canonicalTarget = await this.#io.realpath(absolute);
-    if (canonicalTarget !== absolute) {
+    if ((await this.#io.realpath(absolute)) !== absolute) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
         `Prompt target '${relativePath}' must not traverse symbolic links`,
       );
     }
+    return { relativePath, absolute, mode: info.mode & 0o777 };
+  }
 
-    // Snapshot current bytes into the local object store for recovery/rollback.
-    // Prompt files must contain no secrets; these objects are local recovery only.
+  /**
+   * The preview the operator approved is still the truth: same bytes, same permissions, and
+   * still something a prompt file can be (UTF-8, bounded). Anything else means the world
+   * moved between preview and apply.
+   */
+  async assertPromptTargetUnchanged(
+    absolute: string,
+    target: PromptTargetFacts,
+    expectedBefore: TargetDigestState,
+  ): Promise<Buffer> {
     const currentBytes = await this.#io.readFile(absolute);
-    if (
-      sha256Bytes(currentBytes) !== expectedBefore.digest ||
-      (expectedBefore.mode !== undefined && (info.mode & 0o777) !== expectedBefore.mode)
-    ) {
+    const modeDrifted = expectedBefore.mode !== undefined && target.mode !== expectedBefore.mode;
+    if (sha256Bytes(currentBytes) !== expectedBefore.digest || modeDrifted) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' changed after preview`,
+        `Prompt target '${target.relativePath}' changed after preview`,
       );
     }
     try {
@@ -306,27 +337,34 @@ export class EvolutionApplicationTargets {
     } catch {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' is not valid UTF-8`,
+        `Prompt target '${target.relativePath}' is not valid UTF-8`,
       );
     }
     if (currentBytes.byteLength > EVOLUTION_PROMPT_MATERIAL_MAX_BYTES) {
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Prompt target '${relativePath}' exceeds material size limit`,
+        `Prompt target '${target.relativePath}' exceeds material size limit`,
       );
     }
-    await this.ingestPromptMaterial(sha256Bytes(currentBytes), currentBytes);
+    return currentBytes;
+  }
 
+  /**
+   * Replace the bytes atomically: write a sibling temp file, fsync it, rename it over the
+   * target, then fsync the directory. A failure after the rename is not "the write failed" —
+   * the new bytes are already in place — so it is reported as recovery, not drift.
+   */
+  async writePromptAtomically(absolute: string, content: Buffer, mode: number): Promise<void> {
     const directory = path.dirname(absolute);
     const temporaryPath = path.join(directory, promptTempName(path.basename(absolute)));
     let renamed = false;
     try {
       await this.#io.beforeAtomicStage?.("open");
-      const handle = await this.#io.open(temporaryPath, "wx", info.mode & 0o777);
+      const handle = await this.#io.open(temporaryPath, "wx", mode);
       try {
         await this.#io.beforeAtomicStage?.("write");
         await handle.writeFile(content);
-        await this.#io.chmod(temporaryPath, info.mode & 0o777);
+        await this.#io.chmod(temporaryPath, mode);
         await this.#io.beforeAtomicStage?.("file-sync");
         await handle.sync();
       } finally {
@@ -336,7 +374,7 @@ export class EvolutionApplicationTargets {
       if ((await this.#io.realpath(directory)) !== directory) {
         throw new EvolutionApplicationError(
           "TARGET_DRIFTED",
-          `Prompt parent directory changed before rename: ${relativePath}`,
+          `Prompt parent directory changed before rename: ${path.basename(absolute)}`,
         );
       }
       await this.#io.rename(temporaryPath, absolute);
@@ -345,39 +383,57 @@ export class EvolutionApplicationTargets {
       await this.#io.syncDirectory(directory);
     } catch (error) {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
+      const detail = error instanceof Error ? error.message : String(error);
       if (renamed) {
         throw new EvolutionApplicationError(
           "RECOVERY_REQUIRED",
-          `Prompt rename completed but directory fsync failed; recovery required: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `Prompt rename completed but directory fsync failed; recovery required: ${detail}`,
         );
       }
       throw new EvolutionApplicationError(
         "TARGET_DRIFTED",
-        `Failed to write prompt target '${relativePath}': ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Failed to write prompt target '${path.basename(absolute)}': ${detail}`,
       );
     }
+  }
 
-    // Verify digest after write
+  /** The bytes on disk after the replace must be the bytes the object store holds. */
+  async assertPromptWriteLanded(
+    absolute: string,
+    desiredDigest: string,
+    mode: number,
+  ): Promise<void> {
     const written = await this.#io.readFile(absolute);
-    const writtenDigest = sha256Bytes(written);
-    if (writtenDigest !== desiredDigest) {
+    if (sha256Bytes(written) !== desiredDigest) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target digest mismatch after write for '${relativePath}'`,
+        `Prompt target digest mismatch after write for '${path.basename(absolute)}'`,
       );
     }
     const writtenInfo = await this.#io.lstat(absolute);
-    if (!writtenInfo.isFile() || writtenInfo.isSymbolicLink() || (writtenInfo.mode & 0o777) !== (info.mode & 0o777)) {
+    if (
+      !writtenInfo.isFile() ||
+      writtenInfo.isSymbolicLink() ||
+      (writtenInfo.mode & 0o777) !== mode
+    ) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
-        `Prompt target permissions changed unexpectedly for '${relativePath}'`,
+        `Prompt target permissions changed unexpectedly for '${path.basename(absolute)}'`,
       );
     }
+  }
 
+  /**
+   * Commit exactly that one file. The message names the direction and the operator so the
+   * history says who applied or rolled back what; the prompt template cache is dropped
+   * afterwards because agents would otherwise keep serving the previous text.
+   */
+  async commitPromptChange(
+    authorization: ExactTrackedFileCommitAuthorization,
+    mode: "apply" | "rollback",
+    relativePath: string,
+    decision: HumanDecision,
+  ): Promise<void> {
     try {
       await this.#git.commitExactTrackedFile(
         authorization,
@@ -388,7 +444,6 @@ export class EvolutionApplicationTargets {
     } catch (error) {
       throw mapGitError(error);
     }
-
     clearPromptTemplateCache();
   }
 
