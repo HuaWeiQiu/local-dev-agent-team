@@ -69,10 +69,10 @@ describe("assertAdapterContract", () => {
       assertAdapterContract(adapter({ contract: { ...adapter().contract, version: 2 } as never })),
     ).toThrow(/unsupported contract/);
     expect(() =>
-      assertAdapterContract(adapter({ supportedReasoning: ["low", "low"] as never })),
+      assertAdapterContract(adapter({ supportedReasoning: ["low", "low"] })),
     ).toThrow(/unique|duplicate/i);
     expect(() =>
-      assertAdapterContract(adapter({ supportedReasoning: [] as never })),
+      assertAdapterContract(adapter({ supportedReasoning: [] })),
     ).toThrow(/at least one/i);
     expect(() =>
       assertAdapterContract(adapter({ supportedReasoning: ["nope"] as never })),

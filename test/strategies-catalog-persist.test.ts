@@ -56,7 +56,7 @@ describe("catalog persist failure modes", () => {
           }
           const fs = await import("node:fs/promises");
           return await fs.open(...args);
-        }) as never,
+        }),
       },
     });
 
