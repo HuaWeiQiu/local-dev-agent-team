@@ -4,8 +4,10 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  lstat,
   readdir,
   rename,
+  rm,
   symlink,
   rm,
   stat,
@@ -2813,7 +2815,7 @@ describe("the restored state validator refuses states the catalog disagrees with
  * | target written, catalog not advanced (prompt)     | `restoreInterruptedPrompt` success path; `verifyPromptGitOutcome` false arm |
  * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
  * | pending snapshot lost its digest                  | **unreachable**: the journal schema refuses the document first ("prompt presence and digest disagree"), asserted below |
- * | target replaced by a symlink or a non-file        | `restoreInterruptedPrompt` "not a safe regular file" arm |
+ * | target replaced by a symlink                     | ✅ world covered: recovery kept, link and its target untouched. The `"not a safe regular file"` arm itself stays 0 — the live-target read refuses upstream first (measured: entry hit, arm not) |
  * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
  * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
  * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
@@ -3044,6 +3046,33 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
       /pending\.beforeTarget: prompt presence and digest disagree/,
     );
   });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses to restore when the target was replaced by a symlink",
+    async () => {
+      // Creating symlinks on Windows needs a privilege the CI user does not have; skipped
+      // there rather than assuming "our CI only runs unix".
+      //
+      // A restore must never write through a link: the path may still look like the prompt
+      // while pointing somewhere else entirely, and following it would corrupt a file that
+      // was never part of the change. Fail closed, and leave the world as found.
+      const harness = await interruptedPromptWorld("target-symlink");
+      await harness.coordinator.close();
+      const target = path.join(harness.root, promptPath);
+      const outside = path.join(harness.root, "outside-prompt.md");
+      await writeFile(outside, "outside content\n", "utf8");
+      await rm(target);
+      await symlink(outside, target);
+
+      const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+      expect(reopened.coordinator.getApplicationState()).toMatchObject({
+        recoveryRequired: true,
+      });
+      expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+      expect((await lstat(target)).isSymbolicLink()).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("outside content\n");
+    },
+  );
 
   it("cleans the temp files an interrupted prompt write left behind", async () => {
     // One world covers all three branches of the cleanup: a matching temp file is removed, an
