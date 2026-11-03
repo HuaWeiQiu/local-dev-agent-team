@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
+import type { ComponentProps } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -7,7 +8,7 @@ import { ExperienceDetail } from "../web/src/components/experience/ExperienceDet
 import { actionsFor, conditionLabels, portabilityLabel, tagLabels } from "../web/src/components/experience/detail/model.js";
 import type { ExperienceEntry } from "../web/src/types.js";
 
-function entry(patch: Record<string, unknown> = {}): ExperienceEntry {
+function entry(patch: Partial<ExperienceEntry> = {}): ExperienceEntry {
   return {
     id: "e1",
     project: "demo",
@@ -24,10 +25,12 @@ function entry(patch: Record<string, unknown> = {}): ExperienceEntry {
     createdAt: "2026-10-30T00:00:00.000Z",
     updatedAt: "2026-10-30T12:00:00.000Z",
     ...patch,
-  } as unknown as ExperienceEntry;
+  };
 }
 
-function props(patch: Record<string, unknown> = {}) {
+type DetailProps = ComponentProps<typeof ExperienceDetail>;
+
+function props(patch: Partial<DetailProps> = {}): DetailProps {
   return {
     entry: entry(),
     busy: false,
@@ -36,7 +39,7 @@ function props(patch: Record<string, unknown> = {}) {
     onShare: vi.fn(),
     onRetire: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
 describe("experience detail model", () => {
@@ -49,10 +52,10 @@ describe("experience detail model", () => {
     const highSensitivity = entry({ status: "verified", sensitivity: "high" });
     expect(actionsFor(highSensitivity).share).toBe(false);
 
-    const projectOnly = entry({ status: "verified", portability: "project-only" });
+    const projectOnly = entry({ status: "verified", portability: "project-bound" });
     expect(actionsFor(projectOnly).share).toBe(false);
 
-    const shared = entry({ status: "shared", scope: "shared" });
+    const shared = entry({ status: "retired", scope: "shared" });
     expect(actionsFor(shared).readOnly).toBe(true);
 
     const retired = entry({ status: "retired" });
@@ -63,14 +66,14 @@ describe("experience detail model", () => {
     expect(conditionLabels(entry())).toHaveLength(5);
     expect(tagLabels(entry())).toHaveLength(6);
     expect(portabilityLabel(entry())).toBe("可跨项目");
-    expect(portabilityLabel(entry({ portability: "project-only" }))).toBe("仅本项目");
+    expect(portabilityLabel(entry({ portability: "project-bound" }))).toBe("仅本项目");
   });
 });
 
 describe("ExperienceDetail", () => {
   it("renders a candidate with promote and reject", async () => {
     const p = props();
-    render(<ExperienceDetail {...(p as object)} />);
+    render(<ExperienceDetail {...(p)} />);
     expect(screen.getByText("并发刷新要先合并再写")).toBeVisible();
     expect(screen.getByText("候选")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: /晋升/ }));
@@ -81,7 +84,7 @@ describe("ExperienceDetail", () => {
 
   it("offers share and retire for a verified, portable entry", async () => {
     const p = props({ entry: entry({ status: "verified" }) });
-    render(<ExperienceDetail {...(p as object)} />);
+    render(<ExperienceDetail {...(p)} />);
     await userEvent.click(screen.getByRole("button", { name: /共享/ }));
     await userEvent.click(screen.getByRole("button", { name: /退役/ }));
     expect(p.onShare).toHaveBeenCalled();
@@ -89,28 +92,28 @@ describe("ExperienceDetail", () => {
   });
 
   it("shows the read-only hint when nothing applies", () => {
-    render(<ExperienceDetail {...(props({ entry: entry({ status: "shared", scope: "shared" }) }) as object)} />);
+    render(<ExperienceDetail {...(props({ entry: entry({ status: "retired", scope: "shared" }) }))} />);
     expect(screen.getByText("只读")).toBeVisible();
   });
 
   it("explains a rejection reason", () => {
-    render(<ExperienceDetail {...(props({ entry: entry({ failureReason: "证据不足" }) }) as object)} />);
+    render(<ExperienceDetail {...(props({ entry: entry({ failureReason: "证据不足" }) }))} />);
     expect(screen.getByText(/证据不足/)).toBeVisible();
   });
 
   it("says when there are no conditions and hides empty tags", () => {
-    render(<ExperienceDetail {...(props({ entry: entry({ conditions: [], tags: [] }) }) as object)} />);
+    render(<ExperienceDetail {...(props({ entry: entry({ conditions: [], tags: [] }) }))} />);
     expect(screen.getByText("无")).toBeVisible();
     expect(screen.queryByText("标签")).toBeNull();
   });
 
   it("disables the actions while busy", () => {
-    render(<ExperienceDetail {...(props({ busy: true }) as object)} />);
+    render(<ExperienceDetail {...(props({ busy: true }))} />);
     expect(screen.getByRole("button", { name: /晋升/ })).toBeDisabled();
   });
 
   it("shows source, hits and update time", () => {
-    render(<ExperienceDetail {...(props() as object)} />);
+    render(<ExperienceDetail {...(props())} />);
     expect(screen.getByText("来源")).toBeVisible();
     expect(screen.getByText("命中")).toBeVisible();
     expect(screen.getByText("3")).toBeVisible();
