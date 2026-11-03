@@ -82,13 +82,22 @@ const DEFAULT_IO = {
  * Why not ``file://${argv[1]}``: on Windows `argv[1]` is `C:\...` while `import.meta.url` is
  * `file:///C:/...`, so that comparison is silently false and a guarded entry never runs —
  * the failure mode is a build that does nothing, which is far harder to diagnose than a
- * crash. Normalising the drive prefix here keeps the rule platform independent, and that is
- * also what lets a macOS test prove the Windows shape on a machine that has no `C:` drive.
+ * crash.
+ *
+ * Why a drive path does not go through `pathToFileURL` either: on Windows that helper
+ * resolves `/D:/...` against the *current* drive and produces `\D:\...`, a URL naming a
+ * different file, so the guard stays false for the same silent reason. The URL API has no
+ * notion of a platform, so this branch is the same code on every runner — which is also what
+ * lets a macOS test prove the Windows shape on a machine that has no `D:` drive.
  */
 export function argvToModuleUrl(argvPath) {
   const slashed = argvPath.replaceAll("\\", "/");
-  const absolute = /^[A-Za-z]:\//.test(slashed) ? `/${slashed}` : slashed;
-  return pathToFileURL(absolute).href;
+  if (/^[A-Za-z]:\//.test(slashed)) {
+    const url = new URL("file:///");
+    url.pathname = `/${slashed}`;
+    return url.href;
+  }
+  return pathToFileURL(slashed).href;
 }
 
 /** Whether an argv path names the module being evaluated. */

@@ -28,6 +28,23 @@ describe("module entry guard", () => {
 
   it("encodes the characters a URL cannot carry verbatim on both sides", () => {
     expect(isMainModule("file:///repo/my%20scripts/x.mjs", "/repo/my scripts/x.mjs")).toBe(true);
+    expect(argvToModuleUrl("C:\\repo\\my scripts\\x.mjs")).toBe(
+      "file:///C:/repo/my%20scripts/x.mjs",
+    );
+    expect(argvToModuleUrl("C:\\a\\b#c\\x.mjs")).toBe("file:///C:/a/b%23c/x.mjs");
+  });
+
+  it("builds a drive-path URL without going through the platform, which mangles it", () => {
+    // `pathToFileURL("/D:/...")` resolves against the current drive on Windows and yields a
+    // URL containing `%5C` — the shape that made the windows-latest packaging job skip the
+    // entry in silence. Asserting the *absence* of that shape is what a macOS runner can
+    // check about a Windows path.
+    const url = argvToModuleUrl("D:\\a\\local-dev-agent-team\\scripts\\prepare.mjs");
+    expect(url).toBe(
+      "file:///D:/a/local-dev-agent-team/scripts/prepare.mjs",
+    );
+    expect(url).not.toContain("%5C");
+    expect(url.includes("\\")).toBe(false);
   });
 });
 
