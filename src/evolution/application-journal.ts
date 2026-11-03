@@ -31,8 +31,10 @@ import {
   targetStatesEqual,
   type ApplicationDocument,
   type ApplicationPayload,
+  type CompletedApplicationRecord,
   type ApplicationRecord,
   type ApplicationStatus,
+  type CommandIdempotencyBinding,
   type EvolutionApplicationFileIo,
   type EvolutionApplicationState,
   type PendingApplicationOperation,
@@ -42,6 +44,233 @@ import {
   assertSafeRegularFileOrMissing,
   type EvolutionApplicationTargets,
 } from "./application-target.js";
+
+/** One recorded proof against the application it claims to prove, field for field. */
+function completionView(completion: CompletedApplicationRecord): Record<string, unknown> {
+  return {
+    proposalId: completion.proposalId,
+    candidateDigest: completion.candidateDigest,
+    status: completion.status,
+    beforeTargetDigest: completion.beforeTargetDigest,
+    afterTargetDigest: completion.afterTargetDigest,
+    catalogRevisionAfter: completion.catalogRevisionAfter,
+    operator: completion.operator,
+    reason: completion.reason,
+    "humanDecision.actor": completion.humanDecision.actor,
+    "humanDecision.decidedAt": completion.humanDecision.decidedAt,
+  };
+}
+
+function applicationCompletionView(application: ApplicationRecord): Record<string, unknown> {
+  return {
+    proposalId: application.proposalId,
+    candidateDigest: application.candidateDigest,
+    status: application.status,
+    beforeTargetDigest: application.beforeTargetDigest,
+    afterTargetDigest: application.afterTargetDigest,
+    catalogRevisionAfter: application.catalogRevision,
+    operator: application.operator,
+    reason: application.reason,
+    "humanDecision.actor": application.operator,
+    "humanDecision.decidedAt": application.appliedAt,
+  };
+}
+
+function commandView(command: CommandIdempotencyBinding): Record<string, unknown> {
+  return {
+    operator: command.operator,
+    reason: command.reason,
+    "result.applicationStatus": command.result.applicationStatus,
+    "result.beforeTargetDigest": command.result.beforeTargetDigest,
+    "result.afterTargetDigest": command.result.afterTargetDigest,
+    "result.committedCatalogRevision": command.result.committedCatalogRevision,
+  };
+}
+
+function applicationCommandView(application: ApplicationRecord): Record<string, unknown> {
+  return {
+    operator: application.operator,
+    reason: application.reason,
+    "result.applicationStatus": application.status,
+    "result.beforeTargetDigest": application.beforeTargetDigest,
+    "result.afterTargetDigest": application.afterTargetDigest,
+    "result.committedCatalogRevision": application.catalogRevision,
+  };
+}
+
+/** The operation-specific half of the proof: each operation carries extra requirements. */
+/**
+ * The extra requirement each operation puts on its proof, as rows: a field name and a
+ * predicate. Adding an operation adds rows; it never adds a branch to `operationChecks`.
+ */
+const OPERATION_PROOF_CHECKS: Record<
+  string,
+  Array<{ field: string; requires: (input: ProofInput) => boolean }>
+> = {
+  "promote-and-apply": [
+    { field: "command", requires: (input) => input.command !== undefined },
+    {
+      field: "command.operation",
+      requires: (input) =>
+        input.command === undefined || input.command.operation === "promote-and-apply",
+    },
+    { field: "application.rollbackSafe", requires: (input) => input.application.rollbackSafe },
+    { field: "application.status", requires: (input) => input.application.status === "applied" },
+  ],
+  "reconcile-promoted": [
+    {
+      field: "completion.status",
+      requires: (input) => input.completion?.status === input.application.status,
+    },
+    {
+      field: "command.operation",
+      requires: (input) =>
+        input.command === undefined || input.command.operation === "reconcile-promoted",
+    },
+    {
+      field: "application.status",
+      requires: (input) => input.command === undefined || input.reconcileStatusMatches,
+    },
+    {
+      field: "application.rollbackSafe",
+      requires: (input) => input.application.rollbackSafe === input.reconcileRollbackSafe,
+    },
+    {
+      field: "syntheticLegacyBaseline",
+      requires: (input) =>
+        input.command !== undefined ||
+        (input.syntheticLegacyBaseline && COMMAND_FALLBACK["reconcile-promoted"] !== null),
+    },
+  ],
+};
+
+/** The rows for this operation, evaluated. Nothing here branches on the operation itself. */
+function operationChecks(input: ProofInput): Array<{ field: string; holds: boolean }> {
+  const rows =
+    input.completion === undefined ? [] : (OPERATION_PROOF_CHECKS[input.completion.operation] ?? []);
+  return rows.map((row) => ({ field: row.field, holds: row.requires(input) }));
+}
+
+type Pair = [string, Record<string, unknown> | undefined, Record<string, unknown>];
+
+/** A completion must always agree, so a missing one is a row with nothing to compare. */
+function completionPairs(input: ProofInput): Pair[] {
+  const { application, completion } = input;
+  return completion === undefined
+    ? [["completion", undefined, {}]]
+    : [["completion", completionView(completion), applicationCompletionView(application)]];
+}
+
+/** A missing command is the legacy Phase-2 shape, so it contributes no row at all. */
+function commandPairs(input: ProofInput): Pair[] {
+  const { application, command } = input;
+  return command === undefined
+    ? []
+    : [["command", commandView(command), applicationCommandView(application)]];
+}
+
+/** Every field the pairs disagree about, named `record.field`. */
+function pairMismatches(pairs: Pair[]): string[] {
+  const failed: string[] = [];
+  for (const [name, actual, expected] of pairs) {
+    if (actual === undefined) {
+      failed.push(name);
+      continue;
+    }
+    failed.push(...prefixed(name, mismatchedFields(actual, expected)));
+  }
+  return failed;
+}
+
+/** Dot-paths of the fields where `actual` disagrees with `expected`; empty means agreement. */
+export function mismatchedFields(
+  actual: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): string[] {
+  return Object.keys(expected).filter((field) => {
+    const wanted = expected[field];
+    const got = actual[field];
+    return wanted !== null && typeof wanted === "object"
+      ? sha256Canonical(got ?? null) !== sha256Canonical(wanted)
+      : got !== wanted;
+  });
+}
+
+/** The command an audit record claims, when it claims one at all. */
+function auditCommandId(audit: EvolutionCatalogSnapshot["auditRecords"][number]): string | undefined {
+  if (
+    audit.kind === "rejection" ||
+    audit.kind === "archive" ||
+    audit.kind === "unarchive" ||
+    audit.kind === "delete" ||
+    !("applicationCommandId" in audit)
+  ) {
+    return undefined;
+  }
+  return audit.applicationCommandId;
+}
+
+/** The fields whose check failed, in declaration order — every check is evaluated. */
+function settle(checks: Array<{ field: string; holds: boolean }>): string[] {
+  return checks.filter((check) => !check.holds).map((check) => check.field);
+}
+
+function prefixed(prefix: string, fields: string[]): string[] {
+  return fields.map((field) => `${prefix}.${field}`);
+}
+
+const AUDIT_KIND_BY_OPERATION: Record<string, "promotion" | "rollback" | undefined> = {
+  "promote-and-apply": "promotion",
+  "rollback-applied": "rollback",
+};
+
+/**
+ * Which operation may legitimately carry **no** idempotency binding, and what vouches for it
+ * instead. This is not an oversight to be tidied away: a legacy Phase-2 promotion was
+ * recorded in the catalog before the journal existed, so its proof has no command to point
+ * at. Whoever "unifies" the checks below must delete this table first — and this comment
+ * says why that would be wrong.
+ */
+const COMMAND_FALLBACK = {
+  // The journal always writes a binding for work it started.
+  "promote-and-apply": null,
+  // A captured legacy predecessor is proven by its own synthetic baseline, not by a command.
+  "reconcile-promoted": "syntheticLegacyBaseline",
+  // Any other operation proves itself through the catalog revision the completion recorded.
+  fallback: "completion.catalogRevisionBefore",
+} as const;
+
+/** A command that could own a synthetic legacy predecessor. */
+type SyntheticOwner = {
+  commandId: string;
+  proposalId: string;
+  reason: string;
+  humanDecision: HumanDecision;
+};
+
+/** What a proof check needs: the record, what the catalog says, and the derived flags. */
+type ProofInput = {
+  application: ApplicationRecord;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  completion: CompletedApplicationRecord | undefined;
+  command: CommandIdempotencyBinding | undefined;
+  expectedAfterTarget: TargetDigestState | null;
+  reconcileStatusMatches: boolean;
+  reconcileRollbackSafe: boolean;
+  syntheticLegacyBaseline: boolean;
+};
+
+/** Everything the restored-state checks read: one catalog snapshot and the journal state. */
+type RestoredStateContext = {
+  revision: number;
+  snapshot: EvolutionCatalogSnapshot;
+  proposals: Map<string, EvolutionProposal>;
+  activeByTarget: Map<string, string>;
+  promotionByProposal: Map<string, PromotionRecord>;
+  completedByCommand: Map<string, CompletedApplicationRecord>;
+  syntheticCompletionIds: Set<string>;
+};
 
 export interface EvolutionApplicationJournalEnvironment {
   readonly io: EvolutionApplicationFileIo;
@@ -152,6 +381,231 @@ export class EvolutionApplicationJournal {
     }
   }
 
+  /**
+   * One recorded application proof against the catalog, at the depth of its predecessor
+   * chain. A proof only means something while the catalog still agrees with it: same
+   * candidate, same target, same completion, and — for a chained promotion — a predecessor
+   * that is itself valid.
+   */
+  private async validateApplicationProof(
+    application: ApplicationRecord,
+    input: RestoredStateContext,
+    parentCommandId: string | null = null,
+  ): Promise<void> {
+    const proposal = input.proposals.get(application.proposalId);
+    const completion = input.completedByCommand.get(application.commandId);
+    const command = this.#state.commands.get(application.commandId);
+    const expectedAfterTarget = proposal
+      ? await this.#targets.plannedAfterState(proposal, application.beforeTarget)
+      : null;
+    const reconcileMode = command?.previewTokenDigest.startsWith("reconcile:")
+      ? command.previewTokenDigest.slice("reconcile:".length)
+      : null;
+    const reconcileRollbackSafe = reconcileMode === "apply" ||
+      (command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null);
+    const reconcileStatusMatches =
+      (reconcileMode === "adopt" && application.status === "adopted") ||
+      (reconcileMode === "apply" && application.status === "applied");
+    const syntheticOwner = this.syntheticOwnerFor(application, input, parentCommandId);
+    const syntheticLegacyBaseline =
+      !command &&
+      syntheticOwner !== undefined &&
+      application.commandId.startsWith("legacy:") &&
+      application.status === "adopted" &&
+      application.previousApplication === null &&
+      !application.rollbackSafe &&
+      targetStatesEqual(application.beforeTarget, application.afterTarget) &&
+      application.reason ===
+        `Captured verified legacy predecessor while reconciling: ${syntheticOwner.reason}` &&
+      completion !== undefined &&
+      sha256Canonical(completion.humanDecision) ===
+        sha256Canonical(syntheticOwner.humanDecision);
+    if (syntheticLegacyBaseline) {
+      input.syntheticCompletionIds.add(application.commandId);
+    }
+    const mismatches = this.proofMismatches({
+      application,
+      revision: input.revision,
+      proposal,
+      completion,
+      command,
+      expectedAfterTarget,
+      reconcileStatusMatches,
+      reconcileRollbackSafe,
+      syntheticLegacyBaseline,
+    });
+    if (mismatches.length > 0) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid application state: application proof for '${application.proposalId}' does not match the catalog (${mismatches.join(", ")})`,
+      );
+    }
+    if (application.previousApplication) {
+      await this.validateApplicationProof(application.previousApplication, input, application.commandId);
+    }
+    
+  }
+
+  /**
+   * Which fields of a recorded proof disagree with the catalog, named by dot path.
+   *
+   * The comparisons used to be a single `&&` chain: every field added a clause, the whole
+   * thing counted as one enormous branch, and the refusal said only "does not match the
+   * catalog". Naming the fields keeps a new field from silently extending a chain and — the
+   * reason it matters — tells an operator *which* field disagreed, which is the difference
+   * between "state invalid" and "completion.status says 'applied' where the application
+   * says 'adopted'".
+   */
+  private proofMismatches(input: ProofInput): string[] {
+    const { application } = input;
+    // The pairs are generated by their own functions: a record that must agree contributes
+    // one row, and a record that may legitimately be absent contributes none.
+    const mismatches = [
+      ...pairMismatches(completionPairs(input)),
+      ...pairMismatches(commandPairs(input)),
+    ];
+    const checks: Array<{ field: string; holds: boolean }> = [
+      { field: "proposal", holds: input.proposal !== undefined },
+      { field: "expectedAfterTarget", holds: input.expectedAfterTarget !== null },
+      { field: "application.catalogRevision", holds: application.catalogRevision <= input.revision },
+      {
+        field: "application.afterTarget",
+        holds:
+          input.expectedAfterTarget === null ||
+          targetStatesEqual(application.afterTarget, input.expectedAfterTarget),
+      },
+      {
+        field: "catalog.candidateDigest",
+        holds:
+          input.proposal === undefined ||
+          computeCandidateDigest(input.proposal.candidate) === application.candidateDigest,
+      },
+      {
+        field: "catalog.target",
+        holds:
+          input.proposal === undefined ||
+          targetKey(targetFromCandidate(input.proposal.candidate)) === targetKey(application.target),
+      },
+      {
+        field: COMMAND_FALLBACK.fallback,
+        holds:
+          input.command !== undefined ||
+          input.completion === undefined ||
+          input.completion.catalogRevisionBefore === application.catalogRevision,
+      },
+      ...operationChecks(input),
+    ];
+    mismatches.push(...settle(checks));
+    return [...new Set(mismatches)];
+  }
+
+  /**
+   * What the state around a pending operation is supposed to look like. Kept apart from the
+   * comparison that uses it so a wrong *expectation* and a wrong *comparison* fail in
+   * different places: both used to live in one function, and a mismatch never said which of
+   * the two had gone wrong.
+   */
+  private async pendingExpectation(
+    pending: PendingApplicationOperation,
+    context: RestoredStateContext,
+  ): Promise<{
+    expectedOldActive: string | null;
+    expectedPreviousApplication: ApplicationRecord | null;
+    reconcileRestoredId: string | null | undefined;
+  }> {
+    const expectedOldActive =
+      pending.operation === "promote-and-apply"
+        ? pending.previousActiveProposalId
+        : pending.proposalId;
+    const expectedPreviousApplication = this.pendingPreviousApplication(pending);
+    if (pending.operation !== "reconcile-promoted") {
+      return { expectedOldActive, expectedPreviousApplication, reconcileRestoredId: undefined };
+    }
+    const reconcileRestoredId = (
+      await this.#catalog.preflightRollback(pending.proposalId, pending.humanDecision)
+    ).record.restoredActiveProposalId;
+    if (pending.previousApplication) {
+      await this.validateApplicationProof(pending.previousApplication, context, pending.commandId);
+    }
+    return { expectedOldActive, expectedPreviousApplication, reconcileRestoredId };
+  }
+
+  /** The application a pending operation replaces, if it replaces one. */
+  private pendingPreviousApplication(pending: PendingApplicationOperation): ApplicationRecord | null {
+    if (pending.operation === "promote-and-apply") {
+      return pending.previousActiveProposalId
+        ? (this.#state.applications.get(pending.previousActiveProposalId) ?? null)
+        : null;
+    }
+    if (pending.operation === "rollback-applied") {
+      return this.#state.applications.get(pending.proposalId) ?? null;
+    }
+    return pending.previousApplication;
+  }
+
+  /**
+   * Which catalog audit records a completion must have left behind. A table rather than a
+   * nested ternary: adding an operation means adding a row, and an operation with no audit
+   * (a reconciliation) is visibly the absence of a row rather than a fall-through.
+   */
+  /**
+   * The command that could have produced this "synthetic" legacy predecessor, if any.
+   *
+   * A legacy Phase-2 promotion was applied before the journal existed, so reconciliation
+   * records a predecessor whose command id is derived from the owner rather than stored.
+   * Finding that owner is its own question, asked only for records without a command.
+   */
+  private syntheticOwnerFor(
+    application: ApplicationRecord,
+    context: RestoredStateContext,
+    parentCommandId: string | null,
+  ): SyntheticOwner | undefined {
+    const owners: SyntheticOwner[] = [];
+    const pending = this.#state.pending;
+    if (
+      pending !== null &&
+      pending.operation === "reconcile-promoted" &&
+      parentCommandId === pending.commandId
+    ) {
+      owners.push({
+        commandId: pending.commandId,
+        proposalId: pending.proposalId,
+        reason: pending.reason,
+        humanDecision: pending.humanDecision,
+      });
+    }
+    for (const command of this.#state.commands.values()) {
+      if (command.operation !== "reconcile-promoted") continue;
+      if (parentCommandId !== null && command.commandId !== parentCommandId) continue;
+      const completion = context.completedByCommand.get(command.commandId);
+      if (completion === undefined) continue;
+      owners.push({
+        commandId: command.commandId,
+        proposalId: command.proposalId,
+        reason: command.reason,
+        humanDecision: completion.humanDecision,
+      });
+    }
+    return owners.find((owner) => this.ownerDerivedTheApplication(owner, application, context));
+  }
+
+  /** Whether this owner's derived command id and promotion chain explain the application. */
+  private ownerDerivedTheApplication(
+    owner: { commandId: string; proposalId: string },
+    application: ApplicationRecord,
+    context: RestoredStateContext,
+  ): boolean {
+    const ownerPromotion = context.promotionByProposal.get(owner.proposalId);
+    const expectedCommandId = `legacy:${sha256Canonical({
+      commandId: owner.commandId,
+      proposalId: application.proposalId,
+      target: application.afterTarget,
+    })}`;
+    return (
+      ownerPromotion?.previousActiveProposalId === application.proposalId &&
+      expectedCommandId === application.commandId
+    );
+  }
+
   async validateRestoredState(): Promise<void> {
     const { revision, snapshot } = await this.#catalog.readSnapshot();
     const proposals = new Map(snapshot.proposals.map((proposal) => [proposal.id, proposal]));
@@ -166,135 +620,17 @@ export class EvolutionApplicationJournal {
     const completedByCommand = new Map(
       this.#state.completed.map((record) => [record.commandId, record]),
     );
-    const syntheticCompletionIds = new Set<string>();
-    const validateApplication = async (
-      application: ApplicationRecord,
-      parentCommandId: string | null = null,
-    ): Promise<void> => {
-      const proposal = proposals.get(application.proposalId);
-      const completion = completedByCommand.get(application.commandId);
-      const command = this.#state.commands.get(application.commandId);
-      const expectedAfterTarget = proposal
-        ? await this.#targets.plannedAfterState(proposal, application.beforeTarget)
-        : null;
-      const reconcileMode = command?.previewTokenDigest.startsWith("reconcile:")
-        ? command.previewTokenDigest.slice("reconcile:".length)
-        : null;
-      const reconcileRollbackSafe = reconcileMode === "apply" ||
-        (command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null);
-      const reconcileStatusMatches =
-        (reconcileMode === "adopt" && application.status === "adopted") ||
-        (reconcileMode === "apply" && application.status === "applied");
-      const syntheticOwners: Array<{
-        commandId: string;
-        proposalId: string;
-        reason: string;
-        humanDecision: HumanDecision;
-      }> = [];
-      if (
-        parentCommandId === this.#state.pending?.commandId &&
-        this.#state.pending.operation === "reconcile-promoted"
-      ) {
-        syntheticOwners.push({
-          commandId: this.#state.pending.commandId,
-          proposalId: this.#state.pending.proposalId,
-          reason: this.#state.pending.reason,
-          humanDecision: this.#state.pending.humanDecision,
-        });
-      }
-      for (const ownerCommand of this.#state.commands.values()) {
-        if (
-          ownerCommand.operation !== "reconcile-promoted" ||
-          (parentCommandId !== null && ownerCommand.commandId !== parentCommandId)
-        ) {
-          continue;
-        }
-        const ownerCompletion = completedByCommand.get(ownerCommand.commandId);
-        if (!ownerCompletion) continue;
-        syntheticOwners.push({
-          commandId: ownerCommand.commandId,
-          proposalId: ownerCommand.proposalId,
-          reason: ownerCommand.reason,
-          humanDecision: ownerCompletion.humanDecision,
-        });
-      }
-      const syntheticOwner = syntheticOwners.find((owner) => {
-        const ownerPromotion = promotionByProposal.get(owner.proposalId);
-        const expectedCommandId = `legacy:${sha256Canonical({
-          commandId: owner.commandId,
-          proposalId: application.proposalId,
-          target: application.afterTarget,
-        })}`;
-        return (
-          ownerPromotion?.previousActiveProposalId === application.proposalId &&
-          expectedCommandId === application.commandId
-        );
-      });
-      const syntheticLegacyBaseline =
-        !command &&
-        syntheticOwner !== undefined &&
-        application.commandId.startsWith("legacy:") &&
-        application.status === "adopted" &&
-        application.previousApplication === null &&
-        !application.rollbackSafe &&
-        targetStatesEqual(application.beforeTarget, application.afterTarget) &&
-        application.reason ===
-          `Captured verified legacy predecessor while reconciling: ${syntheticOwner.reason}` &&
-        completion !== undefined &&
-        sha256Canonical(completion.humanDecision) ===
-          sha256Canonical(syntheticOwner.humanDecision);
-      if (syntheticLegacyBaseline) {
-        syntheticCompletionIds.add(application.commandId);
-      }
-      if (
-        !proposal ||
-        !completion ||
-        computeCandidateDigest(proposal.candidate) !== application.candidateDigest ||
-        targetKey(targetFromCandidate(proposal.candidate)) !== targetKey(application.target) ||
-        !expectedAfterTarget ||
-        !targetStatesEqual(application.afterTarget, expectedAfterTarget) ||
-        application.catalogRevision > revision ||
-        completion.proposalId !== application.proposalId ||
-        completion.candidateDigest !== application.candidateDigest ||
-        completion.status !== application.status ||
-        completion.beforeTargetDigest !== application.beforeTargetDigest ||
-        completion.afterTargetDigest !== application.afterTargetDigest ||
-        completion.catalogRevisionAfter !== application.catalogRevision ||
-        completion.operator !== application.operator ||
-        completion.reason !== application.reason ||
-        completion.humanDecision.actor !== application.operator ||
-        completion.humanDecision.decidedAt !== application.appliedAt ||
-        (command
-          ? command.operator !== application.operator ||
-            command.reason !== application.reason ||
-            command.result.applicationStatus !== application.status ||
-            command.result.beforeTargetDigest !== application.beforeTargetDigest ||
-            command.result.afterTargetDigest !== application.afterTargetDigest ||
-            command.result.committedCatalogRevision !== application.catalogRevision
-          : completion.catalogRevisionBefore !== application.catalogRevision) ||
-        (completion.operation === "promote-and-apply" &&
-          (!command ||
-            command.operation !== "promote-and-apply" ||
-            !application.rollbackSafe ||
-            application.status !== "applied")) ||
-        (completion.operation === "reconcile-promoted" &&
-          (completion.status !== application.status ||
-            (command
-              ? command.operation !== "reconcile-promoted" ||
-                !reconcileStatusMatches ||
-                application.rollbackSafe !== reconcileRollbackSafe
-              : !syntheticLegacyBaseline)))
-      ) {
-        throw new EvolutionPersistenceValidationError(
-          `Invalid application state: application proof for '${application.proposalId}' does not match the catalog`,
-        );
-      }
-      if (application.previousApplication) {
-        await validateApplication(application.previousApplication, application.commandId);
-      }
+    const context: RestoredStateContext = {
+      revision,
+      snapshot,
+      proposals,
+      activeByTarget,
+      promotionByProposal,
+      completedByCommand,
+      syntheticCompletionIds: new Set<string>(),
     };
     for (const application of this.#state.applications.values()) {
-      await validateApplication(application);
+      await this.validateApplicationProof(application, context);
       const activeId = activeByTarget.get(targetKey(application.target));
       const committedPendingRollback =
         this.#state.pending?.operation === "rollback-applied" &&
@@ -316,33 +652,8 @@ export class EvolutionApplicationJournal {
       const proposal = proposals.get(this.#state.pending.proposalId);
       const pendingTarget = proposal ? targetFromCandidate(proposal.candidate) : null;
       const activeId = pendingTarget ? activeByTarget.get(targetKey(pendingTarget)) ?? null : null;
-      const expectedOldActive =
-        this.#state.pending.operation === "promote-and-apply"
-          ? this.#state.pending.previousActiveProposalId
-          : this.#state.pending.proposalId;
-      const expectedPreviousApplication =
-        this.#state.pending.operation === "promote-and-apply"
-          ? this.#state.pending.previousActiveProposalId
-            ? (this.#state.applications.get(this.#state.pending.previousActiveProposalId) ?? null)
-            : null
-          : this.#state.pending.operation === "rollback-applied"
-            ? (this.#state.applications.get(this.#state.pending.proposalId) ?? null)
-            : this.#state.pending.previousApplication;
-      let reconcileRestoredId: string | null | undefined;
-      if (this.#state.pending.operation === "reconcile-promoted") {
-        reconcileRestoredId = (
-          await this.#catalog.preflightRollback(
-            this.#state.pending.proposalId,
-            this.#state.pending.humanDecision,
-          )
-        ).record.restoredActiveProposalId;
-        if (this.#state.pending.previousApplication) {
-          await validateApplication(
-            this.#state.pending.previousApplication,
-            this.#state.pending.commandId,
-          );
-        }
-      }
+      const { expectedOldActive, expectedPreviousApplication, reconcileRestoredId } =
+        await this.pendingExpectation(this.#state.pending, context);
       let expectedPendingBefore: TargetDigestState | null = null;
       let expectedPendingAfter: TargetDigestState | null = null;
       if (proposal) {
@@ -363,37 +674,64 @@ export class EvolutionApplicationJournal {
           );
         }
       }
-      if (
-        !proposal ||
-        computeCandidateDigest(proposal.candidate) !== this.#state.pending.candidateDigest ||
-        !pendingTarget ||
-        !expectedPendingAfter ||
-        !targetStatesEqual(this.#state.pending.afterTarget, expectedPendingAfter) ||
-        (expectedPendingBefore !== null &&
-          !targetStatesEqual(this.#state.pending.beforeTarget, expectedPendingBefore)) ||
-        targetKey(pendingTarget) !== targetKeyFromState(this.#state.pending.beforeTarget) ||
-        targetKey(pendingTarget) !== targetKeyFromState(this.#state.pending.afterTarget) ||
-        (revision !== this.#state.pending.catalogRevisionBefore &&
-          revision !== this.#state.pending.expectedCatalogRevisionAfter) ||
-        (revision === this.#state.pending.catalogRevisionBefore && activeId !== expectedOldActive) ||
-        sha256Canonical(this.#state.pending.previousApplication) !==
-          sha256Canonical(expectedPreviousApplication) ||
-        (this.#state.pending.operation === "reconcile-promoted" &&
-          (this.#state.pending.previousApplication?.proposalId ?? null) !== reconcileRestoredId)
-      ) {
+      const pending = this.#state.pending;
+      const mismatches = settle([
+        { field: "proposal", holds: proposal !== undefined },
+        {
+          field: "catalog.candidateDigest",
+          holds:
+            proposal === undefined ||
+            computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
+        },
+        { field: "expectedAfterTarget", holds: expectedPendingAfter !== null },
+        {
+          field: "afterTarget",
+          holds:
+            expectedPendingAfter === null ||
+            targetStatesEqual(pending.afterTarget, expectedPendingAfter),
+        },
+        {
+          field: "beforeTarget",
+          holds:
+            expectedPendingBefore === null ||
+            targetStatesEqual(pending.beforeTarget, expectedPendingBefore),
+        },
+        {
+          field: "beforeTarget.key",
+          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
+        },
+        {
+          field: "afterTarget.key",
+          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
+        },
+        {
+          field: "catalogRevision",
+          holds: revision === pending.catalogRevisionBefore || revision === pending.expectedCatalogRevisionAfter,
+        },
+        {
+          field: "activeProposal",
+          holds: revision !== pending.catalogRevisionBefore || activeId === expectedOldActive,
+        },
+        {
+          field: "previousApplication",
+          holds: sha256Canonical(pending.previousApplication) === sha256Canonical(expectedPreviousApplication),
+        },
+        {
+          field: "previousApplication.proposalId",
+          holds:
+            pending.operation !== "reconcile-promoted" ||
+            (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: pending operation '${this.#state.pending.commandId}' does not match the catalog`,
+          `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
         );
       }
     }
     for (const completed of this.#state.completed) {
       const proposal = proposals.get(completed.proposalId);
-      const expectedAuditKind =
-        completed.operation === "promote-and-apply"
-          ? "promotion"
-          : completed.operation === "rollback-applied"
-            ? "rollback"
-            : null;
+      const expectedAuditKind = AUDIT_KIND_BY_OPERATION[completed.operation] ?? null;
       const matchingAudit = expectedAuditKind
         ? snapshot.auditRecords.find(
             (record) =>
@@ -410,59 +748,84 @@ export class EvolutionApplicationJournal {
       const catalogMutationSucceeded =
         completed.status === "applied" || completed.status === "rolled-back";
       const command = this.#state.commands.get(completed.commandId);
-      if (
-        !proposal ||
-        computeCandidateDigest(proposal.candidate) !== completed.candidateDigest ||
-        completed.catalogRevisionBefore > completed.catalogRevisionAfter ||
-        completed.catalogRevisionAfter > revision ||
-        (!command && !syntheticCompletionIds.has(completed.commandId)) ||
-        (expectedAuditKind !== null && catalogMutationSucceeded !== Boolean(matchingAudit))
-      ) {
+      const mismatches = settle([
+        { field: "proposal", holds: proposal !== undefined },
+        {
+          field: "catalog.candidateDigest",
+          holds:
+            proposal === undefined ||
+            computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
+        },
+        {
+          field: "catalogRevisionBefore",
+          holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
+        },
+        { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= revision },
+        {
+          field: "command",
+          holds: command !== undefined || context.syntheticCompletionIds.has(completed.commandId),
+        },
+        {
+          field: "audit",
+          holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: completed operation '${completed.commandId}' does not match the catalog`,
+          `Invalid application state: completed operation '${completed.commandId}' does not match the catalog (${mismatches.join(", ")})`,
         );
       }
     }
     for (const command of this.#state.commands.values()) {
       const completed = completedByCommand.get(command.commandId);
       const catalogProposal = proposals.get(command.proposalId);
-      if (
-        !completed ||
-        completed.operation !== command.operation ||
-        completed.proposalId !== command.proposalId ||
-        !catalogProposal ||
-        !proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal)
-      ) {
+      const mismatches = settle([
+        { field: "completion", holds: completed !== undefined },
+        {
+          field: "completion.operation",
+          holds: completed === undefined || completed.operation === command.operation,
+        },
+        {
+          field: "completion.proposalId",
+          holds: completed === undefined || completed.proposalId === command.proposalId,
+        },
+        { field: "proposal", holds: catalogProposal !== undefined },
+        {
+          field: "result.proposal",
+          holds:
+            catalogProposal === undefined ||
+            proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: command binding '${command.commandId}' has no matching completion`,
+          `Invalid application state: command binding '${command.commandId}' has no matching completion (${mismatches.join(", ")})`,
         );
       }
     }
     for (const audit of snapshot.auditRecords) {
-      if (
-        audit.kind === "rejection" ||
-        audit.kind === "archive" ||
-        audit.kind === "unarchive" ||
-        audit.kind === "delete" ||
-        !("applicationCommandId" in audit) ||
-        audit.applicationCommandId === undefined
-      ) {
-        continue;
-      }
-      const completed = completedByCommand.get(audit.applicationCommandId);
+      const applicationCommandId = auditCommandId(audit);
+      if (applicationCommandId === undefined) continue;
+      const completed = completedByCommand.get(applicationCommandId);
       const pending = this.#state.pending;
       const pendingOwnsAudit =
         pending !== null &&
-        pending.commandId === audit.applicationCommandId &&
+        pending.commandId === applicationCommandId &&
         this.catalogOutcomeMatchesPending(pending, snapshot, revision);
-      if (
-        !pendingOwnsAudit &&
-        (!completed ||
-          completed.proposalId !== audit.proposalId ||
-          !["applied", "rolled-back"].includes(completed.status))
-      ) {
+      const mismatches = settle([
+        { field: "pendingOrCompletion", holds: pendingOwnsAudit || completed !== undefined },
+        {
+          field: "completion.proposalId",
+          holds: completed === undefined || completed.proposalId === audit.proposalId,
+        },
+        {
+          field: "completion.status",
+          holds: completed === undefined || ["applied", "rolled-back"].includes(completed.status),
+        },
+      ]);
+      if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
-          `Invalid application state: catalog audit for command '${audit.applicationCommandId}' has no successful application result`,
+          `Invalid application state: catalog audit for command '${applicationCommandId}' has no successful application result (${mismatches.join(", ")})`,
         );
       }
     }
@@ -576,6 +939,14 @@ export class EvolutionApplicationJournal {
     return false;
   }
 
+  /**
+   * Promote the pending command asked for, when the target write already happened.
+   *
+   * The first two returns are guards, not recovery steps: a recovery never arrives with the
+   * catalog already advanced (the situation check routes that case elsewhere), so they only
+   * matter for a repeated call. They are deliberately uncovered — see the branch-coverage
+   * note in docs/ub-quality-gates.zh-CN.md before "fixing" that.
+   */
   async finishPromotion(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
@@ -594,6 +965,7 @@ export class EvolutionApplicationJournal {
     return true;
   }
 
+  /** The mirror of `finishPromotion`, with the same two guard returns and the same reason. */
   async finishRollback(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,

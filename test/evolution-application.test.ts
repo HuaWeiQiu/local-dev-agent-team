@@ -6,10 +6,12 @@ import {
   readFile,
   readdir,
   rename,
+  symlink,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -2787,12 +2789,47 @@ describe("the restored state validator refuses states the catalog disagrees with
     });
     await expect(reopen(harness.root)).rejects.toThrow(
       new EvolutionPersistenceValidationError(
-        "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result",
+        "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result (pendingOrCompletion)",
       ),
     );
   });
 });
 
+/**
+ * Crash-recovery coverage: the matrix this suite is filling in.
+ *
+ * A recovery function is scored on **branch** coverage (crapper reads `BRDA` records when a
+ * function has any), and one crash world walks exactly one path through it. So "add another
+ * crash of the same kind" does not move the number: only a *different* world does.
+ *
+ * Rows are worlds, not functions — a function is just code that reads a world, and one world
+ * can serve several functions. Cells say which branch the world reaches, or why a branch can
+ * never be reached. The suite is complete when every cell is either exercised or marked
+ * unreachable with a reason.
+ *
+ * | world (crash point)                              | what it reaches |
+ * | ------------------------------------------------ | --------------- |
+ * | target written, catalog not advanced (strategy)   | `finishPromotion` promote arm; `finishRollback` rollback arm |
+ * | target written, catalog not advanced (prompt)     | `restoreInterruptedPrompt` success path; `verifyPromptGitOutcome` false arm |
+ * | temp files left by a killed write                 | `cleanPendingPromptTemps` all three arms (kept / removed / symlink) |
+ * | pending snapshot lost its digest                  | `restoreInterruptedPrompt` "no recoverable snapshot" arm |
+ * | target replaced by a symlink or a non-file        | `restoreInterruptedPrompt` "not a safe regular file" arm |
+ * | working tree dirty after a restore                | `restoreInterruptedPrompt` "tree dirty" arm |
+ * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
+ * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
+ *
+ * Deliberately **unreachable** (kept, not covered):
+ *   - `finishPromotion`'s `status === "promoted"` and `finishRollback`'s `status === "rolled-back"`:
+ *     idempotent guards for a repeated call; the recovery flow never enters with the catalog
+ *     already advanced, because `situationFor` routes that case elsewhere.
+ *   - `finishPromotion`'s `status !== "evaluated"` / `finishRollback`'s `status !== "promoted"`:
+ *     the same `situationFor` refuses first (verified: a rejected proposal left `recoveryRequired`
+ *     true without ever calling the finish step).
+ *
+ * One world per row, and no new injection point unless the real world has one: the fixtures use
+ * the existing `io.rename` / `catalogIo.beforeAtomicStage` / `FailOnceExactCommitGitManager`
+ * seams. Each extra seam is a window the product does not have.
+ */
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;
@@ -2941,6 +2978,357 @@ describe("EvolutionApplicationCoordinator journal crash recovery", () => {
       pending: null,
       recoveryRequired: false,
       completed: [{ commandId: "recover-new-new-command", status: "applied" }],
+    });
+  });
+
+  /** A prompt promotion that crashed after the bytes landed and before the commit. */
+  async function interruptedPromptWorld(id: string) {
+    const harness = await createHarness({
+      gitFactory: (root) =>
+        new FailOnceExactCommitGitManager(root, path.join(root, ".agent-team", "worktrees")),
+    });
+    const candidate = Buffer.from(`Candidate prompt for ${id}\n`, "utf8");
+    await harness.coordinator.propose({
+      id,
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation(id);
+    await harness.coordinator.evaluateServerPreflight(id);
+    const preview = await harness.coordinator.previewPromotion({ proposalId: id, operator });
+    (harness.git as FailOnceExactCommitGitManager).failNextExactCommit = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: `${id}-command`,
+        proposalId: id,
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    return harness;
+  }
+
+  it("cleans the temp files an interrupted prompt write left behind", async () => {
+    // One world covers all three branches of the cleanup: a matching temp file is removed, an
+    // unrelated file is kept, and a non-file entry with the same name shape is left alone.
+    const harness = await interruptedPromptWorld("temp-cleanup");
+    const directory = path.join(harness.root, "prompts");
+    const matching = path.join(directory, `.worker.md.4242.${"a".repeat(16)}.tmp`);
+    const recoveryShaped = path.join(directory, `.worker.md.4243.${"b".repeat(16)}.recovery.tmp`);
+    const unrelated = path.join(directory, "notes.md");
+    await writeFile(matching, "left by a killed process\n", "utf8");
+    await writeFile(recoveryShaped, "left by a killed restore\n", "utf8");
+    await writeFile(unrelated, "somebody's notes\n", "utf8");
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(existsSync(matching)).toBe(false);
+    expect(existsSync(recoveryShaped)).toBe(false);
+    expect(existsSync(unrelated)).toBe(true);
+    expect(await readFile(unrelated, "utf8")).toBe("somebody's notes\n");
+    // The cleanup ran as part of opening: the coordinator came up and can read the catalog.
+    expect(reopened.coordinator.readProposal("temp-cleanup")).toMatchObject({
+      id: "temp-cleanup",
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "leaves a temp-shaped symlink alone when cleaning up",
+    async () => {
+      // Creating symlinks on Windows needs a privilege the CI user does not have, so this one
+      // is skipped there. The cleanup must not follow the link and delete its target.
+      const harness = await interruptedPromptWorld("temp-symlink");
+      const directory = path.join(harness.root, "prompts");
+      const outside = path.join(harness.root, "outside.md");
+      const link = path.join(directory, `.worker.md.4244.${"c".repeat(16)}.tmp`);
+      await writeFile(outside, "must survive\n", "utf8");
+      await symlink(outside, link);
+
+      const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+      expect(existsSync(outside)).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("must survive\n");
+      expect(existsSync(link)).toBe(true);
+      expect(reopened.coordinator.readProposal("temp-symlink")).toMatchObject({
+        id: "temp-symlink",
+      });
+    },
+  );
+
+  it("restores the prompt when the write landed but the Git commit did not", async () => {
+    // The crash point for a role prompt is between "bytes written" and "committed": the file
+    // on disk already shows the candidate while HEAD still points at the original. Reopening
+    // must put the original bytes back and record the command as aborted — leaving the
+    // candidate in the tree would ship a change that no commit ever sanctioned.
+    const harness = await createHarness({
+      gitFactory: (root) =>
+        new FailOnceExactCommitGitManager(root, path.join(root, ".agent-team", "worktrees")),
+    });
+    const promptFile = path.join(harness.root, promptPath);
+    const original = await readFile(promptFile);
+    const candidate = Buffer.from("Candidate prompt that never gets committed\n", "utf8");
+    await harness.coordinator.propose({
+      id: "interrupted-prompt",
+      policy: validPolicy(),
+      candidate: { kind: "role-prompt", path: promptPath, contentDigest: sha256(candidate) },
+      promptContent: candidate,
+    });
+    await harness.coordinator.beginEvaluation("interrupted-prompt");
+    const evaluating = harness.coordinator.readProposal("interrupted-prompt");
+    if (!evaluating) throw new Error("prompt proposal disappeared");
+    await harness.coordinator.evaluateServerPreflight("interrupted-prompt");
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "interrupted-prompt",
+      operator,
+    });
+    const git = harness.git as FailOnceExactCommitGitManager;
+    git.failNextExactCommit = true;
+    const headBefore = await gitText(harness.root, ["rev-parse", "HEAD"]);
+
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "interrupted-prompt-command",
+        proposalId: "interrupted-prompt",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed prompt",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: candidate bytes on disk, HEAD unchanged, journal pending.
+    expect(await readFile(promptFile)).toEqual(candidate);
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).toBe(headBefore);
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    // Restored, not abandoned: the original bytes are back and the command is recorded aborted.
+    expect(await readFile(promptFile)).toEqual(original);
+    expect(await gitText(harness.root, ["rev-parse", "HEAD"])).toBe(headBefore);
+    expect(reopened.catalog.getProposal("interrupted-prompt")).toMatchObject({
+      status: "evaluated",
+    });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "interrupted-prompt-command",
+          status: "aborted",
+        }),
+      ]),
+    );
+  });
+
+  it("refuses to finish a promotion whose proposal left the evaluated state", async () => {
+    // The world a half-written journal or an older version can leave behind: the target
+    // write happened, the journal still holds the pending promotion, and the catalog has
+    // since rejected the proposal. Finishing it would promote something nobody approved, so
+    // the coordinator must stay in recovery instead of advancing the catalog.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(harness, "refusable", "refusable", strategyA);
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "refusable",
+      operator,
+    });
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "refusable-command",
+        proposalId: "refusable",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Promote the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await harness.coordinator.close();
+
+    const rawCatalog = await DurableEvolutionCatalog.open(harness.loaded);
+    await rawCatalog.reject("refusable", {
+      actor: operator,
+      reason: "Rejected while the journal still held the pending promotion",
+      decidedAt: new Date(harness.clock.now()).toISOString(),
+    });
+    expect(rawCatalog.getProposal("refusable")).toMatchObject({ status: "rejected" });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      recoveryRequired: true,
+    });
+    expect(reopened.coordinator.getApplicationState().pending).not.toBeNull();
+    expect(reopened.catalog.getProposal("refusable")).toMatchObject({ status: "rejected" });
+    expect(
+      reopened.catalog.snapshot().auditRecords.filter((record) => record.kind === "promotion"),
+    ).toEqual([]);
+  });
+
+  it("recovers when the target was promoted but the catalog never advanced", async () => {
+    // The mirror of the rollback case above: same crash window (between the target write and
+    // the catalog write), opposite direction. Kept deliberately symmetric so that changing
+    // one of the two makes the other the obvious next thing to check.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog promotion");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(
+      harness,
+      "recover-promote-old-catalog",
+      "recover-promote-old-catalog",
+      strategyA,
+    );
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "recover-promote-old-catalog",
+      operator,
+    });
+    failNextCatalogWrite = true;
+
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "recover-promote-command",
+        proposalId: "recover-promote-old-catalog",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Promote the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    // The world the crash left behind: target promoted, catalog unchanged, journal pending.
+    expect(harness.strategies.customDefinition("recover-promote-old-catalog")).toMatchObject(
+      strategyA,
+    );
+    expect(harness.catalog.getProposal("recover-promote-old-catalog")).toMatchObject({
+      status: "evaluated",
+    });
+    expect(harness.coordinator.getApplicationState()).toMatchObject({
+      pending: { commandId: "recover-promote-command" },
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("recover-promote-old-catalog")).toMatchObject({
+      status: "promoted",
+    });
+    expect(reopened.strategies.customDefinition("recover-promote-old-catalog")).toMatchObject(
+      strategyA,
+    );
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "recover-promote-command",
+          operation: "promote-and-apply",
+          status: "applied",
+        }),
+      ]),
+    );
+    const promotionAudit = reopened.catalog
+      .snapshot()
+      .auditRecords.filter((record) => record.kind === "promotion")
+      .at(-1);
+    expect(promotionAudit).toMatchObject({
+      proposalId: "recover-promote-old-catalog",
+      applicationCommandId: "recover-promote-command",
+    });
+  });
+
+  it("finishes the rollback when the target was restored but the catalog never advanced", async () => {
+    // The crash point is between the target write and the catalog write: the repository
+    // already shows the restored state, the catalog still says "promoted", and the journal
+    // still holds the pending rollback. Reopening must finish the catalog half rather than
+    // demand recovery — otherwise every crash in this window needs an operator.
+    let failNextCatalogWrite = false;
+    const catalogIo: Partial<DurableEvolutionFileIo> = {
+      beforeAtomicStage: async (stage) => {
+        if (failNextCatalogWrite && stage === "write") {
+          failNextCatalogWrite = false;
+          throw new Error("simulated crash before catalog rollback");
+        }
+      },
+    };
+    const harness = await createHarness({ catalogIo });
+    await proposeEvaluatedStrategy(
+      harness,
+      "recover-rollback-old-catalog",
+      "recover-rollback-old-catalog",
+      strategyA,
+    );
+    await promoteStrategy(
+      harness,
+      "recover-rollback-old-catalog",
+      "recover-rollback-apply-command",
+      "Apply the promotion that will be rolled back",
+    );
+    const preview = await harness.coordinator.previewRollback({
+      proposalId: "recover-rollback-old-catalog",
+      operator,
+    });
+    failNextCatalogWrite = true;
+
+    await expect(
+      harness.coordinator.rollbackAppliedPromotion({
+        commandId: "recover-rollback-command",
+        proposalId: "recover-rollback-old-catalog",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Restore the manually managed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    expect(harness.strategies.customDefinition("recover-rollback-old-catalog")).toBeUndefined();
+    expect(harness.catalog.getProposal("recover-rollback-old-catalog")).toMatchObject({
+      status: "promoted",
+    });
+    expect(harness.coordinator.getApplicationState()).toMatchObject({
+      pending: { commandId: "recover-rollback-command" },
+    });
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.catalog.getProposal("recover-rollback-old-catalog")).toMatchObject({
+      status: "rolled-back",
+    });
+    expect(reopened.strategies.customDefinition("recover-rollback-old-catalog")).toBeUndefined();
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+    });
+    expect(reopened.coordinator.getApplicationState().completed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          commandId: "recover-rollback-command",
+          operation: "rollback-applied",
+          status: "rolled-back",
+        }),
+      ]),
+    );
+    const rollbackAudit = reopened.catalog
+      .snapshot()
+      .auditRecords.filter((record) => record.kind === "rollback")
+      .at(-1);
+    expect(rollbackAudit).toMatchObject({
+      proposalId: "recover-rollback-old-catalog",
+      applicationCommandId: "recover-rollback-command",
     });
   });
 
