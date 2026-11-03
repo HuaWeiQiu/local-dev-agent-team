@@ -29,6 +29,26 @@ interface FailedWaveTask {
   durationMs: number;
 }
 
+/** The failure half of a wave report: the error and the first blocked task. */
+function waveFailureFields(
+  rejection: FailedWaveTask | undefined,
+  blocked: ReadonlyArray<{ task: { id: string } }>,
+) {
+  return {
+    ...(rejection ? { error: messageOf(rejection.error) } : {}),
+    ...(blocked[0] ? { blockedTaskId: blocked[0].task.id } : {}),
+  };
+}
+
+/** The evidence half: what was rejected, plus the environment sample that explains it. */
+async function waveEvidenceFields(
+  facts: ReadonlyArray<WaveRejectionFacts>,
+  worktree: string,
+): Promise<{ rejected?: WaveRejectionFacts[]; environment?: Awaited<ReturnType<typeof sampleWaveEnvironment>> }> {
+  if (facts.length === 0) return {};
+  return { rejected: [...facts], environment: await sampleWaveEnvironment(worktree) };
+}
+
 export class TaskScheduler {
   constructor(
     private readonly env: RunnerEnv,
@@ -194,13 +214,9 @@ export class TaskScheduler {
         taskIds: outcome.waveTaskIds,
         concurrency: outcome.wave.length,
         status: waveStatus(rejection ? { reason: rejection.error } : undefined, passedStates.length, blocked.length),
-        ...(rejection ? { error: messageOf(rejection.error) } : {}),
-        ...(blocked[0] ? { blockedTaskId: blocked[0].task.id } : {}),
+        ...waveFailureFields(rejection, blocked),
         batchKeys: outcome.batchKeys,
-        ...(facts.length ? { rejected: facts } : {}),
-        ...(facts.length
-          ? { environment: await sampleWaveEnvironment(state.integrationWorktree) }
-          : {}),
+        ...(await waveEvidenceFields(facts, state.integrationWorktree)),
       }) as Record<string, unknown> & { blockedTaskId?: string },
     );
     if (rejection && passedStates.length === 0 && blocked.length === 0) throw rejection.error;
