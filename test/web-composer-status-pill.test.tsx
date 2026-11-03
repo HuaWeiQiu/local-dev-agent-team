@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
 import { render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 import { ComposerToolbar } from "../web/src/components/strategy/ComposerToolbar.js";
 import { TooltipProvider } from "../web/src/ui/tooltip.js";
 import { PILL_TEXT, PILL_TONE, pillState, pillText } from "../web/src/components/strategy/composer/status-pill.js";
 
-function toolbar(patch: Record<string, unknown> = {}) {
+type ToolbarProps = ComponentProps<typeof ComposerToolbar>;
+
+function toolbar(patch: Partial<ToolbarProps> = {}): ToolbarProps {
   return {
     strategyNames: ["balanced", "fast"],
     selectedName: "balanced",
@@ -23,7 +26,7 @@ function toolbar(patch: Record<string, unknown> = {}) {
     onSave: () => undefined,
     onLaunch: () => undefined,
     ...patch,
-  } as never;
+  };
 }
 
 describe("status pill model", () => {
@@ -53,30 +56,30 @@ describe("status pill model", () => {
 
 describe("ComposerToolbar", () => {
   it("says the strategy is loaded when nothing is pending", () => {
-    render(<TooltipProvider><ComposerToolbar {...(toolbar() as object)} /></TooltipProvider>);
+    render(<TooltipProvider><ComposerToolbar {...(toolbar())} /></TooltipProvider>);
     expect(screen.getByRole("status")).toHaveTextContent("已加载策略");
   });
 
   it("warns about an unverified draft", () => {
-    render(<TooltipProvider><ComposerToolbar {...(toolbar({ dirty: true }) as object)} /></TooltipProvider>);
+    render(<TooltipProvider><ComposerToolbar {...(toolbar({ dirty: true }))} /></TooltipProvider>);
     expect(screen.getByRole("status")).toHaveTextContent("草稿待预检");
   });
 
   it("shows the last result and the failure state", () => {
     const { unmount } = render(
       <TooltipProvider>
-        <ComposerToolbar {...(toolbar({ feedback: { kind: "saved", message: "已保存并编译" } }) as object)} />
+        <ComposerToolbar {...(toolbar({ feedback: { kind: "saved", message: "已保存并编译" } }))} />
       </TooltipProvider>,
     );
     expect(screen.getByRole("status")).toHaveTextContent("已保存并编译");
     unmount();
 
-    render(<TooltipProvider><ComposerToolbar {...(toolbar({ feedback: { kind: "error", message: "预检失败" } }) as object)} /></TooltipProvider>);
+    render(<TooltipProvider><ComposerToolbar {...(toolbar({ feedback: { kind: "error", message: "预检失败" } }))} /></TooltipProvider>);
     expect(screen.getByRole("status")).toHaveTextContent("操作失败");
   });
 
   it("locks the controls while submitting", () => {
-    render(<TooltipProvider><ComposerToolbar {...(toolbar({ submitting: true }) as object)} /></TooltipProvider>);
+    render(<TooltipProvider><ComposerToolbar {...(toolbar({ submitting: true }))} /></TooltipProvider>);
     expect(screen.getByRole("status")).toHaveTextContent("提交中");
   });
 });
