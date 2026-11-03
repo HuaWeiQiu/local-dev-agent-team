@@ -11,14 +11,35 @@ import type { SessionEvent } from "../src/sessions/types.js";
  * The protocol handlers are pure functions of a JSON-RPC line and the session
  * state, so they are exercised here without spawning the app server.
  */
+
+/**
+ * The methods this suite drives. They are private on `CodexAppServerSession`,
+ * so the suite builds an instance off the prototype and declares the reachable
+ * surface once, here. It is deliberately *not* `CodexAppServerSession & {…}`:
+ * that class has private members, and an intersection that redeclares one of
+ * them collapses to `never`, which is how the first attempt at this failed.
+ */
+type SessionUnderTest = {
+  active: Record<string, unknown>;
+  respond: (id: unknown, body: unknown) => void;
+  respondError: (id: unknown, message: string) => void;
+  handleNotification: (method: string, params: unknown) => void;
+  handleServerRequest: (id: unknown, method: string, params: unknown) => void;
+  handleLine: (line: string) => void;
+  handleExit: (code: number | null, signal: string | null, error?: Error) => void;
+  handleUsage: (params: unknown) => void;
+  handleTurnCompleted: (params: unknown) => void;
+  completeTurn: (turn: Record<string, unknown>, outcome: unknown) => void;
+};
+
 function session(): {
-  session: CodexAppServerSession;
+  session: SessionUnderTest;
   events: SessionEvent[];
   written: string[];
 } {
   const events: SessionEvent[] = [];
   const written: string[] = [];
-  const instance = Object.create(CodexAppServerSession.prototype) as CodexAppServerSession;
+  const instance = Object.create(CodexAppServerSession.prototype) as unknown as SessionUnderTest;
   // Token totals are read by buildResult; every turn needs them present.
   Object.assign(instance, { totals: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } });
   Object.assign(instance, {
@@ -34,32 +55,29 @@ function session(): {
       done: { resolve: () => undefined, reject: () => undefined, promise: Promise.resolve() },
     },
   });
-  (instance as unknown as { respond: (id: unknown, body: unknown) => void }).respond = (id, body) => {
+  instance.respond = (id, body) => {
     written.push(JSON.stringify({ id, ...(body as object) }));
   };
-  (instance as unknown as { respondError: (id: unknown, message: string) => void }).respondError = (
-    id,
-    message,
-  ) => {
+  instance.respondError = (id, message) => {
     written.push(JSON.stringify({ id, error: message }));
   };
   return { session: instance, events, written };
 }
 
-function notify(target: CodexAppServerSession, method: string, params: Record<string, unknown> = {}) {
-  (target as unknown as { handleNotification: (m: string, p: unknown) => void }).handleNotification(
+function notify(target: SessionUnderTest, method: string, params: Record<string, unknown> = {}) {
+  target.handleNotification(
     method,
     params,
   );
 }
 
 function request(
-  target: CodexAppServerSession,
+  target: SessionUnderTest,
   id: number | string,
   method: string,
   params: Record<string, unknown> = {},
 ) {
-  (target as unknown as { handleServerRequest: (i: unknown, m: string, p: unknown) => void }).handleServerRequest(
+  target.handleServerRequest(
     id,
     method,
     params,
@@ -236,21 +254,21 @@ describe("codex helpers", () => {
 describe("codex protocol failures", () => {
   it("warns about an unparseable line and routes replies to waiters", () => {
     const { session: target, events, written } = session();
-    (target as unknown as { handleLine: (line: string) => void }).handleLine("not json");
+    target.handleLine("not json");
     expect(events[0]).toMatchObject({ type: "notice", level: "warning" });
 
     const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
     let resolved: unknown;
     pending.set(1, { resolve: (value) => (resolved = value), reject: () => undefined });
     Object.assign(target, { pending, proc: { write: (line: string) => written.push(line) } });
-    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+    target.handleLine(
       JSON.stringify({ id: 1, result: { ok: true } }),
     );
     expect(resolved).toEqual({ ok: true });
 
     let rejected: unknown;
     pending.set(2, { resolve: () => undefined, reject: (error) => (rejected = error) });
-    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+    target.handleLine(
       JSON.stringify({ id: 2, error: { message: "nope" } }),
     );
     expect(String(rejected)).toContain("nope");
@@ -304,13 +322,13 @@ describe("codex protocol failures", () => {
   it("answers a reply for an unknown or string id without throwing", () => {
     const { session: target } = session();
     Object.assign(target, { pending: new Map() });
-    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+    target.handleLine(
       JSON.stringify({ id: 42, result: { ok: true } }),
     );
-    (target as unknown as { handleLine: (line: string) => void }).handleLine(
+    target.handleLine(
       JSON.stringify({ id: "abc", result: { ok: true } }),
     );
-    (target as unknown as { handleLine: (line: string) => void }).handleLine(JSON.stringify({}));
+    target.handleLine(JSON.stringify({}));
     expect(true).toBe(true);
   });
 
@@ -321,7 +339,7 @@ describe("codex protocol failures", () => {
       pending: new Map([[1, { resolve: () => undefined, reject: (e: unknown) => rejections.push(e) }]]),
       proc: { stderrTail: () => "" },
     });
-    (target as unknown as { handleExit: (c: number | null, s: string | null, e?: Error) => void }).handleExit(
+    target.handleExit(
       null,
       "SIGKILL",
     );
@@ -344,7 +362,7 @@ describe("codex protocol failures", () => {
     let rejection: unknown;
     pending.set(1, { resolve: () => undefined, reject: (error) => (rejection = error) });
     Object.assign(target, { pending, proc: { stderrTail: () => "stderr tail" } });
-    (target as unknown as { handleExit: (c: number, s: string, e?: Error) => void }).handleExit(1, null);
+    target.handleExit(1, null);
     expect(String(rejection)).toContain("codex app-server exited");
   });
 });
