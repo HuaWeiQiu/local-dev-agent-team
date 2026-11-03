@@ -115,13 +115,7 @@ describe("ProfiledAgentService fallback chain", () => {
     const config = fallbackConfig(false);
     config.profiles["primary-worker"]!.model = "ok";
     const emitted: Array<{ runId: string; type: string; payload: unknown }> = [];
-    const store = {
-      artifactDirectory: (runId: string, ...parts: string[]) =>
-        path.join(root, runId, "artifacts", ...parts),
-      emit: (runId: string, type: string, payload: unknown) => {
-        emitted.push({ runId, type, payload });
-      },
-    };
+    const store = fakeStore(root, emitted);
     const adapter: AgentAdapter = {
       name: "fixture",
       contract: {
@@ -163,7 +157,7 @@ describe("ProfiledAgentService fallback chain", () => {
     const service = new ProfiledAgentService(
       config,
       root,
-      store as unknown as RunStateStore,
+      store,
       {},
       undefined,
       observer,
@@ -207,7 +201,7 @@ describe("ProfiledAgentService fallback chain", () => {
     const service = new ProfiledAgentService(
       config,
       root,
-      fakeStore(path.join(root, "artifacts"), emitted) as unknown as RunStateStore,
+      fakeStore(path.join(root, "artifacts"), emitted),
       {},
       undefined,
       undefined,
@@ -307,7 +301,7 @@ async function textOnlyFixture(text: string) {
   const service = new ProfiledAgentService(
     config,
     root,
-    fakeStore(path.join(root, "artifacts"), emitted) as unknown as RunStateStore,
+    fakeStore(path.join(root, "artifacts"), emitted),
     {},
     undefined,
     undefined,
@@ -353,7 +347,7 @@ async function createFixture(
   const service = new ProfiledAgentService(
     config,
     root,
-    store as unknown as RunStateStore,
+    store,
     {},
     options.signal,
     options.observer,
@@ -391,17 +385,23 @@ function fallbackConfig(failFallback: boolean): AgentTeamConfig {
   return config;
 }
 
+/**
+ * Stand-in for the run store. `RunStateStore` is a class holding a private save
+ * queue behind a constructor that takes a directory, so no real instance can be
+ * built here. The cast lives at this boundary and nowhere else — call sites get
+ * a `RunStateStore` and stop casting.
+ */
 function fakeStore(
   artifactsRoot: string,
   emitted: Array<{ runId: string; type: string; payload: unknown }> = [],
-) {
+): RunStateStore {
   return {
     artifactDirectory: (runId: string, ...parts: string[]) =>
       path.join(artifactsRoot, runId, "artifacts", ...parts),
     emit: (runId: string, type: string, payload: unknown) => {
       emitted.push({ runId, type, payload });
     },
-  };
+  } as unknown as RunStateStore;
 }
 
 function fixtureAdapter(models: string[]): AgentAdapter {
