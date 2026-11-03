@@ -719,42 +719,60 @@ function resolveRepositoryOwnedDirectory(
   relativeDirectory: string,
   label: string,
 ): string {
-  if (!relativeDirectory || relativeDirectory.includes("\0")) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must be a non-empty repository-relative path`,
-    );
-  }
-  if (relativeDirectory !== relativeDirectory.trim()) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must not include leading or trailing whitespace`,
-    );
-  }
-  if (path.isAbsolute(relativeDirectory) || /^[A-Za-z]:[\\/]/.test(relativeDirectory)) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must be repository-relative (absolute paths are not allowed)`,
-    );
-  }
-  if (relativeDirectory.includes("\\")) {
-    throw new StrategyBlueprintUnsafePathError(`${label} must use POSIX separators only`);
-  }
+  assertRelativeDirectory(relativeDirectory, label);
   const segments = relativeDirectory.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must not contain empty, '.', or '..' segments`,
-    );
-  }
+  assertNoDotSegments(segments, label);
+  return resolveInsideRoot(root, segments, label);
+}
 
+/** The five refusals that make a path unsafe before it is even resolved. */
+function assertRelativeDirectory(relativeDirectory: string, label: string): void {
+  assertNonEmptyPath(relativeDirectory, label);
+  assertTrimmedPath(relativeDirectory, label);
+  assertNotAbsolutePath(relativeDirectory, label);
+  assertPosixSeparators(relativeDirectory, label);
+}
+
+function assertNonEmptyPath(relativeDirectory: string, label: string): void {
+  if (relativeDirectory && !relativeDirectory.includes("\0")) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must be a non-empty repository-relative path`,
+  );
+}
+
+function assertTrimmedPath(relativeDirectory: string, label: string): void {
+  if (relativeDirectory === relativeDirectory.trim()) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must not include leading or trailing whitespace`,
+  );
+}
+
+function assertNotAbsolutePath(relativeDirectory: string, label: string): void {
+  if (!path.isAbsolute(relativeDirectory) && !/^[A-Za-z]:[\\/]/.test(relativeDirectory)) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must be repository-relative (absolute paths are not allowed)`,
+  );
+}
+
+function assertPosixSeparators(relativeDirectory: string, label: string): void {
+  if (!relativeDirectory.includes("\\")) return;
+  throw new StrategyBlueprintUnsafePathError(`${label} must use POSIX separators only`);
+}
+
+function assertNoDotSegments(segments: string[], label: string): void {
+  if (!segments.some((segment) => !segment || segment === "." || segment === "..")) return;
+  throw new StrategyBlueprintUnsafePathError(
+    `${label} must not contain empty, '.', or '..' segments`,
+  );
+}
+
+/** The resolved path must stay inside the repository root, prefix and all. */
+function resolveInsideRoot(root: string, segments: string[], label: string): string {
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, ...segments);
-  const rootPrefix = resolvedRoot.endsWith(path.sep)
-    ? resolvedRoot
-    : `${resolvedRoot}${path.sep}`;
-  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
-    throw new StrategyBlueprintUnsafePathError(
-      `${label} must resolve inside the repository root`,
-    );
-  }
-  return resolved;
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  if (resolved === resolvedRoot || resolved.startsWith(rootPrefix)) return resolved;
+  throw new StrategyBlueprintUnsafePathError(`${label} must resolve inside the repository root`);
 }
 
 async function createRepositoryOwnedDirectory(
