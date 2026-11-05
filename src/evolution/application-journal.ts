@@ -218,6 +218,11 @@ function prefixed(prefix: string, fields: string[]): string[] {
   return fields.map((field) => `${prefix}.${field}`);
 }
 
+/**
+ * Which catalog audit records a completion must have left behind. A table rather than a
+ * nested ternary: adding an operation means adding a row, and an operation with no audit
+ * (a reconciliation) is visibly the absence of a row rather than a fall-through.
+ */
 const AUDIT_KIND_BY_OPERATION: Record<string, "promotion" | "rollback" | undefined> = {
   "promote-and-apply": "promotion",
   "rollback-applied": "rollback",
@@ -542,11 +547,6 @@ export class EvolutionApplicationJournal {
   }
 
   /**
-   * Which catalog audit records a completion must have left behind. A table rather than a
-   * nested ternary: adding an operation means adding a row, and an operation with no audit
-   * (a reconciliation) is visibly the absence of a row rather than a fall-through.
-   */
-  /**
    * The command that could have produced this "synthetic" legacy predecessor, if any.
    *
    * A legacy Phase-2 promotion was applied before the journal existed, so reconciliation
@@ -558,20 +558,35 @@ export class EvolutionApplicationJournal {
     context: RestoredStateContext,
     parentCommandId: string | null,
   ): SyntheticOwner | undefined {
-    const owners: SyntheticOwner[] = [];
+    const owners = [
+      ...this.pendingSyntheticOwners(parentCommandId),
+      ...this.completedSyntheticOwners(context, parentCommandId),
+    ];
+    return owners.find((owner) => this.ownerDerivedTheApplication(owner, application, context));
+  }
+
+  /** The reconciliation still pending, when it is the owner the caller is asking about. */
+  private pendingSyntheticOwners(parentCommandId: string | null): SyntheticOwner[] {
     const pending = this.#state.pending;
-    if (
-      pending !== null &&
-      pending.operation === "reconcile-promoted" &&
-      parentCommandId === pending.commandId
-    ) {
-      owners.push({
+    if (pending === null) return [];
+    if (pending.operation !== "reconcile-promoted") return [];
+    if (parentCommandId !== pending.commandId) return [];
+    return [
+      {
         commandId: pending.commandId,
         proposalId: pending.proposalId,
         reason: pending.reason,
         humanDecision: pending.humanDecision,
-      });
-    }
+      },
+    ];
+  }
+
+  /** Every completed reconciliation that could be the owner, narrowed by the parent command. */
+  private completedSyntheticOwners(
+    context: RestoredStateContext,
+    parentCommandId: string | null,
+  ): SyntheticOwner[] {
+    const owners: SyntheticOwner[] = [];
     for (const command of this.#state.commands.values()) {
       if (command.operation !== "reconcile-promoted") continue;
       if (parentCommandId !== null && command.commandId !== parentCommandId) continue;
@@ -584,7 +599,7 @@ export class EvolutionApplicationJournal {
         humanDecision: completion.humanDecision,
       });
     }
-    return owners.find((owner) => this.ownerDerivedTheApplication(owner, application, context));
+    return owners;
   }
 
   /** Whether this owner's derived command id and promotion chain explain the application. */
@@ -646,21 +661,62 @@ export class EvolutionApplicationJournal {
   /** The proof must be for the proposal the catalog currently has in effect for its target. */
   assertApplicationIsActive(application: ApplicationRecord, context: RestoredStateContext): void {
     const activeId = context.activeByTarget.get(targetKey(application.target));
-    const committedPendingRollback =
-      this.#state.pending?.operation === "rollback-applied" &&
-      this.#state.pending.proposalId === application.proposalId &&
-      context.revision === this.#state.pending.expectedCatalogRevisionAfter &&
-      this.catalogOutcomeMatchesPending(this.#state.pending, context.snapshot, context.revision);
-    if (
-      activeId !== application.proposalId &&
-      (!activeId ||
-        context.promotionByProposal.get(activeId)?.previousActiveProposalId !== application.proposalId) &&
-      !committedPendingRollback
-    ) {
+    if (!this.applicationIsInEffect(application, activeId, context)) {
       throw new EvolutionPersistenceValidationError(
         `Invalid application state: '${application.proposalId}' is not the catalog active proposal`,
       );
     }
+  }
+
+  /**
+   * Whether the catalog can still be read as "this proposal is the one in effect".
+   *
+   * Two ways that can be true, and they answer different questions: the active pointer never
+   * moved off it, or a rollback is pending and has not committed the pointer back yet. Neither
+   * is a licence to accept an arbitrary proof — see `ownerDerivedTheApplication` for the case
+   * where a legacy predecessor has no pointer at all.
+   */
+  private applicationIsInEffect(
+    application: ApplicationRecord,
+    activeId: string | undefined,
+    context: RestoredStateContext,
+  ): boolean {
+    return (
+      this.activePointerCarriedForward(application, activeId, context) ||
+      this.pendingRollbackExplainsActive(application, context)
+    );
+  }
+
+  /**
+   * The pointer is still this proposal, or the proposal the pointer names replaced it — a
+   * promotion records `previousActiveProposalId`, so a pointer that moved *forward* still
+   * explains the proof it left behind. No pointer at all explains nothing.
+   */
+  private activePointerCarriedForward(
+    application: ApplicationRecord,
+    activeId: string | undefined,
+    context: RestoredStateContext,
+  ): boolean {
+    if (activeId === undefined) return false;
+    if (activeId === application.proposalId) return true;
+    return context.promotionByProposal.get(activeId)?.previousActiveProposalId === application.proposalId;
+  }
+
+  /**
+   * A rollback that has been applied but not yet committed leaves the active pointer on the
+   * proposed target, so the proof it is about to replace is legitimately "not active" until the
+   * catalog catches up. Every part of the pending record has to line up, including the catalog
+   * outcome, otherwise this would excuse any proof at all.
+   */
+  private pendingRollbackExplainsActive(
+    application: ApplicationRecord,
+    context: RestoredStateContext,
+  ): boolean {
+    const pending = this.#state.pending;
+    if (pending === null || pending.operation !== "rollback-applied") return false;
+    if (pending.proposalId !== application.proposalId) return false;
+    if (context.revision !== pending.expectedCatalogRevisionAfter) return false;
+    return this.catalogOutcomeMatchesPending(pending, context.snapshot, context.revision);
   }
 
 
