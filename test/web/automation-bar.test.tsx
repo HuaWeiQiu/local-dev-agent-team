@@ -15,18 +15,27 @@ import {
   showFooter,
   startDisabled,
 } from "../../web/src/components/evolution/automation/model.js";
-import type { AutomaticEvolutionSnapshot } from "../../web/src/types.js";
+import type { ComponentProps } from "react";
+import type { AutomaticEvolutionCycle, AutomaticEvolutionSnapshot } from "../../web/src/types.js";
 
-function cycle(seq: number, patch: Record<string, unknown> = {}) {
+/**
+ * One cycle, in the shape the snapshot declares. It used to be annotated as a
+ * whole `AutomaticEvolutionSnapshot`, which a cast made possible and which was
+ * wrong: a cycle has no `status`, `cycles` or `lastEvaluation`. The blueprint
+ * definition only requires `roleProfiles`, so the candidate is one line.
+ */
+function cycle(seq: number, patch: Partial<AutomaticEvolutionCycle> = {}): AutomaticEvolutionCycle {
   return {
     cycle: seq,
-    decision: "promoted",
-    improved: true,
-    scoreDelta: 120,
+    proposalId: `proposal-${seq}`,
+    rationale: "更稳",
+    candidateDefinition: { roleProfiles: {} },
+    candidateRunIds: ["run-1"],
     incumbentScore: 800,
     candidateScore: 920,
-    candidateRunIds: ["run-1"],
-    rationale: "更稳",
+    scoreDelta: 120,
+    improved: true,
+    decision: "promoted",
     completedAt: "2026-10-30T00:00:00.000Z",
     ...patch,
   };
@@ -63,7 +72,9 @@ function automation(patch: Partial<AutomaticEvolutionSnapshot> = {}): AutomaticE
   } as AutomaticEvolutionSnapshot;
 }
 
-function props(patch: Record<string, unknown> = {}) {
+type AutomationBarProps = ComponentProps<typeof AutomationBar>;
+
+function props(patch: Partial<AutomationBarProps> = {}): AutomationBarProps {
   return {
     automation: automation(),
     requestedCycles: 2,
@@ -74,7 +85,7 @@ function props(patch: Record<string, unknown> = {}) {
     onStart: vi.fn(),
     onStop: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
 describe("automation model", () => {
@@ -94,8 +105,8 @@ describe("automation model", () => {
     expect(roleBindingLabel("layered-cli-defaults")).toBe("全局/项目默认");
     expect(roleBindingLabel("project-yaml")).toBe("项目 yaml");
     expect(roleBindingLabel(null)).toBe("项目 yaml");
-    expect(cycleDecisionLabel(cycle(1) as never)).toBe("已采纳");
-    expect(cycleDecisionLabel(cycle(1, { decision: "rejected" }) as never)).toBe("未采纳");
+    expect(cycleDecisionLabel(cycle(1))).toBe("已采纳");
+    expect(cycleDecisionLabel(cycle(1, { decision: "rejected" }))).toBe("未采纳");
     expect(showFooter(automation({}))).toBe(false);
     expect(showFooter(automation({ cycles: [cycle(1)] as never }))).toBe(true);
     expect(showFooter(automation({ stopReason: "done" }))).toBe(true);
