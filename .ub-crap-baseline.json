@@ -1,52 +1,48 @@
 {
-  "updatedAt": "2026-11-03T17:07:01.132Z",
+  "updatedAt": "2026-11-03T17:59:05.525Z",
   "generation": {
-    "headSha": "8a18cca7a96fcc0ce710789e8651684ce353f3ab",
+    "headSha": "fe1e73e331380db38db6f7ad236dbb195d94e2c6",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T17:07:01.131Z",
+    "generatedAt": "2026-11-03T17:59:05.524Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
-      "divergentLines": 5,
+      "divergentLines": 1,
       "partialFiles": 0,
       "digests": [
-        "804f6d01299fd42e7a8f9dfa842955a2fa5fd06a039af234e698e1908a43b022",
-        "d59afb543c29a7fd3a5fdb31bcab19729e321330c25a40b081ca706159951f87",
-        "c2e3ac7de98c065bf789c3bdbe631af5f87a8f3d03a7cedb8b3d9ee534eba62c"
+        "1a1b92ca02f038850a9fa7ad13aa7879ecc97d52cbb45a7db4cbdbeca619c673",
+        "0bdc8741f99f643ea30c813743e22a5ef14d5e9c0219d5a886ae61a9f731b753",
+        "8d6bac9fcd48052e057c3c47160ba8181aee55107eaef91154551573ddd8d9fb"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 1020866,
-      "sha256": "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270"
+      "bytes": 1025184,
+      "sha256": "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270",
-        "7e10a5eb3f5c8121265860c2edb4ebe02ea97c2aafa8638035adaa4161f55270"
+        "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb",
+        "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb"
       ]
     }
   },
   "scores": {
-    "evolution.application-target.EvolutionApplicationTargets#applyPromptTarget": 120.686,
     "evolution.catalog.EvolutionCatalog#restoreFromValidatedMaterial": 85.176,
     "scripts.laya-jev-server.Handler#do_POST": 72,
     "evolution.application-journal.EvolutionApplicationJournal#validateRestoredState": 59.9348,
     "evolution.application.EvolutionApplicationCoordinator#executeCommand": 50.6578,
     "workflow.runner.LocalWorkflowRunner#run": 50.1071,
-    "evolution.application-target.EvolutionApplicationTargets#readPromptObject": 46.5457,
-    "evolution.application-target.EvolutionApplicationTargets#applyStrategyTarget": 46.2035,
     "profiles.role-bindings#normalizeReasoning": 45.037,
     "agents.live-invoke#invokeLive": 44.5815,
     "desktop.settings#sanitizeRoleBindings": 44.2032,
     "process.stream#spawnStreamProcess": 42.0749,
     "profiles.role-bindings#defaultModelForCli": 42,
-    "evolution.application-target#createDirectoryChain": 41.9781,
     "server.project-runtime#cleanupRuntime": 40.768,
     "workflow.checkpoints.CheckpointService#prepareRecovery": 39.6838,
     "evolution.application-journal.EvolutionApplicationJournal#restoreInterruptedPrompt": 39.6297,
@@ -58,7 +54,6 @@
     "git.manager.GitManager#commitExactTrackedFile": 34.7688,
     "evaluation.domain#projectEvaluationRun": 33.5918,
     "agents.live-invoke#runWithRedirects": 33.5792,
-    "evolution.application-target.EvolutionApplicationTargets#ingestPromptMaterial": 33.5792,
     "components.RunCleanupDialog#RunCleanupDialog": 33.5773,
     "domain.plan#selectTaskWave": 32.452,
     "evolution.application-journal.EvolutionApplicationJournal#completePendingFromLive": 32.384,
@@ -82,7 +77,7 @@
     "workflow.runner.LocalWorkflowRunner#runHandlers": 24.144,
     "visibility.explain#verdictLines": 24.1137,
     "evaluation.resolve#resolveEvaluationSuite": 23.625,
-    "evolution.persistence.DurableEvolutionCatalog#persist": 23.4907,
+    "evolution.persistence.DurableEvolutionCatalog#persist": 23.2,
     "hooks.useRunInsights#useRunInsights": 23.0625,
     "onboarding.detect#detectPython": 22.6154,
     "evolution.automatic-state#syncDirectory": 22.5,
@@ -90,7 +85,6 @@
     "evolution.application-journal.EvolutionApplicationJournal#validateApplicationProof": 22.3182,
     "workflow.advisor.AdvisorService#consultAdvisor": 21.9708,
     "providers.failure#classifyProviderFailure": 21.8613,
-    "evolution.application-target#cleanOrphanTemps": 21.824,
     "workflow.state-helpers#latestApproval": 21.5185,
     "experience.attempt-log.AttemptLog#recentMatching": 21.2592,
     "git.manager.GitManager#assertValidAuthorization": 21.2592,
