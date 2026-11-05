@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
 import { render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runState } from "../support/web-fixtures.js";
@@ -18,8 +19,12 @@ const { RunPage } = await import("../../web/src/components/RunPage.js");
 const { needsAlerts } = await import("../../web/src/components/run-page/sections.js");
 const { useRunPageHandlers } = await import("../../web/src/components/run-page/hooks.js");
 
-function monitor(run: RunState | undefined) {
+type RunPageProps = ComponentProps<typeof RunPage>;
+
+function monitor(run: RunState | undefined): RunPageProps["monitor"] {
   return {
+    config: undefined,
+    runs: [],
     selectedRunId: "run-fixture",
     run,
     selectedTaskId: undefined,
@@ -29,10 +34,24 @@ function monitor(run: RunState | undefined) {
     evidenceLoading: false,
     usageReport: undefined,
     usageLoading: false,
-  } as never;
+    error: undefined,
+    setSelectedRunId: vi.fn(),
+    setSelectedTaskId: vi.fn(),
+    setRun: vi.fn(),
+    setEvents: vi.fn(),
+    setEvidence: vi.fn(),
+    setConnected: vi.fn(),
+    setError: vi.fn(),
+    refreshRuns: vi.fn().mockResolvedValue(undefined),
+    refreshConfig: vi.fn().mockResolvedValue(undefined),
+    refreshRun: vi.fn().mockResolvedValue(undefined),
+    refreshUsage: vi.fn().mockResolvedValue(undefined),
+    resetRunScope: vi.fn(),
+    scheduleRefresh: vi.fn(),
+  };
 }
 
-function props(patch: Record<string, unknown> = {}) {
+function props(patch: Partial<RunPageProps> = {}): RunPageProps {
   return {
     scope: { mode: "single", projectId: "p1" },
     monitor: monitor(runState()),
@@ -45,7 +64,7 @@ function props(patch: Record<string, unknown> = {}) {
     onReadArtifact: vi.fn().mockResolvedValue({ content: "" }),
     onRefreshUsage: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
 beforeEach(() => {
@@ -106,7 +125,7 @@ describe("RunPage", () => {
     render(
       <RunPage
         {...props({
-          monitor: { ...(monitor(run) as object), selectedTaskId: "T1" },
+          monitor: { ...monitor(run), selectedTaskId: "T1" },
           busy: false,
         })}
       />,
