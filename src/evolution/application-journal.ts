@@ -324,6 +324,22 @@ function pendingPreviousApplicationMismatches(expectation: PendingExpectation): 
   ]);
 }
 
+/** The evidence a promotion needs, or undefined when the proposal is not in a state to promote. */
+function promotableEvidence(proposal: EvolutionProposal): PromotionEvidence | undefined {
+  if (proposal.status !== "evaluated") return undefined;
+  return proposal.evaluation?.evidence;
+}
+
+/** A pending operation that recorded the Git proof a prompt outcome check needs. */
+type PromptGitProof = PendingApplicationOperation & {
+  readonly gitBaseHead: string;
+  readonly gitPath: string;
+};
+
+function hasGitProof(pending: PendingApplicationOperation): pending is PromptGitProof {
+  return pending.gitBaseHead !== null && pending.gitPath !== null;
+}
+
 /** The status a completion records, by the operation that produced it. */
 const COMPLETION_STATUS = {
   "promote-and-apply": "applied",
@@ -432,6 +448,9 @@ function assertCatalogRestored(catalogActiveId: string | null, restoredId: strin
     "Recovered application predecessor does not match the catalog active pointer",
   );
 }
+
+/** The evidence value `catalog.promote` accepts, taken from its own signature. */
+type PromotionEvidence = Parameters<DurableEvolutionCatalog["promote"]>[1];
 
 /** A before snapshot complete enough to restore from: it names bytes and a permission mode. */
 type RecoverableSnapshot = TargetDigestState & { readonly digest: string; readonly mode: number };
@@ -1517,9 +1536,8 @@ export class EvolutionApplicationJournal {
     proposal: EvolutionProposal,
   ): Promise<boolean> {
     if (proposal.status === "promoted") return true;
-    if (proposal.status !== "evaluated") return false;
-    const evidence = proposal.evaluation?.evidence;
-    if (!evidence) return false;
+    const evidence = promotableEvidence(proposal);
+    if (evidence === undefined) return false;
     await this.#catalog.promote(
       proposal.id,
       evidence,
@@ -1583,19 +1601,47 @@ export class EvolutionApplicationJournal {
     return rollbackOutcomeMatches(proposal, active, audit);
   }
 
+  /**
+   * Whether the commit now at HEAD is exactly the one this pending operation was going to make.
+   *
+   * Every clause is a different way for someone else's work to be at HEAD: a commit that did not
+   * come from this base, a tree with other edits in it, or a commit that touched more than this
+   * one file. Only the last is a judgement about content rather than history, which is why it is
+   * the one part split out.
+   */
   async verifyPromptGitOutcome(pending: PendingApplicationOperation): Promise<boolean> {
-    if (!pending.gitBaseHead || !pending.gitPath) return false;
+    if (!hasGitProof(pending)) return false;
     const current = await this.#git.currentCommit(this.#catalog.root);
     if (current === pending.gitBaseHead) return false;
-    let parent: string;
+    return await this.commitIsThisPromptOnly(pending, current);
+  }
+
+  /** The new commit builds on the recorded base, on a clean tree, and touches only the prompt. */
+  private async commitIsThisPromptOnly(
+    pending: PromptGitProof,
+    current: string,
+  ): Promise<boolean> {
+    // One comparison covers both "HEAD has no parent" and "someone else committed on top":
+    // `undefined !== baseHead`, and a parent that is not the recorded base, are the same answer.
+    if ((await this.parentCommitOf(current)) !== pending.gitBaseHead) return false;
+    if (!(await this.#git.isClean(this.#catalog.root))) return false;
+    return await this.commitTouchedOnly(current, pending);
+  }
+
+  /** The parent of a commit, or undefined when it has none (a root commit). */
+  private async parentCommitOf(commit: string): Promise<string | undefined> {
     try {
-      parent = await this.#git.resolveCommit(`${current}^`);
+      return await this.#git.resolveCommit(`${commit}^`);
     } catch {
-      return false;
+      return undefined;
     }
-    if (parent !== pending.gitBaseHead || !(await this.#git.isClean(this.#catalog.root))) {
-      return false;
-    }
+  }
+
+  /** The commit changed this prompt and nothing else. */
+  private async commitTouchedOnly(
+    current: string,
+    pending: PromptGitProof,
+  ): Promise<boolean> {
     const diff = await this.#git.diffBetween(pending.gitBaseHead, current);
     return diff.changedFiles.length === 1 && diff.changedFiles[0] === pending.gitPath;
   }
