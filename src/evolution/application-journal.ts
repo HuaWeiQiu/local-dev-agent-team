@@ -382,6 +382,77 @@ function auditDescribesDecision(
   );
 }
 
+/**
+ * The reconciliation mode a command's preview token names, or null when it is not a
+ * reconciliation at all. `adopt` captured a verified legacy baseline; `apply` rolled one forward.
+ */
+function reconcileModeFrom(command: CommandIdempotencyBinding | undefined): string | null {
+  const token = command?.previewTokenDigest;
+  if (token === undefined) return null;
+  if (!token.startsWith("reconcile:")) return null;
+  return token.slice("reconcile:".length);
+}
+
+/**
+ * Whether rolling this application back is safe.
+ *
+ * An `apply` reconciliation wrote a real change, so undoing it is ordinary work. An `adopt`
+ * captured a predecessor — safe only when that predecessor replaced nothing, otherwise the
+ * rollback chain would have to reach deeper than the one entry a rollback records.
+ */
+function reconcileRollbackSafe(
+  mode: string | null,
+  command: CommandIdempotencyBinding | undefined,
+  application: ApplicationRecord,
+): boolean {
+  if (mode === "apply") return true;
+  return (
+    command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null
+  );
+}
+
+/** Whether the recorded status is the one this reconciliation mode produces. */
+function reconcileStatusMatches(mode: string | null, application: ApplicationRecord): boolean {
+  if (mode === "adopt") return application.status === "adopted";
+  if (mode === "apply") return application.status === "applied";
+  return false;
+}
+
+/**
+ * The shape of a captured legacy predecessor: no command of its own, an id derived from its
+ * owner, adopted status, nothing beneath it, not rollback-safe, and a target that did not move.
+ * Anything else claiming to be a baseline is an ordinary proof and has to prove itself normally.
+ */
+function isSyntheticLegacyShape(
+  application: ApplicationRecord,
+  command: CommandIdempotencyBinding | undefined,
+): boolean {
+  return (
+    command === undefined &&
+    application.commandId.startsWith("legacy:") &&
+    application.status === "adopted" &&
+    application.previousApplication === null &&
+    !application.rollbackSafe &&
+    targetStatesEqual(application.beforeTarget, application.afterTarget)
+  );
+}
+
+/** The completion has to repeat the owner's decision exactly: that is what makes it the same act. */
+function completionRepeatsOwner(
+  application: ApplicationRecord,
+  completion: CompletedApplicationRecord | undefined,
+  owner: SyntheticOwner,
+): boolean {
+  if (completion === undefined) return false;
+  if (
+    application.reason !==
+    `Captured verified legacy predecessor while reconciling: ${owner.reason}`
+  ) {
+    return false;
+  }
+  return sha256Canonical(completion.humanDecision) === sha256Canonical(owner.humanDecision);
+}
+
 /** The first audit of the expected kind that describes this completion's decision. */
 function matchingCompletionAudit(
   context: RestoredStateContext,
@@ -619,28 +690,12 @@ export class EvolutionApplicationJournal {
     const expectedAfterTarget = proposal
       ? await this.#targets.plannedAfterState(proposal, application.beforeTarget)
       : null;
-    const reconcileMode = command?.previewTokenDigest.startsWith("reconcile:")
-      ? command.previewTokenDigest.slice("reconcile:".length)
-      : null;
-    const reconcileRollbackSafe = reconcileMode === "apply" ||
-      (command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null);
-    const reconcileStatusMatches =
-      (reconcileMode === "adopt" && application.status === "adopted") ||
-      (reconcileMode === "apply" && application.status === "applied");
-    const syntheticOwner = this.syntheticOwnerFor(application, input, parentCommandId);
-    const syntheticLegacyBaseline =
-      !command &&
-      syntheticOwner !== undefined &&
-      application.commandId.startsWith("legacy:") &&
-      application.status === "adopted" &&
-      application.previousApplication === null &&
-      !application.rollbackSafe &&
-      targetStatesEqual(application.beforeTarget, application.afterTarget) &&
-      application.reason ===
-        `Captured verified legacy predecessor while reconciling: ${syntheticOwner.reason}` &&
-      completion !== undefined &&
-      sha256Canonical(completion.humanDecision) ===
-        sha256Canonical(syntheticOwner.humanDecision);
+    const reconcileMode = reconcileModeFrom(command);
+    const syntheticLegacyBaseline = this.syntheticLegacyBaselineFor(
+      application,
+      input,
+      parentCommandId,
+    );
     if (syntheticLegacyBaseline) {
       input.syntheticCompletionIds.add(application.commandId);
     }
@@ -651,8 +706,8 @@ export class EvolutionApplicationJournal {
       completion,
       command,
       expectedAfterTarget,
-      reconcileStatusMatches,
-      reconcileRollbackSafe,
+      reconcileStatusMatches: reconcileStatusMatches(reconcileMode, application),
+      reconcileRollbackSafe: reconcileRollbackSafe(reconcileMode, command, application),
       syntheticLegacyBaseline,
     });
     if (mismatches.length > 0) {
@@ -661,9 +716,38 @@ export class EvolutionApplicationJournal {
       );
     }
     if (application.previousApplication) {
-      await this.validateApplicationProof(application.previousApplication, input, application.commandId);
+      await this.validateApplicationProof(
+        application.previousApplication,
+        input,
+        application.commandId,
+      );
     }
-    
+  }
+
+  /**
+   * Whether this proof is a captured legacy predecessor rather than work the journal performed.
+   *
+   * Phase-2 promotions were applied before the journal existed, so reconciliation records a
+   * baseline on their behalf. Two separate questions decide it: does the record have the shape
+   * of such a baseline, and does a command owner exist whose decision the completion repeats
+   * verbatim. An owner with no matching completion is not enough, and neither is the shape on
+   * its own — together they are the only thing that can vouch for a proof with no command.
+   */
+  private syntheticLegacyBaselineFor(
+    application: ApplicationRecord,
+    input: RestoredStateContext,
+    parentCommandId: string | null,
+  ): boolean {
+    const owner = this.syntheticOwnerFor(application, input, parentCommandId);
+    if (owner === undefined) return false;
+    if (!isSyntheticLegacyShape(application, this.#state.commands.get(application.commandId))) {
+      return false;
+    }
+    return completionRepeatsOwner(
+      application,
+      input.completedByCommand.get(application.commandId),
+      owner,
+    );
   }
 
   /**
