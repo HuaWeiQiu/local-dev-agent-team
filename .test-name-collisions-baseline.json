@@ -1,0 +1,8 @@
+{
+  "known": [
+    "test/onboarding.test.ts | test/web/onboarding.test.tsx",
+    "test/plan-completeness.test.ts | test/web/plan-completeness.test.tsx",
+    "test/web-board.test.ts | test/web-board.test.tsx",
+    "test/web/architecture-diagram.test.ts | test/web/architecture-diagram.test.tsx"
+  ]
+}

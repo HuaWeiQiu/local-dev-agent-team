@@ -19,11 +19,17 @@
  * have caught the `run-actions` / `web-run-actions` pair — the fix for that was
  * the move, and the habit of reading the reported line before editing.
  */
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const defaultBaseline = path.join(defaultRoot, ".test-name-collisions-baseline.json");
+
+/** Two distinct files that print the same stem. */
+function sameStem(left, right) {
+  return left.file !== right.file && left.stem === right.stem;
+}
 
 /** @param {string[]} paths */
 export function findCollisions(paths) {
@@ -35,35 +41,71 @@ export function findCollisions(paths) {
   const collisions = [];
   for (let i = 0; i < named.length; i += 1) {
     for (let j = i + 1; j < named.length; j += 1) {
-      const [left, right] = [named[i], named[j]];
-      if (left.file === right.file) continue;
-      if (left.stem === right.stem) {
-        collisions.push({ left: left.file, right: right.file, reason: "same stem, different extension" });
+      if (sameStem(named[i], named[j])) {
+        collisions.push({
+          left: named[i].file,
+          right: named[j].file,
+          reason: "same stem, different extension",
+        });
       }
     }
   }
   return collisions;
 }
 
-function walk(directory, out = []) {
+/** A stable key for a collision, so a baseline can hold it. */
+export function collisionKey(collision) {
+  return [collision.left, collision.right].sort().join(" | ");
+}
+
+/**
+ * Collisions that are not already frozen in the baseline. The four pairs on the
+ * baseline are not duplicates — they test different layers of the same feature
+ * (`onboarding` over node:fs vs over the DOM, `board` as a pure function vs as a
+ * rendered component) — so the baseline records them as known, and the gate only
+ * refuses new ones.
+ */
+export function newCollisions(collisions, baseline) {
+  const known = new Set(baseline);
+  return collisions.filter((collision) => !known.has(collisionKey(collision)));
+}
+
+export function walk(directory, root, out = []) {
   for (const entry of readdirSync(directory)) {
     const target = path.join(directory, entry);
-    if (statSync(target).isDirectory()) walk(target, out);
+    if (statSync(target).isDirectory()) walk(target, root, out);
     else if (/\.(?:test|spec)\.[cm]?tsx?$/.test(entry)) {
-      out.push(path.relative(defaultRoot, target).split(path.sep).join("/"));
+      out.push(path.relative(root, target).split(path.sep).join("/"));
     }
   }
   return out;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const collisions = findCollisions(walk(path.join(defaultRoot, "test")));
-  if (collisions.length > 0) {
-    process.stderr.write(`${collisions.length} confusable test file name(s):\n`);
-    for (const { left, right, reason } of collisions) {
-      process.stderr.write(`  ${left}\n  ${right}   (${reason})\n`);
+  const args = process.argv.slice(2);
+  const collisions = findCollisions(walk(path.join(defaultRoot, "test"), defaultRoot));
+  const keys = collisions.map(collisionKey).sort();
+
+  if (args.includes("--update-baseline")) {
+    writeFileSync(defaultBaseline, `${JSON.stringify({ known: keys }, null, 2)}\n`);
+    process.stdout.write(`wrote ${keys.length} known pair(s) to ${defaultBaseline}\n`);
+  } else if (args.includes("--check")) {
+    const baseline = existsSync(defaultBaseline)
+      ? JSON.parse(readFileSync(defaultBaseline, "utf8")).known
+      : [];
+    const fresh = newCollisions(collisions, baseline);
+    if (fresh.length > 0) {
+      process.stderr.write(`${fresh.length} new confusable test file name(s):\n`);
+      for (const { left, right, reason } of fresh) {
+        process.stderr.write(`  ${left}\n  ${right}   (${reason})\n`);
+      }
+      process.exit(1);
     }
-    process.exit(1);
+    process.stdout.write(`${keys.length} confusable name(s), ${fresh.length} new\n`);
+  } else {
+    for (const { left, right, reason } of collisions) {
+      process.stdout.write(`${left}\n${right}   (${reason})\n`);
+    }
+    process.stdout.write(`${collisions.length} confusable name(s)\n`);
   }
-  process.stdout.write("no confusable test file names\n");
 }
