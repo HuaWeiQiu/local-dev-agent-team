@@ -622,7 +622,15 @@ function hasCounts(parsed) {
   return typeof parsed?.counts === "object" && parsed?.counts !== null;
 }
 
+/** Two questions about the tree, asked before anything is measured: which commit, and is it clean. */
+function treePrecondition(options, cwd) {
+  const wrongTree = baseRefusal(options, cwd);
+  if (wrongTree !== undefined) return wrongTree;
+  return dirtyTreeRefusal(cwd);
+}
+
 /**
+ * A census measured on a dirty tree describes a tree that is not any commit./**
  * A census measured on a dirty tree describes a tree that is not any commit.
  *
  * `baseRefusal` already refuses a `HEAD` that is not `origin/main`, but a dirty tree passes it —
@@ -1463,10 +1471,8 @@ export function writeDriftReport(pathname, payload, cwd = process.cwd()) {
  * only says the gate has seen it; the CRAP ledger still decides whether it is debt.
  */
 export function writeCcSnapshot(ub, options, cwd = process.cwd()) {
-  const wrongTree = baseRefusal(options, cwd);
-  if (wrongTree !== undefined) return wrongTree;
-  const dirtyTree = dirtyTreeRefusal(cwd);
-  if (dirtyTree !== undefined) return dirtyTree;
+  const tree = treePrecondition(options, cwd);
+  if (tree !== undefined) return tree;
   clearMetrics(cwd);
   const failed = runLayers(ub, { ...options, changed: false }, cwd);
   // Exit 2 means "over the threshold", which is this file's subject, not a broken run.
@@ -1518,14 +1524,7 @@ function countsDigest(counts) {
 export function censusDocument({ ub, cwd, counts, increases }) {
   return {
     generatedAt: new Date().toISOString(),
-    // Provenance keys are never dropped, only reported as unknown: a file whose shape depends on
-    // what it happened to be able to measure cannot be compared with the file it replaces.
-    headSha: gitHeadSha(cwd) ?? null,
-    // A census measured with uncommitted changes is measured on a tree that is not any commit —
-    // which is exactly the state #256's census shipped in. Saying so lets a reader tell a
-    // reproducible number from one that only existed on somebody's disk for a few minutes.
-    workingTreeDirty: workingTreeIsDirty(cwd) ?? null,
-    toolCommit: ub ? (toolCommit(ub) ?? null) : null,
+    ...censusProvenance(ub, cwd),
     command: "node scripts/ub-quality-gate.mjs --all --update-cc-baseline",
     total: Object.keys(counts).length,
     countsDigest: countsDigest(counts),
@@ -1538,7 +1537,27 @@ export function censusDocument({ ub, cwd, counts, increases }) {
   };
 }
 
-/** How many functions sit at each complexity, so the distribution reads without walking 3,800 lines. */
+/**
+ * Where this census came from.
+ *
+ * Unknown is reported as `null`, never by dropping the key: a file whose shape depends on what it
+ * happened to be able to measure cannot be compared with the file it replaces. The dirty flag is
+ * not ceremony either — a census measured with uncommitted changes describes a tree that is not
+ * any commit, and `writeCcSnapshot` refuses that case rather than recording it.
+ */
+function censusProvenance(ub, cwd) {
+  return {
+    headSha: knownOrNull(gitHeadSha(cwd)),
+    workingTreeDirty: knownOrNull(workingTreeIsDirty(cwd)),
+    toolCommit: ub === undefined ? null : knownOrNull(toolCommit(ub)),
+  };
+}
+
+function knownOrNull(value) {
+  return value ?? null;
+}
+
+/** How many functions sit at each complexity, so the distribution reads without walking 3,800 lines. *//** How many functions sit at each complexity, so the distribution reads without walking 3,800 lines. */
 function complexityHistogram(counts) {
   const histogram = {};
   for (const complexity of Object.values(counts)) {
