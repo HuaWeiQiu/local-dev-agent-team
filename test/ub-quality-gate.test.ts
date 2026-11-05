@@ -715,6 +715,36 @@ describe("new functions must stay simple", () => {
     });
   });
 
+  it("does not let an allowance admit a function the census never saw", async () => {
+    // This was the one hole in the rule: newcomers were run through `allowed` too, so a brand-new
+    // cc 15 function could be waved in with the same flag that is meant to let a *recorded*
+    // function grow. "A new function may be at most cc 4" has to be advice no flag can undo.
+    const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["m#brand-new", { complexity: 15, coverage: 1, crap: 15 }]]);
+    const census = { counts: { "m#old": 3 }, increases: {} };
+
+    const result = censusGrowth(
+      parseArgs(["--update-cc-baseline", "--allow-cc-increase=m#brand-new,it is fine, really"], {}),
+      functions,
+      census,
+    );
+    expect(result.status).toBe(1);
+  });
+
+  it("says so when an allowance names something the census does not record", async () => {
+    // An allowance with nothing to allow is not a no-op to hide: a silently unused flag looks
+    // exactly like a flag that worked.
+    const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["m#known", { complexity: 2, coverage: 1, crap: 2 }]]);
+
+    const result = censusGrowth(
+      parseArgs(["--update-cc-baseline", "--allow-cc-increase=m#typo,meant the other one"], {}),
+      functions,
+      { counts: { "m#known": 2 }, increases: {} },
+    );
+    expect(result.status).toBe(1);
+  });
+
   it("refuses the census write when something grew without an allowance", async () => {
     const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
     const functions = new Map([["m#big", { complexity: 9, coverage: 1, crap: 9 }]]);

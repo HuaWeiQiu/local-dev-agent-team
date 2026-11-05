@@ -1611,13 +1611,29 @@ function allowanceMap(options) {
 
 /** Complexity the census does not permit, as printable lines; empty means the refresh may write. */
 function unpermittedGrowth(functions, counts, allowed) {
-  const newcomers = overComplexNewcomers(functions, counts)
-    .filter(([key]) => !allowed.has(key))
-    .map(([key, complexity]) => `  new  cc ${String(complexity).padStart(3)}  ${key}  (allowance ${NEW_FUNCTION_CC_LIMIT})`);
+  // A newcomer is not filtered by `allowed` — that filter was the one hole in the rule. An
+  // allowance is about a function the census already knows; letting it admit an unknown key
+  // turned "a new function may be at most cc 4" into advice.
+  const newcomers = overComplexNewcomers(functions, counts).map(
+    ([key, complexity]) =>
+      `  new  cc ${String(complexity).padStart(3)}  ${key}  (allowance ${NEW_FUNCTION_CC_LIMIT})`,
+  );
   const grown = ccIncreases(functions, counts)
     .filter((entry) => !allowed.has(entry.key))
     .map((entry) => `  grew cc ${entry.from} -> ${entry.to}  ${entry.key}`);
-  return [...newcomers, ...grown];
+  return [...newcomers, ...grown, ...unusableAllowances(allowed, counts)];
+}
+
+/**
+ * An allowance naming something the census does not record.
+ *
+ * It has nothing to allow: there is no recorded complexity to grow past. Reporting it rather
+ * than ignoring it keeps the flag honest — a silently unused allowance looks like it worked.
+ */
+function unusableAllowances(allowed, counts) {
+  return [...allowed.keys()]
+    .filter((key) => key in counts === false)
+    .map((key) => `  allowance for '${key}', which the census does not record — split it instead`);
 }
 
 function refuseCensusGrowth(lines) {
