@@ -1,7 +1,7 @@
 {
-  "total": 386,
+  "total": 384,
   "byForm": {
-    "never": 252,
+    "never": 250,
     "unknown-as": 134
   },
   "counts": {
@@ -112,8 +112,8 @@
     "test/web/run-events-hook.test.tsx:never": 1,
     "test/web/run-launcher-model.test.ts:unknown-as": 1,
     "test/web/run-launcher.test.tsx:unknown-as": 1,
-    "test/web/run-page.test.tsx:never": 11,
     "test/web/run-page.test.tsx:unknown-as": 1,
+    "test/web/run-page.test.tsx:never": 9,
     "test/web/run-task-detail.test.tsx:unknown-as": 1,
     "test/web/run-task-detail.test.tsx:never": 1,
     "test/web/strategy-composer.test.tsx:unknown-as": 2,
