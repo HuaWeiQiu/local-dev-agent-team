@@ -21,7 +21,8 @@
  */
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultBaseline = path.join(defaultRoot, ".test-name-collisions-baseline.json");
@@ -81,7 +82,7 @@ export function walk(directory, root, out = []) {
   return out;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   const args = process.argv.slice(2);
   const collisions = findCollisions(walk(path.join(defaultRoot, "test"), defaultRoot));
   const keys = collisions.map(collisionKey).sort();

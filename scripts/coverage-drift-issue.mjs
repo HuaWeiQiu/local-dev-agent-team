@@ -16,6 +16,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { renderAttribution } from "./coverage-caliber-attribution.mjs";
+import { isMainModule } from "./lib/is-main-module.mjs";
 import { infrastructureReport, readReport, reportFromText } from "./drift-report.mjs";
 
 // Re-exported so the two readers of a drift report keep one public name for its rule.
@@ -206,8 +207,7 @@ function main(argv) {
   return 0;
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined && process.argv[1].endsWith("coverage-drift-issue.mjs");
+const invokedDirectly = isMainModule(import.meta.url, process.argv[1]);
 if (invokedDirectly) {
   process.exit(main(process.argv.slice(2)));
 }

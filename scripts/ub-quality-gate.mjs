@@ -31,6 +31,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mergeCoverageReports } from "./coverage-merge.mjs";
+import { isMainModule } from "./lib/is-main-module.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -42,7 +43,6 @@ import {
 } from "node:fs";
 import os, { arch, platform } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mutator] [--threshold N]
                                   [--rust-threshold N] [--baseline PATH] [--update-baseline]
@@ -1371,9 +1371,7 @@ function driftVerdict(options, cwd, { report, error }, status) {
   return status;
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+const invokedDirectly = isMainModule(import.meta.url, process.argv[1]);
 if (invokedDirectly) {
   process.exit(main());
 }

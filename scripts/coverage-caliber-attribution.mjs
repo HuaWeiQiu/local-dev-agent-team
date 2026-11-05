@@ -38,6 +38,7 @@
 
 import { NOISE, buildReport, defaultIO, measureCells, resolveUb } from "./coverage-caliber-report.mjs";
 import { readReport } from "./drift-report.mjs";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
 export const REPEATS = 3;
 export const MODES = ["existing"];
@@ -277,8 +278,7 @@ export function main(argv = process.argv.slice(2), io = defaultIO()) {
   return 0;
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined && process.argv[1].endsWith("coverage-caliber-attribution.mjs");
+const invokedDirectly = isMainModule(import.meta.url, process.argv[1]);
 if (invokedDirectly) {
   process.exit(main());
 }
