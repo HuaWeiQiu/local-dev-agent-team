@@ -3,6 +3,7 @@ import { symlinkSync } from "node:fs";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
 
 /**
@@ -62,16 +63,94 @@ const clis = [
  * the static check below, which is the part that has to hold for a new script too.
  */
 
-/** The two forms that were copied around this repository before `lib/is-main-module.mjs`. */
-const forbidden = [/import\.meta\.url ===/, /process\.argv\[1\]\.endsWith\(/];
+/**
+ * The two forms that were copied around this repository before `lib/is-main-module.mjs`,
+ * looked for in the syntax tree rather than in the text.
+ *
+ * Text matching answers "do these bytes look like a guard", which is not the question.
+ * It fires on a comment explaining why the form is wrong — `lib/is-main-module.mjs`
+ * contains exactly that sentence — and it fires inside a string literal. This repository
+ * has already paid for that mistake once: `grep` counted 315 `as never` where the AST
+ * counted 291, and six of the sixteen were `was never` in prose.
+ */
 
 /**
- * Source without its comments. A guard that is commented out is not a guard, and the
- * rule itself is written down in prose in `lib/is-main-module.mjs` — the one place that
- * is allowed to spell the old form, because it is explaining why it is wrong.
+ * `import.meta.url`, as a node rather than as a substring. `import.meta` parses as a
+ * `MetaProperty` — the same shape as `new.target` — not as a property access on an
+ * identifier called `import`, which is what a first version assumed.
  */
-function withoutComments(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+function isImportMetaUrl(node: ts.Node): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  if (node.name.text !== "url") return false;
+  const target = node.expression;
+  return (
+    ts.isMetaProperty(target) &&
+    target.keywordToken === ts.SyntaxKind.ImportKeyword &&
+    target.name.text === "meta"
+  );
+}
+
+/** `process.argv[...]`, which is where a hand-rolled entry check reads its input. */
+function isArgvElement(node: ts.Node): boolean {
+  if (!ts.isElementAccessExpression(node)) return false;
+  const target = node.expression;
+  return (
+    ts.isPropertyAccessExpression(target) &&
+    target.name.text === "argv" &&
+    ts.isIdentifier(target.expression) &&
+    target.expression.text === "process"
+  );
+}
+
+/** Whether a subtree contains a node the predicate accepts. */
+function contains(node: ts.Node, predicate: (candidate: ts.Node) => boolean): boolean {
+  if (predicate(node)) return true;
+  let found = false;
+  ts.forEachChild(node, (child) => {
+    if (!found && contains(child, predicate)) found = true;
+  });
+  return found;
+}
+
+function isEquality(kind: ts.SyntaxKind): boolean {
+  return kind === ts.SyntaxKind.EqualsEqualsEqualsToken || kind === ts.SyntaxKind.EqualsEqualsToken;
+}
+
+/** `x.endsWith(...)` called on `process.argv[...]`. */
+function isArgvSuffixCheck(node: ts.Node): boolean {
+  if (!ts.isCallExpression(node)) return false;
+  const callee = node.expression;
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    callee.name.text === "endsWith" &&
+    isArgvElement(callee.expression)
+  );
+}
+
+/**
+ * Every place a file decides its own entry status by comparing strings, as
+ * `line: what it did`.
+ */
+export function stringEntryChecks(source: string, file = "input.mjs"): string[] {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const found: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isBinaryExpression(node) && isEquality(node.operatorToken.kind)) {
+      const comparesUrl = [node.left, node.right].some((side) => contains(side, isImportMetaUrl));
+      if (comparesUrl) found.push(`line ${line(parsed, node)}: compares import.meta.url as a string`);
+    }
+    if (isArgvSuffixCheck(node)) {
+      found.push(`line ${line(parsed, node)}: decides by the tail of process.argv[1]`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return found;
+}
+
+/** @param {ts.SourceFile} file */
+function line(file: ts.SourceFile, node: ts.Node): number {
+  return file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
 }
 
 describe("every CLI survives a symlinked path", () => {
@@ -96,15 +175,31 @@ describe("every CLI survives a symlinked path", () => {
     }
   }, 120_000);
 
-  it("leaves the two string comparisons nowhere in the tree", async () => {
-    // The unit case proves the comparison is right; this one proves nobody wrote their
+  it("flags the comparison in code, and only in code", () => {
+    // The checker has to be proved before its silence means anything: it fires on the
+    // form that broke, and stays quiet for the same text in prose and in a string.
+    const inCode = 'const main = import.meta.url === pathToFileURL(resolve(argv[1])).href;';
+    const inComment = "// we used to write import.meta.url === pathToFileURL(...) here\n";
+    const inString = 'const note = "import.meta.url === pathToFileURL(...)";\n';
+    const bySuffix = 'const main = process.argv[1].endsWith("some-script.mjs");';
+
+    expect(stringEntryChecks(inCode)).toHaveLength(1);
+    expect(stringEntryChecks(bySuffix)).toHaveLength(1);
+    expect(stringEntryChecks(inComment)).toEqual([]);
+    expect(stringEntryChecks(inString)).toEqual([]);
+    expect(stringEntryChecks("export const isMain = isMainModule(import.meta.url, process.argv[1]);"))
+      .toEqual([]);
+  });
+
+  it("finds no hand-rolled entry check anywhere under scripts/", async () => {
+    // The unit case above proves the checker works; this one proves nobody wrote their
     // own. A script added next month is checked here without anyone remembering to add it.
     const entries = await readdir("scripts", { recursive: true });
     const offenders = [];
     for (const entry of entries) {
       if (!entry.endsWith(".mjs")) continue;
-      const code = withoutComments(await readFile(path.join("scripts", entry), "utf8"));
-      if (forbidden.some((pattern) => pattern.test(code))) offenders.push(entry);
+      const source = await readFile(path.join("scripts", entry), "utf8");
+      for (const hit of stringEntryChecks(source, entry)) offenders.push(`${entry}:${hit}`);
     }
     expect(offenders).toEqual([]);
   });
