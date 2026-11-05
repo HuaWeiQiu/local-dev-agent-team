@@ -323,6 +323,42 @@ function pendingPreviousApplicationMismatches(expectation: PendingExpectation): 
   ]);
 }
 
+/** A before snapshot complete enough to restore from: it names bytes and a permission mode. */
+type RecoverableSnapshot = TargetDigestState & { readonly digest: string; readonly mode: number };
+
+/** The candidate shape a prompt restore can work with. */
+type PromptCandidate = Extract<EvolutionProposal["candidate"], { kind: "role-prompt" }>;
+
+/**
+ * Two separate refusals, one message. They are split because each narrows its own argument: the
+ * proposal has to name a prompt, and the snapshot has to name bytes *and* a permission mode.
+ * Without a digest there is no object to read; without a mode the rewritten file comes back with
+ * whatever the process umask gives it — a silently different target state no later check looks
+ * for. Both conditions still fail with the same message the single guard used to produce.
+ */
+function assertPromptCandidate(
+  proposal: EvolutionProposal,
+): asserts proposal is EvolutionProposal & { readonly candidate: PromptCandidate } {
+  if (proposal.candidate.kind === "role-prompt") return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Interrupted prompt operation lacks a recoverable before snapshot",
+  );
+}
+
+function assertRecoverableSnapshot(before: TargetDigestState): asserts before is RecoverableSnapshot {
+  if (before.digest !== null && before.mode !== undefined) return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Interrupted prompt operation lacks a recoverable before snapshot",
+  );
+}
+
+/** Whether this path is anything other than the plain file it is supposed to name. */
+function targetIsUnsafe(info: { isSymbolicLink(): boolean; isFile(): boolean }, resolved: string, absolute: string): boolean {
+  return info.isSymbolicLink() || !info.isFile() || resolved !== absolute;
+}
+
 /** The catalog's active pointer for the target the given proposal names. */
 function activePointerForProposal(
   snapshot: EvolutionCatalogSnapshot,
@@ -1462,39 +1498,68 @@ export class EvolutionApplicationJournal {
     );
   }
 
+  /**
+   * Put the original prompt bytes back after a crash left them half-written.
+   *
+   * Four refusals stand between the record and the write, and they are ordered: the snapshot has
+   * to be complete enough to restore from, the object store has to still hold those bytes, the
+   * target has to still be the regular file it was, and only then is anything written. After the
+   * write the same two questions are asked again of the world, because "the rename returned" and
+   * "the target now says what it said before" are not the same statement.
+   */
   async restoreInterruptedPrompt(
     proposal: EvolutionProposal,
     before: TargetDigestState,
   ): Promise<void> {
-    if (proposal.candidate.kind !== "role-prompt" || !before.digest || before.mode === undefined) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        "Interrupted prompt operation lacks a recoverable before snapshot",
-      );
-    }
+    assertPromptCandidate(proposal);
+    assertRecoverableSnapshot(before);
     const bytes = await this.#targets.readPromptObject(before.digest);
     const absolute = path.resolve(this.#catalog.root, proposal.candidate.path);
+    await this.assertSafeRecoveryTarget(absolute);
+    await this.writeRestoredBytes(absolute, bytes, before.mode);
+    clearPromptTemplateCache();
+    await this.assertTargetRestored(proposal, before);
+    await this.assertRecoveryLeftTheTreeClean();
+  }
+
+  /**
+   * A restore must never write through a link, and never into anything but a regular file.
+   *
+   * The realpath comparison is the part worth keeping: the path may look like the prompt while
+   * pointing somewhere else entirely, and following it would corrupt a file that was never part
+   * of the change.
+   */
+  private async assertSafeRecoveryTarget(absolute: string): Promise<void> {
     const info = await this.#io.lstat(absolute);
-    if (
-      info.isSymbolicLink() ||
-      !info.isFile() ||
-      (await this.#io.realpath(absolute)) !== absolute
-    ) {
+    if (targetIsUnsafe(info, await this.#io.realpath(absolute), absolute)) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
         "Interrupted prompt target is no longer a safe regular file",
       );
     }
+  }
+
+  /**
+   * Write the bytes to a sibling temp file and rename it into place.
+   *
+   * The temp file is removed on any failure: leaving it behind would either be picked up by the
+   * cleanup pass later or, worse, sit next to the prompt looking like a real file.
+   */
+  private async writeRestoredBytes(
+    absolute: string,
+    bytes: Uint8Array,
+    mode: number,
+  ): Promise<void> {
     const directory = path.dirname(absolute);
     const temporaryPath = path.join(
       directory,
       promptTempName(path.basename(absolute), { recovery: true }),
     );
     try {
-      const handle = await this.#io.open(temporaryPath, "wx", before.mode);
+      const handle = await this.#io.open(temporaryPath, "wx", mode);
       try {
         await handle.writeFile(bytes);
-        await this.#io.chmod(temporaryPath, before.mode);
+        await this.#io.chmod(temporaryPath, mode);
         await handle.sync();
       } finally {
         await handle.close();
@@ -1505,7 +1570,13 @@ export class EvolutionApplicationJournal {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       throw error;
     }
-    clearPromptTemplateCache();
+  }
+
+  /** The target now reads back exactly as the snapshot recorded it, digest and mode included. */
+  private async assertTargetRestored(
+    proposal: EvolutionProposal,
+    before: TargetDigestState,
+  ): Promise<void> {
     const restored = await this.#targets.readTargetState(proposal.candidate);
     if (!targetStatesEqual(restored, before)) {
       throw new EvolutionApplicationError(
@@ -1513,12 +1584,15 @@ export class EvolutionApplicationJournal {
         "Interrupted prompt recovery did not restore the complete target state",
       );
     }
-    if (!(await this.#git.isClean(this.#catalog.root))) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        "Interrupted prompt was restored but the Git index/worktree is not clean",
-      );
-    }
+  }
+
+  /** A restore that leaves other work uncommitted would mix two changes in one tree. */
+  private async assertRecoveryLeftTheTreeClean(): Promise<void> {
+    if (await this.#git.isClean(this.#catalog.root)) return;
+    throw new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      "Interrupted prompt was restored but the Git index/worktree is not clean",
+    );
   }
 
   async cleanPendingPromptTemps(relativePath: string): Promise<void> {
