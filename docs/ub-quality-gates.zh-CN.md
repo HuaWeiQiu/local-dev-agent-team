@@ -598,7 +598,31 @@ new  cc   6  scripts.ub-quality-gate#validated          ← 不是我的
 前五条全部拆到 ≤4 之后才写进去；第六条 `validated` 是 `#261` 在 census 建好之前合进来的，
 用 `--allow-cc-increase` 记了一条带理由的豁免。
 
-**顺带一条运维事实**：crapper 自采集会跑整个测试套件，而 `test/ub-quality-gate.test.ts` 里有用例
+##### 文件的键集必须等于写入器的键集（2026-11，被审计抓到）
+
+一份**自己无法重算**的 census 比没有 census 更危险：它会让后面所有"新函数 cc ≤ 4"的判定建立
+在一个没人能复现的名单上。审计当时抓到的形状很具体——文件里躺着七个溯源键，而写入器只会产出
+`{ total, byComplexity, counts }`。**下一次刷新不会报错，只会把它们静默抹掉，覆盖成一个更小的对象。**
+
+两条约束，各有用例守着：
+
+| 约束 | 用例 |
+| --- | --- |
+| **写入器产出的键 = 文件里的键**，一个不多一个不少 | 往返用例：写 → 读回 → 断言键集；另有一条直接比对仓库里那份文件的键集与 `censusDocument` 的键集 |
+| **键不随内容增减** | `increases` 空时也写 `{}`；`headSha` / `toolCommit` / `workingTreeDirty` 未知时写 `null`。否则"这次没测到"会变成"这次少一个键"，而文件形状取决于它自己的内容，就没法跟上一版比 |
+
+同一个测试文件里还有一条**可复现性**用例：同一棵树刷两次，`counts` 与 `countsDigest` 必须相同
+（中间要先提交，因为第一次写出来的 census 本身就是未提交改动）。
+
+##### 脏树上的 census 是拒写，不是"如实记录"（2026-11 修正）
+
+上一版把 `workingTreeDirty: true` 写进文件，同时 `headSha` 还是某个真实提交——**recorded,
+not allowed**。那等于承认"这份数字不来自那个提交"，然后照样把它当那个提交的权威数字用。
+
+现在 `writeCcSnapshot` 在 `baseRefusal`（HEAD 必须等于 `origin/main`）之后**再拒一次脏树**。
+理由和前者相同：census 描述的是一个提交，脏树上的那一份不对应任何提交，谁也复现不了。
+
+**顺带一条运维事实**：crapper 自采集会跑整个测试套件**顺带一条运维事实**：crapper 自采集会跑整个测试套件，而 `test/ub-quality-gate.test.ts` 里有用例
 调用 `main(["--update-cc-baseline"], root)`——它的 stdout 会串进刷新的日志里，看起来像刷新写了两次。
 实际只有最后一次落盘。
 
