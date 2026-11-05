@@ -36,7 +36,7 @@ const { useEvolutionWorkbench } = await import(
 const { ApiError } = await import("../../web/src/api.js");
 
 /** A project selection (`{mode, projectId}`), which is what the model scopes by. */
-const scope = projectScope;
+const scope = projectScope();
 
 function automation(): EvolutionSnapshot["automation"] {
   return {

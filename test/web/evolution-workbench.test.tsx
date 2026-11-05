@@ -39,7 +39,7 @@ const { EvolutionWorkbench } = await import(
  * not the project record (`{id, name, root}`). The fixture used to describe the
  * record and the cast hid the difference — a shape error, not a missing field.
  */
-const scope = projectScope;
+const scope = projectScope();
 const config = { roles: [], strategies: { default: "demo", definitions: [] } } as never;
 
 function proposal(id: string, status: EvolutionSnapshot["proposals"][number]["status"]) {

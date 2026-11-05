@@ -16,7 +16,7 @@ vi.mock("../web/src/api.js", async (importOriginal) => {
 
 const { WorkspaceView } = await import("../web/src/app/WorkspaceView.js");
 
-const scope = projectScope;
+const scope = projectScope();
 
 function config(): PublicConfig {
   return {
