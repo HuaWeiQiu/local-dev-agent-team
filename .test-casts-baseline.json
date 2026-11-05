@@ -1,7 +1,7 @@
 {
-  "total": 390,
+  "total": 387,
   "byForm": {
-    "never": 256,
+    "never": 253,
     "unknown-as": 134
   },
   "counts": {
@@ -88,7 +88,7 @@
     "test/web/architecture-stage-detail.test.tsx:unknown-as": 2,
     "test/web/architecture-stage.test.ts:unknown-as": 1,
     "test/web/architecture-stage.test.ts:never": 1,
-    "test/web/automation-bar.test.tsx:never": 5,
+    "test/web/automation-bar.test.tsx:never": 2,
     "test/web/component-maps.test.tsx:unknown-as": 1,
     "test/web/component-maps.test.tsx:never": 5,
     "test/web/dom-setup.ts:unknown-as": 2,
