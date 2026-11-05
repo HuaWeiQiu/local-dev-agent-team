@@ -76,6 +76,7 @@ describe("ub quality gate wrapper", () => {
       baseline: ".ub-crap-baseline.json",
       ccBaseline: ".ub-cc-baseline.json",
       updateCcBaseline: false,
+      allowCcIncrease: [],
       updateBaseline: false,
       driftReport: "",
       coverageA: "",
@@ -584,6 +585,26 @@ describe("new functions must stay simple", () => {
       .toBe(1);
   });
 
+  it("refuses a report it cannot read instead of passing silently", async () => {
+    // The reader is a regex over the tool's EDN. A format change would match nothing, and an
+    // empty result that means "no functions" is indistinguishable from "the gate has nothing to
+    // say" — which is how a gate gets switched off without anyone noticing.
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await workdir(["not an edn entry at all"], { "mod#steady": 2 });
+
+    expect(
+      newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root),
+    ).toBe(1);
+  });
+
+  it("says nothing when there is no metrics file at all", async () => {
+    // An idle changed-files run leaves no report; that is not a shape change.
+    const { newcomerRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-cc-idle-"));
+
+    expect(newcomerRefusal(existing, new Map(), root)).toBeUndefined();
+  });
+
   it("treats a renamed function as a newcomer, on purpose", async () => {
     // Renaming is the cheapest way out of any "known functions" rule, so it has to land in the
     // newcomer set. The way out is deleting the old key with a reason in the commit, not a flag.
@@ -591,6 +612,120 @@ describe("new functions must stay simple", () => {
     const functions = new Map([["mod#renamed", { complexity: 7, coverage: 100, crap: 7 }]]);
 
     expect(overComplexNewcomers(functions, { "mod#original": 7 })).toEqual([["mod#renamed", 7]]);
+  });
+
+  it("catches a regression the other three gates wave through", async () => {
+    // The case this ratchet exists for: `parseArgs` was cc 10 at 100% coverage. Put it back and
+    // CRAP is 10.0 — not above the threshold, so the CRAP gate is silent; the key is known, so
+    // the newcomer gate is silent; the ledger only stores entries above 10, so nothing moves.
+    // The only number that changed is the complexity.
+    const { ccIncreases, regressions } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["gate#parseArgs", { complexity: 10, coverage: 100, crap: 10 }]]);
+    const census = { "gate#parseArgs": 7 };
+    const scores = new Map([["gate#parseArgs", 10]]);
+
+    expect(regressions(scores, { "gate#parseArgs": 10 }, 10)).toEqual([]);
+    expect(ccIncreases(functions, census)).toEqual([{ key: "gate#parseArgs", from: 7, to: 10 }]);
+  });
+
+  it("says nothing when a known function got simpler or stayed put", async () => {
+    const { ccIncreases } = await import("../scripts/ub-quality-gate.mjs");
+
+    expect(ccIncreases(new Map([["m#a", { complexity: 3, coverage: 1, crap: 3 }]]), { "m#a": 3 }))
+      .toEqual([]);
+    expect(ccIncreases(new Map([["m#a", { complexity: 2, coverage: 1, crap: 2 }]]), { "m#a": 5 }))
+      .toEqual([]);
+  });
+
+  it("reports the biggest growth first", async () => {
+    const { ccIncreases } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([
+      ["m#small", { complexity: 6, coverage: 1, crap: 6 }],
+      ["m#big", { complexity: 12, coverage: 1, crap: 12 }],
+    ]);
+
+    expect(ccIncreases(functions, { "m#small": 5, "m#big": 5 })).toEqual([
+      { key: "m#big", from: 5, to: 12 },
+      { key: "m#small", from: 5, to: 6 },
+    ]);
+  });
+
+  it("refuses the gate run when a recorded function grew", async () => {
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await workdir([fn("mod", "steady", 6)], { "mod#steady": 4 });
+
+    expect(newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root))
+      .toBe(1);
+  });
+
+  it("rejects an allowance outside a census refresh", async () => {
+    // Everywhere else an increase is a refusal — that is the whole point, so the flag must not
+    // be usable as a quiet override on a normal run.
+    const { parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+
+    expect(() => parseArgs(["--allow-cc-increase=m#a,slow"], {})).toThrow(/only applies to/);
+    expect(() => parseArgs(["--update-cc-baseline", "--allow-cc-increase=m#a"], {})).toThrow(
+      /needs <key>,<reason>/,
+    );
+    expect(() =>
+      parseArgs(["--update-cc-baseline", "--allow-cc-increase=m#a,   "], {}),
+    ).toThrow(/needs a reason/);
+  });
+
+  it("records an allowed increase in the census, with its reason", async () => {
+    const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["m#big", { complexity: 9, coverage: 1, crap: 9 }]]);
+    const census = { counts: { "m#big": 7 }, increases: {} };
+    const options = parseArgs(
+      ["--update-cc-baseline", "--allow-cc-increase=m#big,pending split"],
+      {},
+    );
+
+    const grown = censusGrowth(options, functions, census);
+    expect(grown.status).toBeUndefined();
+    expect(grown.increases["m#big"]).toMatchObject({
+      from: 7,
+      to: 9,
+      reason: "pending split",
+    });
+  });
+
+  it("refuses the census write when something grew without an allowance", async () => {
+    const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["m#big", { complexity: 9, coverage: 1, crap: 9 }]]);
+
+    expect(
+      censusGrowth(parseArgs(["--update-cc-baseline"], {}), functions, {
+        counts: { "m#big": 7 },
+        increases: {},
+      }).status,
+    ).toBe(1);
+  });
+
+  it("records a first census wholesale, because there is nothing to ratchet against", async () => {
+    const { censusGrowth, parseArgs } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["m#huge", { complexity: 45, coverage: 1, crap: 45 }]]);
+
+    const first = censusGrowth(parseArgs(["--update-cc-baseline"], {}), functions, undefined);
+    expect(first.status).toBeUndefined();
+    expect(first.increases).toEqual({});
+  });
+
+  it("pins where the census came from, so the numbers can be recomputed", async () => {
+    // Without headSha a frozen 3790 cannot be recomputed, and a move cannot be attributed to the
+    // tool or to the code. Both questions are the first ones a reader of a frozen number asks.
+    const { censusDocument } = await import("../scripts/ub-quality-gate.mjs");
+    const doc = censusDocument({
+      ub: undefined,
+      cwd: process.cwd(),
+      counts: { "m#a": 1 },
+      increases: {},
+    });
+
+    expect(doc).toMatchObject({ total: 1, command: expect.stringContaining("--update-cc-baseline") });
+    expect(doc.headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(doc.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(doc.countsDigest).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("reports the worst newcomers first", async () => {
@@ -1460,11 +1595,18 @@ describe("the complexity census", () => {
     expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(0);
 
     stdout.mockRestore();
-    expect(JSON.parse(await readFile(path.join(root, "census.json"), "utf8"))).toEqual({
+    const written = JSON.parse(await readFile(path.join(root, "census.json"), "utf8"));
+    expect(written).toMatchObject({
       total: 2,
       byComplexity: { "2": 1, "6": 1 },
       counts: { "mod#a": 2, "mod#b": 6 },
     });
+    // Provenance, asserted here rather than trusted: a frozen census with no head cannot be
+    // recomputed, and a move in it cannot be blamed on either the tool or the code.
+    expect(written.headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(written.countsDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(written.command).toContain("--update-cc-baseline");
+    expect(written.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it("refuses a tree that is not the commit which becomes main", async () => {
@@ -1505,15 +1647,21 @@ describe("the run's own branches", () => {
         "utf8",
       );
     }
+    // A scan with nothing to report leaves no report behind — that is what crapper does, and a
+    // stub writing `{:entries []}` would model a state the tool cannot produce. It also matters
+    // for the idle test: an empty file reads as "the report could not be parsed", which the
+    // newcomer gate refuses, while no file at all is "nothing was scored".
     const tool = await stubTool(
-      [
-        'mkdir -p "$PWD/.metrics"',
-        `cat > "$PWD/.metrics/crap.edn" <<'EDN'`,
-        "{:entries [",
-        entries.join("\n"),
-        "]}",
-        "EDN",
-      ].join("\n"),
+      entries.length === 0
+        ? "exit 0"
+        : [
+            'mkdir -p "$PWD/.metrics"',
+            `cat > "$PWD/.metrics/crap.edn" <<'EDN'`,
+            "{:entries [",
+            entries.join("\n"),
+            "]}",
+            "EDN",
+          ].join("\n"),
     );
     return { root, tool };
   }
@@ -1533,11 +1681,13 @@ describe("the run's own branches", () => {
 
     expect(main(["--ub", tool, "--all", "--update-cc-baseline"], root)).toBe(0);
 
-    expect(JSON.parse(await readFile(path.join(root, ".ub-cc-baseline.json"), "utf8"))).toEqual({
+    const census = JSON.parse(await readFile(path.join(root, ".ub-cc-baseline.json"), "utf8"));
+    expect(census).toMatchObject({
       total: 1,
       byComplexity: { "2": 1 },
       counts: { "mod#a": 2 },
     });
+    expect(census.headSha).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("records the nightly verdict in the file the workflow reads", async () => {
