@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
+import type { ComponentProps } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +23,7 @@ function run(patch: Partial<RunState> = {}): RunState {
   return { ...runState(), ...patch } as RunState;
 }
 
-function props(patch: Record<string, unknown> = {}) {
+function props(patch: Partial<RunActionsProps> = {}): RunActionsProps {
   return {
     run: run(),
     busy: false,
@@ -34,13 +35,15 @@ function props(patch: Record<string, unknown> = {}) {
     onCancel: vi.fn(),
     onRetry: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
-function renderActions(p: Record<string, unknown>) {
+type RunActionsProps = ComponentProps<typeof RunActions>;
+
+function renderActions(p: RunActionsProps) {
   return render(
     <TooltipProvider>
-      <RunActions {...(p as object)} />
+      <RunActions {...p} />
     </TooltipProvider>,
   );
 }
