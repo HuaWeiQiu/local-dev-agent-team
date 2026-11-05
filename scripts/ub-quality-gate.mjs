@@ -50,6 +50,10 @@ const USAGE = `usage: node scripts/ub-quality-gate.mjs [--tool crapper|dryer|mut
                                   [--coverage-a PATH --coverage-b PATH] [--expect-base REF]
                                   [-- extra args]
 
+  --update-cc-baseline       rebuild the complexity census (.ub-cc-baseline.json) from a full
+                             scan. Same precondition as --update-baseline: HEAD must be the
+                             commit that becomes main, or pass --expect-base REF.
+
   --update-baseline          only on the tree that will become main. The gate compares
                              HEAD with origin/main (or with --expect-base REF) and refuses
                              to write otherwise: a baseline freezes whatever it measures,
@@ -98,12 +102,31 @@ export function defaultOptions(env = process.env) {
     coverageB: "",
     coverageC: "",
     expectBase: "",
+    ccBaseline: DEFAULT_CC_BASELINE,
+    updateCcBaseline: false,
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
 }
 
 export const DEFAULT_BASELINE = ".ub-crap-baseline.json";
+
+/**
+ * Every function this gate has ever measured, with its complexity. A full snapshot, not only the
+ * entries over a threshold: the CRAP baseline holds eight-thousandths of nothing useful here —
+ * `validateAuditOwnership` scores 9.0 and is therefore absent from it, which would make it look
+ * new on the first run of this gate.
+ */
+export const DEFAULT_CC_BASELINE = ".ub-cc-baseline.json";
+
+/**
+ * The complexity a function this gate has never seen may have.
+ *
+ * No coverage clause on purpose. Coverage does not buy margin once cc is this high: cc 10 at
+ * 100% coverage is CRAP 10.0 and cc 9 at 100% is 9.0 — both measured in this repository, both
+ * exactly on the line with nothing left over. cc 4 at 40% coverage is 7.5.
+ */
+export const NEW_FUNCTION_CC_LIMIT = 4;
 
 function takeValue(argv, index, flag) {
   const value = argv[index + 1];
@@ -123,12 +146,14 @@ const VALUE_FLAGS = {
   "--coverage-b": "coverageB",
   "--coverage-c": "coverageC",
   "--expect-base": "expectBase",
+  "--cc-baseline": "ccBaseline",
 };
 
 /** Flags that only flip a boolean. */
 const BOOLEAN_FLAGS = {
   "--all": ["changed", false],
   "--update-baseline": ["updateBaseline", true],
+  "--update-cc-baseline": ["updateCcBaseline", true],
 };
 
 export function parseArgs(argv, env = process.env) {
@@ -155,6 +180,12 @@ export function parseArgs(argv, env = process.env) {
   }
   if (!TOOLS.includes(options.tool)) {
     throw new Error(`--tool must be crapper, dryer or mutator (got '${options.tool}')`);
+  }
+  if (options.updateBaseline && options.updateCcBaseline) {
+    throw new Error(
+      "--update-baseline and --update-cc-baseline are two different files: run them one at a " +
+        "time, ledger first so the census is measured on the same tree",
+    );
   }
   return options;
 }
@@ -219,16 +250,35 @@ export function isScoredSource(file) {
   return !(file.startsWith("test/") || file.includes("/e2e/") || /\.(test|spec)\.[a-z]+$/.test(file));
 }
 
-/** Worst CRAP per function, read from the EDN crapper writes. */
-export function readScores(metricsPath) {
+/**
+ * Every function the tool measured, by key, with both numbers this gate needs.
+ *
+ * `file::function` would read better than `namespace#function`, but the report carries no file:
+ * it has `:name` and `:namespace`, and the namespace is the module path in dotted form. Deriving
+ * a path from it means guessing, and one wrong guess makes every function in that file look new —
+ * the single false positive this gate cannot afford. So the key is the one the tool emits and the
+ * CRAP baseline already uses.
+ */
+export function readFunctions(metricsPath) {
   if (!existsSync(metricsPath)) return new Map();
   const text = readFileSync(metricsPath, "utf8");
-  const scores = new Map();
+  const functions = new Map();
   for (const match of text.matchAll(
     /\{:name "([^"]*)", :namespace "([^"]*)", :complexity (\d+), :coverage ([\d.]+), :crap ([\d.]+)\}/g,
   )) {
-    scores.set(`${match[2]}#${match[1]}`, Number(match[5]));
+    functions.set(`${match[2]}#${match[1]}`, {
+      complexity: Number(match[3]),
+      coverage: Number(match[4]),
+      crap: Number(match[5]),
+    });
   }
+  return functions;
+}
+
+/** Worst CRAP per function, read from the EDN crapper writes. */
+export function readScores(metricsPath) {
+  const scores = new Map();
+  for (const [key, value] of readFunctions(metricsPath)) scores.set(key, value.crap);
   return scores;
 }
 
@@ -371,6 +421,9 @@ export function main(argv = process.argv.slice(2)) {
   if (prepared.status !== undefined) return prepared.status;
   const stale = staleCoverageRefusal(prepared.options);
   if (stale !== undefined) return refuseForStaleCoverage(prepared, stale);
+  if (prepared.options.updateCcBaseline) {
+    return writeCcSnapshot(prepared.ub, prepared.options);
+  }
   if (prepared.options.driftReport) return driftStep(prepared.options, prepared.ub);
   clearMetrics();
   // crapper in changed mode has nothing to score when nothing changed; the
@@ -476,12 +529,87 @@ export function layers(options) {
 }
 
 /**
+ * What this measurement knows that the snapshot does not.
+ *
+ * Renames land here by design: a function that changes its name is a function nobody has
+ * measured, and "give it a new name" must not be a way out of the allowance. The way out is to
+ * delete the old key from the snapshot and say why in the commit — an edit a reviewer can see,
+ * rather than a flag that quietly widens the gate.
+ */
+export function newcomers(functions, snapshot) {
+  const unknown = new Map();
+  for (const [key, value] of functions) {
+    if (key in snapshot) continue;
+    unknown.set(key, value.complexity);
+  }
+  return unknown;
+}
+
+/** The newcomers above the allowance, worst first. */
+export function overComplexNewcomers(functions, snapshot, limit = NEW_FUNCTION_CC_LIMIT) {
+  return [...newcomers(functions, snapshot)]
+    .filter(([, complexity]) => complexity > limit)
+    .sort((left, right) => right[1] - left[1]);
+}
+
+/** The complexity snapshot: a full census, so absence means "never measured", not "fine". */
+export function readCcSnapshot(pathname) {
+  if (!existsSync(pathname)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(pathname, "utf8"));
+    return parsed && typeof parsed.counts === "object" ? parsed.counts : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Refuse a gate run whose new functions are too complex to trust.
+ *
+ * The snapshot is required rather than optional: without it every function is a newcomer, and a
+ * gate that fails on everything is a gate somebody switches off. A missing snapshot is therefore
+ * its own refusal with the command that fixes it.
+ */
+export function newcomerRefusal(options, functions, cwd = process.cwd()) {
+  if (functions.size === 0) return undefined;
+  const snapshot = readCcSnapshot(path.resolve(cwd, options.ccBaseline));
+  if (!snapshot) {
+    process.stderr.write(
+      `gate: refusing to score — no complexity snapshot at ${options.ccBaseline}.\n\n` +
+        "The snapshot is a census of every function already measured, so a missing one reads as " +
+        "\"all of them are new\". Build it once, from the tree that will become main:\n" +
+        "  node scripts/ub-quality-gate.mjs --all --update-cc-baseline\n",
+    );
+    return 1;
+  }
+  const over = overComplexNewcomers(functions, snapshot);
+  if (over.length === 0) return undefined;
+  process.stderr.write(
+    `gate: refusing to score — ${over.length} new function(s) above the complexity allowance ` +
+      `of ${NEW_FUNCTION_CC_LIMIT}:\n`,
+  );
+  for (const [key, complexity] of over) {
+    process.stderr.write(`  cc ${String(complexity).padStart(3)}  ${key}\n`);
+  }
+  process.stderr.write(
+    "\nA function this gate has never seen may not arrive above the allowance. Neither does a " +
+      "refresh get around it: `--update-baseline` may close debt and may not open it, and " +
+      "`--update-cc-baseline` only runs on the commit that becomes main.\n" +
+      `Split it until every piece is at most ${NEW_FUNCTION_CC_LIMIT}.\n`,
+  );
+  return 1;
+}
+
+/**
  * Freeze what is already over the threshold so a new or worsened function
  * fails the gate even when nobody touches the file that owns it.
  */
 export function baselineStep(options, cwd = process.cwd()) {
   if (options.tool !== "crapper") return 0;
-  const scores = readScores(path.join(cwd, ".metrics", "crap.edn"));
+  const metricsPath = path.join(cwd, ".metrics", "crap.edn");
+  const newcomer = newcomerRefusal(options, readFunctions(metricsPath), cwd);
+  if (newcomer !== undefined) return newcomer;
+  const scores = readScores(metricsPath);
   const baselinePath = path.resolve(cwd, options.baseline);
   if (options.updateBaseline) return writeBaseline(scores, baselinePath, options.baseline);
   const baseline = readBaseline(baselinePath);
@@ -568,8 +696,10 @@ function scanOnce(ub, options, cwd) {
   if (!existing) rmSync(path.join(cwd, "target", "coverage"), { recursive: true, force: true });
   const before = lcovProvenance(coveragePath(cwd));
   runLayers(ub, { ...options, changed: false }, cwd);
+  const functions = readFunctions(path.join(cwd, ".metrics", "crap.edn"));
   return {
     scores: readScores(path.join(cwd, ".metrics", "crap.edn")),
+    functions,
     lcov: lcovProvenance(coveragePath(cwd)),
     before,
     existing,
@@ -682,6 +812,10 @@ export function stableBaseline(ub, options, cwd = process.cwd(), hooks = {}) {
   const second = scanOnce(ub, options, cwd);
   const refusal = scanRefusal(first, second, cwd);
   if (refusal !== undefined) return refusal;
+  // A refresh closes debt and does not open it. Without this, one `--update-baseline` would turn
+  // a freshly split cc 9 block into an "existing" function and the allowance would never see it.
+  const newcomer = newcomerRefusal(options, second.functions, cwd);
+  if (newcomer !== undefined) return newcomer;
   return writeBaseline(
     second.scores,
     path.resolve(cwd, options.baseline),
@@ -1156,7 +1290,46 @@ export function writeDriftReport(pathname, payload, cwd = process.cwd()) {
   return target;
 }
 
-/** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. */
+/**
+ * Write the complexity census. Full scan, on the tree that will become main.
+ *
+ * Same precondition as the CRAP baseline and for the same reason: this file decides which
+ * functions the allowance applies to, so writing it from a side branch would let a branch declare
+ * its own newcomers "existing". Recording an entry is bookkeeping, not an exemption — the entry
+ * only says the gate has seen it; the CRAP ledger still decides whether it is debt.
+ */
+export function writeCcSnapshot(ub, options, cwd = process.cwd()) {
+  const wrongTree = baseRefusal(options, cwd);
+  if (wrongTree !== undefined) return wrongTree;
+  clearMetrics(cwd);
+  const failed = runLayers(ub, { ...options, changed: false }, cwd);
+  // Exit 2 means "over the threshold", which is this file's subject, not a broken run.
+  if (failed !== 0 && failed !== 2) return failed;
+  const functions = readFunctions(path.join(cwd, ".metrics", "crap.edn"));
+  if (functions.size === 0) {
+    process.stderr.write("census: refusing to write — the scan measured no functions\n");
+    return 1;
+  }
+  const counts = Object.fromEntries(
+    [...functions].map(([key, value]) => [key, value.complexity]).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const histogram = {};
+  for (const complexity of Object.values(counts)) {
+    histogram[complexity] = (histogram[complexity] ?? 0) + 1;
+  }
+  writeFileSync(
+    path.resolve(cwd, options.ccBaseline),
+    `${JSON.stringify({ total: Object.keys(counts).length, byComplexity: histogram, counts }, null, 2)}\n`,
+  );
+  const over = Object.values(counts).filter((complexity) => complexity > NEW_FUNCTION_CC_LIMIT).length;
+  process.stdout.write(
+    `census: wrote ${Object.keys(counts).length} functions to ${options.ccBaseline} ` +
+      `(${over} of them above ${NEW_FUNCTION_CC_LIMIT}, recorded as already known)\n`,
+  );
+  return 0;
+}
+
+/** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. *//** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. */
 export function driftStep(options, ub, cwd = process.cwd()) {
   const full = { ...options, changed: false };
   clearMetrics(cwd);
