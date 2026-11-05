@@ -313,6 +313,72 @@ return failed === 0 ? baselineStep(prepared.options) : failed;
 要么不碰。文件里条数多（`claude-session.ts` 9 条、`automatic-controller.ts` 8 条）时，
 把它当成一个「整文件批」，一次做完一次合。
 
+### cc 口径：crapper 数的是哪些节点（2026-11，查源码 + 实测）
+
+**cc = 1 + 子树里 decision 节点的个数**（`src/crapper/languages/treesitter.py:60-76`，走的是显式栈不是
+递归——生成的表达式能比 Python 的调用栈还深）。
+
+**算作 decision 的节点**（`src/crapper/languages/typescript.py:25-36`）：
+
+| 类别 | 节点 |
+| --- | --- |
+| 语句 | `if_statement`、`for_statement`、`for_in_statement`、`while_statement`、`do_statement`、`catch_clause` |
+| 三元 | `ternary_expression` |
+| switch | `switch_case`、`switch_default`（**每个 `case` 各算一个**） |
+| 逻辑与空值合并 | `binary_expression` 里带 `&&`、`||` 或 `??` 子节点的 |
+| 可选链 | `optional_chain`（`a?.b`、`a?.[0]` 都包在里面），以及没被它包住的裸 `?.` |
+
+**整棵子树跳过**：`class_declaration`、`abstract_class_declaration`、`interface_declaration`
+（`typescript.py:37-41`）。所以**类本身不是条目，它的方法各自独立计分**。
+
+**四种构造的实测**（探针源码见下，`crapper 6fd92c4`）：
+
+| 构造 | 结果 |
+| --- | --- |
+| 函数内嵌套 `function inner() { if … }` | **并进外层**（`outer` cc 3 = 1 + inner 的 `if` + 下一行的 `?`），`inner` **不成条目** |
+| 函数内 `const cb = (y) => (y > 0 ? y : 0)` | 同上，**并进外层**，`cb` 不成条目 |
+| `app.get("/users", (req, res) => { if … })` | **单独一条**（`GET /users` cc 2），且**不算进外层**（`routes` cc 1） |
+| 类方法 `Box.open(a, b) { return a && b ? 1 : 0 }` | 单独一条（cc 3 = 1 + `&&` + `?`），`Box` 不成条目 |
+
+这两条"并进外层"最容易被忽略，而它正是**拆函数真的有效**的原因：把内联回调抽成独立函数，外层 cc
+同时甩掉那条分支和那次归属——**同一个动作降两次数**。
+
+```ts
+// 探针：src/demo.ts，用 crapper 跑一次即可复现上面那张表
+export function outer(n: number) {
+  function inner(x: number) { if (x) return 1; return 0; }
+  const cb = (y: number) => (y > 0 ? y : 0);
+  return inner(n) + cb(n);
+}
+export function routes(app: any) {
+  app.get("/users", (req: any, res: any) => { if (req) res.send(1); else res.send(0); });
+}
+export class Box { open(a: boolean, b: boolean) { return a && b ? 1 : 0; } }
+```
+
+**已知后果，两条**：
+
+1. **`#` 私有方法完全不出现在报告里**——解析器不认 `PrivateIdentifier`，所以拆分 `#` 方法会把复杂度
+   搬进度量盲区（账本显示 `54 → 5`，代码一行没少）。已由 eslint 规则在 `src/**` 禁掉——详见下面的
+   「度量看不见 `#` 私有方法」一节。
+2. 内联回调的分支记在**外层**函数上。看到某个函数 cc 偏高、里面却只有一句 `arr.map(x => x ? a : b)`
+   时，那不是误报，是口径。
+
+### 报数必须带树（2026-11，一次误判的复盘）
+
+同一天里出现过"两个函数在两边差 1–2，于是判断成**计数口径系统性偏低**"。**那个判断是错的**：查下去
+是**两棵不同的树**——`#264` 给 `parseArgs` 加了 `if (arg.startsWith(ALLOW_CC_INCREASE))`、给 `validated`
+加了带 `&&` 的拒绝，而另一边量的是 `e06abbd`。
+
+**证据其实就在同一张表里**：`main` 在两边都是 8。**一个系统性偏差不会刚好在没人动过的函数上消失。**
+
+所以规则是：**报任何 cc / CRAP 数字，必须同时说清它是哪棵树上的**——`headSha`，以及工作树是否干净。
+census 里那两个字段（`headSha` / `workingTreeDirty`）就是为这件事存在的；`--update-cc-baseline` 现在也
+直接拒脏树。
+
+这条对排查的用途很具体：**当两个数不一样时，"树不同"永远排在"口径不同"前面**。口径问题会在所有函数上
+同向偏移，树不同只在改动过的函数上出现——而人能凭记忆把后者读成前者。
+
 ### CRAP 的覆盖率是**分支**覆盖，不是行覆盖（2026-11，查 crapper 源码确认）
 
 crapper 的判分口径是这样的（源码注释原文）：
