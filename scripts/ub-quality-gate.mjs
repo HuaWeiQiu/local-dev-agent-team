@@ -622,6 +622,28 @@ function hasCounts(parsed) {
   return typeof parsed?.counts === "object" && parsed?.counts !== null;
 }
 
+/**
+ * A census measured on a dirty tree describes a tree that is not any commit.
+ *
+ * `baseRefusal` already refuses a `HEAD` that is not `origin/main`, but a dirty tree passes it —
+ * and then the file claims a `headSha` its numbers did not come from. Recording that fact in
+ * `workingTreeDirty` is not the same as permitting it: a census nobody can recompute is worse
+ * than no census, because every later "new function must be ≤ 4" decision rests on a name list
+ * that cannot be reproduced.
+ */
+export function dirtyTreeRefusal(cwd = process.cwd()) {
+  if (workingTreeIsDirty(cwd) === false) return undefined;
+  process.stderr.write(
+    "census: refusing to write — the working tree has uncommitted changes.\n\n" +
+      "A census has to describe a commit: measured on a dirty tree it would record a headSha " +
+      "those numbers did not come from, and nobody could recompute them.\n" +
+      "Commit or stash first, then run it on the commit that will become main:\n" +
+      "  git add -A && git commit -m …\n" +
+      "  node scripts/ub-quality-gate.mjs --all --update-cc-baseline\n",
+  );
+  return 1;
+}
+
 function workingTreeIsDirty(cwd) {
   const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim().length > 0 : undefined;
@@ -1443,6 +1465,8 @@ export function writeDriftReport(pathname, payload, cwd = process.cwd()) {
 export function writeCcSnapshot(ub, options, cwd = process.cwd()) {
   const wrongTree = baseRefusal(options, cwd);
   if (wrongTree !== undefined) return wrongTree;
+  const dirtyTree = dirtyTreeRefusal(cwd);
+  if (dirtyTree !== undefined) return dirtyTree;
   clearMetrics(cwd);
   const failed = runLayers(ub, { ...options, changed: false }, cwd);
   // Exit 2 means "over the threshold", which is this file's subject, not a broken run.
@@ -1494,18 +1518,23 @@ function countsDigest(counts) {
 export function censusDocument({ ub, cwd, counts, increases }) {
   return {
     generatedAt: new Date().toISOString(),
-    headSha: gitHeadSha(cwd),
+    // Provenance keys are never dropped, only reported as unknown: a file whose shape depends on
+    // what it happened to be able to measure cannot be compared with the file it replaces.
+    headSha: gitHeadSha(cwd) ?? null,
     // A census measured with uncommitted changes is measured on a tree that is not any commit —
     // which is exactly the state #256's census shipped in. Saying so lets a reader tell a
     // reproducible number from one that only existed on somebody's disk for a few minutes.
-    workingTreeDirty: workingTreeIsDirty(cwd),
-    toolCommit: ub ? toolCommit(ub) : undefined,
+    workingTreeDirty: workingTreeIsDirty(cwd) ?? null,
+    toolCommit: ub ? (toolCommit(ub) ?? null) : null,
     command: "node scripts/ub-quality-gate.mjs --all --update-cc-baseline",
     total: Object.keys(counts).length,
     countsDigest: countsDigest(counts),
     byComplexity: complexityHistogram(counts),
     counts,
-    ...(Object.keys(increases).length > 0 ? { increases } : {}),
+    // Always present, empty or not. A key that disappears when it has nothing to say would make
+    // the file's own shape depend on its contents — and the next refresh would be writing a
+    // different object than the one it read.
+    increases,
   };
 }
 

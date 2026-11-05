@@ -58,6 +58,31 @@ async function mainTree(dir: string): Promise<string> {
   return head;
 }
 
+/**
+ * Commit the fixture's scaffolding and move `origin/main` onto it.
+ *
+ * The census refuses a dirty tree and refuses a HEAD that is not `origin/main`, so a fixture that
+ * writes a stub tool has to commit it and re-point the base — which is also the only honest way
+ * to model "this is the commit that becomes main".
+ */
+function commitFixture(dir: string): void {
+  gitIn(dir, "add", "-A");
+  gitIn(
+    dir,
+    "-c",
+    "user.email=gate@example.com",
+    "-c",
+    "user.name=gate",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-q",
+    "-m",
+    "fixture",
+  );
+  gitIn(dir, "update-ref", "refs/remotes/origin/main", gitIn(dir, "rev-parse", "HEAD"));
+}
+
 function run(args: string[], env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [script, ...args], {
     encoding: "utf8",
@@ -1581,6 +1606,9 @@ describe("the complexity census", () => {
         "EDN",
       ].join("\n"),
     );
+    // The census refuses a dirty tree, so the fixture hands it the state it demands: everything
+    // it created is committed, and the stub's own output is the only thing left to change.
+    commitFixture(root);
     return { root, tool };
   }
 
@@ -1607,6 +1635,76 @@ describe("the complexity census", () => {
     expect(written.countsDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(written.command).toContain("--update-cc-baseline");
     expect(written.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("writes a census the reader can read back, key for key", async () => {
+    // The failure this pins: a file that claims provenance the writer cannot produce. Whoever
+    // runs the next refresh would silently overwrite it with a smaller object — not an error,
+    // just a quieter file. So the assertion is a round trip, not a shape check.
+    const { writeCcSnapshot, readCcCensus, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const { root, tool } = await censusTree([entry("mod", "b", 6), entry("mod", "a", 2)]);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(0);
+    stdout.mockRestore();
+
+    const written = JSON.parse(await readFile(path.join(root, "census.json"), "utf8"));
+    expect(Object.keys(written).sort()).toEqual(
+      ["byComplexity", "command", "counts", "countsDigest", "generatedAt", "headSha", "increases", "total", "toolCommit", "workingTreeDirty"].sort(),
+    );
+    const readBack = readCcCensus(path.join(root, "census.json"));
+    expect(readBack.counts).toEqual(written.counts);
+    expect(readBack.increases).toEqual({});
+  });
+
+  it("reproduces the same census on a second run", async () => {
+    // Two runs of the same tree must agree on the numbers; only the clock and the head may move.
+    // `countsDigest` is what makes that checkable without diffing four thousand lines.
+    const { writeCcSnapshot, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const { root, tool } = await censusTree([entry("mod", "b", 6), entry("mod", "a", 2)]);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(0);
+    const first = JSON.parse(await readFile(path.join(root, "census.json"), "utf8"));
+    // The first write dirties the tree by definition — it just created a file. Commit it, which
+    // is also the real sequence: refresh, commit the census, refresh again next time.
+    commitFixture(root);
+    expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(0);
+    stdout.mockRestore();
+    const second = JSON.parse(await readFile(path.join(root, "census.json"), "utf8"));
+
+    expect(second.countsDigest).toBe(first.countsDigest);
+    expect(second.counts).toEqual(first.counts);
+  });
+
+  it("refuses a dirty tree instead of recording a head its numbers did not come from", async () => {
+    // Recording `workingTreeDirty: true` is not the same as allowing it: the file still names a
+    // commit, and the numbers behind that name cannot be recomputed from it.
+    const { writeCcSnapshot, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const { root, tool } = await censusTree([entry("mod", "a", 2)]);
+    await writeFile(path.join(root, "half-finished.ts"), "export const wip = 1;\n", "utf8");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(1);
+    stderr.mockRestore();
+    expect(existsSync(path.join(root, "census.json"))).toBe(false);
+  });
+
+  it("keeps the committed census to exactly the keys its writer produces", async () => {
+    // The invariant behind the two cases above, checked against the file this repository actually
+    // ships: if the writer ever stops emitting one of these, the next refresh would erase it.
+    const { censusDocument } = await import("../scripts/ub-quality-gate.mjs");
+    const committed = JSON.parse(
+      await readFile(path.resolve(".ub-cc-baseline.json"), "utf8"),
+    );
+    const produced = censusDocument({
+      ub: undefined,
+      cwd: process.cwd(),
+      counts: { "mod#a": 1 },
+      increases: {},
+    });
+
+    expect(Object.keys(committed).sort()).toEqual(Object.keys(produced).sort());
   });
 
   it("refuses a tree that is not the commit which becomes main", async () => {
@@ -1663,6 +1761,8 @@ describe("the run's own branches", () => {
             "EDN",
           ].join("\n"),
     );
+    // Same reason as censusTree: a census is only written on a clean tree.
+    commitFixture(root);
     return { root, tool };
   }
 
