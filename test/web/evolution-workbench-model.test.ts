@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CliId } from "../../web/src/types.js";
+import type { CliId, ProjectScope } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
   getEvolution: vi.fn(),
@@ -34,7 +34,8 @@ type Snapshot = import("../../web/src/types.js").EvolutionSnapshot;
 type Proposal = import("../../web/src/types.js").EvolutionProposal;
 type Decision = import("../../web/src/components/EvolutionDecisionDialog.js").EvolutionDecision;
 
-const scope = { id: "p1", name: "demo", root: "/repo" };
+/** A project selection (`{mode, projectId}`), which is what the model scopes by. */
+const scope: ProjectScope = { mode: "single", projectId: "p1" };
 
 function proposal(id: string, archived = false): Proposal {
   return {

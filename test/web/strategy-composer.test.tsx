@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
 import { act, render, renderHook, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicConfig, StrategyDefinition } from "../../web/src/types.js";
@@ -55,7 +56,9 @@ function config(patch: Partial<PublicConfig> = {}): PublicConfig {
   } as unknown as PublicConfig;
 }
 
-function host(patch: Record<string, unknown> = {}) {
+type ComposerProps = ComponentProps<typeof StrategyComposer>;
+
+function host(patch: Partial<ComposerProps> = {}): ComposerProps {
   return {
     config: config(),
     onPreflight: vi.fn().mockResolvedValue({ name: "demo-custom" }),
@@ -63,7 +66,7 @@ function host(patch: Record<string, unknown> = {}) {
     onDelete: vi.fn().mockResolvedValue(undefined),
     onLaunch: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
 beforeEach(() => {
@@ -185,7 +188,7 @@ describe("StrategyComposer", () => {
   it("explains an empty project", () => {
     render(
       <StrategyComposer
-        {...(host({ config: { ...config(), strategies: { default: "demo", definitions: {} } } }) as object)}
+        {...(host({ config: { ...config(), strategies: { default: "demo", definitions: {} } } }) )}
       />,
     );
     expect(screen.getByText("还没有可编排的策略")).toBeVisible();
@@ -194,7 +197,7 @@ describe("StrategyComposer", () => {
   it("renders the workspace with the toolbar", () => {
     render(
       <TooltipProvider>
-        <StrategyComposer {...(host() as object)} />
+        <StrategyComposer {...(host() )} />
       </TooltipProvider>,
     );
     expect(screen.getByRole("region", { name: "策略编排器" })).toBeTruthy();
@@ -220,7 +223,7 @@ describe("StrategyComposer", () => {
   it("toggles the library panel from the toolbar", async () => {
     render(
       <TooltipProvider>
-        <StrategyComposer {...(host() as object)} />
+        <StrategyComposer {...(host() )} />
       </TooltipProvider>,
     );
     const toggle = screen.getByRole("button", { name: /策略库|library/i });
