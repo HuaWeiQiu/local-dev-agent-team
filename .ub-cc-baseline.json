@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-11-05T12:10:29.581Z",
-  "headSha": "8f7087b2754318280eb997e636edd73a34ddab1d",
-  "workingTreeDirty": true,
+  "generatedAt": "2026-11-05T12:18:11.234Z",
+  "headSha": "453289f41b34bd222bf91fe730ed0bb386cd81a6",
+  "workingTreeDirty": false,
   "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
   "command": "node scripts/ub-quality-gate.mjs --all --update-cc-baseline",
   "total": 3856,
