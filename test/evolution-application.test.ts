@@ -2708,14 +2708,20 @@ describe("EvolutionApplicationCoordinator open guards", () => {
 });
 
 describe("the restored state validator refuses states the catalog disagrees with", () => {
-  /** Read the durable document, let the caller change its payload, and write it back. */
+  /**
+   * Read the durable document, let the caller change its payload, and write it back.
+   *
+   * The payload is typed `Record<string, unknown>` rather than `Record<string, unknown[]>`:
+   * `applications`/`completed`/`commands` are lists but `pending` is a single record, and the
+   * narrower type forced every caller touching `pending` to cast through `unknown` twice.
+   */
   async function patchDocument(
     root: string,
-    mutate: (payload: Record<string, unknown[]>) => void,
+    mutate: (payload: Record<string, unknown>) => void,
   ): Promise<void> {
     const applicationPath = path.join(root, ".agent-team", "evolution", EVOLUTION_APPLICATION_FILENAME);
     const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
-      payload: Record<string, unknown[]>;
+      payload: Record<string, unknown>;
       payloadDigest: string;
     };
     mutate(document.payload);
@@ -2795,6 +2801,74 @@ describe("the restored state validator refuses states the catalog disagrees with
       ),
     );
   });
+
+  /**
+   * A promotion that crashed after the pending record was durable and before the catalog
+   * commit. Returns with the journal still holding that pending operation.
+   */
+  async function interruptedPromotion(id: string) {
+    let failNextCatalogWrite = false;
+    const harness = await createHarness({
+      catalogIo: {
+        beforeAtomicStage: async (stage) => {
+          if (failNextCatalogWrite && stage === "write") {
+            failNextCatalogWrite = false;
+            throw new Error("simulated crash before the catalog write");
+          }
+        },
+      },
+    });
+    await proposeEvaluatedStrategy(harness, id, id, strategyA);
+    const preview = await harness.coordinator.previewPromotion({ proposalId: id, operator });
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: `${id}-command`,
+        proposalId: id,
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(harness.coordinator.getApplicationState().pending).not.toBeNull();
+    return harness;
+  }
+
+  it("rejects a pending operation naming a proposal the catalog never had", async () => {
+    // The journal is durable on its own: a crash can leave a pending record whose proposal
+    // was never committed, and a hand-edited or older-version document can name an id the
+    // catalog has no trace of. Restoring must refuse rather than "recover" towards a
+    // proposal it cannot read — there would be no candidate to plan the target states from,
+    // so every check downstream of the missing proposal has nothing to compare against.
+    //
+    // `requestDigest` covers `proposalId`, so this world has to recompute it: the schema is
+    // the first line of defence and a merely inconsistent document never reaches
+    // `validatePendingEntry` (it fails with "pending request digest mismatch"). What is left
+    // is the self-consistent journal — the one a different code version would have written —
+    // and that is the state the restored-state validator has to catch on its own.
+    const harness = await interruptedPromotion("pending-unknown-proposal");
+    await harness.coordinator.close();
+    await patchDocument(harness.root, (payload) => {
+      // `pending` is one object, not a list; the payload type here is loose on purpose.
+      const pending = payload.pending as Record<string, unknown>;
+      pending.proposalId = "pending-unknown-proposal-gone";
+      pending.requestDigest = computePayloadDigest({
+        operation: pending.operation,
+        proposalId: pending.proposalId,
+        expectedRevision: pending.catalogRevisionBefore,
+        tokenDigest: pending.previewTokenDigest,
+        operator: pending.operator,
+        reason: pending.reason,
+        materialDigest: pending.materialDigest,
+      });
+    });
+    await expect(reopen(harness.root)).rejects.toThrow(
+      new EvolutionPersistenceValidationError(
+        "Invalid application state: pending operation 'pending-unknown-proposal-command' does not match the catalog (proposal, expectedAfterTarget)",
+      ),
+    );
+  });
 });
 
 /**
@@ -2817,7 +2891,8 @@ describe("the restored state validator refuses states the catalog disagrees with
  * | pending snapshot lost its digest                  | **unreachable**: the journal schema refuses the document first ("prompt presence and digest disagree"), asserted below |
  * | target replaced by a symlink                     | ✅ world covered: recovery kept, link and its target untouched. The `"not a safe regular file"` arm itself stays 0 — the live-target read refuses upstream first (measured: entry hit, arm not) |
  * | working tree dirty after a restore                | ✅ "tree dirty" arm reached: `isClean` returns false and the throw executes (DA hits on the throw line; the BRDA counter does not attribute it to that arm) |
- * | commit landed, catalog not advanced               | `verifyPromptGitOutcome` diff-verification arm |
+ * | commit landed, catalog not advanced               | ✅ `verifyPromptGitOutcome` whole path: base recorded, HEAD moved, parent is the base, tree clean, diff is the one prompt |
+ * | nothing happened at all (prompt)                  | ✅ `verifyPromptAbortOutcome` both arms: HEAD still the base and the tree clean, so the command is aborted rather than recovered |
  * | catalog moved the proposal on (rejected/archived) | upstream `situationFor` → `requireRecovery()`, asserted in the "bad pending" case |
  *
  * Deliberately **unreachable** (kept, not covered):
@@ -2827,6 +2902,13 @@ describe("the restored state validator refuses states the catalog disagrees with
  *   - `finishPromotion`'s `status !== "evaluated"` / `finishRollback`'s `status !== "promoted"`:
  *     the same `situationFor` refuses first (verified: a rejected proposal left `recoveryRequired`
  *     true without ever calling the finish step).
+ *
+ *   Those guards stay uncovered on purpose, and the reason they no longer cost anything is the
+ *   move that made them cheap: the "may this be promoted at all" question became
+ *   `promotableEvidence` (cc 3), so `finishPromotion` itself is cc 3 and CRAP 5.7 at 33% branch
+ *   coverage. **A permanently uncovered branch is a reason to lower cc, not a reason to write a
+ *   test that calls a public method with an impossible state.** That test would pass forever
+ *   without ever describing a world the product can be in.
  *
  * One world per row, and no new injection point unless the real world has one: the fixtures use
  * the existing `io.rename` / `catalogIo.beforeAtomicStage` / `FailOnceExactCommitGitManager`
@@ -2888,6 +2970,62 @@ describe("prompt target apply refusals", () => {
 });
 
 describe("EvolutionApplicationCoordinator journal crash recovery", () => {
+  it("aborts a prompt promotion that never touched its target", async () => {
+    // The prompt half of the world above. It is not a duplicate: for a prompt the abort path
+    // first has to establish that Git says nothing happened — `verifyPromptAbortOutcome` asks
+    // whether HEAD is still the base commit and the tree is clean, and only then may the
+    // command be marked aborted. A strategy skips that question entirely, so the strategy
+    // world left the whole function unexecuted.
+    let crashAfterPendingRename = false;
+    const crashRename: typeof rename = async (oldPath, newPath) => {
+      await rename(oldPath, newPath);
+      if (
+        crashAfterPendingRename &&
+        path.basename(newPath.toString()) === EVOLUTION_APPLICATION_FILENAME
+      ) {
+        crashAfterPendingRename = false;
+        throw new Error("simulated crash after pending journal rename");
+      }
+    };
+    const harness = await createHarness({ io: { rename: crashRename } });
+    const candidate = Buffer.from("Reviewed prompt that never landed\n", "utf8");
+    await proposeEvaluatedPrompt(harness, "prompt-never-wrote", candidate);
+    const preview = await harness.coordinator.previewPromotion({
+      proposalId: "prompt-never-wrote",
+      operator,
+    });
+    crashAfterPendingRename = true;
+
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: "prompt-never-wrote-command",
+        proposalId: "prompt-never-wrote",
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Crash before touching the prompt target",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    // Neither half of the change happened: the file still holds its original bytes and HEAD
+    // has not moved, which is exactly the pair the abort path has to see.
+    expect(await readFile(path.join(harness.root, promptPath), "utf8")).not.toBe(
+      candidate.toString("utf8"),
+    );
+
+    const reopened = await createHarness({ root: harness.root, clock: harness.clock });
+    expect(reopened.coordinator.getApplicationState()).toMatchObject({
+      pending: null,
+      recoveryRequired: false,
+      completed: [
+        {
+          commandId: "prompt-never-wrote-command",
+          operation: "promote-and-apply",
+          status: "aborted",
+        },
+      ],
+    });
+  });
+
   it("finalizes old target plus old catalog as an aborted command", async () => {
     let crashAfterPendingRename = false;
     const crashRename: typeof rename = async (oldPath, newPath) => {

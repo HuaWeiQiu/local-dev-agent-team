@@ -1,11 +1,12 @@
 import path from "node:path";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import { type GitManager } from "../git/manager.js";
-import type { EvolutionCatalogSnapshot } from "./catalog.js";
+import type { EvolutionCandidateTarget, EvolutionCatalogSnapshot } from "./catalog.js";
 import {
   computeCandidateDigest,
   type EvolutionProposal,
   type HumanDecision,
+  type AuditRecord,
   type PromotionRecord,
   type RollbackRecord,
 } from "./domain.js";
@@ -31,6 +32,7 @@ import {
   type ApplicationDocument,
   type ApplicationPayload,
   type CompletedApplicationRecord,
+  type ApplicationCommandKind,
   type ApplicationRecord,
   type ApplicationStatus,
   type CommandIdempotencyBinding,
@@ -218,6 +220,509 @@ function prefixed(prefix: string, fields: string[]): string[] {
   return fields.map((field) => `${prefix}.${field}`);
 }
 
+/**
+ * The pending record together with everything the catalog says about it.
+ *
+ * Resolved once, then read by the check groups below — each group answers one question (does
+ * the shape hold, do the target states match, does the revision agree, does the replaced
+ * application line up). When they were one eleven-row table, a mismatch told the reader the
+ * field name but not which *expectation* had been derived wrongly.
+ */
+type PendingExpectation = {
+  pending: PendingApplicationOperation;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  /** The target this operation was recorded against, when the catalog still has its candidate. */
+  pendingTarget: EvolutionCandidateTarget | null;
+  /** The catalog's active proposal for that target right now. */
+  activeId: string | null;
+  activeBefore: string | null;
+  expectedPreviousApplication: ApplicationRecord | null;
+  reconcileRestoredId: string | null | undefined;
+  /** What the target should look like before and after, planned from the catalog. */
+  before: TargetDigestState | null;
+  after: TargetDigestState | null;
+};
+
+/** The proposal the pending record names must still exist, and still digest the same. */
+function pendingShapeMismatches(expectation: PendingExpectation): string[] {
+  const { pending, proposal } = expectation;
+  return settle([
+    { field: "proposal", holds: proposal !== undefined },
+    {
+      field: "catalog.candidateDigest",
+      holds:
+        proposal === undefined ||
+        computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
+    },
+  ]);
+}
+
+/** Both recorded target states must match the plan — or there was nothing to compare against. */
+function pendingTargetMismatches(expectation: PendingExpectation): string[] {
+  const { pending, before, after } = expectation;
+  return settle([
+    { field: "expectedAfterTarget", holds: after !== null },
+    { field: "afterTarget", holds: after === null || targetStatesEqual(pending.afterTarget, after) },
+    {
+      field: "beforeTarget",
+      holds: before === null || targetStatesEqual(pending.beforeTarget, before),
+    },
+  ]);
+}
+
+/** Neither recorded target may name a different target than the candidate being applied. */
+function pendingTargetKeyMismatches(expectation: PendingExpectation): string[] {
+  const { pending, pendingTarget } = expectation;
+  return settle([
+    {
+      field: "beforeTarget.key",
+      holds:
+        pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
+    },
+    {
+      field: "afterTarget.key",
+      holds:
+        pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
+    },
+  ]);
+}
+
+/** The revision must be one the operation can be at, and the active pointer must agree with it. */
+function pendingRevisionMismatches(expectation: PendingExpectation): string[] {
+  const { pending, revision, activeId, activeBefore } = expectation;
+  return settle([
+    {
+      field: "catalogRevision",
+      holds:
+        revision === pending.catalogRevisionBefore ||
+        revision === pending.expectedCatalogRevisionAfter,
+    },
+    {
+      field: "activeProposal",
+      holds: revision !== pending.catalogRevisionBefore || activeId === activeBefore,
+    },
+  ]);
+}
+
+/** The application this operation replaces, and — for a reconciliation — the id it restores. */
+function pendingPreviousApplicationMismatches(expectation: PendingExpectation): string[] {
+  const { pending, expectedPreviousApplication, reconcileRestoredId } = expectation;
+  return settle([
+    {
+      field: "previousApplication",
+      holds:
+        sha256Canonical(pending.previousApplication) ===
+        sha256Canonical(expectedPreviousApplication),
+    },
+    {
+      field: "previousApplication.proposalId",
+      holds:
+        pending.operation !== "reconcile-promoted" ||
+        (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
+    },
+  ]);
+}
+
+/** The evidence a promotion needs, or undefined when the proposal is not in a state to promote. */
+function promotableEvidence(proposal: EvolutionProposal): PromotionEvidence | undefined {
+  if (proposal.status !== "evaluated") return undefined;
+  return proposal.evaluation?.evidence;
+}
+
+/** A pending operation that recorded the Git proof a prompt outcome check needs. */
+type PromptGitProof = PendingApplicationOperation & {
+  readonly gitBaseHead: string;
+  readonly gitPath: string;
+};
+
+function hasGitProof(pending: PendingApplicationOperation): pending is PromptGitProof {
+  return pending.gitBaseHead !== null && pending.gitPath !== null;
+}
+
+/** The status a completion records, by the operation that produced it. */
+const COMPLETION_STATUS = {
+  "promote-and-apply": "applied",
+  "reconcile-promoted": "applied",
+  "rollback-applied": "rolled-back",
+} as const satisfies Record<ApplicationCommandKind, ApplicationStatus>;
+
+/** The proof a promotion leaves behind, built from the pending record and the live target. */
+function appliedRecord(
+  pending: PendingApplicationOperation,
+  proposal: EvolutionProposal,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+): ApplicationRecord {
+  return {
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    target: targetFromCandidate(proposal.candidate),
+    status: "applied",
+    beforeTargetDigest: pending.beforeTarget.digest,
+    afterTargetDigest: liveTarget.digest!,
+    beforeTarget: pending.beforeTarget,
+    afterTarget: pending.afterTarget,
+    previousApplication: pending.previousApplication,
+    rollbackSafe: true,
+    catalogRevision,
+    operator: pending.operator,
+    reason: pending.reason,
+    appliedAt: pending.startedAt,
+    commandId: pending.commandId,
+  };
+}
+
+/** The completion entry a finished pending operation adds to the journal. */
+function completionRecordFrom(
+  pending: PendingApplicationOperation,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+  status: ApplicationStatus,
+  now: number,
+): CompletedApplicationRecord {
+  return {
+    commandId: pending.commandId,
+    operation: pending.operation,
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    status,
+    beforeTargetDigest: pending.beforeTarget.digest,
+    afterTargetDigest: liveTarget.digest,
+    catalogRevisionBefore: pending.catalogRevisionBefore,
+    catalogRevisionAfter: catalogRevision,
+    operator: pending.operator,
+    reason: pending.reason,
+    completedAt: new Date(now).toISOString(),
+    humanDecision: pending.humanDecision,
+  };
+}
+
+/** The idempotency binding a finished pending operation leaves for its command. */
+function commandBindingFrom(
+  pending: PendingApplicationOperation,
+  proposal: EvolutionProposal,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+  status: ApplicationStatus,
+): CommandIdempotencyBinding {
+  return {
+    commandId: pending.commandId,
+    operation: pending.operation,
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    operator: pending.operator,
+    reason: pending.reason,
+    expectedRevision: pending.catalogRevisionBefore,
+    previewTokenDigest: pending.previewTokenDigest,
+    requestDigest: pending.requestDigest,
+    materialDigest: pending.materialDigest,
+    result: {
+      proposal: isolate(proposal),
+      committedCatalogRevision: catalogRevision,
+      applicationStatus: status,
+      beforeTargetDigest: pending.beforeTarget.digest,
+      afterTargetDigest: liveTarget.digest,
+    },
+  };
+}
+
+/** The proposal a rollback's predecessor chain restores, if it restores one at all. */
+function restoredPredecessorId(pending: PendingApplicationOperation): string | null {
+  return pending.previousApplication?.previousApplication?.proposalId ?? null;
+}
+
+/** The catalog's own answer to "which proposal is active for this target". */
+function theCatalogActiveId(
+  catalog: DurableEvolutionCatalog,
+  proposal: EvolutionProposal,
+): string | null {
+  return catalog.getActiveProposalId(targetFromCandidate(proposal.candidate));
+}
+
+/** A restored predecessor is only written when the catalog already points at it. */
+function assertCatalogRestored(catalogActiveId: string | null, restoredId: string | null): void {
+  if (catalogActiveId === restoredId) return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Recovered application predecessor does not match the catalog active pointer",
+  );
+}
+
+/** The evidence value `catalog.promote` accepts, taken from its own signature. */
+type PromotionEvidence = Parameters<DurableEvolutionCatalog["promote"]>[1];
+
+/** A before snapshot complete enough to restore from: it names bytes and a permission mode. */
+type RecoverableSnapshot = TargetDigestState & { readonly digest: string; readonly mode: number };
+
+/** The candidate shape a prompt restore can work with. */
+type PromptCandidate = Extract<EvolutionProposal["candidate"], { kind: "role-prompt" }>;
+
+/**
+ * Two separate refusals, one message. They are split because each narrows its own argument: the
+ * proposal has to name a prompt, and the snapshot has to name bytes *and* a permission mode.
+ * Without a digest there is no object to read; without a mode the rewritten file comes back with
+ * whatever the process umask gives it — a silently different target state no later check looks
+ * for. Both conditions still fail with the same message the single guard used to produce.
+ */
+function assertPromptCandidate(
+  proposal: EvolutionProposal,
+): asserts proposal is EvolutionProposal & { readonly candidate: PromptCandidate } {
+  if (proposal.candidate.kind === "role-prompt") return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Interrupted prompt operation lacks a recoverable before snapshot",
+  );
+}
+
+function assertRecoverableSnapshot(before: TargetDigestState): asserts before is RecoverableSnapshot {
+  if (before.digest !== null && before.mode !== undefined) return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Interrupted prompt operation lacks a recoverable before snapshot",
+  );
+}
+
+/** Whether this path is anything other than the plain file it is supposed to name. */
+function targetIsUnsafe(info: { isSymbolicLink(): boolean; isFile(): boolean }, resolved: string, absolute: string): boolean {
+  return info.isSymbolicLink() || !info.isFile() || resolved !== absolute;
+}
+
+/** The catalog's active pointer for the target the given proposal names. */
+function activePointerForProposal(
+  snapshot: EvolutionCatalogSnapshot,
+  proposal: EvolutionProposal,
+): { proposalId: string } | undefined {
+  return snapshot.activeProposals.find(
+    (item) => targetKey(item.target) === targetKey(targetFromCandidate(proposal.candidate)),
+  );
+}
+
+/** The catalog's most recent audit for a proposal — the reversal matters, not the order. */
+function latestAuditFor(
+  snapshot: EvolutionCatalogSnapshot,
+  proposalId: string,
+): AuditRecord | undefined {
+  return [...snapshot.auditRecords].reverse().find((record) => record.proposalId === proposalId);
+}
+
+/** The audit the pending record expected has to be the one the catalog ended up recording. */
+function auditMatchesPending(
+  audit: AuditRecord,
+  pending: PendingApplicationOperation,
+): boolean {
+  return sha256Canonical(audit) === pending.expectedAuditDigest;
+}
+
+/** The proposal is promoted, and the active pointer still names it. */
+function promotedAndActive(
+  proposal: EvolutionProposal,
+  active: { proposalId: string } | undefined,
+): boolean {
+  return proposal.status === "promoted" && active?.proposalId === proposal.id;
+}
+
+/** A rollback is in effect: the status says so, and the pointer moved back to the audited proposal. */
+function rollbackOutcomeMatches(
+  proposal: EvolutionProposal,
+  active: { proposalId: string } | undefined,
+  audit: AuditRecord,
+): boolean {
+  const rollback = audit as RollbackRecord;
+  return (
+    proposal.status === "rolled-back" &&
+    (active?.proposalId ?? null) === rollback.restoredActiveProposalId
+  );
+}
+
+/**
+ * The audit kinds that can name an application command. Rejections, archives and deletions are
+ * lifecycle audit records with nothing applied behind them, so they never belong to a
+ * completion — narrowing here is what lets the predicates below read `applicationCommandId`.
+ */
+type ApplicationAuditRecord = Exclude<
+  AuditRecord,
+  { kind: "rejection" | "archive" | "unarchive" | "delete" }
+>;
+
+/**
+ * A completed record together with what the catalog says it should have left behind.
+ *
+ * Split out of the eleven-line check the same way `PendingExpectation` is: the audit lookup
+ * alone carried a six-conjunct predicate, and folding it into the comparison hid the
+ * difference between "no audit matched" and "an audit matched but disagrees".
+ */
+type CompletedExpectation = {
+  completed: CompletedApplicationRecord;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  command: CommandIdempotencyBinding | undefined;
+  /** The audit kind this operation must produce, or null when it produces none. */
+  expectedAuditKind: "promotion" | "rollback" | null;
+  matchingAudit: ApplicationAuditRecord | undefined;
+  /** Whether the completion claims the catalog was actually mutated. */
+  catalogMutationSucceeded: boolean;
+  /** Whether this id is vouched for by a captured legacy baseline rather than a command. */
+  syntheticCompletion: boolean;
+};
+
+/**
+ * Whether the audit names this completion's command.
+ *
+ * An audit with no command id is a legacy Phase-2 record: it predates the journal, so the
+ * absence is only acceptable for a completion that never claimed a mutation.
+ */
+function auditNamesCompletion(
+  audit: ApplicationAuditRecord,
+  completed: CompletedApplicationRecord,
+): boolean {
+  if (audit.applicationCommandId === completed.commandId) return true;
+  return audit.applicationCommandId === undefined && completed.status !== "aborted";
+}
+
+/** Whether the audit describes this completion's decision, never mind which command it names. */
+function auditDescribesDecision(
+  audit: ApplicationAuditRecord,
+  completed: CompletedApplicationRecord,
+): boolean {
+  return (
+    audit.proposalId === completed.proposalId &&
+    audit.actor === completed.humanDecision.actor &&
+    audit.reason === completed.humanDecision.reason &&
+    audit.at === completed.humanDecision.decidedAt &&
+    auditNamesCompletion(audit, completed)
+  );
+}
+
+/**
+ * The reconciliation mode a command's preview token names, or null when it is not a
+ * reconciliation at all. `adopt` captured a verified legacy baseline; `apply` rolled one forward.
+ */
+function reconcileModeFrom(command: CommandIdempotencyBinding | undefined): string | null {
+  const token = command?.previewTokenDigest;
+  if (token === undefined) return null;
+  if (!token.startsWith("reconcile:")) return null;
+  return token.slice("reconcile:".length);
+}
+
+/**
+ * Whether rolling this application back is safe.
+ *
+ * An `apply` reconciliation wrote a real change, so undoing it is ordinary work. An `adopt`
+ * captured a predecessor — safe only when that predecessor replaced nothing, otherwise the
+ * rollback chain would have to reach deeper than the one entry a rollback records.
+ */
+function reconcileRollbackSafe(
+  mode: string | null,
+  command: CommandIdempotencyBinding | undefined,
+  application: ApplicationRecord,
+): boolean {
+  if (mode === "apply") return true;
+  return (
+    command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null
+  );
+}
+
+/** Whether the recorded status is the one this reconciliation mode produces. */
+function reconcileStatusMatches(mode: string | null, application: ApplicationRecord): boolean {
+  if (mode === "adopt") return application.status === "adopted";
+  if (mode === "apply") return application.status === "applied";
+  return false;
+}
+
+/**
+ * The shape of a captured legacy predecessor: no command of its own, an id derived from its
+ * owner, adopted status, nothing beneath it, not rollback-safe, and a target that did not move.
+ * Anything else claiming to be a baseline is an ordinary proof and has to prove itself normally.
+ */
+function isSyntheticLegacyShape(
+  application: ApplicationRecord,
+  command: CommandIdempotencyBinding | undefined,
+): boolean {
+  return (
+    command === undefined &&
+    application.commandId.startsWith("legacy:") &&
+    application.status === "adopted" &&
+    application.previousApplication === null &&
+    !application.rollbackSafe &&
+    targetStatesEqual(application.beforeTarget, application.afterTarget)
+  );
+}
+
+/** The completion has to repeat the owner's decision exactly: that is what makes it the same act. */
+function completionRepeatsOwner(
+  application: ApplicationRecord,
+  completion: CompletedApplicationRecord | undefined,
+  owner: SyntheticOwner,
+): boolean {
+  if (completion === undefined) return false;
+  if (
+    application.reason !==
+    `Captured verified legacy predecessor while reconciling: ${owner.reason}`
+  ) {
+    return false;
+  }
+  return sha256Canonical(completion.humanDecision) === sha256Canonical(owner.humanDecision);
+}
+
+/** The first audit of the expected kind that describes this completion's decision. */
+function matchingCompletionAudit(
+  context: RestoredStateContext,
+  completed: CompletedApplicationRecord,
+  expectedAuditKind: "promotion" | "rollback" | null,
+): ApplicationAuditRecord | undefined {
+  if (expectedAuditKind === null) return undefined;
+  const kind = expectedAuditKind;
+  return context.snapshot.auditRecords.find(
+    (record): record is ApplicationAuditRecord =>
+      record.kind === kind && auditDescribesDecision(record, completed),
+  );
+}
+
+/** The proposal the completed record names must still exist, and still digest the same. */
+function completedShapeMismatches(expectation: CompletedExpectation): string[] {
+  const { completed, proposal } = expectation;
+  return settle([
+    { field: "proposal", holds: proposal !== undefined },
+    {
+      field: "catalog.candidateDigest",
+      holds:
+        proposal === undefined ||
+        computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
+    },
+  ]);
+}
+
+/** The revisions must bracket each other and never overtake the catalog's own revision. */
+function completedRevisionMismatches(expectation: CompletedExpectation): string[] {
+  const { completed, revision } = expectation;
+  return settle([
+    {
+      field: "catalogRevisionBefore",
+      holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
+    },
+    { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= revision },
+  ]);
+}
+
+/** The binding and the audit both have to exist — or be legitimately absent. */
+function completedOwnershipMismatches(expectation: CompletedExpectation): string[] {
+  const { command, expectedAuditKind, matchingAudit, catalogMutationSucceeded, syntheticCompletion } =
+    expectation;
+  return settle([
+    { field: "command", holds: command !== undefined || syntheticCompletion },
+    {
+      field: "audit",
+      holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
+    },
+  ]);
+}
+
+/**
+ * Which catalog audit records a completion must have left behind. A table rather than a
+ * nested ternary: adding an operation means adding a row, and an operation with no audit
+ * (a reconciliation) is visibly the absence of a row rather than a fall-through.
+ */
 const AUDIT_KIND_BY_OPERATION: Record<string, "promotion" | "rollback" | undefined> = {
   "promote-and-apply": "promotion",
   "rollback-applied": "rollback",
@@ -397,28 +902,12 @@ export class EvolutionApplicationJournal {
     const expectedAfterTarget = proposal
       ? await this.#targets.plannedAfterState(proposal, application.beforeTarget)
       : null;
-    const reconcileMode = command?.previewTokenDigest.startsWith("reconcile:")
-      ? command.previewTokenDigest.slice("reconcile:".length)
-      : null;
-    const reconcileRollbackSafe = reconcileMode === "apply" ||
-      (command?.previewTokenDigest === "reconcile:adopt" && application.previousApplication !== null);
-    const reconcileStatusMatches =
-      (reconcileMode === "adopt" && application.status === "adopted") ||
-      (reconcileMode === "apply" && application.status === "applied");
-    const syntheticOwner = this.syntheticOwnerFor(application, input, parentCommandId);
-    const syntheticLegacyBaseline =
-      !command &&
-      syntheticOwner !== undefined &&
-      application.commandId.startsWith("legacy:") &&
-      application.status === "adopted" &&
-      application.previousApplication === null &&
-      !application.rollbackSafe &&
-      targetStatesEqual(application.beforeTarget, application.afterTarget) &&
-      application.reason ===
-        `Captured verified legacy predecessor while reconciling: ${syntheticOwner.reason}` &&
-      completion !== undefined &&
-      sha256Canonical(completion.humanDecision) ===
-        sha256Canonical(syntheticOwner.humanDecision);
+    const reconcileMode = reconcileModeFrom(command);
+    const syntheticLegacyBaseline = this.syntheticLegacyBaselineFor(
+      application,
+      input,
+      parentCommandId,
+    );
     if (syntheticLegacyBaseline) {
       input.syntheticCompletionIds.add(application.commandId);
     }
@@ -429,8 +918,8 @@ export class EvolutionApplicationJournal {
       completion,
       command,
       expectedAfterTarget,
-      reconcileStatusMatches,
-      reconcileRollbackSafe,
+      reconcileStatusMatches: reconcileStatusMatches(reconcileMode, application),
+      reconcileRollbackSafe: reconcileRollbackSafe(reconcileMode, command, application),
       syntheticLegacyBaseline,
     });
     if (mismatches.length > 0) {
@@ -439,9 +928,38 @@ export class EvolutionApplicationJournal {
       );
     }
     if (application.previousApplication) {
-      await this.validateApplicationProof(application.previousApplication, input, application.commandId);
+      await this.validateApplicationProof(
+        application.previousApplication,
+        input,
+        application.commandId,
+      );
     }
-    
+  }
+
+  /**
+   * Whether this proof is a captured legacy predecessor rather than work the journal performed.
+   *
+   * Phase-2 promotions were applied before the journal existed, so reconciliation records a
+   * baseline on their behalf. Two separate questions decide it: does the record have the shape
+   * of such a baseline, and does a command owner exist whose decision the completion repeats
+   * verbatim. An owner with no matching completion is not enough, and neither is the shape on
+   * its own — together they are the only thing that can vouch for a proof with no command.
+   */
+  private syntheticLegacyBaselineFor(
+    application: ApplicationRecord,
+    input: RestoredStateContext,
+    parentCommandId: string | null,
+  ): boolean {
+    const owner = this.syntheticOwnerFor(application, input, parentCommandId);
+    if (owner === undefined) return false;
+    if (!isSyntheticLegacyShape(application, this.#state.commands.get(application.commandId))) {
+      return false;
+    }
+    return completionRepeatsOwner(
+      application,
+      input.completedByCommand.get(application.commandId),
+      owner,
+    );
   }
 
   /**
@@ -542,11 +1060,6 @@ export class EvolutionApplicationJournal {
   }
 
   /**
-   * Which catalog audit records a completion must have left behind. A table rather than a
-   * nested ternary: adding an operation means adding a row, and an operation with no audit
-   * (a reconciliation) is visibly the absence of a row rather than a fall-through.
-   */
-  /**
    * The command that could have produced this "synthetic" legacy predecessor, if any.
    *
    * A legacy Phase-2 promotion was applied before the journal existed, so reconciliation
@@ -558,20 +1071,35 @@ export class EvolutionApplicationJournal {
     context: RestoredStateContext,
     parentCommandId: string | null,
   ): SyntheticOwner | undefined {
-    const owners: SyntheticOwner[] = [];
+    const owners = [
+      ...this.pendingSyntheticOwners(parentCommandId),
+      ...this.completedSyntheticOwners(context, parentCommandId),
+    ];
+    return owners.find((owner) => this.ownerDerivedTheApplication(owner, application, context));
+  }
+
+  /** The reconciliation still pending, when it is the owner the caller is asking about. */
+  private pendingSyntheticOwners(parentCommandId: string | null): SyntheticOwner[] {
     const pending = this.#state.pending;
-    if (
-      pending !== null &&
-      pending.operation === "reconcile-promoted" &&
-      parentCommandId === pending.commandId
-    ) {
-      owners.push({
+    if (pending === null) return [];
+    if (pending.operation !== "reconcile-promoted") return [];
+    if (parentCommandId !== pending.commandId) return [];
+    return [
+      {
         commandId: pending.commandId,
         proposalId: pending.proposalId,
         reason: pending.reason,
         humanDecision: pending.humanDecision,
-      });
-    }
+      },
+    ];
+  }
+
+  /** Every completed reconciliation that could be the owner, narrowed by the parent command. */
+  private completedSyntheticOwners(
+    context: RestoredStateContext,
+    parentCommandId: string | null,
+  ): SyntheticOwner[] {
+    const owners: SyntheticOwner[] = [];
     for (const command of this.#state.commands.values()) {
       if (command.operation !== "reconcile-promoted") continue;
       if (parentCommandId !== null && command.commandId !== parentCommandId) continue;
@@ -584,7 +1112,7 @@ export class EvolutionApplicationJournal {
         humanDecision: completion.humanDecision,
       });
     }
-    return owners.find((owner) => this.ownerDerivedTheApplication(owner, application, context));
+    return owners;
   }
 
   /** Whether this owner's derived command id and promotion chain explain the application. */
@@ -628,206 +1156,263 @@ export class EvolutionApplicationJournal {
       completedByCommand,
       syntheticCompletionIds: new Set<string>(),
     };
+    await this.validateApplicationEntries(context);
+    await this.validatePendingEntry(context);
+    await this.validateCompletedEntries(context);
+    await this.validateCommandBindings(context);
+    await this.validateAuditOwnership(context);
+  }
+
+  /** Every recorded application proof, and the active target it claims. */
+  async validateApplicationEntries(context: RestoredStateContext): Promise<void> {
     for (const application of this.#state.applications.values()) {
       await this.validateApplicationProof(application, context);
-      const activeId = activeByTarget.get(targetKey(application.target));
-      const committedPendingRollback =
-        this.#state.pending?.operation === "rollback-applied" &&
-        this.#state.pending.proposalId === application.proposalId &&
-        revision === this.#state.pending.expectedCatalogRevisionAfter &&
-        this.catalogOutcomeMatchesPending(this.#state.pending, snapshot, revision);
-      if (
-        activeId !== application.proposalId &&
-        (!activeId ||
-          promotionByProposal.get(activeId)?.previousActiveProposalId !== application.proposalId) &&
-        !committedPendingRollback
-      ) {
-        throw new EvolutionPersistenceValidationError(
-          `Invalid application state: '${application.proposalId}' is not the catalog active proposal`,
-        );
-      }
+      this.assertApplicationIsActive(application, context);
     }
-    if (this.#state.pending) {
-      const proposal = proposals.get(this.#state.pending.proposalId);
-      const pendingTarget = proposal ? targetFromCandidate(proposal.candidate) : null;
-      const activeId = pendingTarget ? activeByTarget.get(targetKey(pendingTarget)) ?? null : null;
-      const { expectedOldActive, expectedPreviousApplication, reconcileRestoredId } =
-        await this.pendingExpectation(this.#state.pending, context);
-      let expectedPendingBefore: TargetDigestState | null = null;
-      let expectedPendingAfter: TargetDigestState | null = null;
-      if (proposal) {
-        if (
-          this.#state.pending.operation === "rollback-applied" &&
-          expectedPreviousApplication
-        ) {
-          expectedPendingBefore = expectedPreviousApplication.afterTarget;
-          expectedPendingAfter = await this.#targets.plannedRollbackState(
-            proposal,
-            expectedPreviousApplication,
-          );
-        } else {
-          expectedPendingBefore = expectedPreviousApplication?.afterTarget ?? null;
-          expectedPendingAfter = await this.#targets.plannedAfterState(
-            proposal,
-            this.#state.pending.beforeTarget,
-          );
-        }
-      }
-      const pending = this.#state.pending;
-      const mismatches = settle([
-        { field: "proposal", holds: proposal !== undefined },
-        {
-          field: "catalog.candidateDigest",
-          holds:
-            proposal === undefined ||
-            computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
-        },
-        { field: "expectedAfterTarget", holds: expectedPendingAfter !== null },
-        {
-          field: "afterTarget",
-          holds:
-            expectedPendingAfter === null ||
-            targetStatesEqual(pending.afterTarget, expectedPendingAfter),
-        },
-        {
-          field: "beforeTarget",
-          holds:
-            expectedPendingBefore === null ||
-            targetStatesEqual(pending.beforeTarget, expectedPendingBefore),
-        },
-        {
-          field: "beforeTarget.key",
-          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
-        },
-        {
-          field: "afterTarget.key",
-          holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
-        },
-        {
-          field: "catalogRevision",
-          holds: revision === pending.catalogRevisionBefore || revision === pending.expectedCatalogRevisionAfter,
-        },
-        {
-          field: "activeProposal",
-          holds: revision !== pending.catalogRevisionBefore || activeId === expectedOldActive,
-        },
-        {
-          field: "previousApplication",
-          holds: sha256Canonical(pending.previousApplication) === sha256Canonical(expectedPreviousApplication),
-        },
-        {
-          field: "previousApplication.proposalId",
-          holds:
-            pending.operation !== "reconcile-promoted" ||
-            (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
-        },
-      ]);
-      if (mismatches.length > 0) {
-        throw new EvolutionPersistenceValidationError(
-          `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
-        );
-      }
+  }
+
+  /** The proof must be for the proposal the catalog currently has in effect for its target. */
+  assertApplicationIsActive(application: ApplicationRecord, context: RestoredStateContext): void {
+    const activeId = context.activeByTarget.get(targetKey(application.target));
+    if (!this.applicationIsInEffect(application, activeId, context)) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid application state: '${application.proposalId}' is not the catalog active proposal`,
+      );
     }
+  }
+
+  /**
+   * Whether the catalog can still be read as "this proposal is the one in effect".
+   *
+   * Two ways that can be true, and they answer different questions: the active pointer never
+   * moved off it, or a rollback is pending and has not committed the pointer back yet. Neither
+   * is a licence to accept an arbitrary proof — see `ownerDerivedTheApplication` for the case
+   * where a legacy predecessor has no pointer at all.
+   */
+  private applicationIsInEffect(
+    application: ApplicationRecord,
+    activeId: string | undefined,
+    context: RestoredStateContext,
+  ): boolean {
+    return (
+      this.activePointerCarriedForward(application, activeId, context) ||
+      this.pendingRollbackExplainsActive(application, context)
+    );
+  }
+
+  /**
+   * The pointer is still this proposal, or the proposal the pointer names replaced it — a
+   * promotion records `previousActiveProposalId`, so a pointer that moved *forward* still
+   * explains the proof it left behind. No pointer at all explains nothing.
+   */
+  private activePointerCarriedForward(
+    application: ApplicationRecord,
+    activeId: string | undefined,
+    context: RestoredStateContext,
+  ): boolean {
+    if (activeId === undefined) return false;
+    if (activeId === application.proposalId) return true;
+    return context.promotionByProposal.get(activeId)?.previousActiveProposalId === application.proposalId;
+  }
+
+  /**
+   * A rollback that has been applied but not yet committed leaves the active pointer on the
+   * proposed target, so the proof it is about to replace is legitimately "not active" until the
+   * catalog catches up. Every part of the pending record has to line up, including the catalog
+   * outcome, otherwise this would excuse any proof at all.
+   */
+  private pendingRollbackExplainsActive(
+    application: ApplicationRecord,
+    context: RestoredStateContext,
+  ): boolean {
+    const pending = this.#state.pending;
+    if (pending === null || pending.operation !== "rollback-applied") return false;
+    if (pending.proposalId !== application.proposalId) return false;
+    if (context.revision !== pending.expectedCatalogRevisionAfter) return false;
+    return this.catalogOutcomeMatchesPending(pending, context.snapshot, context.revision);
+  }
+
+
+  /** The pending operation, and the expectation computed from the current state. */
+  async validatePendingEntry(context: RestoredStateContext): Promise<void> {
+    const pending = this.#state.pending;
+    if (pending === null) return;
+    const expectation = await this.pendingExpectationFrom(pending, context);
+    const mismatches = [
+      ...pendingShapeMismatches(expectation),
+      ...pendingTargetMismatches(expectation),
+      ...pendingTargetKeyMismatches(expectation),
+      ...pendingRevisionMismatches(expectation),
+      ...pendingPreviousApplicationMismatches(expectation),
+    ];
+    if (mismatches.length > 0) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
+      );
+    }
+  }
+
+  /**
+   * Resolve everything the pending checks compare against, once.
+   *
+   * The four check groups below are separate functions over this one bag so each reads as a
+   * small table of fields. They were one eleven-row table, which made "which expectation was
+   * wrong" and "which comparison was wrong" impossible to tell apart from the message alone.
+   */
+  private async pendingExpectationFrom(
+    pending: PendingApplicationOperation,
+    context: RestoredStateContext,
+  ): Promise<PendingExpectation> {
+    const proposal = context.proposals.get(pending.proposalId);
+    const pendingTarget = proposal ? targetFromCandidate(proposal.candidate) : null;
+    const activeId = pendingTarget
+      ? (context.activeByTarget.get(targetKey(pendingTarget)) ?? null)
+      : null;
+    const { expectedOldActive, expectedPreviousApplication, reconcileRestoredId } =
+      await this.pendingExpectation(pending, context);
+    const planned = proposal
+      ? await this.plannedPendingStates(proposal, pending, expectedPreviousApplication)
+      : { before: null, after: null };
+    return {
+      pending,
+      revision: context.revision,
+      proposal,
+      pendingTarget,
+      activeId,
+      activeBefore: expectedOldActive,
+      expectedPreviousApplication,
+      reconcileRestoredId,
+      before: planned.before,
+      after: planned.after,
+    };
+  }
+
+  /**
+   * What the target should look like before and after this pending operation.
+   *
+   * A rollback that is already applied is compared against the state the *previous* application
+   * left, not against the current target: the catalog has not moved back yet. Everything else is
+   * planned forward from the bytes the operation recorded before it touched anything.
+   */
+  private async plannedPendingStates(
+    proposal: EvolutionProposal,
+    pending: PendingApplicationOperation,
+    expectedPreviousApplication: ApplicationRecord | null,
+  ): Promise<{ before: TargetDigestState | null; after: TargetDigestState | null }> {
+    if (pending.operation === "rollback-applied" && expectedPreviousApplication) {
+      return {
+        before: expectedPreviousApplication.afterTarget,
+        after: await this.#targets.plannedRollbackState(proposal, expectedPreviousApplication),
+      };
+    }
+    return {
+      before: expectedPreviousApplication?.afterTarget ?? null,
+      after: await this.#targets.plannedAfterState(proposal, pending.beforeTarget),
+    };
+  }
+
+  /** Every completed record, and the catalog audit it must have left behind. */
+  async validateCompletedEntries(context: RestoredStateContext): Promise<void> {
     for (const completed of this.#state.completed) {
-      const proposal = proposals.get(completed.proposalId);
-      const expectedAuditKind = AUDIT_KIND_BY_OPERATION[completed.operation] ?? null;
-      const matchingAudit = expectedAuditKind
-        ? snapshot.auditRecords.find(
-            (record) =>
-              record.kind === expectedAuditKind &&
-              record.proposalId === completed.proposalId &&
-              record.actor === completed.humanDecision.actor &&
-              record.reason === completed.humanDecision.reason &&
-              record.at === completed.humanDecision.decidedAt &&
-              (record.applicationCommandId === completed.commandId ||
-                (record.applicationCommandId === undefined &&
-                  completed.status !== "aborted")),
-          )
-        : undefined;
-      const catalogMutationSucceeded =
-        completed.status === "applied" || completed.status === "rolled-back";
-      const command = this.#state.commands.get(completed.commandId);
-      const mismatches = settle([
-        { field: "proposal", holds: proposal !== undefined },
-        {
-          field: "catalog.candidateDigest",
-          holds:
-            proposal === undefined ||
-            computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
-        },
-        {
-          field: "catalogRevisionBefore",
-          holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
-        },
-        { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= revision },
-        {
-          field: "command",
-          holds: command !== undefined || context.syntheticCompletionIds.has(completed.commandId),
-        },
-        {
-          field: "audit",
-          holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
-        },
-      ]);
+      const expectation = this.completedExpectation(completed, context);
+      const mismatches = [
+        ...completedShapeMismatches(expectation),
+        ...completedRevisionMismatches(expectation),
+        ...completedOwnershipMismatches(expectation),
+      ];
       if (mismatches.length > 0) {
         throw new EvolutionPersistenceValidationError(
           `Invalid application state: completed operation '${completed.commandId}' does not match the catalog (${mismatches.join(", ")})`,
         );
       }
     }
-    for (const command of this.#state.commands.values()) {
-      const completed = completedByCommand.get(command.commandId);
-      const catalogProposal = proposals.get(command.proposalId);
-      const mismatches = settle([
-        { field: "completion", holds: completed !== undefined },
-        {
-          field: "completion.operation",
-          holds: completed === undefined || completed.operation === command.operation,
-        },
-        {
-          field: "completion.proposalId",
-          holds: completed === undefined || completed.proposalId === command.proposalId,
-        },
-        { field: "proposal", holds: catalogProposal !== undefined },
-        {
-          field: "result.proposal",
-          holds:
-            catalogProposal === undefined ||
-            proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal),
-        },
-      ]);
-      if (mismatches.length > 0) {
-        throw new EvolutionPersistenceValidationError(
-          `Invalid application state: command binding '${command.commandId}' has no matching completion (${mismatches.join(", ")})`,
-        );
+  }
+
+  /**
+   * Resolve what the catalog says this completion should have left behind, once.
+   *
+   * The audit lookup used to be an inline ternary holding a six-conjunct predicate, which
+   * made "the catalog recorded no matching audit" and "the audit disagrees about who decided"
+   * the same `undefined`. They are different states now, and the field names say which.
+   */
+  private completedExpectation(
+    completed: CompletedApplicationRecord,
+    context: RestoredStateContext,
+  ): CompletedExpectation {
+    const expectedAuditKind = AUDIT_KIND_BY_OPERATION[completed.operation] ?? null;
+    return {
+      completed,
+      revision: context.revision,
+      proposal: context.proposals.get(completed.proposalId),
+      command: this.#state.commands.get(completed.commandId),
+      expectedAuditKind,
+      matchingAudit: matchingCompletionAudit(context, completed, expectedAuditKind),
+      catalogMutationSucceeded:
+        completed.status === "applied" || completed.status === "rolled-back",
+      syntheticCompletion: context.syntheticCompletionIds.has(completed.commandId),
+    };
+  }
+
+  /** Every idempotency binding, and the completion it must point at. */
+  async validateCommandBindings(context: RestoredStateContext): Promise<void> {
+      for (const command of this.#state.commands.values()) {
+        const completed = context.completedByCommand.get(command.commandId);
+        const catalogProposal = context.proposals.get(command.proposalId);
+        const mismatches = settle([
+          { field: "completion", holds: completed !== undefined },
+          {
+            field: "completion.operation",
+            holds: completed === undefined || completed.operation === command.operation,
+          },
+          {
+            field: "completion.proposalId",
+            holds: completed === undefined || completed.proposalId === command.proposalId,
+          },
+          { field: "proposal", holds: catalogProposal !== undefined },
+          {
+            field: "result.proposal",
+            holds:
+              catalogProposal === undefined ||
+              proposalSnapshotMatchesCatalog(command.result.proposal, catalogProposal),
+          },
+        ]);
+        if (mismatches.length > 0) {
+          throw new EvolutionPersistenceValidationError(
+            `Invalid application state: command binding '${command.commandId}' has no matching completion (${mismatches.join(", ")})`,
+          );
+        }
       }
-    }
-    for (const audit of snapshot.auditRecords) {
-      const applicationCommandId = auditCommandId(audit);
-      if (applicationCommandId === undefined) continue;
-      const completed = completedByCommand.get(applicationCommandId);
-      const pending = this.#state.pending;
-      const pendingOwnsAudit =
-        pending !== null &&
-        pending.commandId === applicationCommandId &&
-        this.catalogOutcomeMatchesPending(pending, snapshot, revision);
-      const mismatches = settle([
-        { field: "pendingOrCompletion", holds: pendingOwnsAudit || completed !== undefined },
-        {
-          field: "completion.proposalId",
-          holds: completed === undefined || completed.proposalId === audit.proposalId,
-        },
-        {
-          field: "completion.status",
-          holds: completed === undefined || ["applied", "rolled-back"].includes(completed.status),
-        },
-      ]);
-      if (mismatches.length > 0) {
-        throw new EvolutionPersistenceValidationError(
-          `Invalid application state: catalog audit for command '${applicationCommandId}' has no successful application result (${mismatches.join(", ")})`,
-        );
+  }
+
+  /** Every catalog audit that names an application command, and who owns it. */
+  async validateAuditOwnership(context: RestoredStateContext): Promise<void> {
+      for (const audit of context.snapshot.auditRecords) {
+        const applicationCommandId = auditCommandId(audit);
+        if (applicationCommandId === undefined) continue;
+        const completed = context.completedByCommand.get(applicationCommandId);
+        const pending = this.#state.pending;
+        const pendingOwnsAudit =
+          pending !== null &&
+          pending.commandId === applicationCommandId &&
+          this.catalogOutcomeMatchesPending(pending, context.snapshot, context.revision);
+        const mismatches = settle([
+          { field: "pendingOrCompletion", holds: pendingOwnsAudit || completed !== undefined },
+          {
+            field: "completion.proposalId",
+            holds: completed === undefined || completed.proposalId === audit.proposalId,
+          },
+          {
+            field: "completion.status",
+            holds: completed === undefined || ["applied", "rolled-back"].includes(completed.status),
+          },
+        ]);
+        if (mismatches.length > 0) {
+          throw new EvolutionPersistenceValidationError(
+            `Invalid application state: catalog audit for command '${applicationCommandId}' has no successful application result (${mismatches.join(", ")})`,
+          );
+        }
       }
-    }
+ 
   }
 
   async reconcilePendingOnOpen(): Promise<void> {
@@ -951,9 +1536,8 @@ export class EvolutionApplicationJournal {
     proposal: EvolutionProposal,
   ): Promise<boolean> {
     if (proposal.status === "promoted") return true;
-    if (proposal.status !== "evaluated") return false;
-    const evidence = proposal.evaluation?.evidence;
-    if (!evidence) return false;
+    const evidence = promotableEvidence(proposal);
+    if (evidence === undefined) return false;
     await this.#catalog.promote(
       proposal.id,
       evidence,
@@ -996,6 +1580,11 @@ export class EvolutionApplicationJournal {
     await this.finalizePendingAs("aborted", revision, liveTarget.digest);
   }
 
+  /**
+   * Whether the catalog has reached exactly the outcome this pending operation was going to
+   * produce. The order matters and is the record's own: a reconciliation is compared without an
+   * audit at all, while a promotion or rollback is only trusted once the audit digests match.
+   */
   catalogOutcomeMatchesPending(
     pending: PendingApplicationOperation,
     snapshot: EvolutionCatalogSnapshot,
@@ -1003,40 +1592,56 @@ export class EvolutionApplicationJournal {
   ): boolean {
     if (revision !== pending.expectedCatalogRevisionAfter) return false;
     const proposal = snapshot.proposals.find((item) => item.id === pending.proposalId);
-    if (!proposal) return false;
-    const active = snapshot.activeProposals.find(
-      (item) => targetKey(item.target) === targetKey(targetFromCandidate(proposal.candidate)),
-    );
-    if (pending.operation === "reconcile-promoted") {
-      return proposal.status === "promoted" && active?.proposalId === proposal.id;
-    }
-    const audit = [...snapshot.auditRecords]
-      .reverse()
-      .find((record) => record.proposalId === pending.proposalId);
-    if (!audit || sha256Canonical(audit) !== pending.expectedAuditDigest) return false;
-    if (pending.operation === "promote-and-apply") {
-      return proposal.status === "promoted" && active?.proposalId === proposal.id;
-    }
-    const rollback = audit as RollbackRecord;
-    return (
-      proposal.status === "rolled-back" &&
-      (active?.proposalId ?? null) === rollback.restoredActiveProposalId
-    );
+    if (proposal === undefined) return false;
+    const active = activePointerForProposal(snapshot, proposal);
+    if (pending.operation === "reconcile-promoted") return promotedAndActive(proposal, active);
+    const audit = latestAuditFor(snapshot, pending.proposalId);
+    if (audit === undefined || !auditMatchesPending(audit, pending)) return false;
+    if (pending.operation === "promote-and-apply") return promotedAndActive(proposal, active);
+    return rollbackOutcomeMatches(proposal, active, audit);
   }
 
+  /**
+   * Whether the commit now at HEAD is exactly the one this pending operation was going to make.
+   *
+   * Every clause is a different way for someone else's work to be at HEAD: a commit that did not
+   * come from this base, a tree with other edits in it, or a commit that touched more than this
+   * one file. Only the last is a judgement about content rather than history, which is why it is
+   * the one part split out.
+   */
   async verifyPromptGitOutcome(pending: PendingApplicationOperation): Promise<boolean> {
-    if (!pending.gitBaseHead || !pending.gitPath) return false;
+    if (!hasGitProof(pending)) return false;
     const current = await this.#git.currentCommit(this.#catalog.root);
     if (current === pending.gitBaseHead) return false;
-    let parent: string;
+    return await this.commitIsThisPromptOnly(pending, current);
+  }
+
+  /** The new commit builds on the recorded base, on a clean tree, and touches only the prompt. */
+  private async commitIsThisPromptOnly(
+    pending: PromptGitProof,
+    current: string,
+  ): Promise<boolean> {
+    // One comparison covers both "HEAD has no parent" and "someone else committed on top":
+    // `undefined !== baseHead`, and a parent that is not the recorded base, are the same answer.
+    if ((await this.parentCommitOf(current)) !== pending.gitBaseHead) return false;
+    if (!(await this.#git.isClean(this.#catalog.root))) return false;
+    return await this.commitTouchedOnly(current, pending);
+  }
+
+  /** The parent of a commit, or undefined when it has none (a root commit). */
+  private async parentCommitOf(commit: string): Promise<string | undefined> {
     try {
-      parent = await this.#git.resolveCommit(`${current}^`);
+      return await this.#git.resolveCommit(`${commit}^`);
     } catch {
-      return false;
+      return undefined;
     }
-    if (parent !== pending.gitBaseHead || !(await this.#git.isClean(this.#catalog.root))) {
-      return false;
-    }
+  }
+
+  /** The commit changed this prompt and nothing else. */
+  private async commitTouchedOnly(
+    current: string,
+    pending: PromptGitProof,
+  ): Promise<boolean> {
     const diff = await this.#git.diffBetween(pending.gitBaseHead, current);
     return diff.changedFiles.length === 1 && diff.changedFiles[0] === pending.gitPath;
   }
@@ -1049,39 +1654,68 @@ export class EvolutionApplicationJournal {
     );
   }
 
+  /**
+   * Put the original prompt bytes back after a crash left them half-written.
+   *
+   * Four refusals stand between the record and the write, and they are ordered: the snapshot has
+   * to be complete enough to restore from, the object store has to still hold those bytes, the
+   * target has to still be the regular file it was, and only then is anything written. After the
+   * write the same two questions are asked again of the world, because "the rename returned" and
+   * "the target now says what it said before" are not the same statement.
+   */
   async restoreInterruptedPrompt(
     proposal: EvolutionProposal,
     before: TargetDigestState,
   ): Promise<void> {
-    if (proposal.candidate.kind !== "role-prompt" || !before.digest || before.mode === undefined) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        "Interrupted prompt operation lacks a recoverable before snapshot",
-      );
-    }
+    assertPromptCandidate(proposal);
+    assertRecoverableSnapshot(before);
     const bytes = await this.#targets.readPromptObject(before.digest);
     const absolute = path.resolve(this.#catalog.root, proposal.candidate.path);
+    await this.assertSafeRecoveryTarget(absolute);
+    await this.writeRestoredBytes(absolute, bytes, before.mode);
+    clearPromptTemplateCache();
+    await this.assertTargetRestored(proposal, before);
+    await this.assertRecoveryLeftTheTreeClean();
+  }
+
+  /**
+   * A restore must never write through a link, and never into anything but a regular file.
+   *
+   * The realpath comparison is the part worth keeping: the path may look like the prompt while
+   * pointing somewhere else entirely, and following it would corrupt a file that was never part
+   * of the change.
+   */
+  private async assertSafeRecoveryTarget(absolute: string): Promise<void> {
     const info = await this.#io.lstat(absolute);
-    if (
-      info.isSymbolicLink() ||
-      !info.isFile() ||
-      (await this.#io.realpath(absolute)) !== absolute
-    ) {
+    if (targetIsUnsafe(info, await this.#io.realpath(absolute), absolute)) {
       throw new EvolutionApplicationError(
         "RECOVERY_REQUIRED",
         "Interrupted prompt target is no longer a safe regular file",
       );
     }
+  }
+
+  /**
+   * Write the bytes to a sibling temp file and rename it into place.
+   *
+   * The temp file is removed on any failure: leaving it behind would either be picked up by the
+   * cleanup pass later or, worse, sit next to the prompt looking like a real file.
+   */
+  private async writeRestoredBytes(
+    absolute: string,
+    bytes: Uint8Array,
+    mode: number,
+  ): Promise<void> {
     const directory = path.dirname(absolute);
     const temporaryPath = path.join(
       directory,
       promptTempName(path.basename(absolute), { recovery: true }),
     );
     try {
-      const handle = await this.#io.open(temporaryPath, "wx", before.mode);
+      const handle = await this.#io.open(temporaryPath, "wx", mode);
       try {
         await handle.writeFile(bytes);
-        await this.#io.chmod(temporaryPath, before.mode);
+        await this.#io.chmod(temporaryPath, mode);
         await handle.sync();
       } finally {
         await handle.close();
@@ -1092,7 +1726,13 @@ export class EvolutionApplicationJournal {
       await this.#io.rm(temporaryPath, { force: true }).catch(() => undefined);
       throw error;
     }
-    clearPromptTemplateCache();
+  }
+
+  /** The target now reads back exactly as the snapshot recorded it, digest and mode included. */
+  private async assertTargetRestored(
+    proposal: EvolutionProposal,
+    before: TargetDigestState,
+  ): Promise<void> {
     const restored = await this.#targets.readTargetState(proposal.candidate);
     if (!targetStatesEqual(restored, before)) {
       throw new EvolutionApplicationError(
@@ -1100,12 +1740,15 @@ export class EvolutionApplicationJournal {
         "Interrupted prompt recovery did not restore the complete target state",
       );
     }
-    if (!(await this.#git.isClean(this.#catalog.root))) {
-      throw new EvolutionApplicationError(
-        "RECOVERY_REQUIRED",
-        "Interrupted prompt was restored but the Git index/worktree is not clean",
-      );
-    }
+  }
+
+  /** A restore that leaves other work uncommitted would mix two changes in one tree. */
+  private async assertRecoveryLeftTheTreeClean(): Promise<void> {
+    if (await this.#git.isClean(this.#catalog.root)) return;
+    throw new EvolutionApplicationError(
+      "RECOVERY_REQUIRED",
+      "Interrupted prompt was restored but the Git index/worktree is not clean",
+    );
   }
 
   async cleanPendingPromptTemps(relativePath: string): Promise<void> {
@@ -1128,105 +1771,95 @@ export class EvolutionApplicationJournal {
     }
   }
 
+  /**
+   * Finish a pending operation from what the world already shows, instead of replanning it.
+   *
+   * Which half of the record has to change depends on the operation: a promotion leaves an
+   * application behind, a rollback removes one. What they share — the completion entry, the
+   * idempotency binding, and the cleared pending — is written once, after the branch, so the
+   * three of them can never disagree about which operation completed.
+   */
   async completePendingFromLive(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     catalogRevision: number,
     liveTarget: TargetDigestState,
   ): Promise<void> {
-    if (pending.operation === "promote-and-apply" || pending.operation === "reconcile-promoted") {
-      if (
-        pending.previousActiveProposalId &&
-        pending.previousActiveProposalId !== pending.proposalId
-      ) {
-        this.#state.applications.delete(pending.previousActiveProposalId);
-      }
-      if (pending.operation === "reconcile-promoted" && pending.previousApplication) {
-        this.#state.applications.delete(pending.previousApplication.proposalId);
-      }
-      this.#state.applications.set(pending.proposalId, {
-        proposalId: pending.proposalId,
-        candidateDigest: pending.candidateDigest,
-        target: targetFromCandidate(proposal.candidate),
-        status: "applied",
-        beforeTargetDigest: pending.beforeTarget.digest,
-        afterTargetDigest: liveTarget.digest!,
-        beforeTarget: pending.beforeTarget,
-        afterTarget: pending.afterTarget,
-        previousApplication: pending.previousApplication,
-        rollbackSafe: true,
-        catalogRevision,
-        operator: pending.operator,
-        reason: pending.reason,
-        appliedAt: pending.startedAt,
-        commandId: pending.commandId,
-      });
-    } else if (pending.operation === "rollback-applied") {
-      this.#state.applications.delete(pending.proposalId);
-      const restoredId = pending.previousApplication?.previousApplication?.proposalId;
-      const catalogRestoredId = this.#catalog.getActiveProposalId(
-        targetFromCandidate(proposal.candidate),
-      );
-      if ((restoredId ?? null) !== catalogRestoredId) {
-        this.#state.recoveryRequired = true;
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          "Recovered application predecessor does not match the catalog active pointer",
-        );
-      }
-      if (restoredId) {
-        this.#state.applications.set(restoredId, pending.previousApplication!.previousApplication!);
-      }
+    if (pending.operation === "rollback-applied") {
+      this.applyRolledBackOutcome(pending, proposal);
+    } else {
+      this.applyPromotedOutcome(pending, proposal, catalogRevision, liveTarget);
     }
-
-    const status: ApplicationStatus =
-      pending.operation === "rollback-applied"
-        ? "rolled-back"
-        : pending.operation === "reconcile-promoted"
-          ? "applied"
-          : "applied";
-
-    this.#state.completed.push({
-      commandId: pending.commandId,
-      operation: pending.operation,
-      proposalId: pending.proposalId,
-      candidateDigest: pending.candidateDigest,
-      status,
-      beforeTargetDigest: pending.beforeTarget.digest,
-      afterTargetDigest: liveTarget.digest,
-      catalogRevisionBefore: pending.catalogRevisionBefore,
-      catalogRevisionAfter: catalogRevision,
-      operator: pending.operator,
-      reason: pending.reason,
-      completedAt: new Date(this.#now()).toISOString(),
-      humanDecision: pending.humanDecision,
-    });
-
-    if (!this.#state.commands.has(pending.commandId)) {
-      this.#state.commands.set(pending.commandId, {
-        commandId: pending.commandId,
-        operation: pending.operation,
-        proposalId: pending.proposalId,
-        candidateDigest: pending.candidateDigest,
-        operator: pending.operator,
-        reason: pending.reason,
-        expectedRevision: pending.catalogRevisionBefore,
-        previewTokenDigest: pending.previewTokenDigest,
-        requestDigest: pending.requestDigest,
-        materialDigest: pending.materialDigest,
-        result: {
-          proposal: isolate(proposal),
-          committedCatalogRevision: catalogRevision,
-          applicationStatus: status,
-          beforeTargetDigest: pending.beforeTarget.digest,
-          afterTargetDigest: liveTarget.digest,
-        },
-      });
-    }
-
+    const status = COMPLETION_STATUS[pending.operation];
+    this.#state.completed.push(
+      completionRecordFrom(pending, catalogRevision, liveTarget, status, this.#now()),
+    );
+    this.recordBindingOnce(pending, proposal, catalogRevision, liveTarget, status);
     this.#state.pending = null;
     this.#state.recoveryRequired = false;
     await this.persist(this.#state.revision + 1);
+  }
+
+  /** A promotion leaves exactly one application in effect for its target. */
+  private applyPromotedOutcome(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    catalogRevision: number,
+    liveTarget: TargetDigestState,
+  ): void {
+    this.dropReplacedActive(pending);
+    this.dropReconcilePredecessor(pending);
+    this.#state.applications.set(
+      pending.proposalId,
+      appliedRecord(pending, proposal, catalogRevision, liveTarget),
+    );
+  }
+
+  /** The pointer moved off this proposal, so whatever proof it left is no longer in effect. */
+  private dropReplacedActive(pending: PendingApplicationOperation): void {
+    const replaced = pending.previousActiveProposalId;
+    if (replaced === null || replaced === pending.proposalId) return;
+    this.#state.applications.delete(replaced);
+  }
+
+  /** A reconciliation also retires the legacy predecessor it captured. */
+  private dropReconcilePredecessor(pending: PendingApplicationOperation): void {
+    if (pending.operation !== "reconcile-promoted") return;
+    if (pending.previousApplication === null) return;
+    this.#state.applications.delete(pending.previousApplication.proposalId);
+  }
+
+  /**
+   * A rollback puts the pointer back where it was, and the record has to agree.
+   *
+   * The predecessor is only restored when the catalog already points at it: writing a proof for
+   * a proposal the catalog does not name would create exactly the disagreement the restore-time
+   * validator exists to catch, only later and less legibly.
+   */
+  private applyRolledBackOutcome(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): void {
+    this.#state.applications.delete(pending.proposalId);
+    const restoredId = restoredPredecessorId(pending);
+    assertCatalogRestored(theCatalogActiveId(this.#catalog, proposal), restoredId);
+    if (restoredId === null) return;
+    this.#state.applications.set(restoredId, pending.previousApplication!.previousApplication!);
+  }
+
+  /** The idempotency binding is written once per command; a replay keeps the first one. */
+  private recordBindingOnce(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    catalogRevision: number,
+    liveTarget: TargetDigestState,
+    status: ApplicationStatus,
+  ): void {
+    if (this.#state.commands.has(pending.commandId)) return;
+    this.#state.commands.set(
+      pending.commandId,
+      commandBindingFrom(pending, proposal, catalogRevision, liveTarget, status),
+    );
   }
 
   async finalizePendingAs(
