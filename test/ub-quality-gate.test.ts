@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -350,6 +350,146 @@ describe("clearMetrics", () => {
     clearMetrics(root);
     const status = baselineStep({ tool: "crapper", baseline: "baseline.json" }, root);
     expect(status).toBe(0);
+  });
+});
+
+describe("stale coverage", () => {
+  const existing = { extra: ["--use-existing-coverage"] };
+
+  /** A tree with one source file and one coverage report, with their ages set explicitly. */
+  async function coverageTree(reportAgeSeconds: number) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-fresh-"));
+    const source = path.join(root, "src", "journal.ts");
+    const report = path.join(root, "target", "coverage", "typescript", "lcov.info");
+    await mkdir(path.dirname(source), { recursive: true });
+    await mkdir(path.dirname(report), { recursive: true });
+    await writeFile(source, "export const a = 1;\n", "utf8");
+    await writeFile(report, "SF:src/journal.ts\nDA:1,1\nend_of_record\n", "utf8");
+    const now = Math.floor(Date.now() / 1000);
+    await utimes(source, now - 100, now - 100);
+    await utimes(report, now - 100 + reportAgeSeconds, now - 100 + reportAgeSeconds);
+    return { root, source, report };
+  }
+
+  it("refuses to score a report older than the code it would be scored against", async () => {
+    // The real failure this stops: vitest pointed at another reportsDirectory leaves the
+    // report crapper reads at its old path, and today's functions get yesterday's line
+    // numbers. A correct function measured 210.0 that way, and nothing in the run said so.
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(-60);
+
+    expect(staleCoverageRefusal(existing, root)).toBe(1);
+  });
+
+  it("scores a report produced after the last source change", async () => {
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(60);
+
+    expect(staleCoverageRefusal(existing, root)).toBeUndefined();
+  });
+
+  it("says nothing when the gate regenerates its own coverage", async () => {
+    // Self mode deletes the report and runs the tests itself, so an old file cannot be read.
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(-60);
+
+    expect(staleCoverageRefusal({ extra: [] }, root)).toBeUndefined();
+  });
+
+  it("checks the refresh inputs, not the report they are about to replace", async () => {
+    // A refresh copies `--coverage-a` over the canonical path, so the canonical file's age
+    // says nothing; the inputs are the ones that get scored.
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(60);
+    const now = Math.floor(Date.now() / 1000);
+    for (const name of ["a.info", "b.info"]) {
+      const file = path.join(root, name);
+      await writeFile(file, "SF:src/journal.ts\nDA:1,1\nend_of_record\n", "utf8");
+      await utimes(file, now - 100, now - 100);
+    }
+
+    expect(
+      staleCoverageRefusal(
+        { ...existing, updateBaseline: true, coverageA: "a.info", coverageB: "b.info" },
+        root,
+      ),
+    ).toBe(1);
+  });
+
+  it("ignores build output and installed dependencies", async () => {
+    // Otherwise any `pnpm build` or `pnpm install` would declare every report stale, and a
+    // gate that fires for the wrong reason gets switched off.
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(60);
+    const now = Math.floor(Date.now() / 1000);
+    for (const directory of ["node_modules", "dist", "target"]) {
+      const file = path.join(root, directory, "generated.ts");
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, "export const later = 1;\n", "utf8");
+      await utimes(file, now, now);
+    }
+
+    expect(staleCoverageRefusal(existing, root)).toBeUndefined();
+  });
+
+  it("walks nested source directories and only counts files the layers read", async () => {
+    // The scored tree is not flat, and it holds things that are not source: notes, fixtures,
+    // JSON. A file the layers never read cannot make the report stale.
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(60);
+    const now = Math.floor(Date.now() / 1000);
+    const notes = path.join(root, "src", "nested", "notes.md");
+    const fixture = path.join(root, "src", "nested", "fixture.json");
+    await mkdir(path.dirname(notes), { recursive: true });
+    for (const file of [notes, fixture]) {
+      await writeFile(file, "{}\n", "utf8");
+      await utimes(file, now, now);
+    }
+
+    expect(staleCoverageRefusal(existing, root)).toBeUndefined();
+  });
+
+  it("counts a nested source file, wherever the newest change is", async () => {
+    const { staleCoverageRefusal } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await coverageTree(-60);
+    const now = Math.floor(Date.now() / 1000);
+    const deep = path.join(root, "web", "src", "components", "Panel.tsx");
+    await mkdir(path.dirname(deep), { recursive: true });
+    await writeFile(deep, "export const Panel = () => null;\n", "utf8");
+    await utimes(deep, now, now);
+
+    expect(staleCoverageRefusal(existing, root)).toBe(1);
+  });
+
+  it("reports staleness as infrastructure, never as an empty ledger", async () => {
+    // The tool must never run in this test: staleness is decided before it is called, which
+    // is the point — a stub that is never invoked proves the gate stopped at the input.
+    const tool = await stubTool("exit 0");
+    const { root } = await coverageTree(-60);
+    await writeFile(
+      path.join(root, "baseline.json"),
+      JSON.stringify({ scores: {} }),
+      "utf8",
+    );
+    const read = spawnSync(
+      process.execPath,
+      [
+        script,
+        "--all",
+        "--baseline",
+        "baseline.json",
+        "--drift-report",
+        "drift.json",
+        "--",
+        "--use-existing-coverage",
+      ],
+      { cwd: root, encoding: "utf8", env: { ...process.env, UB_BIN: tool } },
+    );
+
+    expect(read.status).toBe(1);
+    const payload = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(payload.kind).toBe("infrastructure");
+    expect(payload.error).toContain("stale");
   });
 });
 
