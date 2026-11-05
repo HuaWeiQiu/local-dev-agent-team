@@ -323,6 +323,53 @@ function pendingPreviousApplicationMismatches(expectation: PendingExpectation): 
   ]);
 }
 
+/** The catalog's active pointer for the target the given proposal names. */
+function activePointerForProposal(
+  snapshot: EvolutionCatalogSnapshot,
+  proposal: EvolutionProposal,
+): { proposalId: string } | undefined {
+  return snapshot.activeProposals.find(
+    (item) => targetKey(item.target) === targetKey(targetFromCandidate(proposal.candidate)),
+  );
+}
+
+/** The catalog's most recent audit for a proposal — the reversal matters, not the order. */
+function latestAuditFor(
+  snapshot: EvolutionCatalogSnapshot,
+  proposalId: string,
+): AuditRecord | undefined {
+  return [...snapshot.auditRecords].reverse().find((record) => record.proposalId === proposalId);
+}
+
+/** The audit the pending record expected has to be the one the catalog ended up recording. */
+function auditMatchesPending(
+  audit: AuditRecord,
+  pending: PendingApplicationOperation,
+): boolean {
+  return sha256Canonical(audit) === pending.expectedAuditDigest;
+}
+
+/** The proposal is promoted, and the active pointer still names it. */
+function promotedAndActive(
+  proposal: EvolutionProposal,
+  active: { proposalId: string } | undefined,
+): boolean {
+  return proposal.status === "promoted" && active?.proposalId === proposal.id;
+}
+
+/** A rollback is in effect: the status says so, and the pointer moved back to the audited proposal. */
+function rollbackOutcomeMatches(
+  proposal: EvolutionProposal,
+  active: { proposalId: string } | undefined,
+  audit: AuditRecord,
+): boolean {
+  const rollback = audit as RollbackRecord;
+  return (
+    proposal.status === "rolled-back" &&
+    (active?.proposalId ?? null) === rollback.restoredActiveProposalId
+  );
+}
+
 /**
  * The audit kinds that can name an application command. Rejections, archives and deletions are
  * lifecycle audit records with nothing applied behind them, so they never belong to a
@@ -1369,6 +1416,11 @@ export class EvolutionApplicationJournal {
     await this.finalizePendingAs("aborted", revision, liveTarget.digest);
   }
 
+  /**
+   * Whether the catalog has reached exactly the outcome this pending operation was going to
+   * produce. The order matters and is the record's own: a reconciliation is compared without an
+   * audit at all, while a promotion or rollback is only trusted once the audit digests match.
+   */
   catalogOutcomeMatchesPending(
     pending: PendingApplicationOperation,
     snapshot: EvolutionCatalogSnapshot,
@@ -1376,25 +1428,13 @@ export class EvolutionApplicationJournal {
   ): boolean {
     if (revision !== pending.expectedCatalogRevisionAfter) return false;
     const proposal = snapshot.proposals.find((item) => item.id === pending.proposalId);
-    if (!proposal) return false;
-    const active = snapshot.activeProposals.find(
-      (item) => targetKey(item.target) === targetKey(targetFromCandidate(proposal.candidate)),
-    );
-    if (pending.operation === "reconcile-promoted") {
-      return proposal.status === "promoted" && active?.proposalId === proposal.id;
-    }
-    const audit = [...snapshot.auditRecords]
-      .reverse()
-      .find((record) => record.proposalId === pending.proposalId);
-    if (!audit || sha256Canonical(audit) !== pending.expectedAuditDigest) return false;
-    if (pending.operation === "promote-and-apply") {
-      return proposal.status === "promoted" && active?.proposalId === proposal.id;
-    }
-    const rollback = audit as RollbackRecord;
-    return (
-      proposal.status === "rolled-back" &&
-      (active?.proposalId ?? null) === rollback.restoredActiveProposalId
-    );
+    if (proposal === undefined) return false;
+    const active = activePointerForProposal(snapshot, proposal);
+    if (pending.operation === "reconcile-promoted") return promotedAndActive(proposal, active);
+    const audit = latestAuditFor(snapshot, pending.proposalId);
+    if (audit === undefined || !auditMatchesPending(audit, pending)) return false;
+    if (pending.operation === "promote-and-apply") return promotedAndActive(proposal, active);
+    return rollbackOutcomeMatches(proposal, active, audit);
   }
 
   async verifyPromptGitOutcome(pending: PendingApplicationOperation): Promise<boolean> {
