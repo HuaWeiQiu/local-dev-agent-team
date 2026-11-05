@@ -2,6 +2,7 @@
 import "./dom-setup.js";
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProjectScope } from "../../web/src/types.js";
 import type { EvolutionSnapshot } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
@@ -33,7 +34,12 @@ const { EvolutionWorkbench } = await import(
   "../../web/src/components/EvolutionWorkbench.js"
 );
 
-const scope = { id: "p1", name: "demo", root: "/repo" };
+/**
+ * The scope the workbench takes is a *selection* (`{mode, projectId}`), which is
+ * not the project record (`{id, name, root}`). The fixture used to describe the
+ * record and the cast hid the difference — a shape error, not a missing field.
+ */
+const scope: ProjectScope = { mode: "single", projectId: "p1" };
 const config = { roles: [], strategies: { default: "demo", definitions: [] } } as never;
 
 function proposal(id: string, status: EvolutionSnapshot["proposals"][number]["status"]) {
