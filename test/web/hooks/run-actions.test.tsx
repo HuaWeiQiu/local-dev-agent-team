@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import "./dom-setup.js";
-import type { RunQueries } from "../../web/src/hooks/run-events/queries.js";
+import "../dom-setup.js";
+import type { RunQueries } from "../../../web/src/hooks/run-events/queries.js";
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RunSummary } from "../../web/src/types.js";
+import type { RunSummary } from "../../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
   startRun: vi.fn(),
@@ -23,14 +23,14 @@ const api = vi.hoisted(() => ({
   deleteStrategyBlueprint: vi.fn(),
 }));
 
-vi.mock("../../web/src/api", async () => {
-  const actual = await vi.importActual<typeof import("../../web/src/api")>(
-    "../../web/src/api",
+vi.mock("../../../web/src/api", async () => {
+  const actual = await vi.importActual<typeof import("../../../web/src/api")>(
+    "../../../web/src/api",
   );
   return { ...actual, ...api };
 });
 
-const { useRunActions } = await import("../../web/src/hooks/useRunActions.js");
+const { useRunActions } = await import("../../../web/src/hooks/useRunActions.js");
 
 const scope = { mode: "single", projectId: "p1" } as never;
 
