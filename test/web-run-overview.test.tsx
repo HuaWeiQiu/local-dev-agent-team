@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
 import { render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { RunOverview } from "../web/src/components/RunOverview.js";
@@ -32,14 +33,16 @@ function run(patch: Partial<RunState> = {}): RunState {
   return { ...runState(), tasks: [task("T1")], ...patch } as RunState;
 }
 
-function props(patch: Record<string, unknown> = {}) {
+type OverviewProps = ComponentProps<typeof RunOverview>;
+
+function props(patch: Partial<OverviewProps> = {}): OverviewProps {
   return {
     run: run(),
     events: [],
     onSelectTask: vi.fn(),
     onOpenActivity: vi.fn(),
     ...patch,
-  } as never;
+  };
 }
 
 describe("run overview model", () => {
@@ -78,7 +81,10 @@ describe("run overview model", () => {
     expect(withCost[1]?.value).toMatch(/^4\//);
     expect(withCost[2]?.value).toBe("$1.23");
 
-    const noCost = summaryStats(run({ usage: undefined }), NOW);
+    // No usage field here: under exactOptionalPropertyTypes, passing it explicitly
+    // as undefined claims the property exists, which is not what "no usage
+    // recorded" means.
+    const noCost = summaryStats(run(), NOW);
     expect(noCost[2]?.value).toBe("—");
   });
 
@@ -103,7 +109,7 @@ describe("run overview model", () => {
 
 describe("RunOverview", () => {
   it("asks for a run when none is selected", () => {
-    render(<RunOverview {...(props({ run: undefined }) as object)} />);
+    render(<RunOverview {...(props({ run: undefined }))} />);
     expect(screen.getByText("选择一个运行查看概览")).toBeVisible();
   });
 
@@ -113,7 +119,7 @@ describe("RunOverview", () => {
         {...(props({
           run: run({ error: "spawn codex ENOENT" }),
           headline: { text: "任务 T1 卡在 CI", tone: "warn" },
-        }) as object)}
+        }))}
       />,
     );
     expect(screen.getByText("运行没有完成")).toBeVisible();
@@ -131,7 +137,7 @@ describe("RunOverview", () => {
             finalDecision: { decision: "ready", reason: "全部通过" } as never,
           }),
           onSelectTask,
-        }) as object)}
+        }))}
       />,
     );
     expect(screen.getByText("先拆分再并行")).toBeVisible();
@@ -148,14 +154,14 @@ describe("RunOverview", () => {
   });
 
   it("explains an empty task list", () => {
-    render(<RunOverview {...(props({ run: run({ tasks: [] }) }) as object)} />);
+    render(<RunOverview {...(props({ run: run({ tasks: [] }) }))} />);
     expect(screen.getByText("还没有拆分出任务")).toBeVisible();
   });
 
   it("shows the decision without a plan", () => {
     render(
       <RunOverview
-        {...(props({ run: run({ finalDecision: { decision: "escalate", reason: "需要人工" } as never }) }) as object)}
+        {...(props({ run: run({ finalDecision: { decision: "escalate", reason: "需要人工" } as never }) }))}
       />,
     );
     expect(screen.getByText("总控：需升级")).toBeVisible();
@@ -181,7 +187,7 @@ describe("RunOverview", () => {
             },
           ],
           onOpenActivity,
-        }) as object)}
+        }))}
       />,
     );
     expect(screen.getByRole("complementary", { name: "运行摘要" })).toBeTruthy();
@@ -191,7 +197,7 @@ describe("RunOverview", () => {
 
   it("says there is no activity yet", () => {
     // A run whose history is empty produces no timeline entries.
-    render(<RunOverview {...(props({ run: run({ history: [] }) }) as object)} />);
+    render(<RunOverview {...(props({ run: run({ history: [] }) }))} />);
     expect(screen.getByText("暂无事件")).toBeVisible();
   });
 });
