@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
+import { projectScope } from "./support/scope.js";
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceViewProps } from "../../web/src/app/WorkspaceView.js";
-import type { PublicConfig, ProjectScope, RunState } from "../../web/src/types.js";
+import type { PublicConfig, RunState } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
   getEvolution: vi.fn().mockResolvedValue(undefined),
@@ -20,7 +21,7 @@ vi.mock("../../web/src/api", async () => {
 
 const { WorkspaceView } = await import("../../web/src/app/WorkspaceView.js");
 
-const scope: ProjectScope = { mode: "single", projectId: "p1" };
+const scope = projectScope;
 
 function config(): PublicConfig {
   return {

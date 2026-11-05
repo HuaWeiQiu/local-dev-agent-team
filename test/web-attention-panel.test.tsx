@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
+import { projectScope } from "./web/support/scope.js";
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AttentionPanel } from "../web/src/components/AttentionPanel.js";
@@ -10,7 +11,7 @@ vi.mock("../web/src/api.js", async (importOriginal) => {
   return { ...actual, getTicketAttention: vi.fn() };
 });
 
-const scope = { mode: "single", projectId: "p1" } as never;
+const scope = projectScope;
 
 function state(patch: Partial<TicketAttention> = {}): TicketAttention {
   return { attention: [], working: 0, total: 0, ...patch };

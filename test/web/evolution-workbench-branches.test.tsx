@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
+import { projectScope } from "./support/scope.js";
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectScope } from "../../web/src/types.js";
 
 /**
  * `EvolutionWorkbench` decides its own two branches from the model the hook returns:
@@ -41,7 +41,7 @@ const { EvolutionWorkbench } = await import("../../web/src/components/EvolutionW
  * requests by `{mode, projectId}`. The old `{id, name, root}` passed only
  * because a cast hid the difference.
  */
-const scope: ProjectScope = { mode: "single", projectId: "p1" };
+const scope = projectScope;
 const config = { version: 1, defaults: {}, ui: {} } as never;
 
 function model(patch: Record<string, unknown>) {
