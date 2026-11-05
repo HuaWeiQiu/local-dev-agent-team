@@ -8,11 +8,12 @@ import {
 } from "../web/src/demo/seed.js";
 import type { DemoRun } from "../web/src/demo/seed.js";
 import type { RunState } from "../web/src/types.js";
+import type { Overrides } from "./support/overrides.js";
 
 const base = Date.parse("2026-10-30T12:00:00.000Z");
 const runs = buildDemoRuns(base);
 
-function runWith(state: Partial<RunState>): DemoRun {
+function runWith(state: Overrides<RunState>): DemoRun {
   const baseRun = runs[0]!;
   return { ...baseRun, state: { ...baseRun.state, ...state } } as DemoRun;
 }

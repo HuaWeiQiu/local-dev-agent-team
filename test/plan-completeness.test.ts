@@ -135,12 +135,10 @@ describe("assessPlanCompleteness", () => {
 
 describe("report helpers", () => {
   it("builds a report from a run", () => {
-    expect(planCompletenessForRun({ goal: "x", plan: undefined, tasks: [], error: undefined })).toBeUndefined();
+    expect(planCompletenessForRun({ goal: "x", tasks: [] })).toBeUndefined();
     const report = planCompletenessForRun({
       goal: "实现 T1",
-      plan: undefined,
       tasks: [taskState({ task: task({ ownedPaths: [] }) })],
-      error: undefined,
     });
     expect(report?.status).toBe("rejected");
 

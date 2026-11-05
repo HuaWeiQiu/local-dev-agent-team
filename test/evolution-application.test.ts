@@ -208,7 +208,9 @@ async function createHarness(options: {
     await initializeRepository(root);
   }
   const loaded = createLoadedConfig(root);
-  const catalog = await DurableEvolutionCatalog.open(loaded, { io: options.catalogIo });
+  const catalog = await DurableEvolutionCatalog.open(loaded, {
+    ...(options.catalogIo === undefined ? {} : { io: options.catalogIo }),
+  });
   const strategies = await StrategyBlueprintCatalog.open(loaded);
   const gitManager =
     options.gitFactory?.(root) ??
@@ -220,9 +222,9 @@ async function createHarness(options: {
     git: gitManager,
     loaded,
     assertQuiescent: options.assertQuiescent ?? (() => undefined),
-    io: options.io,
+    ...(options.io === undefined ? {} : { io: options.io }),
     now: clock.now,
-    previewTtlMs: options.previewTtlMs,
+    ...(options.previewTtlMs === undefined ? {} : { previewTtlMs: options.previewTtlMs }),
   });
   return {
     root,
@@ -1375,7 +1377,7 @@ describe("EvolutionApplicationCoordinator durable state", () => {
     const io: Partial<EvolutionApplicationFileIo> = {
       rename: injectedRename,
     };
-    const harness = await createHarness({ io });
+    const harness = await createHarness({ ...(io === undefined ? {} : { io }) });
     await proposeEvaluatedStrategy(harness, "retry-after-io", "retry-after-io", strategyA);
     const preview = await harness.coordinator.previewPromotion({
       proposalId: "retry-after-io",
@@ -2921,7 +2923,7 @@ describe("the restored state validator refuses states the catalog disagrees with
  */
 describe("prompt target apply refusals", () => {
   async function promptApplyWorld(id: string, io?: Partial<EvolutionApplicationFileIo>) {
-    const harness = await createHarness({ io });
+    const harness = await createHarness({ ...(io === undefined ? {} : { io }) });
     const content = Buffer.from(`Reviewed prompt ${id}\n`, "utf8");
     await harness.coordinator.propose({
       id,
