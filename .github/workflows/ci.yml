@@ -26,6 +26,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm check:casts
       - run: pnpm check:test-names
+      - run: pnpm check:test-types
       - run: pnpm test
       - run: pnpm build
       - run: node dist/cli.js validate -c agent-team.yaml
