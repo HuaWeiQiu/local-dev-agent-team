@@ -31,7 +31,15 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mergeCoverageReports } from "./coverage-merge.mjs";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os, { arch, platform } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -259,9 +267,110 @@ export function clearMetrics(cwd = process.cwd()) {
   return true;
 }
 
+/**
+ * Directories a freshness walk never enters. They hold copies of source (build output, an
+ * installed dependency tree) and would make every report look stale the moment anything was
+ * installed or built.
+ */
+const FRESHNESS_SKIP = new Set(["node_modules", "dist", "target", ".git", "coverage", ".metrics"]);
+
+/** Extensions the scored layers actually read. */
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx"]);
+
+/** The entries of a directory, or none when it cannot be read. */
+function entriesIn(directory) {
+  try {
+    return readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+/** Every file under a directory that the scored layers could read, skipping build output. */
+function sourceFilesIn(directory) {
+  const found = [];
+  for (const entry of entriesIn(directory)) {
+    if (FRESHNESS_SKIP.has(entry.name)) continue;
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...sourceFilesIn(full));
+      continue;
+    }
+    if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) found.push(full);
+  }
+  return found;
+}
+
+/** The newest of these files by mtime, or undefined when none of them could be read. */
+function newestByMtime(files) {
+  const timed = files
+    .map((file) => ({ path: file, stats: statSync(file, { throwIfNoEntry: false }) }))
+    .filter((entry) => entry.stats !== undefined)
+    .map((entry) => ({ path: entry.path, mtimeMs: entry.stats.mtimeMs }));
+  if (timed.length === 0) return undefined;
+  return timed.reduce((latest, entry) => (entry.mtimeMs > latest.mtimeMs ? entry : latest));
+}
+
+/** The newest source file under the scored roots, or undefined when there is none. */
+export function newestSource(cwd = process.cwd(), roots = SOURCE_ROOTS) {
+  return newestByMtime(roots.flatMap((root) => sourceFilesIn(path.join(cwd, root))));
+}
+
+/**
+ * Which coverage reports this run will actually be scored against.
+ *
+ * A refresh replaces the canonical report with its declared inputs, so the inputs are the
+ * ones that have to be fresh. Every other run scores whatever sits at the canonical path.
+ */
+export function scoredCoverageReports(options, cwd = process.cwd()) {
+  if (!usesExistingCoverage(options)) return [];
+  if (options.updateBaseline) {
+    return [options.coverageA, options.coverageB, options.coverageC]
+      .filter(Boolean)
+      .map((file) => path.resolve(cwd, file));
+  }
+  return [coveragePath(cwd)];
+}
+
+/**
+ * A coverage report is an input, and an input older than the sources cannot describe them.
+ *
+ * Not hypothetical: pointing vitest at another `reportsDirectory` leaves the report crapper
+ * actually reads at its old path, and the tool then scores today's functions against
+ * yesterday's line numbers. A correct function measured 210.0 that way — a number that sends
+ * someone to rewrite code that is fine. Nothing in the run says so, which is why this is a
+ * gate and not a note: the failure has no other symptom.
+ */
+export function staleCoverageRefusal(options, cwd = process.cwd()) {
+  const reports = scoredCoverageReports(options, cwd);
+  if (reports.length === 0) return undefined;
+  const source = newestSource(cwd);
+  if (!source) return undefined;
+  for (const report of reports) {
+    const stats = statSync(report, { throwIfNoEntry: false });
+    // A missing report is a different refusal, raised once the layers actually run.
+    if (!stats) continue;
+    if (stats.mtimeMs > source.mtimeMs) continue;
+    process.stderr.write(
+      "gate: refusing to score — coverage is stale; regenerate it.\n" +
+        `  report  ${new Date(stats.mtimeMs).toISOString()}  ${path.relative(cwd, report)}\n` +
+        `  source  ${new Date(source.mtimeMs).toISOString()}  ${path.relative(cwd, source.path)}\n\n` +
+        "The report predates the code it would be scored against, so its line numbers may " +
+        "belong to a different function: one that is correct came out as 210.0 that way.\n" +
+        "Regenerate it where the gate looks for it:\n" +
+        "  npx vitest run --coverage --coverage.reporter=lcov \\\n" +
+        "    --coverage.reportsDirectory=target/coverage/typescript\n",
+    );
+    return 1;
+  }
+  return undefined;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
+  const stale = staleCoverageRefusal(prepared.options);
+  if (stale !== undefined) return refuseForStaleCoverage(prepared, stale);
   if (prepared.options.driftReport) return driftStep(prepared.options, prepared.ub);
   clearMetrics();
   // crapper in changed mode has nothing to score when nothing changed; the
@@ -272,6 +381,27 @@ export function main(argv = process.argv.slice(2)) {
   if (prepared.options.updateBaseline) return stableBaseline(prepared.ub, prepared.options);
   const failed = runLayers(prepared.ub, prepared.options);
   return failed === 0 ? baselineStep(prepared.options) : failed;
+}
+
+/**
+ * Staleness ends the run either way; how it is *recorded* depends on who is reading.
+ *
+ * The nightly contract is that a run which could not measure anything is an infrastructure
+ * verdict, never an empty ledger — a missing file would read as "no drift", which is the one
+ * answer that hides the problem.
+ */
+function refuseForStaleCoverage(prepared, status) {
+  if (!prepared.options.driftReport) return status;
+  writeDriftReport(
+    prepared.options.driftReport,
+    driftPayload({
+      error: "coverage is stale: the report predates the sources it would score",
+      threshold: Number(prepared.options.threshold),
+      baseline: prepared.options.baseline,
+      provenance: provenance({ ub: prepared.ub, env: process.env }),
+    }),
+  );
+  return status;
 }
 
 function runLayers(ub, options, cwd = process.cwd()) {
