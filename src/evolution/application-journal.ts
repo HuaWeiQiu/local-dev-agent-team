@@ -1,7 +1,7 @@
 import path from "node:path";
 import { clearPromptTemplateCache } from "../agents/service.js";
 import { type GitManager } from "../git/manager.js";
-import type { EvolutionCatalogSnapshot } from "./catalog.js";
+import type { EvolutionCandidateTarget, EvolutionCatalogSnapshot } from "./catalog.js";
 import {
   computeCandidateDigest,
   type EvolutionProposal,
@@ -216,6 +216,110 @@ function settle(checks: Array<{ field: string; holds: boolean }>): string[] {
 
 function prefixed(prefix: string, fields: string[]): string[] {
   return fields.map((field) => `${prefix}.${field}`);
+}
+
+/**
+ * The pending record together with everything the catalog says about it.
+ *
+ * Resolved once, then read by the check groups below — each group answers one question (does
+ * the shape hold, do the target states match, does the revision agree, does the replaced
+ * application line up). When they were one eleven-row table, a mismatch told the reader the
+ * field name but not which *expectation* had been derived wrongly.
+ */
+type PendingExpectation = {
+  pending: PendingApplicationOperation;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  /** The target this operation was recorded against, when the catalog still has its candidate. */
+  pendingTarget: EvolutionCandidateTarget | null;
+  /** The catalog's active proposal for that target right now. */
+  activeId: string | null;
+  activeBefore: string | null;
+  expectedPreviousApplication: ApplicationRecord | null;
+  reconcileRestoredId: string | null | undefined;
+  /** What the target should look like before and after, planned from the catalog. */
+  before: TargetDigestState | null;
+  after: TargetDigestState | null;
+};
+
+/** The proposal the pending record names must still exist, and still digest the same. */
+function pendingShapeMismatches(expectation: PendingExpectation): string[] {
+  const { pending, proposal } = expectation;
+  return settle([
+    { field: "proposal", holds: proposal !== undefined },
+    {
+      field: "catalog.candidateDigest",
+      holds:
+        proposal === undefined ||
+        computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
+    },
+  ]);
+}
+
+/** Both recorded target states must match the plan — or there was nothing to compare against. */
+function pendingTargetMismatches(expectation: PendingExpectation): string[] {
+  const { pending, before, after } = expectation;
+  return settle([
+    { field: "expectedAfterTarget", holds: after !== null },
+    { field: "afterTarget", holds: after === null || targetStatesEqual(pending.afterTarget, after) },
+    {
+      field: "beforeTarget",
+      holds: before === null || targetStatesEqual(pending.beforeTarget, before),
+    },
+  ]);
+}
+
+/** Neither recorded target may name a different target than the candidate being applied. */
+function pendingTargetKeyMismatches(expectation: PendingExpectation): string[] {
+  const { pending, pendingTarget } = expectation;
+  return settle([
+    {
+      field: "beforeTarget.key",
+      holds:
+        pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
+    },
+    {
+      field: "afterTarget.key",
+      holds:
+        pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
+    },
+  ]);
+}
+
+/** The revision must be one the operation can be at, and the active pointer must agree with it. */
+function pendingRevisionMismatches(expectation: PendingExpectation): string[] {
+  const { pending, revision, activeId, activeBefore } = expectation;
+  return settle([
+    {
+      field: "catalogRevision",
+      holds:
+        revision === pending.catalogRevisionBefore ||
+        revision === pending.expectedCatalogRevisionAfter,
+    },
+    {
+      field: "activeProposal",
+      holds: revision !== pending.catalogRevisionBefore || activeId === activeBefore,
+    },
+  ]);
+}
+
+/** The application this operation replaces, and — for a reconciliation — the id it restores. */
+function pendingPreviousApplicationMismatches(expectation: PendingExpectation): string[] {
+  const { pending, expectedPreviousApplication, reconcileRestoredId } = expectation;
+  return settle([
+    {
+      field: "previousApplication",
+      holds:
+        sha256Canonical(pending.previousApplication) ===
+        sha256Canonical(expectedPreviousApplication),
+    },
+    {
+      field: "previousApplication.proposalId",
+      holds:
+        pending.operation !== "reconcile-promoted" ||
+        (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
+    },
+  ]);
 }
 
 /**
@@ -722,87 +826,80 @@ export class EvolutionApplicationJournal {
 
   /** The pending operation, and the expectation computed from the current state. */
   async validatePendingEntry(context: RestoredStateContext): Promise<void> {
-      if (this.#state.pending) {
-        const proposal = context.proposals.get(this.#state.pending.proposalId);
-        const pendingTarget = proposal ? targetFromCandidate(proposal.candidate) : null;
-        const activeId = pendingTarget ? context.activeByTarget.get(targetKey(pendingTarget)) ?? null : null;
-        const { expectedOldActive, expectedPreviousApplication, reconcileRestoredId } =
-          await this.pendingExpectation(this.#state.pending, context);
-        let expectedPendingBefore: TargetDigestState | null = null;
-        let expectedPendingAfter: TargetDigestState | null = null;
-        if (proposal) {
-          if (
-            this.#state.pending.operation === "rollback-applied" &&
-            expectedPreviousApplication
-          ) {
-            expectedPendingBefore = expectedPreviousApplication.afterTarget;
-            expectedPendingAfter = await this.#targets.plannedRollbackState(
-              proposal,
-              expectedPreviousApplication,
-            );
-          } else {
-            expectedPendingBefore = expectedPreviousApplication?.afterTarget ?? null;
-            expectedPendingAfter = await this.#targets.plannedAfterState(
-              proposal,
-              this.#state.pending.beforeTarget,
-            );
-          }
-        }
-        const pending = this.#state.pending;
-        const mismatches = settle([
-          { field: "proposal", holds: proposal !== undefined },
-          {
-            field: "catalog.candidateDigest",
-            holds:
-              proposal === undefined ||
-              computeCandidateDigest(proposal.candidate) === pending.candidateDigest,
-          },
-          { field: "expectedAfterTarget", holds: expectedPendingAfter !== null },
-          {
-            field: "afterTarget",
-            holds:
-              expectedPendingAfter === null ||
-              targetStatesEqual(pending.afterTarget, expectedPendingAfter),
-          },
-          {
-            field: "beforeTarget",
-            holds:
-              expectedPendingBefore === null ||
-              targetStatesEqual(pending.beforeTarget, expectedPendingBefore),
-          },
-          {
-            field: "beforeTarget.key",
-            holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.beforeTarget),
-          },
-          {
-            field: "afterTarget.key",
-            holds: pendingTarget === null || targetKey(pendingTarget) === targetKeyFromState(pending.afterTarget),
-          },
-          {
-            field: "catalogRevision",
-            holds: context.revision === pending.catalogRevisionBefore || context.revision === pending.expectedCatalogRevisionAfter,
-          },
-          {
-            field: "activeProposal",
-            holds: context.revision !== pending.catalogRevisionBefore || activeId === expectedOldActive,
-          },
-          {
-            field: "previousApplication",
-            holds: sha256Canonical(pending.previousApplication) === sha256Canonical(expectedPreviousApplication),
-          },
-          {
-            field: "previousApplication.proposalId",
-            holds:
-              pending.operation !== "reconcile-promoted" ||
-              (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
-          },
-        ]);
-        if (mismatches.length > 0) {
-          throw new EvolutionPersistenceValidationError(
-            `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
-          );
-        }
-      }
+    const pending = this.#state.pending;
+    if (pending === null) return;
+    const expectation = await this.pendingExpectationFrom(pending, context);
+    const mismatches = [
+      ...pendingShapeMismatches(expectation),
+      ...pendingTargetMismatches(expectation),
+      ...pendingTargetKeyMismatches(expectation),
+      ...pendingRevisionMismatches(expectation),
+      ...pendingPreviousApplicationMismatches(expectation),
+    ];
+    if (mismatches.length > 0) {
+      throw new EvolutionPersistenceValidationError(
+        `Invalid application state: pending operation '${pending.commandId}' does not match the catalog (${mismatches.join(", ")})`,
+      );
+    }
+  }
+
+  /**
+   * Resolve everything the pending checks compare against, once.
+   *
+   * The four check groups below are separate functions over this one bag so each reads as a
+   * small table of fields. They were one eleven-row table, which made "which expectation was
+   * wrong" and "which comparison was wrong" impossible to tell apart from the message alone.
+   */
+  private async pendingExpectationFrom(
+    pending: PendingApplicationOperation,
+    context: RestoredStateContext,
+  ): Promise<PendingExpectation> {
+    const proposal = context.proposals.get(pending.proposalId);
+    const pendingTarget = proposal ? targetFromCandidate(proposal.candidate) : null;
+    const activeId = pendingTarget
+      ? (context.activeByTarget.get(targetKey(pendingTarget)) ?? null)
+      : null;
+    const { expectedOldActive, expectedPreviousApplication, reconcileRestoredId } =
+      await this.pendingExpectation(pending, context);
+    const planned = proposal
+      ? await this.plannedPendingStates(proposal, pending, expectedPreviousApplication)
+      : { before: null, after: null };
+    return {
+      pending,
+      revision: context.revision,
+      proposal,
+      pendingTarget,
+      activeId,
+      activeBefore: expectedOldActive,
+      expectedPreviousApplication,
+      reconcileRestoredId,
+      before: planned.before,
+      after: planned.after,
+    };
+  }
+
+  /**
+   * What the target should look like before and after this pending operation.
+   *
+   * A rollback that is already applied is compared against the state the *previous* application
+   * left, not against the current target: the catalog has not moved back yet. Everything else is
+   * planned forward from the bytes the operation recorded before it touched anything.
+   */
+  private async plannedPendingStates(
+    proposal: EvolutionProposal,
+    pending: PendingApplicationOperation,
+    expectedPreviousApplication: ApplicationRecord | null,
+  ): Promise<{ before: TargetDigestState | null; after: TargetDigestState | null }> {
+    if (pending.operation === "rollback-applied" && expectedPreviousApplication) {
+      return {
+        before: expectedPreviousApplication.afterTarget,
+        after: await this.#targets.plannedRollbackState(proposal, expectedPreviousApplication),
+      };
+    }
+    return {
+      before: expectedPreviousApplication?.afterTarget ?? null,
+      after: await this.#targets.plannedAfterState(proposal, pending.beforeTarget),
+    };
   }
 
   /** Every completed record, and the catalog audit it must have left behind. */
