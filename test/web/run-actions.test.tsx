@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
+import type { RunQueries } from "../../web/src/hooks/run-events/queries.js";
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunSummary } from "../../web/src/types.js";
@@ -38,17 +39,38 @@ function summary(id: string): RunSummary {
 }
 
 function harness() {
-  const monitor = {
+  /**
+   * The whole monitor surface. The setters and refreshers below are *shape*
+   * fields: the hook requires them to exist and this suite never calls them —
+   * they are here so the fixture is the object the type describes, not so those
+   * paths are covered. A `vi.fn()` nothing invokes proves nothing ran.
+   */
+  const monitor: RunQueries = {
+    config: undefined,
+    connected: true,
     runs: [summary("r-1")],
     selectedRunId: "r-1",
+    run: undefined,
+    selectedTaskId: undefined,
+    events: [],
+    evidence: undefined,
+    evidenceLoading: false,
+    usageReport: undefined,
+    usageLoading: false,
+    error: undefined,
     setSelectedRunId: vi.fn(),
+    setSelectedTaskId: vi.fn(),
     setRun: vi.fn(),
     setEvents: vi.fn(),
     setEvidence: vi.fn(),
+    setConnected: vi.fn(),
     setError: vi.fn(),
     refreshRuns: vi.fn().mockResolvedValue(undefined),
-    refreshRun: vi.fn().mockResolvedValue(undefined),
     refreshConfig: vi.fn().mockResolvedValue({}),
+    refreshRun: vi.fn().mockResolvedValue(undefined),
+    refreshUsage: vi.fn().mockResolvedValue(undefined),
+    resetRunScope: vi.fn(),
+    scheduleRefresh: vi.fn(),
   };
   const ui = {
     setMonitorPanel: vi.fn(),
@@ -57,7 +79,7 @@ function harness() {
     setLauncherOpen: vi.fn(),
     setLauncherStrategy: vi.fn(),
   };
-  const view = renderHook(() => useRunActions({ scope, monitor: monitor as never, ...ui }));
+  const view = renderHook(() => useRunActions({ scope, monitor, ...ui }));
   return { view, monitor, ui };
 }
 
@@ -103,7 +125,7 @@ describe("useRunActions", () => {
     });
     expect(started).toBe(false);
     expect(ui.setLauncherOpen).not.toHaveBeenCalled();
-    expect(String(monitor.setError.mock.calls.at(-1)?.[0] ?? "")).toContain("spawn failed");
+    expect(String(vi.mocked(monitor.setError).mock.calls.at(-1)?.[0] ?? "")).toContain("spawn failed");
   });
 
   it("cancels, retries, publishes and exports", async () => {
