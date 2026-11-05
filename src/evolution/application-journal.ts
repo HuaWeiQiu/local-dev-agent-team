@@ -6,6 +6,7 @@ import {
   computeCandidateDigest,
   type EvolutionProposal,
   type HumanDecision,
+  type AuditRecord,
   type PromotionRecord,
   type RollbackRecord,
 } from "./domain.js";
@@ -318,6 +319,118 @@ function pendingPreviousApplicationMismatches(expectation: PendingExpectation): 
       holds:
         pending.operation !== "reconcile-promoted" ||
         (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
+    },
+  ]);
+}
+
+/**
+ * The audit kinds that can name an application command. Rejections, archives and deletions are
+ * lifecycle audit records with nothing applied behind them, so they never belong to a
+ * completion — narrowing here is what lets the predicates below read `applicationCommandId`.
+ */
+type ApplicationAuditRecord = Exclude<
+  AuditRecord,
+  { kind: "rejection" | "archive" | "unarchive" | "delete" }
+>;
+
+/**
+ * A completed record together with what the catalog says it should have left behind.
+ *
+ * Split out of the eleven-line check the same way `PendingExpectation` is: the audit lookup
+ * alone carried a six-conjunct predicate, and folding it into the comparison hid the
+ * difference between "no audit matched" and "an audit matched but disagrees".
+ */
+type CompletedExpectation = {
+  completed: CompletedApplicationRecord;
+  revision: number;
+  proposal: EvolutionProposal | undefined;
+  command: CommandIdempotencyBinding | undefined;
+  /** The audit kind this operation must produce, or null when it produces none. */
+  expectedAuditKind: "promotion" | "rollback" | null;
+  matchingAudit: ApplicationAuditRecord | undefined;
+  /** Whether the completion claims the catalog was actually mutated. */
+  catalogMutationSucceeded: boolean;
+  /** Whether this id is vouched for by a captured legacy baseline rather than a command. */
+  syntheticCompletion: boolean;
+};
+
+/**
+ * Whether the audit names this completion's command.
+ *
+ * An audit with no command id is a legacy Phase-2 record: it predates the journal, so the
+ * absence is only acceptable for a completion that never claimed a mutation.
+ */
+function auditNamesCompletion(
+  audit: ApplicationAuditRecord,
+  completed: CompletedApplicationRecord,
+): boolean {
+  if (audit.applicationCommandId === completed.commandId) return true;
+  return audit.applicationCommandId === undefined && completed.status !== "aborted";
+}
+
+/** Whether the audit describes this completion's decision, never mind which command it names. */
+function auditDescribesDecision(
+  audit: ApplicationAuditRecord,
+  completed: CompletedApplicationRecord,
+): boolean {
+  return (
+    audit.proposalId === completed.proposalId &&
+    audit.actor === completed.humanDecision.actor &&
+    audit.reason === completed.humanDecision.reason &&
+    audit.at === completed.humanDecision.decidedAt &&
+    auditNamesCompletion(audit, completed)
+  );
+}
+
+/** The first audit of the expected kind that describes this completion's decision. */
+function matchingCompletionAudit(
+  context: RestoredStateContext,
+  completed: CompletedApplicationRecord,
+  expectedAuditKind: "promotion" | "rollback" | null,
+): ApplicationAuditRecord | undefined {
+  if (expectedAuditKind === null) return undefined;
+  const kind = expectedAuditKind;
+  return context.snapshot.auditRecords.find(
+    (record): record is ApplicationAuditRecord =>
+      record.kind === kind && auditDescribesDecision(record, completed),
+  );
+}
+
+/** The proposal the completed record names must still exist, and still digest the same. */
+function completedShapeMismatches(expectation: CompletedExpectation): string[] {
+  const { completed, proposal } = expectation;
+  return settle([
+    { field: "proposal", holds: proposal !== undefined },
+    {
+      field: "catalog.candidateDigest",
+      holds:
+        proposal === undefined ||
+        computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
+    },
+  ]);
+}
+
+/** The revisions must bracket each other and never overtake the catalog's own revision. */
+function completedRevisionMismatches(expectation: CompletedExpectation): string[] {
+  const { completed, revision } = expectation;
+  return settle([
+    {
+      field: "catalogRevisionBefore",
+      holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
+    },
+    { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= revision },
+  ]);
+}
+
+/** The binding and the audit both have to exist — or be legitimately absent. */
+function completedOwnershipMismatches(expectation: CompletedExpectation): string[] {
+  const { command, expectedAuditKind, matchingAudit, catalogMutationSucceeded, syntheticCompletion } =
+    expectation;
+  return settle([
+    { field: "command", holds: command !== undefined || syntheticCompletion },
+    {
+      field: "audit",
+      holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
     },
   ]);
 }
@@ -904,53 +1017,44 @@ export class EvolutionApplicationJournal {
 
   /** Every completed record, and the catalog audit it must have left behind. */
   async validateCompletedEntries(context: RestoredStateContext): Promise<void> {
-      for (const completed of this.#state.completed) {
-        const proposal = context.proposals.get(completed.proposalId);
-        const expectedAuditKind = AUDIT_KIND_BY_OPERATION[completed.operation] ?? null;
-        const matchingAudit = expectedAuditKind
-          ? context.snapshot.auditRecords.find(
-              (record) =>
-                record.kind === expectedAuditKind &&
-                record.proposalId === completed.proposalId &&
-                record.actor === completed.humanDecision.actor &&
-                record.reason === completed.humanDecision.reason &&
-                record.at === completed.humanDecision.decidedAt &&
-                (record.applicationCommandId === completed.commandId ||
-                  (record.applicationCommandId === undefined &&
-                    completed.status !== "aborted")),
-            )
-          : undefined;
-        const catalogMutationSucceeded =
-          completed.status === "applied" || completed.status === "rolled-back";
-        const command = this.#state.commands.get(completed.commandId);
-        const mismatches = settle([
-          { field: "proposal", holds: proposal !== undefined },
-          {
-            field: "catalog.candidateDigest",
-            holds:
-              proposal === undefined ||
-              computeCandidateDigest(proposal.candidate) === completed.candidateDigest,
-          },
-          {
-            field: "catalogRevisionBefore",
-            holds: completed.catalogRevisionBefore <= completed.catalogRevisionAfter,
-          },
-          { field: "catalogRevisionAfter", holds: completed.catalogRevisionAfter <= context.revision },
-          {
-            field: "command",
-            holds: command !== undefined || context.syntheticCompletionIds.has(completed.commandId),
-          },
-          {
-            field: "audit",
-            holds: expectedAuditKind === null || catalogMutationSucceeded === Boolean(matchingAudit),
-          },
-        ]);
-        if (mismatches.length > 0) {
-          throw new EvolutionPersistenceValidationError(
-            `Invalid application state: completed operation '${completed.commandId}' does not match the catalog (${mismatches.join(", ")})`,
-          );
-        }
+    for (const completed of this.#state.completed) {
+      const expectation = this.completedExpectation(completed, context);
+      const mismatches = [
+        ...completedShapeMismatches(expectation),
+        ...completedRevisionMismatches(expectation),
+        ...completedOwnershipMismatches(expectation),
+      ];
+      if (mismatches.length > 0) {
+        throw new EvolutionPersistenceValidationError(
+          `Invalid application state: completed operation '${completed.commandId}' does not match the catalog (${mismatches.join(", ")})`,
+        );
       }
+    }
+  }
+
+  /**
+   * Resolve what the catalog says this completion should have left behind, once.
+   *
+   * The audit lookup used to be an inline ternary holding a six-conjunct predicate, which
+   * made "the catalog recorded no matching audit" and "the audit disagrees about who decided"
+   * the same `undefined`. They are different states now, and the field names say which.
+   */
+  private completedExpectation(
+    completed: CompletedApplicationRecord,
+    context: RestoredStateContext,
+  ): CompletedExpectation {
+    const expectedAuditKind = AUDIT_KIND_BY_OPERATION[completed.operation] ?? null;
+    return {
+      completed,
+      revision: context.revision,
+      proposal: context.proposals.get(completed.proposalId),
+      command: this.#state.commands.get(completed.commandId),
+      expectedAuditKind,
+      matchingAudit: matchingCompletionAudit(context, completed, expectedAuditKind),
+      catalogMutationSucceeded:
+        completed.status === "applied" || completed.status === "rolled-back",
+      syntheticCompletion: context.syntheticCompletionIds.has(completed.commandId),
+    };
   }
 
   /** Every idempotency binding, and the completion it must point at. */
