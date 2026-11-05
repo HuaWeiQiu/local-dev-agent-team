@@ -41,6 +41,13 @@ interface Emitted {
   payload: Record<string, unknown>;
 }
 
+/** The recovery number of every stall event, in order — the shape the contract is about. */
+function stallRecoveries(emitted: Emitted[]): number[] {
+  return emitted
+    .filter((event) => event.type === "agent.stalled")
+    .map((event) => (event.payload as { recovery: number }).recovery);
+}
+
 function fixture(workflow?: { stallSeconds: number; maxStallRecoveries: number }) {
   const emitted: Emitted[] = [];
   const emit = (runId: string, type: string, payload: unknown) => {
@@ -285,19 +292,59 @@ describe("stall watchdog", () => {
     await expect(run("stall-forever-run", "hangforever")).rejects.toThrow(/stalled/i);
     // How many 200ms watchdog samples land before the timeout is a scheduling
     // detail; the contract is that recoveries are bounded by the configuration.
-    const stalls = emitted.filter((event) => event.type === "agent.stalled").length;
-    expect(stalls).toBeGreaterThanOrEqual(1);
-    expect(stalls).toBeLessThanOrEqual(2);
+    // One recovery in the budget, then the attempt that gives up.
+    expect(stallRecoveries(emitted)).toEqual([1, 2]);
+  });
+
+  it("records one stall per recovery even when the watchdog ticks twice", async () => {
+    // The contract is one event per recovery, and `explain.ts` renders that count as a sentence
+    // an operator reads — so a second record is a wrong number, not a noisy log line.
+    //
+    // Deterministic on purpose: the first interrupt is left unresolved, which is exactly the
+    // window in which the watchdog can tick again while the turn loop has not yet taken
+    // `pending`. No CPU pressure, no waiting for it to wobble.
+    const { recordStallTick } = await import("../src/agents/live-invoke.js");
+    const state = { pending: false, recoveries: 0 };
+    const reports: Array<{ recovery: number }> = [];
+    const nudges: string[] = [];
+    const reporting = (info: { recovery: number }) => reports.push(info);
+    const interrupting = new Promise(() => undefined);
+    const nudge = () => {
+      nudges.push("interrupt");
+      void interrupting;
+    };
+
+    recordStallTick(state, reporting, nudge, { idleSeconds: 1, maxRecoveries: 2 });
+    recordStallTick(state, reporting, nudge, { idleSeconds: 1, maxRecoveries: 2 });
+
+    expect(reports).toEqual([{ idleSeconds: 1, recovery: 1, maxRecoveries: 2 }]);
+    // Nudging twice is right: the first interrupt may not have taken effect.
+    expect(nudges).toHaveLength(2);
+  });
+
+  it("reports the next recovery once the loop has taken the previous one", async () => {
+    // The other half of the same rule: after the loop consumes `pending` and bumps the counter,
+    // the following tick is a genuinely new recovery and must be recorded with the next number.
+    const { recordStallTick } = await import("../src/agents/live-invoke.js");
+    const state = { pending: false, recoveries: 0 };
+    const reports: Array<{ recovery: number }> = [];
+    const reporting = (info: { recovery: number }) => reports.push(info);
+
+    recordStallTick(state, reporting, () => undefined, { idleSeconds: 1, maxRecoveries: 2 });
+    state.pending = false; // what the turn loop does when it takes the stall
+    state.recoveries += 1;
+    recordStallTick(state, reporting, () => undefined, { idleSeconds: 1, maxRecoveries: 2 });
+
+    expect(reports.map((info) => info.recovery)).toEqual([1, 2]);
   });
 
   it("bounds the stall budget by the configured recoveries, not by a literal", async () => {
-    // The same rule with a different budget: a literal count can only be right for
-    // one configuration, which is how the old assertion encoded a timer schedule.
+    // The contract, not a timer schedule: one event per recovery, numbered 1..maxRecoveries+1 —
+    // the last attempt is the one that gives up. A range like `<= 3` can only discover a duplicate
+    // after it has already happened; the recovery numbers spot it on sight.
     const { run, emitted } = fixture({ stallSeconds: 0.2, maxStallRecoveries: 2 });
     await expect(run("stall-budget-run", "hangforever")).rejects.toThrow(/stalled/i);
-    const stalls = emitted.filter((event) => event.type === "agent.stalled").length;
-    expect(stalls).toBeGreaterThanOrEqual(1);
-    expect(stalls).toBeLessThanOrEqual(3);
+    expect(stallRecoveries(emitted)).toEqual([1, 2, 3]);
   });
 
   it("stays quiet when the watchdog is disabled", async () => {
