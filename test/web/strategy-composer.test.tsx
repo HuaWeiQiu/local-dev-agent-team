@@ -63,8 +63,21 @@ function config(patch: Partial<PublicConfig> = {}): PublicConfig {
       default: "demo",
       definitions: { demo: definition(), tighten: definition({ source: "custom", maxParallel: 1 }) },
     },
+    // Two required fields the fixture never had. The cast covered for them, and
+    // "tsc only tells you half" was not the cause: `observability` and `interop`
+    // are simply part of PublicConfig and always were.
+    observability: { maxEventsPerRun: 1_000 },
+    interop: {
+      schemaVersion: 1,
+      adapters: [],
+      protocols: {
+        mcp: { specification: "2025-06-18", mode: "disabled", defaultPolicy: "deny", executionOwner: "agent-cli" },
+        a2a: { specification: "0.2", mode: "disabled", requires: [] },
+      },
+      configuredProfiles: [],
+    },
     ...patch,
-  } as unknown as PublicConfig;
+  };
 }
 
 type ComposerProps = ComponentProps<typeof StrategyComposer>;
