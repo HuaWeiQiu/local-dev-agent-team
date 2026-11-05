@@ -38,7 +38,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
 const USAGE = `usage: node scripts/coverage-caliber-report.mjs --self-check
        node scripts/coverage-caliber-report.mjs [--repeats N] [--modes self,existing]
@@ -447,8 +447,7 @@ function readMetricsScores(io = defaultIO()) {
   return scores;
 }
 
-const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+const invokedDirectly = isMainModule(import.meta.url, process.argv[1]);
 if (invokedDirectly) {
   process.exit(main());
 }

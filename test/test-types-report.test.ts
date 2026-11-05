@@ -14,7 +14,6 @@ import {
   formatViolations,
   freezeBaseline,
   isBaseline,
-  isEntry,
   loadBaseline,
   option,
   parseDiagnostics,
@@ -273,11 +272,6 @@ describe("the command line", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("did not type-check");
   }, 30_000);
-
-  it("knows when it is not the entry point", () => {
-    expect(isEntry(undefined)).toBe(false);
-    expect(isEntry(path.join(project, "does-not-exist.mjs"))).toBe(false);
-  });
 
   // The same modes, called directly. A spawned child has no coverage, and the
   // branches worth pinning are the ones a process cannot be asked about: which

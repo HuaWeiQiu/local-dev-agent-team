@@ -39,6 +39,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainModule as isEntryModule } from "./lib/is-main-module.mjs";
 
 /**
  * The two fields the pipeline reads from a child process. Declared here so a test
@@ -115,10 +116,20 @@ export function argvToModuleUrl(argvPath) {
   return pathToFileURL(slashed).href;
 }
 
+/**
+ * Whether an argv path names this module: by the filesystem first, then by the
+ * URL this platform would build from it. Two spellings of one path (`/tmp` and
+ * `/private/tmp` on macOS) are one file, and only the filesystem knows that; a
+ * modelled `D:\\…` argv has no local file at all, and only the URL knows that.
+ */
+function namesModule(moduleUrl, argvPath) {
+  return argvToModuleUrl(argvPath) === moduleUrl || isEntryModule(moduleUrl, argvPath);
+}
+
 /** Whether an argv path names the module being evaluated. */
 export function isMainModule(moduleUrl, argvPath) {
   if (argvPath === undefined || argvPath === "") return false;
-  return moduleUrl === argvToModuleUrl(argvPath);
+  return namesModule(moduleUrl, argvPath);
 }
 
 /** Map a Rust target triple onto the Node distribution built for it. */

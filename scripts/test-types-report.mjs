@@ -34,15 +34,20 @@
  * is the one way to launder a number here, and it shows up as a deleted file in
  * the diff, where review can see it.
  *
- * Errors printed without a source position — a broken tsconfig, no inputs found
- * — are not counted by the parser, and a gate that reads that as "zero errors"
+ * Errors printed with no source position — a broken tsconfig, no inputs found —
+ * are not counted by the parser, and a gate that reads that as "zero errors"
  * would be green while checking nothing. They are reported and failed instead.
+ *
+ * The entry guard is `lib/is-main-module.mjs`, for the reason written there: this
+ * file first compared `import.meta.url` with a URL built from `argv[1]`, and from
+ * a temporary directory that comparison is false for the very same file.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainModule } from "./lib/is-main-module.mjs";
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultBaseline = path.join(defaultRoot, ".test-types-baseline.json");
@@ -509,31 +514,7 @@ export function run(args, diagnostics, baselinePath) {
   return { ok: true, report: formatReport(diagnostics) };
 }
 
-/**
- * A path with symlinks resolved — but only if something is there. The entry path
- * always exists in practice; a path that does not is simply not this module, and
- * an exception there would turn a comparison into a crash.
- * @param {string} target
- */
-function realpath(target) {
-  const resolved = path.resolve(target);
-  return existsSync(resolved) ? realpathSync(resolved) : resolved;
-}
-
-/**
- * Whether this module is the process entry point. Compared by real path, not by
- * URL: `/tmp` is a symlink to `/private/tmp` on macOS, so `node /tmp/…` puts one
- * path in `argv[1]` while `import.meta.url` carries the other, and the naive
- * comparison then skips the whole CLI and exits 0 having checked nothing — the
- * exact failure this gate exists to prevent, performed by the gate.
- * @param {string | undefined} entry
- */
-export function isEntry(entry) {
-  if (!entry) return false;
-  return realpath(entry) === realpath(fileURLToPath(import.meta.url));
-}
-
-if (isEntry(process.argv[1])) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   const args = process.argv.slice(2);
   const project = path.resolve(defaultRoot, option(args, "--project", defaultProject));
   const baselinePath = path.resolve(defaultRoot, option(args, "--baseline", defaultBaseline));
