@@ -47,6 +47,14 @@ async function mainTree(dir: string): Promise<string> {
   gitIn(dir, "-c", "user.email=gate@example.com", "-c", "user.name=gate", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture");
   const head = gitIn(dir, "rev-parse", "HEAD");
   gitIn(dir, "update-ref", "refs/remotes/origin/main", head);
+  // The complexity census these fixtures inherit. It names the one key their stub tools emit, so
+  // the newcomer allowance has nothing to say and each test stays about what it is about — the
+  // ledger, the merge, the base check. A fixture that wants a newcomer writes its own census.
+  await writeFile(
+    path.join(dir, ".ub-cc-baseline.json"),
+    JSON.stringify({ total: 1, counts: { "a#f": 5 } }),
+    "utf8",
+  );
   return head;
 }
 
@@ -66,6 +74,8 @@ describe("ub quality gate wrapper", () => {
       rustThreshold: "20",
       changed: true,
       baseline: ".ub-crap-baseline.json",
+      ccBaseline: ".ub-cc-baseline.json",
+      updateCcBaseline: false,
       updateBaseline: false,
       driftReport: "",
       coverageA: "",
@@ -251,6 +261,20 @@ describe("baseline step", () => {
     if (baseline) {
       await writeFile(path.join(root, "base.json"), JSON.stringify({ scores: baseline }), "utf8");
     }
+    // Whatever these entries describe is already known: this fixture is about the CRAP ledger,
+    // and an unknown function over the allowance would refuse before the ledger is read.
+    const known = Object.fromEntries(
+      [
+        ...scores
+          .join("\n")
+          .matchAll(/:name "([^"]*)", :namespace "([^"]*)", :complexity (\d+)/g),
+      ].map((match) => [`${match[2]}#${match[1]}`, Number(match[3])]),
+    );
+    await writeFile(
+      path.join(root, ".ub-cc-baseline.json"),
+      JSON.stringify({ total: Object.keys(known).length, counts: known }),
+      "utf8",
+    );
     return root;
   }
 
@@ -490,6 +514,139 @@ describe("stale coverage", () => {
     const payload = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
     expect(payload.kind).toBe("infrastructure");
     expect(payload.error).toContain("stale");
+  });
+});
+
+describe("new functions must stay simple", () => {
+  const existing = { ccBaseline: "census.json", extra: [] };
+  /** One EDN entry in the shape crapper writes. */
+  const fn = (namespace: string, name: string, complexity: number) =>
+    `{:name "${name}", :namespace "${namespace}", :complexity ${complexity}, ` +
+    `:coverage 100.0, :crap ${complexity}}`;
+
+  async function workdir(entries: string[], census: Record<string, number> | undefined) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-cc-"));
+    await mkdir(path.join(root, ".metrics"), { recursive: true });
+    await writeFile(
+      path.join(root, ".metrics", "crap.edn"),
+      `{:entries [\n${entries.join("\n")}\n]}\n`,
+      "utf8",
+    );
+    if (census) {
+      await writeFile(
+        path.join(root, "census.json"),
+        JSON.stringify({ total: Object.keys(census).length, counts: census }),
+        "utf8",
+      );
+    }
+    return root;
+  }
+
+  it("refuses a function the census has never seen that is over the allowance", async () => {
+    // The whole point: a freshly split block is unknown, and unknown means "prove it is small".
+    // Coverage is deliberately not consulted — cc 9 at 100% coverage is still CRAP 9.0, on the
+    // line with nothing left over.
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const known = { "mod#steady": 2 };
+    const root = await workdir([fn("mod", "steady", 2), fn("mod", "fresh", 5)], known);
+
+    expect(newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root))
+      .toBe(1);
+  });
+
+  it("accepts a newcomer at the allowance itself", async () => {
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await workdir([fn("mod", "fresh", 4)], { "mod#steady": 2 });
+
+    expect(
+      newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root),
+    ).toBeUndefined();
+  });
+
+  it("says nothing about a known function however complex it is", async () => {
+    // The allowance is about arrival, not about history: debt that already exists is the CRAP
+    // ledger's subject, and this gate must not become a second, stricter ledger.
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await workdir([fn("mod", "old-and-big", 9)], { "mod#old-and-big": 9 });
+
+    expect(
+      newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root),
+    ).toBeUndefined();
+  });
+
+  it("refuses the run when there is no census at all", async () => {
+    // A missing census reads as "every function is new", which would fail every run and get the
+    // gate switched off. So it is refused with the command that fixes it, not passed silently.
+    const { newcomerRefusal, readFunctions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await workdir([fn("mod", "steady", 2)], undefined);
+
+    expect(newcomerRefusal(existing, readFunctions(path.join(root, ".metrics", "crap.edn")), root))
+      .toBe(1);
+  });
+
+  it("treats a renamed function as a newcomer, on purpose", async () => {
+    // Renaming is the cheapest way out of any "known functions" rule, so it has to land in the
+    // newcomer set. The way out is deleting the old key with a reason in the commit, not a flag.
+    const { overComplexNewcomers } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([["mod#renamed", { complexity: 7, coverage: 100, crap: 7 }]]);
+
+    expect(overComplexNewcomers(functions, { "mod#original": 7 })).toEqual([["mod#renamed", 7]]);
+  });
+
+  it("reports the worst newcomers first", async () => {
+    const { overComplexNewcomers } = await import("../scripts/ub-quality-gate.mjs");
+    const functions = new Map([
+      ["m#a", { complexity: 5, coverage: 100, crap: 5 }],
+      ["m#b", { complexity: 11, coverage: 100, crap: 11 }],
+    ]);
+
+    expect(overComplexNewcomers(functions, {})).toEqual([
+      ["m#b", 11],
+      ["m#a", 5],
+    ]);
+  });
+
+  it("stops a refresh from turning a newcomer into an existing function", async () => {
+    // The three-step bypass this closes: split out a cc 9 block, run --update-baseline, and the
+    // next run treats it as history. A refresh closes debt; it does not open the allowance.
+    const root = await workdir([fn("mod", "fresh", 9)], {});
+    // The stub writes the measurement it "produced": the gate clears `.metrics` before each
+    // scan, so a stub that writes nothing would look like a scan that measured nothing.
+    await writeFile(
+      path.join(root, "scan.edn"),
+      `{:entries [\n${fn("mod", "fresh", 9)}\n]}\n`,
+      "utf8",
+    );
+    const tool = await stubTool("mkdir -p .metrics && cp scan.edn .metrics/crap.edn");
+    await mainTree(root);
+    await writeFile(
+      path.join(root, "baseline.json"),
+      JSON.stringify({ scores: {} }),
+      "utf8",
+    );
+    await writeFile(path.join(root, "a.info"), "SF:mod.ts\nDA:1,1\nend_of_record\n", "utf8");
+    await writeFile(path.join(root, "b.info"), "SF:mod.ts\nDA:1,1\nend_of_record\n", "utf8");
+    const result = spawnSync(
+      process.execPath,
+      [
+        script,
+        "--all",
+        "--update-baseline",
+        "--cc-baseline",
+        "census.json",
+        "--coverage-a",
+        "a.info",
+        "--coverage-b",
+        "b.info",
+        "--",
+        "--use-existing-coverage",
+      ],
+      { cwd: root, encoding: "utf8", env: { ...process.env, UB_BIN: tool } },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("above the complexity allowance");
+    expect(JSON.parse(await readFile(path.join(root, "baseline.json"), "utf8")).scores).toEqual({});
   });
 });
 
