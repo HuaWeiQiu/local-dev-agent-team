@@ -1425,3 +1425,66 @@ describe("refresh from three merged coverage runs", () => {
     void stableBaseline;
   });
 });
+
+describe("the complexity census", () => {
+  /** One EDN entry in the shape crapper writes. */
+  const entry = (namespace: string, name: string, complexity: number) =>
+    `{:name "${name}", :namespace "${namespace}", :complexity ${complexity}, ` +
+    `:coverage 100.0, :crap ${complexity}}`;
+
+  /** A stub tool that answers the scan with the given entries, and a tree that could be main. */
+  async function censusTree(entries: string[]) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-census-"));
+    await mainTree(root);
+    const tool = await stubTool(
+      [
+        'mkdir -p "$PWD/.metrics"',
+        `cat > "$PWD/.metrics/crap.edn" <<'EDN'`,
+        "{:entries [",
+        entries.join("\n"),
+        "]}",
+        "EDN",
+      ].join("\n"),
+    );
+    return { root, tool };
+  }
+
+  it("records what the scan measured, sorted, and counts the ones over the allowance", async () => {
+    // The census is what the newcomer rule reads, so its shape is the rule's input:
+    // a key per `namespace#function`, a complexity per key, and a histogram that makes
+    // the distribution readable without walking 3,800 lines.
+    const { writeCcSnapshot, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const { root, tool } = await censusTree([entry("mod", "b", 6), entry("mod", "a", 2)]);
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    expect(writeCcSnapshot(tool, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(0);
+
+    stdout.mockRestore();
+    expect(JSON.parse(await readFile(path.join(root, "census.json"), "utf8"))).toEqual({
+      total: 2,
+      byComplexity: { "2": 1, "6": 1 },
+      counts: { "mod#a": 2, "mod#b": 6 },
+    });
+  });
+
+  it("refuses a tree that is not the commit which becomes main", async () => {
+    // Freezing from a side branch records debt that is already paid as if it were current:
+    // #198 froze 7 such entries, #206 froze 3. The refusal is the whole point of the function.
+    const { writeCcSnapshot, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-census-side-"));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    expect(writeCcSnapshot("/bin/true", { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(1);
+
+    stderr.mockRestore();
+    expect(existsSync(path.join(root, "census.json"))).toBe(false);
+  });
+
+  it("returns the tool's failure instead of writing a census from a broken scan", async () => {
+    const { writeCcSnapshot, defaultOptions } = await import("../scripts/ub-quality-gate.mjs");
+    const { root } = await censusTree([]);
+    const broken = await stubTool("exit 1");
+
+    expect(writeCcSnapshot(broken, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(1);
+  });
+});
