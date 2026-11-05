@@ -2708,14 +2708,20 @@ describe("EvolutionApplicationCoordinator open guards", () => {
 });
 
 describe("the restored state validator refuses states the catalog disagrees with", () => {
-  /** Read the durable document, let the caller change its payload, and write it back. */
+  /**
+   * Read the durable document, let the caller change its payload, and write it back.
+   *
+   * The payload is typed `Record<string, unknown>` rather than `Record<string, unknown[]>`:
+   * `applications`/`completed`/`commands` are lists but `pending` is a single record, and the
+   * narrower type forced every caller touching `pending` to cast through `unknown` twice.
+   */
   async function patchDocument(
     root: string,
-    mutate: (payload: Record<string, unknown[]>) => void,
+    mutate: (payload: Record<string, unknown>) => void,
   ): Promise<void> {
     const applicationPath = path.join(root, ".agent-team", "evolution", EVOLUTION_APPLICATION_FILENAME);
     const document = JSON.parse(await readFile(applicationPath, "utf8")) as {
-      payload: Record<string, unknown[]>;
+      payload: Record<string, unknown>;
       payloadDigest: string;
     };
     mutate(document.payload);
@@ -2792,6 +2798,74 @@ describe("the restored state validator refuses states the catalog disagrees with
     await expect(reopen(harness.root)).rejects.toThrow(
       new EvolutionPersistenceValidationError(
         "Invalid application state: catalog audit for command 'audit-without-result-command' has no successful application result (pendingOrCompletion)",
+      ),
+    );
+  });
+
+  /**
+   * A promotion that crashed after the pending record was durable and before the catalog
+   * commit. Returns with the journal still holding that pending operation.
+   */
+  async function interruptedPromotion(id: string) {
+    let failNextCatalogWrite = false;
+    const harness = await createHarness({
+      catalogIo: {
+        beforeAtomicStage: async (stage) => {
+          if (failNextCatalogWrite && stage === "write") {
+            failNextCatalogWrite = false;
+            throw new Error("simulated crash before the catalog write");
+          }
+        },
+      },
+    });
+    await proposeEvaluatedStrategy(harness, id, id, strategyA);
+    const preview = await harness.coordinator.previewPromotion({ proposalId: id, operator });
+    failNextCatalogWrite = true;
+    await expect(
+      harness.coordinator.promoteAndApply({
+        commandId: `${id}-command`,
+        proposalId: id,
+        expectedRevision: preview.catalogRevision,
+        token: preview.token,
+        operator,
+        reason: "Apply the reviewed strategy",
+      }),
+    ).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(harness.coordinator.getApplicationState().pending).not.toBeNull();
+    return harness;
+  }
+
+  it("rejects a pending operation naming a proposal the catalog never had", async () => {
+    // The journal is durable on its own: a crash can leave a pending record whose proposal
+    // was never committed, and a hand-edited or older-version document can name an id the
+    // catalog has no trace of. Restoring must refuse rather than "recover" towards a
+    // proposal it cannot read — there would be no candidate to plan the target states from,
+    // so every check downstream of the missing proposal has nothing to compare against.
+    //
+    // `requestDigest` covers `proposalId`, so this world has to recompute it: the schema is
+    // the first line of defence and a merely inconsistent document never reaches
+    // `validatePendingEntry` (it fails with "pending request digest mismatch"). What is left
+    // is the self-consistent journal — the one a different code version would have written —
+    // and that is the state the restored-state validator has to catch on its own.
+    const harness = await interruptedPromotion("pending-unknown-proposal");
+    await harness.coordinator.close();
+    await patchDocument(harness.root, (payload) => {
+      // `pending` is one object, not a list; the payload type here is loose on purpose.
+      const pending = payload.pending as Record<string, unknown>;
+      pending.proposalId = "pending-unknown-proposal-gone";
+      pending.requestDigest = computePayloadDigest({
+        operation: pending.operation,
+        proposalId: pending.proposalId,
+        expectedRevision: pending.catalogRevisionBefore,
+        tokenDigest: pending.previewTokenDigest,
+        operator: pending.operator,
+        reason: pending.reason,
+        materialDigest: pending.materialDigest,
+      });
+    });
+    await expect(reopen(harness.root)).rejects.toThrow(
+      new EvolutionPersistenceValidationError(
+        "Invalid application state: pending operation 'pending-unknown-proposal-command' does not match the catalog (proposal, expectedAfterTarget)",
       ),
     );
   });
