@@ -24,3 +24,7 @@ state separate.
 - Keep Git operations recoverable. Never force-push or delete a worktree
   without validating its recorded path and branch.
 - Add or update tests for behavior changes.
+- Compare two paths by `realpath`, never as strings. "Is this module the entry
+  point", "is this file under that root" and "did the guard fire" all reduce to
+  it, and one symlink is enough (`/tmp` -> `/private/tmp`) to make the string
+  comparison false and the guard silently inert: exit 0, nothing checked.

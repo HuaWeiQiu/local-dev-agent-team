@@ -892,3 +892,33 @@ does not exist in type 'AdapterDoctorSpec'. Did you mean to write 'authArgs'?
 三者失败的形状不同，根因相同：**测试证明了它实际运行的那个世界，而那个世界不是被部署的世界。**
 
 最该警惕的是第三个样本的失败形态：**exit 0、什么都不做、错误在下游很远的地方才暴露**。抛异常的 bug 会把人带到现场；静默 no-op 会把人带到离根因最远的地方。看到「这一步跑过了但什么都没产出」，先怀疑守卫或前置条件本身，再怀疑下游。
+
+## 入口守卫：exit 0、什么都没做（2026-11，一处写对、五处写错）
+
+上一节说"看到这一步跑过了但什么都没产出，先怀疑守卫本身"。这一节是那个守卫在本仓的具体形状。
+
+`import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href` 是判断"我是不是主模块"的常见写法，本仓**四处**抄了它（`test-casts-report`、`test-name-collisions`、`ub-quality-gate`、`coverage-caliber-report`），**两处**用了 `argv[1].endsWith("<文件名>")`（`coverage-caliber-attribution`、`coverage-drift-issue`）。
+
+前一种在 macOS 上是**假阴性**：`/tmp` 是 `/private/tmp` 的符号链接，`node /tmp/repo/scripts/x.mjs` 时 `argv[1]` 是 `/tmp/...`，`import.meta.url` 是 `file:///private/tmp/...`，字符串不等 → 整个入口块被跳过 → **退出码 0，什么也没检查**。
+
+发现方式不是读代码，是从 `/tmp` 下一个 worktree 里跑了一次：
+
+| 从 `/tmp/wt-*/` 调用 | 改前 | 改后 |
+|---|---|---|
+| `test-casts-report.mjs --check` | 无输出，exit 0 | `376 type-escape cast(s), none added` |
+| `test-name-collisions.mjs --check` | 无输出，exit 0 | `4 confusable name(s), 0 new` |
+| `test-types-report.mjs --check` | 无输出，exit 0 | `139 test type error(s) in 60 file(s), none added` |
+| `ub-quality-gate.mjs --help` | 无输出，exit 0 | 打印 usage |
+
+**判据：比较两个路径是否相同，先 `realpath`。字符串相等不是路径相等。**
+
+现在只有一个出处：`scripts/lib/is-main-module.mjs`，由 `test/is-main-module.test.ts` 顶着（含一条真建符号链接的用例）。新脚本一律 `import { isMainModule } from "./lib/is-main-module.mjs"`，不要抄表达式。
+
+这条规则以前只写在夹具工厂的注释里（`targetsFor` 那句 "the fixture root is always canonicalised"），所以它只在对夹具生效的地方被想起来过；**入口守卫是同一个事实的第二个受害者**。写在夹具里，它是一条局部经验；写在这里和 `AGENTS.md`，它才是一条规则。
+
+两个附带结论：
+
+- **`endsWith("<文件名>")` 不是"另一种写法"，是另一个问题**——它问"这个路径是不是以那个名字结尾"，所以把文件复制到别的目录也算入口。它对符号链接免疫，属于**碰巧正确**；碰巧正确的另一种说法是没有测试的正确。
+- **`prepare-desktop-runtime.mjs` 保留 URL 比较是对的，但只能当第二判据。** 它要回答的是"`D:\…` 这样的 argv 名指的是本模块吗"——那是跨平台建模，本机根本没有对应文件。所以先走文件系统真值，走不通再退回 URL 建模：`namesModule()` 一行里两件事各管一半。
+
+自查一条命令就够：**把脚本从软链路径调一次**，看它是否还产出平时那份输出。
