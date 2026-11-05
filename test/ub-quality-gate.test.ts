@@ -1653,8 +1653,9 @@ describe("the complexity census", () => {
       ["byComplexity", "command", "counts", "countsDigest", "generatedAt", "headSha", "increases", "total", "toolCommit", "workingTreeDirty"].sort(),
     );
     const readBack = readCcCensus(path.join(root, "census.json"));
-    expect(readBack.counts).toEqual(written.counts);
-    expect(readBack.increases).toEqual({});
+    expect(readBack).toBeDefined();
+    expect(readBack?.counts).toEqual(written.counts);
+    expect(readBack?.increases).toEqual({});
   });
 
   it("reproduces the same census on a second run", async () => {
