@@ -1,8 +1,8 @@
 {
-  "total": 379,
+  "total": 378,
   "byForm": {
     "never": 246,
-    "unknown-as": 133
+    "unknown-as": 132
   },
   "counts": {
     "test/adapter-conformance.test.ts:never": 3,
@@ -116,7 +116,6 @@
     "test/web/run-page.test.tsx:never": 9,
     "test/web/run-task-detail.test.tsx:unknown-as": 1,
     "test/web/run-task-detail.test.tsx:never": 1,
-    "test/web/strategy-composer.test.tsx:unknown-as": 1,
     "test/web/strategy-composer.test.tsx:never": 3,
     "test/web/strategy-draft.test.ts:unknown-as": 4,
     "test/web/strategy-draft.test.ts:never": 1,
