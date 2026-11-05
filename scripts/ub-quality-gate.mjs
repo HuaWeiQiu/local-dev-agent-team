@@ -104,6 +104,7 @@ export function defaultOptions(env = process.env) {
     expectBase: "",
     ccBaseline: DEFAULT_CC_BASELINE,
     updateCcBaseline: false,
+    allowCcIncrease: [],
     ub: env.UB_BIN?.trim() || "",
     extra: [],
   };
@@ -127,6 +128,26 @@ export const DEFAULT_CC_BASELINE = ".ub-cc-baseline.json";
  * exactly on the line with nothing left over. cc 4 at 40% coverage is 7.5.
  */
 export const NEW_FUNCTION_CC_LIMIT = 4;
+
+const ALLOW_CC_INCREASE = "--allow-cc-increase=";
+
+/**
+ * `--allow-cc-increase=<key>,<reason>` — the only way a function that already exists may get more
+ * complex. The reason is required and is written into the census, because an allowance without a
+ * reason is indistinguishable from forgetting to look.
+ */
+function parseAllowance(raw) {
+  const comma = raw.indexOf(",");
+  if (comma <= 0) {
+    throw new Error(`--allow-cc-increase needs <key>,<reason> (got '${raw}')`);
+  }
+  const key = raw.slice(0, comma);
+  const reason = raw.slice(comma + 1).trim();
+  if (reason.length === 0) {
+    throw new Error(`--allow-cc-increase for '${key}' needs a reason after the comma`);
+  }
+  return { key, reason };
+}
 
 function takeValue(argv, index, flag) {
   const value = argv[index + 1];
@@ -165,6 +186,10 @@ export function parseArgs(argv, env = process.env) {
       break;
     }
     if (arg === "--help" || arg === "-h") return { ...options, help: true };
+    if (arg.startsWith(ALLOW_CC_INCREASE)) {
+      options.allowCcIncrease.push(parseAllowance(arg.slice(ALLOW_CC_INCREASE.length)));
+      continue;
+    }
     const flag = BOOLEAN_FLAGS[arg];
     if (flag) {
       options[flag[0]] = flag[1];
@@ -193,6 +218,12 @@ export function parseArgs(argv, env = process.env) {
 function validated(options) {
   if (!TOOLS.includes(options.tool)) {
     throw new Error(`--tool must be crapper, dryer or mutator (got '${options.tool}')`);
+  }
+  if (options.allowCcIncrease.length > 0 && !options.updateCcBaseline) {
+    throw new Error(
+      "--allow-cc-increase only applies to --update-cc-baseline: everywhere else an increase is " +
+        "a refusal, which is the point of the ratchet",
+    );
   }
   if (options.updateBaseline && options.updateCcBaseline) {
     throw new Error(
@@ -576,15 +607,59 @@ export function overComplexNewcomers(functions, snapshot, limit = NEW_FUNCTION_C
     .sort((left, right) => right[1] - left[1]);
 }
 
-/** The complexity snapshot: a full census, so absence means "never measured", not "fine". */
-export function readCcSnapshot(pathname) {
+/**
+ * The complexity census: how complex every function was when it was last recorded, plus the
+ * allowances that let any of them grow. Absence means "never measured", not "fine".
+ */
+export function readCcCensus(pathname) {
+  const parsed = loadJsonFile(pathname);
+  if (!hasCounts(parsed)) return undefined;
+  return { counts: parsed.counts, increases: parsed.increases ?? {} };
+}
+
+/** Whether this JSON is a census at all, rather than some other file with the same name. */
+function hasCounts(parsed) {
+  return typeof parsed?.counts === "object" && parsed?.counts !== null;
+}
+
+function workingTreeIsDirty(cwd) {
+  const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim().length > 0 : undefined;
+}
+
+/** A JSON file, or undefined when it is missing or unreadable — both mean "no record". */
+function loadJsonFile(pathname) {
   if (!existsSync(pathname)) return undefined;
   try {
-    const parsed = JSON.parse(readFileSync(pathname, "utf8"));
-    return parsed && typeof parsed.counts === "object" ? parsed.counts : undefined;
+    return JSON.parse(readFileSync(pathname, "utf8"));
   } catch {
     return undefined;
   }
+}
+
+/** Just the recorded complexities, for the newcomer question. */
+export function readCcSnapshot(pathname) {
+  return readCcCensus(pathname)?.counts;
+}
+
+/**
+ * Functions the census records whose complexity has grown since.
+ *
+ * This is the half a threshold cannot see. `parseArgs` measured cc 10 at 100% coverage and
+ * `main` cc 8 at 64%: both were over the line, both got fixed, and neither fix leaves a mark on
+ * a CRAP ledger that only stores numbers above 10. Put either back and three gates wave it
+ * through — the CRAP one because 10.0 at full coverage is not "above", the newcomer one because
+ * the key is known. Only the cc itself remembers.
+ */
+export function ccIncreases(functions, counts) {
+  const grown = [];
+  for (const [key, value] of functions) {
+    const recorded = counts[key];
+    if (recorded === undefined) continue;
+    if (value.complexity <= recorded) continue;
+    grown.push({ key, from: recorded, to: value.complexity });
+  }
+  return grown.sort((left, right) => right.to - right.from - (left.to - left.from));
 }
 
 /**
@@ -595,33 +670,76 @@ export function readCcSnapshot(pathname) {
  * its own refusal with the command that fixes it.
  */
 export function newcomerRefusal(options, functions, cwd = process.cwd()) {
-  if (functions.size === 0) return undefined;
-  const snapshot = readCcSnapshot(path.resolve(cwd, options.ccBaseline));
-  if (!snapshot) {
-    process.stderr.write(
-      `gate: refusing to score — no complexity snapshot at ${options.ccBaseline}.\n\n` +
-        "The snapshot is a census of every function already measured, so a missing one reads as " +
-        "\"all of them are new\". Build it once, from the tree that will become main:\n" +
-        "  node scripts/ub-quality-gate.mjs --all --update-cc-baseline\n",
-    );
-    return 1;
-  }
-  const over = overComplexNewcomers(functions, snapshot);
-  if (over.length === 0) return undefined;
+  const loaded = censusForRefusal(options, functions, cwd);
+  if (loaded.idle === true) return undefined;
+  if (loaded.status !== undefined) return loaded.status;
+  const { census } = loaded;
+  const over = overComplexNewcomers(functions, census.counts);
+  const grown = ccIncreases(functions, census.counts);
+  if (over.length === 0 && grown.length === 0) return undefined;
+  reportComplexityRefusal(over, grown);
+  return 1;
+}
+
+/**
+ * The census a refusal needs, or the reason there is nothing to refuse.
+ *
+ * Three states, and they are different: no report at all (an idle run — nothing was scored), a
+ * report nothing parsed out of (the tool's shape changed under the regex reader, which must not
+ * read as "no functions"), and no census (nothing to compare against).
+ */
+function censusForRefusal(options, functions, cwd) {
+  if (!existsSync(path.join(cwd, ".metrics", "crap.edn"))) return { idle: true };
+  if (functions.size === 0) return { status: refuseUnreadableReport() };
+  const census = readCcCensus(path.resolve(cwd, options.ccBaseline));
+  if (census !== undefined) return { census };
+  return { status: refuseMissingCensus(options.ccBaseline) };
+}
+
+function refuseUnreadableReport() {
   process.stderr.write(
-    `gate: refusing to score — ${over.length} new function(s) above the complexity allowance ` +
-      `of ${NEW_FUNCTION_CC_LIMIT}:\n`,
-  );
-  for (const [key, complexity] of over) {
-    process.stderr.write(`  cc ${String(complexity).padStart(3)}  ${key}\n`);
-  }
-  process.stderr.write(
-    "\nA function this gate has never seen may not arrive above the allowance. Neither does a " +
-      "refresh get around it: `--update-baseline` may close debt and may not open it, and " +
-      "`--update-cc-baseline` only runs on the commit that becomes main.\n" +
-      `Split it until every piece is at most ${NEW_FUNCTION_CC_LIMIT}.\n`,
+    "gate: refusing to score — the metrics report could not be read.\n\n" +
+      "The file exists but no function entry matched, so this is a shape change in the tool's " +
+      "report, not a project with no functions. Passing here would disable the complexity gate " +
+      "silently; fix the reader in scripts/ub-quality-gate.mjs first.\n",
   );
   return 1;
+}
+
+function refuseMissingCensus(ccBaseline) {
+  process.stderr.write(
+    `gate: refusing to score — no complexity snapshot at ${ccBaseline}.\n\n` +
+      "The snapshot is a census of every function already measured, so a missing one reads as " +
+      "\"all of them are new\". Build it once, from the tree that will become main:\n" +
+      "  node scripts/ub-quality-gate.mjs --all --update-cc-baseline\n",
+  );
+  return 1;
+}
+
+/** One refusal, two reasons: a function nobody measured, and one that got worse than recorded. *//** One refusal, two reasons: a function nobody measured, and one that got worse than recorded. */
+function reportComplexityRefusal(over, grown) {
+  if (over.length > 0) {
+    printRefusalBlock(
+      `gate: refusing to score — ${over.length} new function(s) above the complexity allowance ` +
+        `of ${NEW_FUNCTION_CC_LIMIT}:`,
+      over.map(([key, complexity]) => `  cc ${String(complexity).padStart(3)}  ${key}`),
+    );
+  }
+  if (grown.length > 0) {
+    printRefusalBlock(
+      `gate: refusing to score — ${grown.length} function(s) grew past the complexity the census ` +
+        "records:",
+      grown.map((entry) => `  cc ${String(entry.from).padStart(3)} -> ${String(entry.to).padEnd(3)}  ${entry.key}`),
+    );
+  }
+  process.stderr.write(
+    "\nA function this gate has never seen may not arrive above the allowance, and one it has " +
+      "seen may not get more complex. Neither does a refresh get around it: `--update-baseline` " +
+      "may close debt and may not open it, and `--update-cc-baseline` only runs on the commit " +
+      "that becomes main.\n" +
+      `Split it until every piece is at most ${NEW_FUNCTION_CC_LIMIT}, or record the exception ` +
+      "in the census with a reason.\n",
+  );
 }
 
 /**
@@ -1334,16 +1452,12 @@ export function writeCcSnapshot(ub, options, cwd = process.cwd()) {
     process.stderr.write("census: refusing to write — the scan measured no functions\n");
     return 1;
   }
-  const counts = Object.fromEntries(
-    [...functions].map(([key, value]) => [key, value.complexity]).sort(([left], [right]) => left.localeCompare(right)),
-  );
-  const histogram = {};
-  for (const complexity of Object.values(counts)) {
-    histogram[complexity] = (histogram[complexity] ?? 0) + 1;
-  }
+  const verdict = censusGrowth(options, functions, readCcCensus(path.resolve(cwd, options.ccBaseline)));
+  if (verdict.status !== undefined) return verdict.status;
+  const counts = sortedCounts(functions);
   writeFileSync(
     path.resolve(cwd, options.ccBaseline),
-    `${JSON.stringify({ total: Object.keys(counts).length, byComplexity: histogram, counts }, null, 2)}\n`,
+    `${JSON.stringify(censusDocument({ ub, cwd, counts, increases: verdict.increases }), null, 2)}\n`,
   );
   const over = Object.values(counts).filter((complexity) => complexity > NEW_FUNCTION_CC_LIMIT).length;
   process.stdout.write(
@@ -1351,6 +1465,147 @@ export function writeCcSnapshot(ub, options, cwd = process.cwd()) {
       `(${over} of them above ${NEW_FUNCTION_CC_LIMIT}, recorded as already known)\n`,
   );
   return 0;
+}
+
+/** `{ key: cc }`, sorted, so a refresh produces a diff a human can read. */
+function sortedCounts(functions) {
+  return Object.fromEntries(
+    [...functions]
+      .map(([key, value]) => [key, value.complexity])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+/** A digest of the counts alone: it answers "did the census change" without diffing 4000 lines. */
+function countsDigest(counts) {
+  const text = Object.entries(counts)
+    .map(([key, complexity]) => `${key}=${complexity}`)
+    .join("\n");
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The census file: a census of every function plus where it came from.
+ *
+ * Provenance is not ceremony. Without `headSha` there is no way to recompute these 3790 numbers,
+ * and no way to tell "the tool changed" from "the code changed" when they move — which is exactly
+ * the question a reader of a frozen number asks first.
+ */
+export function censusDocument({ ub, cwd, counts, increases }) {
+  return {
+    generatedAt: new Date().toISOString(),
+    headSha: gitHeadSha(cwd),
+    // A census measured with uncommitted changes is measured on a tree that is not any commit —
+    // which is exactly the state #256's census shipped in. Saying so lets a reader tell a
+    // reproducible number from one that only existed on somebody's disk for a few minutes.
+    workingTreeDirty: workingTreeIsDirty(cwd),
+    toolCommit: ub ? toolCommit(ub) : undefined,
+    command: "node scripts/ub-quality-gate.mjs --all --update-cc-baseline",
+    total: Object.keys(counts).length,
+    countsDigest: countsDigest(counts),
+    byComplexity: complexityHistogram(counts),
+    counts,
+    ...(Object.keys(increases).length > 0 ? { increases } : {}),
+  };
+}
+
+/** How many functions sit at each complexity, so the distribution reads without walking 3,800 lines. */
+function complexityHistogram(counts) {
+  const histogram = {};
+  for (const complexity of Object.values(counts)) {
+    histogram[complexity] = (histogram[complexity] ?? 0) + 1;
+  }
+  return histogram;
+}
+
+/**
+ * What a census refresh may and may not record.
+ *
+ * The refresh is the only place an allowance can be given, so it is the only place that can let
+ * the census grow — and every allowance is written into the file with its reason. Downward moves
+ * need no ceremony: a refresh exists to notice that things got simpler.
+ */
+export function censusGrowth(options, functions, census) {
+  // First census: there is nothing to ratchet against yet, so it records what exists. Deleting
+  // the file is therefore a way to start over — and a 200 KB deletion in the diff is a thing a
+  // reviewer sees, which is the same protection the CRAP baseline has.
+  if (census === undefined) return { increases: {} };
+  const allowed = allowanceMap(options);
+  const blocked = unpermittedGrowth(functions, census.counts, allowed);
+  if (blocked.length > 0) return { status: refuseCensusGrowth(blocked) };
+  return { increases: recordIncreases(census, functions, allowed) };
+}
+
+/** A titled list on stderr: one reason to refuse, however many functions it names. */
+function printRefusalBlock(title, lines) {
+  process.stderr.write(`${title}\n`);
+  for (const line of lines) process.stderr.write(`${line}\n`);
+}
+
+/** `key -> reason`, the only grows this refresh is allowed to record. */
+function allowanceMap(options) {
+  return new Map(options.allowCcIncrease.map((entry) => [entry.key, entry.reason]));
+}
+
+/** Complexity the census does not permit, as printable lines; empty means the refresh may write. */
+function unpermittedGrowth(functions, counts, allowed) {
+  const newcomers = overComplexNewcomers(functions, counts)
+    .filter(([key]) => !allowed.has(key))
+    .map(([key, complexity]) => `  new  cc ${String(complexity).padStart(3)}  ${key}  (allowance ${NEW_FUNCTION_CC_LIMIT})`);
+  const grown = ccIncreases(functions, counts)
+    .filter((entry) => !allowed.has(entry.key))
+    .map((entry) => `  grew cc ${entry.from} -> ${entry.to}  ${entry.key}`);
+  return [...newcomers, ...grown];
+}
+
+function refuseCensusGrowth(lines) {
+  process.stderr.write(
+    "census: refusing to write — the tree has complexity the census does not permit:\n",
+  );
+  for (const line of lines) process.stderr.write(`${line}\n`);
+  process.stderr.write(
+    "\nA refresh may close debt and may not open it. Split the function, or say why it may stay:\n" +
+      "  --allow-cc-increase=<key>,<reason>    (repeatable; the reason is written to the census)\n",
+  );
+  return 1;
+}
+
+/** Every allowance this run used, merged into what the census already remembers. */
+function recordIncreases(census, functions, allowed) {
+  const previous = censusIncreases(census);
+  const merged = { ...previous };
+  for (const [key, reason] of allowed) {
+    const entry = allowanceEntry(census, previous, functions, key, reason);
+    if (entry === undefined) continue;
+    merged[key] = entry;
+    process.stdout.write(
+      `census: recorded cc ${entry.from ?? "new"} -> ${entry.to} for ${key} (${reason})\n`,
+    );
+  }
+  return merged;
+}
+
+/** The allowances a census already carries. */
+function censusIncreases(census) {
+  return census?.increases ?? {};
+}
+
+/** One allowance record, or undefined when the named function was not measured. */
+function allowanceEntry(census, previous, functions, key, reason) {
+  const to = functions.get(key)?.complexity;
+  if (to === undefined) return undefined;
+  return {
+    from: recordedComplexity(census, previous[key], key),
+    to,
+    reason,
+    at: new Date().toISOString(),
+  };
+}
+
+/** What the census already knows about this key, or null when it is genuinely new. */
+function recordedComplexity(census, previousEntry, key) {
+  if (previousEntry !== undefined) return previousEntry.from;
+  return census.counts[key] ?? null;
 }
 
 /** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. *//** The nightly verdict: full scan, compare, write JSON. Exit 0 unless the scan broke. */

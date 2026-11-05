@@ -550,7 +550,59 @@ class Sample {
 | **重命名** | 当成新函数，**这是想要的**：改名不能成为绕开限额的路。留下的通道是**在快照里删掉旧 key 并在 commit 里写理由**——一个 reviewer 看得到的 diff，而不是一个悄悄放宽闸的开关 |
 | **`src-tauri`** | **不在范围内**。crapper 每次运行都重写同一份 `.metrics/crap.edn`，最后一个跑的是 TypeScript 层，所以读到的快照里只有 TS 层。要覆盖 Rust 得单独采集一次，不属于这道闸的事 |
 
-##### 顺带：刷新不必再冻窗口
+##### census 要能重算，也要只减不增（2026-11）
+
+**第一版的快照没有溯源。** 顶层只有 `total` / `byComplexity` / `counts`——没有 `headSha`、没有
+`generatedAt`、没有生成它的命令。那 3790 是在一棵"main worktree 叠加未提交脚本"的树上跑出来的，
+**不对应任何 commit**，所以没人能重算出这个数，也没法分辨"脚本改了"和"代码变了"。现在文件里带：
+
+```json
+{ "generatedAt": "...", "headSha": "...", "toolCommit": "...",
+  "command": "node scripts/ub-quality-gate.mjs --all --update-cc-baseline",
+  "total": 3852, "countsDigest": "…", "byComplexity": {…}, "counts": {…} }
+```
+
+`countsDigest` 是 counts 的摘要——**回答"census 变没变"不用 diff 四千行**。
+
+**第二版加的是逐 key 的防上涨。** 原来的 `worse` 比较是 **CRAP 分数**对账本比，不是 cc 对 census 比，
+于是有一个具体的三闸同时放行的形状：
+
+| 场景 | CRAP 闸 | 新人闸 | 账本 |
+| --- | --- | --- | --- |
+| `parseArgs` 从 cc 7 改回 **cc 10**，覆盖率仍 100% | CRAP **10.0**，不越线 → 不响 | key 已知 → 不响 | 只存 >10 → 不动 |
+
+**只有 cc 本身记得。** 所以判据改成：**既有 key 的 cc 不许上涨**。
+
+| 操作 | 处置 |
+| --- | --- |
+| 下调 | 自由——刷新的意义就是发现变简单了 |
+| 上调 | 必须 `--allow-cc-increase=<key>,<理由>`，**理由写进 census 的 `increases`** |
+| 普通闸遇到上涨 | 直接拒，**这个 flag 只在 `--update-cc-baseline` 下存在**（`validated()` 拦） |
+
+理由必填，是因为**一条没有理由的豁免和"忘了看"没法区分**。
+
+**首次 census 例外**：文件不存在时刷新照单全收——没有东西可以对表。删掉文件因此是一条"重新开始"的
+路，但那是一次 200 KB 的删除，reviewer 看得见，和保护 CRAP 基线的方式一样。
+
+**这道闸上线当天就抓到了写它的人。** 第一次刷新被拒，六条：
+
+```
+new  cc  15  scripts.ub-quality-gate#recordIncreases     (allowance 4)
+new  cc  10  scripts.ub-quality-gate#censusGrowth
+new  cc   6  scripts.ub-quality-gate#readCcCensus
+new  cc   5  scripts.ub-quality-gate#censusDocument
+grew cc 5 -> 9  scripts.ub-quality-gate#newcomerRefusal
+new  cc   6  scripts.ub-quality-gate#validated          ← 不是我的
+```
+
+前五条全部拆到 ≤4 之后才写进去；第六条 `validated` 是 `#261` 在 census 建好之前合进来的，
+用 `--allow-cc-increase` 记了一条带理由的豁免。
+
+**顺带一条运维事实**：crapper 自采集会跑整个测试套件，而 `test/ub-quality-gate.test.ts` 里有用例
+调用 `main(["--update-cc-baseline"], root)`——它的 stdout 会串进刷新的日志里，看起来像刷新写了两次。
+实际只有最后一次落盘。
+
+##### 顺带：刷新不必再冻窗口##### 顺带：刷新不必再冻窗口
 
 实测三轮采集每轮 **2 分 45 秒**、加刷新全程**不到 12 分钟**。撞了重跑比找人协调便宜——
 直接跑，`#207` 会拒写。
