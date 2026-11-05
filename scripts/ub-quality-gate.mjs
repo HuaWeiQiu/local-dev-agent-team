@@ -219,19 +219,33 @@ function validated(options) {
   if (!TOOLS.includes(options.tool)) {
     throw new Error(`--tool must be crapper, dryer or mutator (got '${options.tool}')`);
   }
+  refuseAllowanceOutsideRefresh(options);
+  refuseTwoBaselinesAtOnce(options);
+  return options;
+}
+
+/**
+ * An allowance is a one-time act on the census, and the census is only written by a full scan on
+ * the tree that becomes main. Anywhere else `--allow-cc-increase` reads like permission to raise a
+ * number, which is the one thing this gate must not become.
+ */
+function refuseAllowanceOutsideRefresh(options) {
   if (options.allowCcIncrease.length > 0 && !options.updateCcBaseline) {
     throw new Error(
       "--allow-cc-increase only applies to --update-cc-baseline: everywhere else an increase is " +
         "a refusal, which is the point of the ratchet",
     );
   }
+}
+
+/** Two files, two measurements: refreshing both in one run puts one of them on the other's tree. */
+function refuseTwoBaselinesAtOnce(options) {
   if (options.updateBaseline && options.updateCcBaseline) {
     throw new Error(
       "--update-baseline and --update-cc-baseline are two different files: run them one at a " +
         "time, ledger first so the census is measured on the same tree",
     );
   }
-  return options;
 }
 
 export function resolveUb(explicit, env = process.env) {
