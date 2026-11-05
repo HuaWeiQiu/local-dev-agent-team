@@ -32,6 +32,7 @@ import {
   type ApplicationDocument,
   type ApplicationPayload,
   type CompletedApplicationRecord,
+  type ApplicationCommandKind,
   type ApplicationRecord,
   type ApplicationStatus,
   type CommandIdempotencyBinding,
@@ -321,6 +322,115 @@ function pendingPreviousApplicationMismatches(expectation: PendingExpectation): 
         (pending.previousApplication?.proposalId ?? null) === reconcileRestoredId,
     },
   ]);
+}
+
+/** The status a completion records, by the operation that produced it. */
+const COMPLETION_STATUS = {
+  "promote-and-apply": "applied",
+  "reconcile-promoted": "applied",
+  "rollback-applied": "rolled-back",
+} as const satisfies Record<ApplicationCommandKind, ApplicationStatus>;
+
+/** The proof a promotion leaves behind, built from the pending record and the live target. */
+function appliedRecord(
+  pending: PendingApplicationOperation,
+  proposal: EvolutionProposal,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+): ApplicationRecord {
+  return {
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    target: targetFromCandidate(proposal.candidate),
+    status: "applied",
+    beforeTargetDigest: pending.beforeTarget.digest,
+    afterTargetDigest: liveTarget.digest!,
+    beforeTarget: pending.beforeTarget,
+    afterTarget: pending.afterTarget,
+    previousApplication: pending.previousApplication,
+    rollbackSafe: true,
+    catalogRevision,
+    operator: pending.operator,
+    reason: pending.reason,
+    appliedAt: pending.startedAt,
+    commandId: pending.commandId,
+  };
+}
+
+/** The completion entry a finished pending operation adds to the journal. */
+function completionRecordFrom(
+  pending: PendingApplicationOperation,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+  status: ApplicationStatus,
+  now: number,
+): CompletedApplicationRecord {
+  return {
+    commandId: pending.commandId,
+    operation: pending.operation,
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    status,
+    beforeTargetDigest: pending.beforeTarget.digest,
+    afterTargetDigest: liveTarget.digest,
+    catalogRevisionBefore: pending.catalogRevisionBefore,
+    catalogRevisionAfter: catalogRevision,
+    operator: pending.operator,
+    reason: pending.reason,
+    completedAt: new Date(now).toISOString(),
+    humanDecision: pending.humanDecision,
+  };
+}
+
+/** The idempotency binding a finished pending operation leaves for its command. */
+function commandBindingFrom(
+  pending: PendingApplicationOperation,
+  proposal: EvolutionProposal,
+  catalogRevision: number,
+  liveTarget: TargetDigestState,
+  status: ApplicationStatus,
+): CommandIdempotencyBinding {
+  return {
+    commandId: pending.commandId,
+    operation: pending.operation,
+    proposalId: pending.proposalId,
+    candidateDigest: pending.candidateDigest,
+    operator: pending.operator,
+    reason: pending.reason,
+    expectedRevision: pending.catalogRevisionBefore,
+    previewTokenDigest: pending.previewTokenDigest,
+    requestDigest: pending.requestDigest,
+    materialDigest: pending.materialDigest,
+    result: {
+      proposal: isolate(proposal),
+      committedCatalogRevision: catalogRevision,
+      applicationStatus: status,
+      beforeTargetDigest: pending.beforeTarget.digest,
+      afterTargetDigest: liveTarget.digest,
+    },
+  };
+}
+
+/** The proposal a rollback's predecessor chain restores, if it restores one at all. */
+function restoredPredecessorId(pending: PendingApplicationOperation): string | null {
+  return pending.previousApplication?.previousApplication?.proposalId ?? null;
+}
+
+/** The catalog's own answer to "which proposal is active for this target". */
+function theCatalogActiveId(
+  catalog: DurableEvolutionCatalog,
+  proposal: EvolutionProposal,
+): string | null {
+  return catalog.getActiveProposalId(targetFromCandidate(proposal.candidate));
+}
+
+/** A restored predecessor is only written when the catalog already points at it. */
+function assertCatalogRestored(catalogActiveId: string | null, restoredId: string | null): void {
+  if (catalogActiveId === restoredId) return;
+  throw new EvolutionApplicationError(
+    "RECOVERY_REQUIRED",
+    "Recovered application predecessor does not match the catalog active pointer",
+  );
 }
 
 /** A before snapshot complete enough to restore from: it names bytes and a permission mode. */
@@ -1615,105 +1725,95 @@ export class EvolutionApplicationJournal {
     }
   }
 
+  /**
+   * Finish a pending operation from what the world already shows, instead of replanning it.
+   *
+   * Which half of the record has to change depends on the operation: a promotion leaves an
+   * application behind, a rollback removes one. What they share — the completion entry, the
+   * idempotency binding, and the cleared pending — is written once, after the branch, so the
+   * three of them can never disagree about which operation completed.
+   */
   async completePendingFromLive(
     pending: PendingApplicationOperation,
     proposal: EvolutionProposal,
     catalogRevision: number,
     liveTarget: TargetDigestState,
   ): Promise<void> {
-    if (pending.operation === "promote-and-apply" || pending.operation === "reconcile-promoted") {
-      if (
-        pending.previousActiveProposalId &&
-        pending.previousActiveProposalId !== pending.proposalId
-      ) {
-        this.#state.applications.delete(pending.previousActiveProposalId);
-      }
-      if (pending.operation === "reconcile-promoted" && pending.previousApplication) {
-        this.#state.applications.delete(pending.previousApplication.proposalId);
-      }
-      this.#state.applications.set(pending.proposalId, {
-        proposalId: pending.proposalId,
-        candidateDigest: pending.candidateDigest,
-        target: targetFromCandidate(proposal.candidate),
-        status: "applied",
-        beforeTargetDigest: pending.beforeTarget.digest,
-        afterTargetDigest: liveTarget.digest!,
-        beforeTarget: pending.beforeTarget,
-        afterTarget: pending.afterTarget,
-        previousApplication: pending.previousApplication,
-        rollbackSafe: true,
-        catalogRevision,
-        operator: pending.operator,
-        reason: pending.reason,
-        appliedAt: pending.startedAt,
-        commandId: pending.commandId,
-      });
-    } else if (pending.operation === "rollback-applied") {
-      this.#state.applications.delete(pending.proposalId);
-      const restoredId = pending.previousApplication?.previousApplication?.proposalId;
-      const catalogRestoredId = this.#catalog.getActiveProposalId(
-        targetFromCandidate(proposal.candidate),
-      );
-      if ((restoredId ?? null) !== catalogRestoredId) {
-        this.#state.recoveryRequired = true;
-        throw new EvolutionApplicationError(
-          "RECOVERY_REQUIRED",
-          "Recovered application predecessor does not match the catalog active pointer",
-        );
-      }
-      if (restoredId) {
-        this.#state.applications.set(restoredId, pending.previousApplication!.previousApplication!);
-      }
+    if (pending.operation === "rollback-applied") {
+      this.applyRolledBackOutcome(pending, proposal);
+    } else {
+      this.applyPromotedOutcome(pending, proposal, catalogRevision, liveTarget);
     }
-
-    const status: ApplicationStatus =
-      pending.operation === "rollback-applied"
-        ? "rolled-back"
-        : pending.operation === "reconcile-promoted"
-          ? "applied"
-          : "applied";
-
-    this.#state.completed.push({
-      commandId: pending.commandId,
-      operation: pending.operation,
-      proposalId: pending.proposalId,
-      candidateDigest: pending.candidateDigest,
-      status,
-      beforeTargetDigest: pending.beforeTarget.digest,
-      afterTargetDigest: liveTarget.digest,
-      catalogRevisionBefore: pending.catalogRevisionBefore,
-      catalogRevisionAfter: catalogRevision,
-      operator: pending.operator,
-      reason: pending.reason,
-      completedAt: new Date(this.#now()).toISOString(),
-      humanDecision: pending.humanDecision,
-    });
-
-    if (!this.#state.commands.has(pending.commandId)) {
-      this.#state.commands.set(pending.commandId, {
-        commandId: pending.commandId,
-        operation: pending.operation,
-        proposalId: pending.proposalId,
-        candidateDigest: pending.candidateDigest,
-        operator: pending.operator,
-        reason: pending.reason,
-        expectedRevision: pending.catalogRevisionBefore,
-        previewTokenDigest: pending.previewTokenDigest,
-        requestDigest: pending.requestDigest,
-        materialDigest: pending.materialDigest,
-        result: {
-          proposal: isolate(proposal),
-          committedCatalogRevision: catalogRevision,
-          applicationStatus: status,
-          beforeTargetDigest: pending.beforeTarget.digest,
-          afterTargetDigest: liveTarget.digest,
-        },
-      });
-    }
-
+    const status = COMPLETION_STATUS[pending.operation];
+    this.#state.completed.push(
+      completionRecordFrom(pending, catalogRevision, liveTarget, status, this.#now()),
+    );
+    this.recordBindingOnce(pending, proposal, catalogRevision, liveTarget, status);
     this.#state.pending = null;
     this.#state.recoveryRequired = false;
     await this.persist(this.#state.revision + 1);
+  }
+
+  /** A promotion leaves exactly one application in effect for its target. */
+  private applyPromotedOutcome(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    catalogRevision: number,
+    liveTarget: TargetDigestState,
+  ): void {
+    this.dropReplacedActive(pending);
+    this.dropReconcilePredecessor(pending);
+    this.#state.applications.set(
+      pending.proposalId,
+      appliedRecord(pending, proposal, catalogRevision, liveTarget),
+    );
+  }
+
+  /** The pointer moved off this proposal, so whatever proof it left is no longer in effect. */
+  private dropReplacedActive(pending: PendingApplicationOperation): void {
+    const replaced = pending.previousActiveProposalId;
+    if (replaced === null || replaced === pending.proposalId) return;
+    this.#state.applications.delete(replaced);
+  }
+
+  /** A reconciliation also retires the legacy predecessor it captured. */
+  private dropReconcilePredecessor(pending: PendingApplicationOperation): void {
+    if (pending.operation !== "reconcile-promoted") return;
+    if (pending.previousApplication === null) return;
+    this.#state.applications.delete(pending.previousApplication.proposalId);
+  }
+
+  /**
+   * A rollback puts the pointer back where it was, and the record has to agree.
+   *
+   * The predecessor is only restored when the catalog already points at it: writing a proof for
+   * a proposal the catalog does not name would create exactly the disagreement the restore-time
+   * validator exists to catch, only later and less legibly.
+   */
+  private applyRolledBackOutcome(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+  ): void {
+    this.#state.applications.delete(pending.proposalId);
+    const restoredId = restoredPredecessorId(pending);
+    assertCatalogRestored(theCatalogActiveId(this.#catalog, proposal), restoredId);
+    if (restoredId === null) return;
+    this.#state.applications.set(restoredId, pending.previousApplication!.previousApplication!);
+  }
+
+  /** The idempotency binding is written once per command; a replay keeps the first one. */
+  private recordBindingOnce(
+    pending: PendingApplicationOperation,
+    proposal: EvolutionProposal,
+    catalogRevision: number,
+    liveTarget: TargetDigestState,
+    status: ApplicationStatus,
+  ): void {
+    if (this.#state.commands.has(pending.commandId)) return;
+    this.#state.commands.set(
+      pending.commandId,
+      commandBindingFrom(pending, proposal, catalogRevision, liveTarget, status),
+    );
   }
 
   async finalizePendingAs(
