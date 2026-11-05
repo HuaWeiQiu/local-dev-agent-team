@@ -51,6 +51,42 @@ interface StallState {
   watchdog?: StallWatchdog | undefined;
 }
 
+/** What one stall recovery puts on the event stream. */
+export interface StallReport {
+  idleSeconds: number;
+  recovery: number;
+  maxRecoveries: number;
+}
+
+/**
+ * One watchdog tick: record the stall once per recovery, and always nudge the session.
+ *
+ * The watchdog can tick again before the turn loop takes `pending` — an event arrives while the
+ * interrupt is still winding down, the watchdog re-arms, and a second tick lands on the same
+ * recovery. Nudging again is useful: the first interrupt may not have taken effect. Recording
+ * again is not. Both ticks describe one recovery, so the second emits a second `agent.stalled`
+ * carrying the same `recovery` number — and `visibility/explain.ts` renders the event count as a
+ * sentence an operator reads ("the agent went silent N times"). The double record is a wrong
+ * number on somebody's screen, not a noisy line in a log.
+ */
+export function recordStallTick(
+  state: { pending: boolean; recoveries: number },
+  report: (info: StallReport) => void,
+  nudge: () => void,
+  info: { idleSeconds: number; maxRecoveries: number },
+): void {
+  const firstTickOfThisRecovery = !state.pending;
+  state.pending = true;
+  if (firstTickOfThisRecovery) {
+    report({
+      idleSeconds: info.idleSeconds,
+      recovery: state.recoveries + 1,
+      maxRecoveries: info.maxRecoveries,
+    });
+  }
+  nudge();
+}
+
 const STALL_CONTINUATION_PROMPT =
   "Your previous turn stopped producing output and was interrupted. Continue the original task from where you left off, keep to the original output format, and finish with the required final answer.";
 
@@ -102,13 +138,17 @@ export async function invokeLive(options: LiveInvokeOptions): Promise<AgentRunRe
           stallMs: stallSeconds * 1000,
           isPaused: () => toolsInFlight.size > 0 || handle.awaitingAnswer(),
           onStall: (idleMs) => {
-            stallState.pending = true;
-            handle.noteStall({
-              idleSeconds: Math.round(idleMs / 1000),
-              recovery: stallState.recoveries + 1,
-              maxRecoveries: options.stall?.maxRecoveries ?? 0,
-            });
-            void session.interrupt().catch(() => undefined);
+            recordStallTick(
+              stallState,
+              handle.noteStall,
+              () => {
+                void session.interrupt().catch(() => undefined);
+              },
+              {
+                idleSeconds: Math.round(idleMs / 1000),
+                maxRecoveries: options.stall?.maxRecoveries ?? 0,
+              },
+            );
           },
         })
       : undefined;
