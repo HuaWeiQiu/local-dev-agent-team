@@ -10,6 +10,7 @@ import type {
   AgentInvocationRequest,
 } from "../src/adapters/types.js";
 import type { AgentProfile } from "../src/config/schema.js";
+import type { Overrides } from "./support/overrides.js";
 
 function adapter(patch: Partial<AgentAdapter> = {}): AgentAdapter {
   return {
@@ -47,7 +48,7 @@ function request(patch: Partial<AgentInvocationRequest> = {}): AgentInvocationRe
   return { cwd: "/repo", prompt: "hi", outputFile: "/repo/out.md", ...patch } as AgentInvocationRequest;
 }
 
-function invocation(patch: Partial<AgentInvocation> = {}): AgentInvocation {
+function invocation(patch: Overrides<AgentInvocation> = {}): AgentInvocation {
   return {
     command: "fake-bin",
     args: [],

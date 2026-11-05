@@ -12,10 +12,11 @@ import {
 } from "../web/src/components/run/evidence/model.js";
 import { EvidenceValue, TaskEvidenceRow } from "../web/src/components/run/evidence/sections.js";
 import type { RunEvidence } from "../web/src/types.js";
+import type { Overrides } from "./support/overrides.js";
 
 type TaskEvidence = RunEvidence["tasks"][number];
 
-function task(patch: Partial<TaskEvidence> = {}): TaskEvidence {
+function task(patch: Overrides<TaskEvidence> = {}): TaskEvidence {
   return {
     id: "T1",
     title: "实现导出",

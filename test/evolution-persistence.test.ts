@@ -150,7 +150,7 @@ async function openDurable(
   } = {},
 ): Promise<DurableEvolutionCatalog> {
   return await DurableEvolutionCatalog.open(createLoadedConfig(root, options.config), {
-    io: options.io,
+    ...(options.io === undefined ? {} : { io: options.io }),
   });
 }
 
