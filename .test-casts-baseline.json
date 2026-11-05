@@ -1,7 +1,7 @@
 {
-  "total": 384,
+  "total": 382,
   "byForm": {
-    "never": 250,
+    "never": 248,
     "unknown-as": 134
   },
   "counts": {
@@ -117,7 +117,7 @@
     "test/web/run-task-detail.test.tsx:unknown-as": 1,
     "test/web/run-task-detail.test.tsx:never": 1,
     "test/web/strategy-composer.test.tsx:unknown-as": 2,
-    "test/web/strategy-composer.test.tsx:never": 4,
+    "test/web/strategy-composer.test.tsx:never": 3,
     "test/web/strategy-draft.test.ts:unknown-as": 4,
     "test/web/strategy-draft.test.ts:never": 1,
     "test/web/strategy-inspector.test.tsx:unknown-as": 2,
@@ -129,7 +129,6 @@
     "test/web-api-wrappers.test.tsx:unknown-as": 1,
     "test/web-attention-mount.test.tsx:unknown-as": 2,
     "test/web-attention-mount.test.tsx:never": 2,
-    "test/web-attention-panel.test.tsx:never": 1,
     "test/web-board.test.tsx:unknown-as": 3,
     "test/web-board.test.tsx:never": 2,
     "test/web-demo-insights.test.ts:never": 7,

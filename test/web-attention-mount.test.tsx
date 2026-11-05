@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
+import { projectScope } from "./web/support/scope.js";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TicketAttention } from "../web/src/attention.js";
 import type { WorkspaceViewProps } from "../web/src/app/WorkspaceView.js";
-import type { ProjectScope, PublicConfig, RunSummary } from "../web/src/types.js";
+import type { PublicConfig, RunSummary } from "../web/src/types.js";
 
 // Only the ticket read is replaced; the rest of the module (ApiError and the
 // other clients) is the real one, because the shell imports it too.
@@ -15,7 +16,7 @@ vi.mock("../web/src/api.js", async (importOriginal) => {
 
 const { WorkspaceView } = await import("../web/src/app/WorkspaceView.js");
 
-const scope: ProjectScope = { mode: "single", projectId: "p1" };
+const scope = projectScope;
 
 function config(): PublicConfig {
   return {

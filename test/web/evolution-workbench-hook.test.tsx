@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import "./dom-setup.js";
+import { projectScope } from "./support/scope.js";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectScope } from "../../web/src/types.js";
 import type { EvolutionSnapshot } from "../../web/src/types.js";
 
 const api = vi.hoisted(() => ({
@@ -36,7 +36,7 @@ const { useEvolutionWorkbench } = await import(
 const { ApiError } = await import("../../web/src/api.js");
 
 /** A project selection (`{mode, projectId}`), which is what the model scopes by. */
-const scope: ProjectScope = { mode: "single", projectId: "p1" };
+const scope = projectScope;
 
 function automation(): EvolutionSnapshot["automation"] {
   return {
