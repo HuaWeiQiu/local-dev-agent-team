@@ -1488,3 +1488,115 @@ describe("the complexity census", () => {
     expect(writeCcSnapshot(broken, { ...defaultOptions(), ccBaseline: "census.json" }, root)).toBe(1);
   });
 });
+
+describe("the run's own branches", () => {
+  const entry = (namespace: string, name: string, complexity: number) =>
+    `{:name "${name}", :namespace "${namespace}", :complexity ${complexity}, ` +
+    `:coverage 100.0, :crap ${complexity}}`;
+
+  /** A tree that could become main, and a stub tool that answers a full scan. */
+  async function mainTreeWithScan(entries: string[], census?: Record<string, number>) {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-team-main-"));
+    await mainTree(root);
+    if (census) {
+      await writeFile(
+        path.join(root, ".ub-cc-baseline.json"),
+        JSON.stringify({ total: Object.keys(census).length, counts: census }),
+        "utf8",
+      );
+    }
+    const tool = await stubTool(
+      [
+        'mkdir -p "$PWD/.metrics"',
+        `cat > "$PWD/.metrics/crap.edn" <<'EDN'`,
+        "{:entries [",
+        entries.join("\n"),
+        "]}",
+        "EDN",
+      ].join("\n"),
+    );
+    return { root, tool };
+  }
+
+  it("refuses a tool it cannot run, and two baselines in one run", () => {
+    // Both are arguments that parse cleanly and would wreck the ledger if they got through:
+    // an unknown tool silently scores nothing, and refreshing two files in one run measures
+    // the census on a tree the ledger was not written from.
+    expect(() => parseArgs(["--tool", "nope"], {})).toThrow(/crapper, dryer or mutator/);
+    expect(() => parseArgs(["--update-baseline", "--update-cc-baseline"], {})).toThrow(
+      /two different files/,
+    );
+  });
+
+  it("writes the census when the run is told to refresh it", async () => {
+    const { root, tool } = await mainTreeWithScan([entry("mod", "a", 2)]);
+
+    expect(main(["--ub", tool, "--all", "--update-cc-baseline"], root)).toBe(0);
+
+    expect(JSON.parse(await readFile(path.join(root, ".ub-cc-baseline.json"), "utf8"))).toEqual({
+      total: 1,
+      byComplexity: { "2": 1 },
+      counts: { "mod#a": 2 },
+    });
+  });
+
+  it("records the nightly verdict in the file the workflow reads", async () => {
+    // The verdict is a file, not a stack trace: the workflow reads `kind` and decides whether a
+    // red run means "debt moved" or "the scan broke". A scan that agrees with the ledger is the
+    // quiet case, and it still has to leave a file behind.
+    // The ledger only holds debt — functions over the threshold — so a fixture that freezes a 2
+    // is already inconsistent: the scan comes back with nothing over the line and the entry reads
+    // as fixed. Twelve is what a frozen entry actually looks like.
+    const { root, tool } = await mainTreeWithScan([entry("mod", "big", 12)]);
+    await writeFile(
+      path.join(root, ".ub-crap-baseline.json"),
+      JSON.stringify({ scores: { "mod#big": 12 } }),
+      "utf8",
+    );
+
+    expect(main(["--ub", tool, "--all", "--drift-report", "drift.json"], root)).toBe(0);
+
+    const verdict = JSON.parse(await readFile(path.join(root, "drift.json"), "utf8"));
+    expect(verdict.kind).toBe("ledger");
+    expect(verdict.counts).toEqual({ new: 0, worse: 0, fixed: 0 });
+  });
+
+  it("refuses to score against a report older than the code it would describe", async () => {
+    // The 210.0 story: a stale report's line numbers belong to a different function, so a
+    // correct one gets scored as garbage. Staleness is a refusal, not a number.
+    const { root, tool } = await mainTreeWithScan([entry("mod", "a", 2)]);
+    const report = path.join(root, "target", "coverage", "typescript", "lcov.info");
+    await mkdir(path.dirname(report), { recursive: true });
+    await writeFile(report, "", "utf8");
+    const yesterday = new Date(Date.now() - 86_400_000);
+    await utimes(report, yesterday, yesterday);
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "fresh.ts"), "export const fresh = 1;\n", "utf8");
+
+    expect(main(["--ub", tool, "--all", "--", "--use-existing-coverage"], root)).toBe(1);
+  });
+
+  it("takes the idle path when a changed-files run has nothing changed", async () => {
+    // crapper in changed mode has no work to do on a clean tree; the other tools do not look at
+    // git at all, which is why this branch is about the tool rather than about the tree.
+    const { root, tool } = await mainTreeWithScan([]);
+
+    expect(main(["--ub", tool], root)).toBe(0);
+  });
+
+  it("seeds the ledger from a tree that repeats, not from one lucky scan", async () => {
+    // stableBaseline() is the other half of "only main may write": a scan that says something
+    // different the second time is not a measurement, and freezing it would pin noise.
+    // The census has to know the function: a twelve-cc stranger is exactly what the newcomer
+    // rule refuses, and freezing a ledger around it would be the thing this file exists to stop.
+    const { root, tool } = await mainTreeWithScan(
+      [entry("mod", "big", 12)],
+      { "a#f": 5, "mod#big": 12 },
+    );
+
+    expect(main(["--ub", tool, "--all", "--update-baseline"], root)).toBe(0);
+
+    const ledger = JSON.parse(await readFile(path.join(root, ".ub-crap-baseline.json"), "utf8"));
+    expect(ledger.scores).toEqual({ "mod#big": 12 });
+  });
+});

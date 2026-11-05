@@ -178,6 +178,19 @@ export function parseArgs(argv, env = process.env) {
     }
     throw new Error(`unknown argument '${arg}'\n${USAGE}`);
   }
+  return validated(options);
+}
+
+/**
+ * The refusals that only make sense once every argument has been read.
+ *
+ * Apart from the loop because they are a different question: the loop asks "what did
+ * this token say", these ask "does the set of answers make sense together". At ten
+ * branches `parseArgs` sat on CRAP 10.0 exactly — cc 10 at 100% coverage, no margin
+ * left for a single uncovered line — and two of those branches were never about
+ * parsing.
+ */
+function validated(options) {
   if (!TOOLS.includes(options.tool)) {
     throw new Error(`--tool must be crapper, dryer or mutator (got '${options.tool}')`);
   }
@@ -416,24 +429,34 @@ export function staleCoverageRefusal(options, cwd = process.cwd()) {
   return undefined;
 }
 
-export function main(argv = process.argv.slice(2)) {
+/**
+ * The whole run, against the tree at `cwd`.
+ *
+ * `cwd` is a parameter rather than a global it reads. A function that consults
+ * `process.cwd()` half a dozen times can only be tested by moving the process —
+ * `process.chdir` inside a test file changes state the next test inherits, and a
+ * test that has to do that is reporting a shape problem, not a coverage gap. Every
+ * callee below already took `cwd`; this was the one place still reaching for the
+ * ambient value.
+ */
+export function main(argv = process.argv.slice(2), cwd = process.cwd()) {
   const prepared = prepare(argv);
   if (prepared.status !== undefined) return prepared.status;
-  const stale = staleCoverageRefusal(prepared.options);
-  if (stale !== undefined) return refuseForStaleCoverage(prepared, stale);
+  const stale = staleCoverageRefusal(prepared.options, cwd);
+  if (stale !== undefined) return refuseForStaleCoverage(prepared, stale, cwd);
   if (prepared.options.updateCcBaseline) {
-    return writeCcSnapshot(prepared.ub, prepared.options);
+    return writeCcSnapshot(prepared.ub, prepared.options, cwd);
   }
-  if (prepared.options.driftReport) return driftStep(prepared.options, prepared.ub);
-  clearMetrics();
+  if (prepared.options.driftReport) return driftStep(prepared.options, prepared.ub, cwd);
+  clearMetrics(cwd);
   // crapper in changed mode has nothing to score when nothing changed; the
   // other tools do not look at git at all.
-  if (isIdleCrapperRun(prepared.options)) return baselineStep(prepared.options);
+  if (isIdleCrapperRun(prepared.options)) return baselineStep(prepared.options, cwd);
   // Seeding a baseline records reality even when the layers are still red — but only
   // reality that repeats. See stableBaseline().
-  if (prepared.options.updateBaseline) return stableBaseline(prepared.ub, prepared.options);
-  const failed = runLayers(prepared.ub, prepared.options);
-  return failed === 0 ? baselineStep(prepared.options) : failed;
+  if (prepared.options.updateBaseline) return stableBaseline(prepared.ub, prepared.options, cwd);
+  const failed = runLayers(prepared.ub, prepared.options, cwd);
+  return failed === 0 ? baselineStep(prepared.options, cwd) : failed;
 }
 
 /**
@@ -443,7 +466,7 @@ export function main(argv = process.argv.slice(2)) {
  * verdict, never an empty ledger — a missing file would read as "no drift", which is the one
  * answer that hides the problem.
  */
-function refuseForStaleCoverage(prepared, status) {
+function refuseForStaleCoverage(prepared, status, cwd = process.cwd()) {
   if (!prepared.options.driftReport) return status;
   writeDriftReport(
     prepared.options.driftReport,
@@ -453,6 +476,7 @@ function refuseForStaleCoverage(prepared, status) {
       baseline: prepared.options.baseline,
       provenance: provenance({ ub: prepared.ub, env: process.env }),
     }),
+    cwd,
   );
   return status;
 }
