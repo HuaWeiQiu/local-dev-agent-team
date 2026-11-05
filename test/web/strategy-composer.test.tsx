@@ -36,17 +36,28 @@ function definition(patch: Record<string, unknown> = {}): StrategyDefinition {
     source: "config",
     roleProfiles: { worker: "p1" },
     compiledTopology: {
+      version: 1,
       mode: "parallel-dag",
-      stages: [{ id: "plan", label: "计划", kind: "plan", role: "architect" }],
+      // `kind` is one of agent / worker-pool / quality-gate / human-approval /
+      // publication, and `roles` is a list. The old fixture invented `"plan"` and
+      // a single `role`, which the cast absorbed.
+      stages: [{ id: "plan", label: "计划", kind: "agent", roles: ["architect"] }],
       edges: [],
     },
     ...patch,
-  } as unknown as StrategyDefinition;
+  };
 }
 
+/**
+ * The base object still does not satisfy `PublicConfig` — something beyond the
+ * fields listed here is required, and the cast is what has been hiding it. Left
+ * as-is deliberately: this is the next batch's job, and removing the cast before
+ * knowing what is missing would only move the failure.
+ */
 function config(patch: Partial<PublicConfig> = {}): PublicConfig {
   return {
-    project: { name: "demo", maxParallel: 2 },
+    project: { name: "demo", defaultBranch: "main", stateDirectory: ".agent-team", maxParallel: 2 },
+    profiles: {},
     roles: {},
     strategies: {
       default: "demo",

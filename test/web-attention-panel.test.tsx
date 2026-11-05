@@ -11,7 +11,7 @@ vi.mock("../web/src/api.js", async (importOriginal) => {
   return { ...actual, getTicketAttention: vi.fn() };
 });
 
-const scope = projectScope;
+const scope = projectScope();
 
 function state(patch: Partial<TicketAttention> = {}): TicketAttention {
   return { attention: [], working: 0, total: 0, ...patch };

@@ -41,7 +41,7 @@ const { EvolutionWorkbench } = await import("../../web/src/components/EvolutionW
  * requests by `{mode, projectId}`. The old `{id, name, root}` passed only
  * because a cast hid the difference.
  */
-const scope = projectScope;
+const scope = projectScope();
 const config = { version: 1, defaults: {}, ui: {} } as never;
 
 function model(patch: Record<string, unknown>) {

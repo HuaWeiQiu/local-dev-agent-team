@@ -36,7 +36,7 @@ type Proposal = import("../../web/src/types.js").EvolutionProposal;
 type Decision = import("../../web/src/components/EvolutionDecisionDialog.js").EvolutionDecision;
 
 /** A project selection (`{mode, projectId}`), which is what the model scopes by. */
-const scope = projectScope;
+const scope = projectScope();
 
 function proposal(id: string, archived = false): Proposal {
   return {

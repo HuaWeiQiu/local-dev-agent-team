@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import "./web/dom-setup.js";
+import { projectScope as sharedScope } from "./web/support/scope.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   downloadRunEvents,
@@ -9,8 +10,10 @@ import {
   saveDesktopSettings,
 } from "../web/src/api.js";
 
-const scope = { mode: "single", projectId: "p1" } as never;
-const projectScope = { mode: "workspace", projectId: "p1" } as never;
+const scope = sharedScope();
+// Deliberately the workspace mode: this suite covers the workspace-scoped paths,
+// and saying so here keeps the difference visible instead of hiding it in a copy.
+const projectScope = sharedScope({ mode: "workspace" });
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
