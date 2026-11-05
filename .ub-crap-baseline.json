@@ -1,41 +1,40 @@
 {
-  "updatedAt": "2026-11-03T17:59:05.525Z",
+  "updatedAt": "2026-11-05T08:40:06.021Z",
   "generation": {
-    "headSha": "fe1e73e331380db38db6f7ad236dbb195d94e2c6",
+    "headSha": "adc29dd3c5d0937d7dea6a9a7738bc328dc19404",
     "toolCommit": "6fd92c4c9bcc56efb64a2f8743d5a2993bcfd42d",
     "coverageSource": "existing",
     "platform": "darwin/arm64",
     "nodeVersion": "v26.5.0",
     "scans": 2,
-    "generatedAt": "2026-11-03T17:59:05.524Z",
+    "generatedAt": "2026-11-05T08:40:06.020Z",
     "merge": {
       "runs": 3,
       "rule": "line-majority",
       "divergentLines": 1,
       "partialFiles": 0,
       "digests": [
-        "1a1b92ca02f038850a9fa7ad13aa7879ecc97d52cbb45a7db4cbdbeca619c673",
-        "0bdc8741f99f643ea30c813743e22a5ef14d5e9c0219d5a886ae61a9f731b753",
-        "8d6bac9fcd48052e057c3c47160ba8181aee55107eaef91154551573ddd8d9fb"
+        "3a500fb3944a26341cdfcda89fa568c12f1464d9906dc6039d7dc692c5018359",
+        "a2f8fc33fdded2835f6dee5342b0dd26a298beb9ebf0c30ee5506e80bbdd2963",
+        "fa679bcd3356814f92afec53ae59ad3d21a37c4bc6ada08f2c38c62c74d6e97f"
       ]
     },
     "lcov": {
       "path": "target/coverage/typescript/lcov.info",
-      "bytes": 1025184,
-      "sha256": "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb"
+      "bytes": 1035757,
+      "sha256": "93216b2481f98b7625dc3c466c0b2ab24b918006bc2cc93d1c07af7bb08dd3ff"
     },
     "agreement": {
       "scans": 2,
       "sha256": [
-        "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb",
-        "c08e395452a5b77838bb8f4681e552bee84edd16879cc952a8befe9400cb8eeb"
+        "93216b2481f98b7625dc3c466c0b2ab24b918006bc2cc93d1c07af7bb08dd3ff",
+        "93216b2481f98b7625dc3c466c0b2ab24b918006bc2cc93d1c07af7bb08dd3ff"
       ]
     }
   },
   "scores": {
     "evolution.catalog.EvolutionCatalog#restoreFromValidatedMaterial": 85.176,
     "scripts.laya-jev-server.Handler#do_POST": 72,
-    "evolution.application-journal.EvolutionApplicationJournal#validateRestoredState": 59.9348,
     "evolution.application.EvolutionApplicationCoordinator#executeCommand": 50.6578,
     "workflow.runner.LocalWorkflowRunner#run": 50.1071,
     "profiles.role-bindings#normalizeReasoning": 45.037,
@@ -45,7 +44,6 @@
     "profiles.role-bindings#defaultModelForCli": 42,
     "server.project-runtime#cleanupRuntime": 40.768,
     "workflow.checkpoints.CheckpointService#prepareRecovery": 39.6838,
-    "evolution.application-journal.EvolutionApplicationJournal#restoreInterruptedPrompt": 39.6297,
     "server.run-recovery.RunRecovery#restoreMissingApprovalRequest": 38.7294,
     "process.run#runProcess": 37.494,
     "hooks.useLiveAgents#useLiveAgents": 36.4342,
@@ -56,7 +54,6 @@
     "agents.live-invoke#runWithRedirects": 33.5792,
     "components.RunCleanupDialog#RunCleanupDialog": 33.5773,
     "domain.plan#selectTaskWave": 32.452,
-    "evolution.application-journal.EvolutionApplicationJournal#completePendingFromLive": 32.384,
     "server.run-recovery.RunRecovery#reconcileRejectedApproval": 31.284,
     "components.experience.ExperienceActionDialog#ExperienceActionDialog": 30.7084,
     "process.live-children#listRecords": 30.1754,
@@ -82,7 +79,6 @@
     "onboarding.detect#detectPython": 22.6154,
     "evolution.automatic-state#syncDirectory": 22.5,
     "state.store#syncDirectory": 22.5,
-    "evolution.application-journal.EvolutionApplicationJournal#validateApplicationProof": 22.3182,
     "workflow.advisor.AdvisorService#consultAdvisor": 21.9708,
     "providers.failure#classifyProviderFailure": 21.8613,
     "workflow.state-helpers#latestApproval": 21.5185,
@@ -113,18 +109,15 @@
     "profiles.role-bindings#materializeRoleBindings": 16.2048,
     "evolution.application-preview.EvolutionApplicationPreviewStore#createRollbackPreview": 16,
     "desktop.settings#suggestDefaultsFromInventory": 15.888,
-    "evolution.application-journal.EvolutionApplicationJournal#finishPromotion": 15.5469,
     "experience.catalog.ExperienceCatalog#importVerified": 15.5469,
     "process.run#utf8Prefix": 15.5469,
     "config.load#loadConfig": 15.4834,
     "config.load#validateLoadedConfig": 15.3761,
     "server.run-recovery.RunRecovery#reconcileApprovalBoundary": 14.9074,
     "domain.plan#classifyTaskKind": 14.497,
-    "evolution.application-journal.EvolutionApplicationJournal#catalogOutcomeMatchesPending": 14.3828,
     "evolution.application-preview.EvolutionApplicationPreviewStore#consume": 13.8221,
     "evolution.application-shared#mapToApplicationError": 13.7037,
     "domain.plan#validateTaskPlan": 13.4927,
-    "evolution.application-journal.EvolutionApplicationJournal#verifyPromptAbortOutcome": 13.2592,
     "git.manager.GitManager#porcelainStatus": 13.125,
     "logs.render#lifecycleDetail": 13.125,
     "server.project-runtime#startProjectRuntime": 12.8948,
@@ -141,7 +134,6 @@
     "web.e2e.helpers#openNav": 12,
     "visibility.explain#explainTask": 11.5625,
     "logs.render#renderLogLines": 11.4406,
-    "evolution.application-journal.EvolutionApplicationJournal#verifyPromptGitOutcome": 11.375,
     "jev.client.JevClient#requestChat": 11.2868,
     "experience.catalog.ExperienceCatalog#retrieveVerified": 11.0441,
     "github.client.GithubClient#findPullRequest": 11.001,
